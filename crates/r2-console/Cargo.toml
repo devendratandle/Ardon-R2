@@ -1,0 +1,17 @@
+[package]
+name = "r2-console"
+version = "0.1.0"
+edition = "2021"
+
+# Pure data-structure crate. No I/O, no rendering, no terminal access.
+# Both the CLI (r2-repl) and the GUI (r2-gui) use this for the
+# REPL's transcript/history/completeness logic; the rendering layer
+# differs per binary (ANSI vs egui), but the BEHAVIOR is identical.
+#
+# Engine (r2-engine) depends on this only for the OutputSink trait,
+# which is what `print()`, `cat()`, etc. write through. That sink is
+# installed by the host (CLI or GUI), so the engine never touches
+# stdout directly.
+
+[dependencies]
+r2-types = { path = "../r2-types" }

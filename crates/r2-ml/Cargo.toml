@@ -5,6 +5,11 @@ edition = "2021"
 license = "AGPL-3.0"
 description = "Ardon-R2 machine-learning domain crate (Phase R.1) — rf, gbm, kmeans, rpart, knn, naive.bayes, cv, prcomp."
 
+# rlib + cdylib. Future split target: GPU-accelerated variant
+# (`r2_ml_gpu.dll`) for users with CUDA/ROCm/Metal hardware.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 r2-types  = { path = "../r2-types" }
 r2-kernel = { path = "../r2-kernel" }

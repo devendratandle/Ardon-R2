@@ -2,6 +2,13 @@
 name = "r2-stats"
 version = "0.1.1"
 edition = "2021"
+
+# Domain library — shipped as a DLL so future R2 distributions can
+# bundle/unbundle stats depending on user choice (e.g. a minimal
+# install without stats for embedded uses).
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 r2-types  = { path = "../r2-types" }
 r2-kernel = { path = "../r2-kernel" }

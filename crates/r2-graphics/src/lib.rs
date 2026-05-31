@@ -19,6 +19,7 @@
 use r2_types::{EvalArg, R2Err, RVal};
 use std::fmt::Write;
 
+pub mod colors;
 pub mod device;
 pub mod overlays;
 pub mod params;

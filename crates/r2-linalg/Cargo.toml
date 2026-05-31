@@ -3,4 +3,12 @@ name = "r2-linalg"
 version = "0.1.1"
 edition = "2021"
 
+# rlib + cdylib. r2-linalg is the FIRST target for CPU-feature-
+# dispatched DLL variants (planned for Phase 4): installer detects
+# the host CPU's instruction-set extensions and drops the right
+# `r2_linalg_scalar.dll` / `r2_linalg_avx2.dll` / `r2_linalg_avx512.dll`
+# into the install dir. Mirrors R's Rblas.dll → Intel MKL swap.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]

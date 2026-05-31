@@ -1,0 +1,46 @@
+[package]
+name = "r2-ui"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Ardon-R2 GUI framework — grid-based, terminal-philosophy, modern-stack. Designed once, intended to remain stable for years (see docs/R2_UI_FRAMEWORK.md)."
+
+# Dual output: rlib for static linking by R2Gui at compile time;
+# cdylib so we can ship r2_ui.dll separately and hot-swap it without
+# rebuilding the launcher. The DLL form is what enables third-party
+# themes / plugins to load against a stable surface.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Internal — buffer + line types shared with the CLI.
+r2-console = { path = "../r2-console" }
+
+# Substrate (we depend on, don't reinvent).
+winit       = "0.29"           # window + raw input
+wgpu        = "0.19"           # GPU pipeline
+pollster    = "0.3"            # block_on for wgpu async init
+
+# Text shaping + glyph atlas. fontdue is the more conservative choice
+# vs cosmic-text — it's stable, smaller, doesn't try to solve i18n.
+# We start here; if non-Latin script support becomes a requirement we
+# swap to cosmic-text (separate session, isolated change).
+fontdue     = "0.9"
+
+# Cross-platform clipboard for Ctrl+C / right-click → Copy.
+arboard     = { version = "3", default-features = false, features = ["image-data"] }
+
+# Image decoders for icon loading (window icon, title-bar logo).
+image       = { version = "0.25", default-features = false, features = ["png"] }
+
+# SVG → raster for the PlotPanel widget.
+resvg       = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
+tiny-skia   = "0.11"
+usvg        = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
+
+# Color / math helpers — bytemuck for wgpu buffer types.
+bytemuck    = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Tests for the pure-data parts (grid selection math, history navigation,
+# layout decisions) run without opening a real window.

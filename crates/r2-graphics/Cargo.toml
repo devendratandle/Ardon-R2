@@ -2,6 +2,13 @@
 name = "r2-graphics"
 version = "0.1.1"
 edition = "2021"
+
+# rlib for compile-time linking; cdylib for the shipped DLL.
+# Future: alternate rendering backends (e.g. Direct2D, Skia, Vulkan
+# raster) can replace r2_graphics.dll without touching the engine.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 r2-types = { path = "../r2-types" }
 # resvg = pure-Rust SVG → PNG rasterizer. Used by save_plot() when the

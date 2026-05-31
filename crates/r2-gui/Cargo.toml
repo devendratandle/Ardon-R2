@@ -1,0 +1,38 @@
+[package]
+name = "r2-gui"
+version = "0.1.9"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Ardon-R2 desktop GUI — built on the r2-ui framework. Replaces the v0.2 eframe/egui implementation."
+
+[[bin]]
+name = "R2Gui"
+path = "src/main.rs"
+
+[dependencies]
+# Engine + parser + types + shared console state.
+r2-types    = { path = "../r2-types" }
+r2-parser   = { path = "../r2-parser" }
+r2-engine   = { path = "../r2-engine" }
+r2-graphics = { path = "../r2-graphics" }
+r2-console  = { path = "../r2-console" }
+
+# The GUI framework. R2Gui is now a thin shell around r2-ui's
+# MDI host + ConsoleBuffer-driven widgets. Eframe / egui are gone.
+r2-ui       = { path = "../r2-ui" }
+
+# Decoder + resampler for the title-bar logo. Kept default-features
+# off so we only pull in the PNG decoder, not the whole image
+# ecosystem.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Cross-platform native file-picker. Same API everywhere; rfd
+# dispatches to whatever the OS provides at runtime — works
+# identically on Windows, macOS, and Linux. Mobile (Android /
+# iPad-OS) needs a different picker abstraction when we port; this
+# crate stays a desktop dependency, isolated to r2-gui so the
+# r2-ui framework itself stays platform-neutral.
+rfd = "0.14"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

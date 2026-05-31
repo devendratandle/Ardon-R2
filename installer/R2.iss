@@ -3,16 +3,23 @@
 ;
 ;  Build steps (from a Windows shell at the project root):
 ;
-;    1.  cargo build --release -p r2-repl
-;    2.  Open this file in "Inno Setup Compiler" and click Compile.
-;        (Free download: https://jrsoftware.org/isdl.php — ~3 MB)
-;    3.  Output:  installer\Output\R2-Setup-0.1.0.exe
+;    1.  cargo build --release -p r2-repl   (builds r2.exe + generates r2.ico)
+;    2.  cargo build --release -p r2-gui    (builds the new R2-UI-based R2Gui.exe)
+;    3.  Compile this script with ISCC:
+;          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\R2.iss
+;        Or open it in the Inno Setup Compiler GUI (https://jrsoftware.org/isdl.php).
+;    4.  Output:  installer\Output\R2-Setup-0.1.9.exe
+;
+;  v0.1.9 notes:
+;    * R2Gui.exe is the new R2-UI build (winit + wgpu); eframe/egui retired.
+;    * r2-ui is statically linked into R2Gui.exe — no separate DLL to ship yet.
+;    * Console body is white; MDI workspace is khaki (R Console palette).
 ;
 ;  Tested with Inno Setup 6.2.x.
 ; ═══════════════════════════════════════════════════════════════════════
 
 #define MyAppName        "Ardon-R2"
-#define MyAppVersion     "0.1.0"
+#define MyAppVersion     "0.1.9"
 #define MyAppPublisher   "Devendra Tandale"
 #define MyAppURL         "https://github.com/devendratandle/Ardon-R2"
 #define MyAppExeName     "r2.exe"
@@ -51,8 +58,9 @@ Name: "addtopath";     Description: "Add R2 to the system &PATH (so `r2` works i
 Name: "associate_r2";  Description: "&Associate .r2 files with Ardon-R2"; GroupDescription: "File associations:"; Flags: unchecked
 
 [Files]
-; The compiled release binary.
-Source: "..\target\release\r2.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The compiled release binaries.
+Source: "..\target\release\r2.exe";    DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\R2Gui.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; Documentation.
 Source: "..\README.md";                  DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
@@ -68,9 +76,13 @@ Source: "..\docs\KNOWN_LIMITATIONS.md";  DestDir: "{app}\docs"; Flags: ignorever
 Source: "..\samples\*.r2"; DestDir: "{app}\samples"; Flags: ignoreversion recursesubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}";         Filename: "{app}\{#MyAppExeName}"
+; GUI version is what most users will launch (the RGui-style desktop app).
+Name: "{group}\Ardon-R2 (GUI)";       Filename: "{app}\R2Gui.exe"
+; CLI version for scripts / automation / SSH.
+Name: "{group}\Ardon-R2 (Console)";   Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}";   Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+; Desktop shortcut launches the GUI by default.
+Name: "{autodesktop}\{#MyAppName}";   Filename: "{app}\R2Gui.exe"; Tasks: desktopicon
 
 [Registry]
 ; .r2 file association (if user opts in).
@@ -80,7 +92,10 @@ Root: HKCU; Subkey: "Software\Classes\Ardon.R2.Script\DefaultIcon"; ValueType: s
 Root: HKCU; Subkey: "Software\Classes\Ardon.R2.Script\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: associate_r2
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} REPL"; Flags: nowait postinstall skipifsilent
+; Post-install: launch the desktop GUI (the experience most users
+; want). The CLI binary (`r2.exe`) is still available via Start Menu
+; → "Ardon-R2 (Console)" for scripting / SSH / automation.
+Filename: "{app}\R2Gui.exe"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // Add to PATH if user opts in. Updates the per-user PATH so no admin rights

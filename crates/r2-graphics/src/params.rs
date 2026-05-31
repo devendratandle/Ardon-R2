@@ -211,10 +211,60 @@ pub fn bi_par(a: &[EvalArg]) -> Result<RVal, R2Err> {
     Ok(RVal::List(old))
 }
 
-/// `dev.off()` builtin — close current device, reset to default state.
-pub fn bi_dev_off(_a: &[EvalArg]) -> Result<RVal, R2Err> {
-    crate::device::dev_off();
-    Ok(RVal::Null)
+/// `dev.off(n = current)` — close one open device. Returns the new
+/// current device's id as an integer scalar (or NULL if no devices
+/// remain). Matches R: `dev.off()` closes the current device,
+/// `dev.off(2)` closes device 2 explicitly.
+pub fn bi_dev_off(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let target: Option<crate::device::DeviceId> = a.first()
+        .and_then(|arg| arg.value.as_reals().ok()?.into_iter().next()?)
+        .map(|x| crate::device::DeviceId(x as u32));
+    match crate::device::close_device(target) {
+        Some(crate::device::DeviceId(n)) => Ok(rint(n as i32)),
+        None => Ok(RVal::Null),
+    }
+}
+
+/// `dev.new()` — open a fresh device and make it current. Returns
+/// the new device's id.
+pub fn bi_dev_new(_a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let crate::device::DeviceId(n) = crate::device::new_device();
+    Ok(rint(n as i32))
+}
+
+/// `dev.set(n)` — make device `n` the current one. Returns the
+/// previous current id, or NULL if `n` is not open / no previous.
+pub fn bi_dev_set(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let id: u32 = a.first()
+        .and_then(|arg| arg.value.as_reals().ok()?.into_iter().next()?)
+        .map(|x| x as u32)
+        .ok_or_else(|| R2Err {
+            msg: "dev.set(n): integer id required".into(),
+            kind: ErrKind::Runtime,
+        })?;
+    match crate::device::set_device(crate::device::DeviceId(id)) {
+        Some(crate::device::DeviceId(n)) => Ok(rint(n as i32)),
+        None => Ok(RVal::Null),
+    }
+}
+
+/// `dev.list()` — integer vector of open device ids. Empty if no
+/// devices are open.
+pub fn bi_dev_list(_a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let ids: Vec<Option<i32>> = crate::device::list_devices()
+        .into_iter()
+        .map(|crate::device::DeviceId(n)| Some(n as i32))
+        .collect();
+    Ok(RVal::Integer(ids.into(), Attrs::default()))
+}
+
+/// `dev.cur()` — current device id, or `0L` if none open. Matches
+/// R's convention of returning 0 when no device exists.
+pub fn bi_dev_cur(_a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let n = crate::device::current_device()
+        .map(|crate::device::DeviceId(n)| n as i32)
+        .unwrap_or(0);
+    Ok(rint(n))
 }
 
 /// `dev.view()` builtin — start the built-in HTTP plot server (if not

@@ -20,7 +20,10 @@ members = [
     "crates/r2-io",
     "crates/r2-utils",
     "crates/r2-pkg",
+    "crates/r2-console",
+    "crates/r2-ui",
     "crates/r2-repl",
+    "crates/r2-gui",
 ]
 
 [workspace.dependencies]

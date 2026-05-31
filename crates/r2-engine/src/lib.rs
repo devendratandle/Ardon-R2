@@ -24,102 +24,35 @@ use rayon::prelude::*;
 
 pub type BuiltinFn = fn(&mut Engine, &[EvalArg], &EnvRef) -> Result<RVal, R2Err>;
 
-// ── Package Layer ────────────────────────────────────────────────────
+// Builtin shims grouped by domain. See `src/builtins/mod.rs`. The
+// `use ::*` line brings each shim into the same scope as a bare
+// `bi_plot` / `bi_hist` etc. so the registration tables below don't
+// need a `builtins::graphics::` prefix.
+mod builtins;
+use builtins::data::*;
+use builtins::graphics::*;
+use builtins::io::*;
+use builtins::ml::*;
+use builtins::stats::*;
+use builtins::strings::*;
 
-#[derive(Clone)]
-pub struct PackageLayer {
-    pub name: String,
-    pub tier: PackageTier,
-    pub functions: HashMap<String, BuiltinFn>,
-    pub exports: Vec<String>,
-}
+// PackageLayer / PackageTier / FunctionRegistry moved to `registry.rs`.
+mod registry;
+pub use registry::{FunctionRegistry, PackageLayer, PackageTier};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PackageTier {
-    Core,   // CANNOT be masked or detached
-    Base,   // CAN be masked by addon, CAN be detached
-    Addon,  // CAN be masked by later addon, CAN be detached
-}
+// NA-bitmap combiners for the SIMD / JIT pipeline live in their own
+// pure module. Re-exported back into lib.rs's namespace via `use`
+// so the eval loop call sites are unchanged.
+mod na_bitmap;
+use na_bitmap::{combine_binary_output, combine_ternary_output, combine_unary_output};
 
-// ── Function Registry (layered, not flat) ────────────────────────────
-
-pub struct FunctionRegistry {
-    layers: Vec<PackageLayer>,
-}
-
-impl FunctionRegistry {
-    pub fn new() -> Self { FunctionRegistry { layers: Vec::new() } }
-
-    pub fn add_layer(&mut self, layer: PackageLayer) { self.layers.push(layer); }
-
-    pub fn remove_layer(&mut self, name: &str) -> Result<Vec<String>, String> {
-        let pos = self.layers.iter().position(|l| l.name == name);
-        match pos {
-            Some(i) => {
-                if self.layers[i].tier == PackageTier::Core {
-                    return Err(format!("cannot detach core package '{}'", name));
-                }
-                let removed = self.layers.remove(i);
-                let restored: Vec<String> = removed.exports.iter()
-                    .filter(|f| self.resolve(f).is_some())
-                    .cloned().collect();
-                Ok(restored)
-            }
-            None => Err(format!("package '{}' not loaded", name)),
-        }
-    }
-
-    /// Resolve: Core always wins for core names. Then top-of-stack down.
-    pub fn resolve(&self, name: &str) -> Option<(BuiltinFn, &str)> {
-        // Core is immutable — check first
-        for layer in &self.layers {
-            if layer.tier == PackageTier::Core {
-                if let Some(f) = layer.functions.get(name) {
-                    return Some((*f, &layer.name));
-                }
-            }
-        }
-        // Then search last-loaded first (addons mask base)
-        for layer in self.layers.iter().rev() {
-            if layer.tier == PackageTier::Core { continue; }
-            if let Some(f) = layer.functions.get(name) {
-                return Some((*f, &layer.name));
-            }
-        }
-        None
-    }
-
-    /// Direct namespace: pkg::func() bypasses search order
-    pub fn resolve_in_package(&self, pkg: &str, name: &str) -> Option<BuiltinFn> {
-        self.layers.iter().find(|l| l.name == pkg)
-            .and_then(|l| l.functions.get(name).copied())
-    }
-
-    pub fn is_core(&self, name: &str) -> bool {
-        self.layers.iter().any(|l| l.tier == PackageTier::Core && l.functions.contains_key(name))
-    }
-
-    pub fn check_masks(&self, new_exports: &[String]) -> Vec<(String, String)> {
-        let mut masks = Vec::new();
-        for name in new_exports {
-            if let Some((_, from)) = self.resolve(name) {
-                if !self.is_core(name) { masks.push((name.clone(), from.to_string())); }
-            }
-        }
-        masks
-    }
-
-    pub fn search_path(&self) -> Vec<String> {
-        let mut path = vec![".GlobalEnv".to_string()];
-        for layer in self.layers.iter().rev() {
-            if layer.tier != PackageTier::Core {
-                path.push(format!("package:{}", layer.name));
-            }
-        }
-        path.push("package:core".to_string());
-        path
-    }
-}
+// Formula-walking helpers (Error(...) splitter for repeated measures,
+// (1|group) random-intercept splitter, Expr→source deparser).
+mod formula;
+use formula::{
+    fmt_expr, is_error_call, is_random_intercept, random_intercept_grouping,
+    split_error_term, split_random_effects, unwrap_nested_error,
+};
 
 // ── Engine ───────────────────────────────────────────────────────────
 
@@ -141,6 +74,12 @@ pub struct Engine {
     jit_cache: HashMap<usize, Option<Arc<dyn JitHandle>>>,
     /// Master switch — disabled via env `R2_JIT=0`. Default on.
     jit_enabled: bool,
+    /// Output sink installed by the host (CLI / GUI). All engine-side
+    /// `print()`, `cat()`, `message()`, formatter output, etc. write
+    /// through this — never directly to stdout. Default is
+    /// `r2_console::StdoutSink` so headless / unit-test usage still
+    /// shows results in a terminal.
+    output_sink: Box<dyn r2_console::OutputSink>,
 }
 
 /// Info about an installed (but not necessarily loaded) package
@@ -187,6 +126,23 @@ impl r2_types::EngineCtx for Engine {
 }
 
 impl Engine {
+    /// Replace the default `StdoutSink` with a host-provided sink.
+    /// The CLI keeps the default; the GUI installs one backed by its
+    /// `Arc<Mutex<ConsoleBuffer>>` so `print()` output lands in the
+    /// transcript widget.
+    pub fn set_output_sink(&mut self, sink: Box<dyn r2_console::OutputSink>) {
+        self.output_sink = sink;
+    }
+
+    /// Emit a line through the active output sink. Used by builtins
+    /// (and gradually-migrated `println!` sites).
+    pub fn emit_output(&mut self, text: &str) {
+        self.output_sink.write_output(text);
+    }
+    pub fn emit_error(&mut self, text: &str) {
+        self.output_sink.write_error(text);
+    }
+
     pub fn new() -> Self {
         let global = Env::new_global();
         let mut e = Engine {
@@ -210,6 +166,7 @@ impl Engine {
             local_scopes: Vec::new(),
             jit_cache: HashMap::new(),
             jit_enabled: std::env::var("R2_JIT").map(|v| v != "0").unwrap_or(true),
+            output_sink: Box::new(r2_console::StdoutSink),
         };
 
         // ── CORE: immutable, CANNOT be masked or detached ────────────
@@ -320,6 +277,17 @@ impl Engine {
             ("save.plot",bi_save_plot),
             ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),
             ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),
+            // Session B — multi-device graphics. Each `dev.new()` opens a
+            // fresh plot window; `dev.set()` / `dev.list()` / `dev.cur()`
+            // navigate the open devices.
+            ("dev.new",bi_dev_new),("dev.set",bi_dev_set),("dev.list",bi_dev_list),
+            ("dev.cur",bi_dev_cur),
+            // R-style color helpers — pure functions, available to
+            // any plot call's col= / border= argument.
+            ("rgb",bi_rgb),("gray",bi_gray),("grey",bi_gray),("hsv",bi_hsv),
+            ("rainbow",bi_rainbow),("heat.colors",bi_heat_colors),
+            ("terrain.colors",bi_terrain_colors),("topo.colors",bi_topo_colors),
+            ("cm.colors",bi_cm_colors),("adjustcolor",bi_adjustcolor),
         ]));
         e.registry.add_layer(mkpkg("utils", PackageTier::Base, vec![
             ("head",bi_head),("tail",bi_tail),("str",bi_str),
@@ -1474,54 +1442,8 @@ impl Engine {
 /// the Cranelift loop produced (which would be NaN from NaN-propagation
 /// — same result, but going through the bitmap is structurally cleaner
 /// and lets us distinguish NaN-from-arithmetic from NA-from-input later).
-fn combine_unary_output(values: &[f64], in_bits: Option<&[u8]>) -> Vec<Real> {
-    match in_bits {
-        // Dense input: output is None only where arithmetic produced NaN
-        // (e.g., log of negative). Preserves R semantics.
-        None => values.iter().map(|x| if x.is_nan() { None } else { Some(*x) }).collect(),
-        // Sparse input: respect the input bitmap exactly. NaN-from-arithmetic
-        // (in a "valid" position) still becomes None — matches R.
-        Some(bits) => values.iter().enumerate().map(|(i, x)| {
-            if (bits[i / 8] >> (i % 8)) & 1 == 1 {
-                if x.is_nan() { None } else { Some(*x) }
-            } else { None }
-        }).collect(),
-    }
-}
-
-/// Binary output bitmap = AND of input bitmaps. Position is valid iff
-/// both inputs were valid at that index.
-fn combine_binary_output(values: &[f64], a_bits: Option<&[u8]>, b_bits: Option<&[u8]>) -> Vec<Real> {
-    let valid_at = |i: usize| -> bool {
-        let va = match a_bits { None => true, Some(bits) => (bits[i / 8] >> (i % 8)) & 1 == 1 };
-        let vb = match b_bits { None => true, Some(bits) => (bits[i / 8] >> (i % 8)) & 1 == 1 };
-        va && vb
-    };
-    values.iter().enumerate().map(|(i, x)| {
-        if valid_at(i) {
-            if x.is_nan() { None } else { Some(*x) }
-        } else { None }
-    }).collect()
-}
-
-/// Ternary output bitmap = AND of three input bitmaps. Position valid iff
-/// all three inputs were valid at that index AND the computed result is
-/// not NaN-from-arithmetic.
-fn combine_ternary_output(
-    values: &[f64],
-    a_bits: Option<&[u8]>,
-    b_bits: Option<&[u8]>,
-    c_bits: Option<&[u8]>,
-) -> Vec<Real> {
-    let valid_at = |bits: Option<&[u8]>, i: usize| -> bool {
-        match bits { None => true, Some(b) => (b[i / 8] >> (i % 8)) & 1 == 1 }
-    };
-    values.iter().enumerate().map(|(i, x)| {
-        if valid_at(a_bits, i) && valid_at(b_bits, i) && valid_at(c_bits, i) {
-            if x.is_nan() { None } else { Some(*x) }
-        } else { None }
-    }).collect()
-}
+// combine_unary_output / combine_binary_output / combine_ternary_output
+// moved to src/na_bitmap.rs.
 
 /// Stringify a parser `Expr` back to source-like text. Used by the
 /// lm/glm/aov NSE preprocessor to capture the original call shape as a
@@ -1547,58 +1469,7 @@ fn combine_ternary_output(
 // `(rhs, None)` and behavior is unchanged.
 // ─────────────────────────────────────────────────────────────────────
 
-fn is_error_call(func: &Expr) -> bool {
-    matches!(func, Expr::Symbol(s) if s.as_ref() == "Error")
-}
-
-/// Unwrap `subject/treatment` style nested Error specifications to the
-/// outermost grouping factor (the wholeplot stratum). For Phase R.S.1
-/// this is the only stratum we use — the full split-plot decomposition
-/// across multiple within-subject factors lands in v0.2.1. Accepting
-/// the syntax with one-way semantics matches R's behavior in the common
-/// case where each subject sees every treatment level.
-fn unwrap_nested_error(stratum: Expr) -> Expr {
-    match stratum {
-        Expr::Binary { op: BinOp::Div, lhs, .. } => unwrap_nested_error(*lhs),
-        other => other,
-    }
-}
-
-fn split_error_term(rhs: &Expr) -> (Expr, Option<Expr>) {
-    match rhs {
-        // Degenerate: the entire RHS is Error(...). Fixed part becomes NullLit.
-        // Nested `Error(subject/treatment)` collapses to `Error(subject)` for
-        // the one-way repeated-measures case.
-        Expr::Call { func, args } if is_error_call(func) => {
-            let raw = args
-                .first()
-                .map(|a| a.value.clone())
-                .unwrap_or(Expr::NullLit);
-            let stratum = unwrap_nested_error(raw);
-            (Expr::NullLit, Some(stratum))
-        }
-        // Compound: walk both sides of `+` recursively, combine.
-        Expr::Binary { op: BinOp::Add, lhs, rhs: r } => {
-            let (l_fixed, l_err) = split_error_term(lhs);
-            let (r_fixed, r_err) = split_error_term(r);
-            let l_null = matches!(l_fixed, Expr::NullLit);
-            let r_null = matches!(r_fixed, Expr::NullLit);
-            let combined = match (l_null, r_null) {
-                (true, true) => Expr::NullLit,
-                (true, false) => r_fixed,
-                (false, true) => l_fixed,
-                (false, false) => Expr::Binary {
-                    op: BinOp::Add,
-                    lhs: Box::new(l_fixed),
-                    rhs: Box::new(r_fixed),
-                },
-            };
-            (combined, l_err.or(r_err))
-        }
-        // Leaf or non-Add expression: no Error possible here, pass through.
-        other => (other.clone(), None),
-    }
-}
+// Error(...) / random-intercept formula splitters moved to src/formula.rs.
 
 // ─────────────────────────────────────────────────────────────────────
 // Phase R.S.3 — Random-effect specification splitter for lmer formulas.
@@ -1615,105 +1486,8 @@ fn split_error_term(rhs: &Expr) -> (Expr, Option<Expr>) {
 // into a separate list, and returns the fixed-effect remainder.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Returns true if `expr` matches the `(1|group)` random-intercept shape:
-/// Binary { Or, lhs = NumLit(1.0), rhs = <grouping expression> }.
-fn is_random_intercept(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Binary { op: BinOp::Or, lhs, .. }
-            if matches!(lhs.as_ref(), Expr::NumLit(n) if (n - 1.0).abs() < 1e-12)
-    )
-}
-
-/// Extract the grouping-factor expression from a `(1|group)` random-effect
-/// spec. Returns None if `expr` is not a random-intercept shape.
-fn random_intercept_grouping(expr: &Expr) -> Option<Expr> {
-    match expr {
-        Expr::Binary { op: BinOp::Or, rhs, .. } => Some((**rhs).clone()),
-        _ => None,
-    }
-}
-
-/// Split a formula RHS into `(fixed_part, random_intercept_groupings)`.
-/// Each entry in the returned Vec is the grouping-factor expression of one
-/// random-intercept term. The fixed part is the RHS with all `(1|g)`
-/// subexpressions removed.
-fn split_random_effects(rhs: &Expr) -> (Expr, Vec<Expr>) {
-    match rhs {
-        // Direct: the entire RHS is a single `(1|group)` term.
-        expr if is_random_intercept(expr) => {
-            let group = random_intercept_grouping(expr).unwrap_or(Expr::NullLit);
-            (Expr::NullLit, vec![group])
-        }
-        Expr::Binary { op: BinOp::Add, lhs, rhs: r } => {
-            let (l_fixed, mut l_re) = split_random_effects(lhs);
-            let (r_fixed, mut r_re) = split_random_effects(r);
-            l_re.append(&mut r_re);
-            let l_null = matches!(l_fixed, Expr::NullLit);
-            let r_null = matches!(r_fixed, Expr::NullLit);
-            let combined = match (l_null, r_null) {
-                (true, true) => Expr::NullLit,
-                (true, false) => r_fixed,
-                (false, true) => l_fixed,
-                (false, false) => Expr::Binary {
-                    op: BinOp::Add,
-                    lhs: Box::new(l_fixed),
-                    rhs: Box::new(r_fixed),
-                },
-            };
-            (combined, l_re)
-        }
-        // Leaf or non-Add expression: not a random-effect spec.
-        other => (other.clone(), Vec::new()),
-    }
-}
-
-fn fmt_expr(e: &Expr) -> String {
-    match e {
-        Expr::Symbol(s) => s.to_string(),
-        Expr::NumLit(n) => fmt_num(*n),
-        Expr::IntLit(n) => format!("{}", n),
-        Expr::StrLit(s) => format!("\"{}\"", s),
-        Expr::BoolLit(b) => if *b { "TRUE".into() } else { "FALSE".into() },
-        Expr::NaLit => "NA".into(),
-        Expr::NullLit => "NULL".into(),
-        Expr::Binary { op, lhs, rhs } => {
-            let opstr = match op {
-                BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/",
-                BinOp::Pow => "^", BinOp::Mod => "%%", BinOp::IntDiv => "%/%",
-                BinOp::Eq => "==", BinOp::Ne => "!=", BinOp::Lt => "<", BinOp::Gt => ">",
-                BinOp::Le => "<=", BinOp::Ge => ">=",
-                // BinOp naming inverted vs symbol (lexer: `&` → And, `&&` → AndShort).
-                BinOp::And => "&", BinOp::Or => "|",
-                BinOp::AndShort => "&&", BinOp::OrShort => "||",
-                BinOp::Tilde => "~", BinOp::MatMul => "%*%",
-                BinOp::Colon => ":",
-                // Every BinOp variant is matched above; the previous
-                // catch-all "?" branch was unreachable. Kept exhaustive
-                // so adding a new BinOp triggers a compile error here
-                // instead of a silent "?" in printed output.
-            };
-            format!("{} {} {}", fmt_expr(lhs), opstr, fmt_expr(rhs))
-        }
-        Expr::Call { func, args } => {
-            let fname = fmt_expr(func);
-            let parts: Vec<String> = args.iter().map(|a| match &a.name {
-                Some(n) => format!("{} = {}", n, fmt_expr(&a.value)),
-                None => fmt_expr(&a.value),
-            }).collect();
-            format!("{}({})", fname, parts.join(", "))
-        }
-        Expr::Dollar { object, field } => format!("{}${}", fmt_expr(object), field),
-        Expr::Index { object, indices } => {
-            let parts: Vec<String> = indices.iter().map(|i| match i {
-                Some(e) => fmt_expr(e),
-                None => String::new(),
-            }).collect();
-            format!("{}[{}]", fmt_expr(object), parts.join(", "))
-        }
-        _ => "<expr>".into(),
-    }
-}
+// is_random_intercept / random_intercept_grouping / split_random_effects /
+// fmt_expr moved to src/formula.rs.
 
 fn val_to_str(v: &RVal) -> String { match v { RVal::Numeric(v,_) => v.iter().map(|x| match x {Some(n)=>fmt_num(*n),None=>"NA".into()}).collect::<Vec<_>>().join(" "), RVal::Single(v,_) => v.iter().map(|x| match x {Some(n)=>fmt_num(*n as f64),None=>"NA".into()}).collect::<Vec<_>>().join(" "), RVal::Integer(v,_) => v.iter().map(|x| match x {Some(n)=>format!("{}",n),None=>"NA".into()}).collect::<Vec<_>>().join(" "), RVal::Character(v,_) => v.iter().map(|x| match x {Some(s)=>s.to_string(),None=>"NA".into()}).collect::<Vec<_>>().join(" "), RVal::Logical(v,_) => v.iter().map(|x| match x {Some(true)=>"TRUE",Some(false)=>"FALSE",None=>"NA"}).collect::<Vec<_>>().join(" "), RVal::Null => "NULL".into(), _ => format!("<{}>",v.type_name()) } }
 
@@ -1722,9 +1496,9 @@ fn val_to_str(v: &RVal) -> String { match v { RVal::Numeric(v,_) => v.iter().map
 // ═══════════════════════════════════════════════════════════════════════
 
 // Phase R.2: bi_c moved to r2-data::concat. Engine adapter only.
-fn bi_c(_e: &mut Engine, args: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::concat::bi_c(args) }
+// (bi_c moved to src/builtins/data.rs.)
 fn bi_length(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rint(rval_length(&gv(a,0)) as i32)) }
-fn bi_print(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+fn bi_print(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
     // Phase R.T.1 — class-aware print for Date / POSIXct. R prints these in
     // human form (`"2024-03-15"`) rather than the raw days/seconds f64. We
@@ -1736,11 +1510,10 @@ fn bi_print(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
                 let strs: Vec<String> = xs.iter()
                     .map(|x| match x { Some(d) => format!("\"{}\"", r2_stats::time::format_date(*d, "%Y-%m-%d")), None => "NA".into() })
                     .collect();
-                println!("{}", quoted_vec(&strs));
+                e.emit_output(&quoted_vec(&strs));
                 return Ok(v);
             }
             Some("xts") => {
-                // R.T.3 — timestamped tabular print.
                 let dim = attrs.dim.as_ref();
                 let idx_v = attrs.custom.get(&std::sync::Arc::from("index"));
                 let cls_v = attrs.custom.get(&std::sync::Arc::from("index.class"));
@@ -1751,20 +1524,19 @@ fn bi_print(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
                         let xs_vec: Vec<Option<f64>> = xs.iter().copied().collect();
                         let idx_vec: Vec<f64> = idx.iter().map(|x| x.unwrap_or(f64::NAN)).collect();
                         let cls_s = cls.first().and_then(|x| x.as_ref().map(|s| s.to_string())).unwrap_or_else(|| "POSIXct".into());
-                        print!("{}", r2_stats::time::format_xts(&xs_vec, nrow, ncol, &idx_vec, &cls_s, attrs.names.as_deref()));
+                        e.emit_output(&r2_stats::time::format_xts(&xs_vec, nrow, ncol, &idx_vec, &cls_s, attrs.names.as_deref()));
                         return Ok(v);
                     }
                 }
             }
             Some("ts") => {
-                // R.T.2 — labeled monthly/quarterly grid via format_ts.
                 if let Some(RVal::Numeric(tsp, _)) = attrs.custom.get(&std::sync::Arc::from("tsp")) {
                     if tsp.len() == 3 {
                         let s = tsp[0].unwrap_or(f64::NAN);
-                        let e = tsp[1].unwrap_or(f64::NAN);
+                        let e2 = tsp[1].unwrap_or(f64::NAN);
                         let f = tsp[2].unwrap_or(1.0);
                         let xs_vec: Vec<Option<f64>> = xs.iter().copied().collect();
-                        print!("{}", r2_stats::time::format_ts(&xs_vec, s, e, f));
+                        e.emit_output(&r2_stats::time::format_ts(&xs_vec, s, e2, f));
                         return Ok(v);
                     }
                 }
@@ -1773,13 +1545,13 @@ fn bi_print(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
                 let strs: Vec<String> = xs.iter()
                     .map(|x| match x { Some(s) => format!("\"{}\"", r2_stats::time::format_posixct(*s, "%Y-%m-%d %H:%M:%S")), None => "NA".into() })
                     .collect();
-                println!("{}", quoted_vec(&strs));
+                e.emit_output(&quoted_vec(&strs));
                 return Ok(v);
             }
             _ => {}
         }
     }
-    println!("{}", v);
+    e.emit_output(&format!("{}", v));
     Ok(v)
 }
 
@@ -1792,7 +1564,19 @@ fn quoted_vec(strs: &[String]) -> String {
     }
     s
 }
-fn bi_cat(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let sep = gn(a,"sep").map(|v| val_to_str(&v)).unwrap_or(" ".into()); let s: Vec<String> = a.iter().filter(|x| x.name.as_ref().map(|n| n.as_ref()) != Some("sep")).map(|x| val_to_str(&x.value)).collect(); print!("{}", s.join(&sep)); Ok(RVal::Null) }
+fn bi_cat(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let sep = gn(a,"sep").map(|v| val_to_str(&v)).unwrap_or(" ".into());
+    let parts: Vec<String> = a.iter()
+        .filter(|x| x.name.as_ref().map(|n| n.as_ref()) != Some("sep"))
+        .map(|x| val_to_str(&x.value))
+        .collect();
+    // cat() does NOT auto-newline (R behavior). The sink's contract
+    // is one logical "output chunk" per call — if the assembled text
+    // has no trailing newline, the sink may or may not add one
+    // depending on impl. StdoutSink adds one for line-buffered I/O.
+    e.emit_output(&parts.join(&sep));
+    Ok(RVal::Null)
+}
 fn bi_typeof(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rstr(gv(a,0).type_name())) }
 fn bi_class(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::TypeInstance(i) => Ok(rstr(&i.type_name)), v => Ok(rstr(v.type_name())) } }
 fn bi_is_na(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())), _ => Ok(rbool(false)) } }
@@ -1827,15 +1611,12 @@ fn bi_rep(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
 // Phase R: 8 reduction builtins now live in r2-stats. r2-engine adapts
 // the pure `(&[EvalArg]) -> Result<RVal, R2Err>` signature to the local
 // `BuiltinFn` shape (which carries `&mut Engine` and `&EnvRef`).
-fn bi_sum(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::bi_sum(a) }
+// (bi_sum moved to src/builtins/stats.rs.)
 
-fn bi_mean(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::bi_mean(a) }
-fn bi_sd(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::bi_sd(a) }
-fn bi_var(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::bi_var(a) }
-fn bi_paste(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_paste(a) }
-fn bi_paste0(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_paste0(a) }
-fn bi_head(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_head(a) }
-fn bi_tail(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_tail(a) }
+// (bi_mean/sd/var moved to src/builtins/stats.rs.)
+// (bi_paste moved to src/builtins/strings.rs.)
+// (bi_paste0 moved to src/builtins/strings.rs.)
+// (bi_head / bi_tail moved to src/builtins/data.rs.)
 fn bi_which(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Logical(v,_) => Ok(RVal::Integer(v.iter().enumerate().filter_map(|(i,x)| if *x==Some(true) { Some(Some((i+1) as i32)) } else { None }).collect(), Attrs::default())), _ => err!(Type, "which requires logical") } }
 // Phase K.2: map-kernel dispatch — Rayon decision lives below this layer.
 fn bi_abs(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
@@ -1847,12 +1628,11 @@ fn bi_sqrt(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Sqrt, &v).into(), Attrs::default()))
 }
 fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) as i32; let f = 10f64.powi(d); Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| (n*f).round()/f)).collect(), Attrs::default())) }
-fn bi_max(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::bi_max(a) }
-fn bi_min(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::bi_min(a) }
+// (bi_max/bi_min moved to src/builtins/stats.rs.)
 fn bi_sort(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let mut n: Vec<f64> = v.into_iter().filter_map(|x| x).collect(); n.sort_by(|a,b| a.partial_cmp(b).unwrap()); Ok(rnums(&n)) }
 fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Numeric(v,_) => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())), _ => err!(Runtime, "rev() works with numeric, integer, or character vectors") } }
-fn bi_unique(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::order::bi_unique(a) }
-fn bi_nchar(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_nchar(a) }
+// (bi_unique moved to src/builtins/data.rs.)
+// (bi_nchar moved to src/builtins/strings.rs.)
 fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Numeric(..)|RVal::Integer(..)))) }
 fn bi_is_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Character(..)))) }
 fn bi_is_lgl(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Logical(..)))) }
@@ -2024,8 +1804,7 @@ fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(RVal::Factor(Factor { codes, levels, ordered: false }))
 }
 fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::DataFrame(df) => Ok(RVal::Character(df.columns.iter().map(|(n,_)| Some(n.clone())).collect(), Attrs::default())), _ => Ok(RVal::Null) } }
-fn bi_nrow(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_nrow(a) }
-fn bi_ncol(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_ncol(a) }
+// (bi_nrow / bi_ncol moved to src/builtins/data.rs.)
 fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
     match &v {
@@ -2407,86 +2186,32 @@ fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> 
     }
 }
 fn bi_search(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { for p in e.registry.search_path() { println!("{}", p); } Ok(RVal::Null) }
-fn bi_cor(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_cor(a) }
+// (bi_cor moved to src/builtins/stats.rs.)
 
 // cov(x, y) — sample covariance with Bessel correction:
 //   cov = Σ(xᵢ - x̄)(yᵢ - ȳ) / (n - 1)
 // Drops NA pairs (matches R's `use = "complete.obs"` default style for now).
 // Oracle decides serial vs parallel for the inner reductions.
-fn bi_cov(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_cov(a) }
+// (bi_cov moved to src/builtins/stats.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // read.csv — parse CSV file into DataFrame
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_write_csv(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_io::bi_write_csv(a) }
+// (bi_write_csv moved to src/builtins/io.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // lm() — linear regression using normal equations: β = (X^T X)^-1 X^T y
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_lm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::models::bi_lm(a) }
+// (bi_lm moved to src/builtins/stats.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // plot() — SVG scatter plot output
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_plot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    // Model-aware plotting
-    if let RVal::TypeInstance(inst) = &gv(a,0) {
-        match inst.type_name.as_ref() {
-            "gbm" => {
-                if let Some(tl) = inst.fields.get("train.loss") {
-                    let losses: Vec<f64> = e.as_reals(tl)?.into_iter().filter_map(|x| x).collect();
-                    let iters: Vec<f64> = (1..=losses.len()).map(|i| i as f64).collect();
-                    let fake_args = vec![
-                        EvalArg { name: None, value: rnums(&iters) },
-                        EvalArg { name: None, value: rnums(&losses) },
-                        EvalArg { name: Some(Arc::from("main")), value: rstr("GBM Training Loss") },
-                        EvalArg { name: Some(Arc::from("xlab")), value: rstr("Iteration") },
-                        EvalArg { name: Some(Arc::from("ylab")), value: rstr("Loss") },
-                    ];
-                    let env = e.global_env.clone();
-                    return bi_plot(e, &fake_args, &env);
-                }
-            }
-            "lm" | "glm" => {
-                if let (Some(fitted), Some(resid)) = (inst.fields.get("fitted.values"), inst.fields.get("residuals")) {
-                    let fake_args = vec![
-                        EvalArg { name: None, value: fitted.clone() },
-                        EvalArg { name: None, value: resid.clone() },
-                        EvalArg { name: Some(Arc::from("main")), value: rstr("Residuals vs Fitted") },
-                        EvalArg { name: Some(Arc::from("xlab")), value: rstr("Fitted values") },
-                        EvalArg { name: Some(Arc::from("ylab")), value: rstr("Residuals") },
-                    ];
-                    let env = e.global_env.clone();
-                    return bi_plot(e, &fake_args, &env);
-                }
-            }
-            "kmeans" => {
-                if let Some(ws) = inst.fields.get("withinss") {
-                    let wss: Vec<f64> = e.as_reals(ws)?.into_iter().filter_map(|x| x).collect();
-                    let clusters: Vec<f64> = (1..=wss.len()).map(|i| i as f64).collect();
-                    let fake_args = vec![
-                        EvalArg { name: None, value: rnums(&clusters) },
-                        EvalArg { name: None, value: rnums(&wss) },
-                        EvalArg { name: Some(Arc::from("main")), value: rstr("K-means Within-SS") },
-                        EvalArg { name: Some(Arc::from("xlab")), value: rstr("Cluster") },
-                        EvalArg { name: Some(Arc::from("ylab")), value: rstr("Within SS") },
-                    ];
-                    let env = e.global_env.clone();
-                    return bi_plot(e, &fake_args, &env);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Phase R.3: data-path plot lives in r2-graphics. Engine retains the
-    // model-aware dispatch above (split-handler pattern).
-    let _ = e;
-    r2_graphics::plots::bi_plot(a)
-}
+// (bi_plot — model-aware dispatch + r2-graphics delegation — moved
+// to src/builtins/graphics.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // matrix(), tensor(), t(), crossprod()
@@ -2502,18 +2227,13 @@ fn bi_crossprod(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Er
 // String operations
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_toupper(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_toupper(a) }
-fn bi_tolower(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_tolower(a) }
-fn bi_substr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_substr(a) }
-fn bi_grep(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_grep(a) }
-fn bi_gsub(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_gsub(a) }
-fn bi_strsplit(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_strsplit(a) }
+// (bi_toupper/tolower/substr/grep/gsub/strsplit moved to src/builtins/strings.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // table() — frequency counts
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_table(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::table::bi_table(a) }
+// (bi_table moved to src/builtins/data.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // sapply / lapply — apply function over vector/list
@@ -2831,22 +2551,19 @@ fn bi_mapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err>
 // Distribution functions — dnorm, pnorm, qnorm, rnorm
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_rnorm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::rng::bi_rnorm(a) }
+// (bi_rnorm moved to src/builtins/stats.rs.)
 
-fn bi_dnorm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_dnorm(a) }
+// (bi_dnorm moved to src/builtins/stats.rs.)
 
-fn bi_runif(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::rng::bi_runif(a) }
+// (bi_runif moved to src/builtins/stats.rs.)
 
-fn bi_sample(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::rng::bi_sample(a) }
+// (bi_sample moved to src/builtins/stats.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // hist() — text histogram (+ SVG)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Phase R.3: bi_hist moved to r2-graphics::plots.
-fn bi_hist(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::plots::bi_hist(a)
-}
+// (bi_hist moved to src/builtins/graphics.rs.)
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3074,6 +2791,12 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
             ("save.plot",bi_save_plot),
                 ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),
                 ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),
+                ("dev.new",bi_dev_new),("dev.set",bi_dev_set),("dev.list",bi_dev_list),
+                ("dev.cur",bi_dev_cur),
+                ("rgb",bi_rgb),("gray",bi_gray),("grey",bi_gray),("hsv",bi_hsv),
+                ("rainbow",bi_rainbow),("heat.colors",bi_heat_colors),
+                ("terrain.colors",bi_terrain_colors),("topo.colors",bi_topo_colors),
+                ("cm.colors",bi_cm_colors),("adjustcolor",bi_adjustcolor),
             ]));
             true
         }
@@ -3434,7 +3157,7 @@ fn bi_cbind(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     } // end of #[allow(unreachable_code)] block (Phase R.2)
 }
 
-fn bi_merge(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::clean::bi_merge(a) }
+// (bi_merge moved to src/builtins/data.rs.)
 
 fn to_string_vec(col: &RVal) -> Vec<String> {
     match col {
@@ -3450,9 +3173,9 @@ fn to_string_vec(col: &RVal) -> Vec<String> {
 // NA HANDLING: na.omit, complete.cases, is.null, ifelse
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_na_omit(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::clean::bi_na_omit(a) }
+// (bi_na_omit moved to src/builtins/data.rs.)
 
-fn bi_complete_cases(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::clean::bi_complete_cases(a) }
+// (bi_complete_cases moved to src/builtins/data.rs.)
 
 fn bi_is_null(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(rbool(matches!(gv(a,0), RVal::Null)))
@@ -3708,7 +3431,7 @@ fn bi_aggregate(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2E
     } // end #[allow(unreachable_code)] (Phase R.2 step 6)
 }
 
-fn bi_do_call(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> { r2_data::apply::bi_do_call(e, a, env) }
+// (bi_do_call moved to src/builtins/data.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // MORE MATH: log, exp, ceiling, floor, cumsum, cumprod, diff, range, median, quantile
@@ -3827,15 +3550,9 @@ fn bi_floor(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
     Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| n.floor())).collect(), Attrs::default()))
 }
-fn bi_cumsum(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_cumsum(a) }
-fn bi_cumprod(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_cumprod(a) }
-fn bi_diff(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_diff(a) }
+// (bi_cumsum / cumprod / diff moved to src/builtins/stats.rs.)
 // Phase K.9 — rolling/window reductions
-fn bi_rollsum(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_rollsum(a) }
-fn bi_rollmean(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_rollmean(a) }
-fn bi_rollmax(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_rollmax(a) }
-fn bi_rollmin(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_rollmin(a) }
-fn bi_rollsd(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_rollsd(a) }
+// (bi_roll* moved to src/builtins/stats.rs.)
 fn bi_median(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { return r2_stats::bi_median(a);
     #[allow(unreachable_code)]
     let mut v: Vec<f64> = vec![];
@@ -3868,19 +3585,19 @@ fn bi_median(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> 
     };
     Ok(rnum(m))
 }
-fn bi_quantile(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_quantile(a) }
+// (bi_quantile moved to src/builtins/stats.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // MORE DISTRIBUTIONS: pnorm, qnorm, rbinom, rpois, dbinom
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_pnorm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pnorm(a) }
+// (bi_pnorm moved to src/builtins/stats.rs.)
 
-fn bi_qnorm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_qnorm(a) }
+// (bi_qnorm moved to src/builtins/stats.rs.)
 
-fn bi_rbinom(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::rng::bi_rbinom(a) }
+// (bi_rbinom moved to src/builtins/stats.rs.)
 
-fn bi_rpois(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::rng::bi_rpois(a) }
+// (bi_rpois moved to src/builtins/stats.rs.)
 
 // Error function approximation (Abramowitz & Stegun)
 // Phase R.9: erf, phi, qnorm_approx now live in r2_stats::dist.
@@ -3927,7 +3644,7 @@ fn bi_system_time(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R
 // t.test() — Student's t-test
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_t_test(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::htest::bi_t_test(a) }
+// (bi_t_test moved to src/builtins/stats.rs.)
 
 // Phase R.10: t_cdf, incomplete_beta, gamma_approx live in r2_stats.
 // All engine call sites migrated; imports retired.
@@ -3936,7 +3653,7 @@ fn bi_t_test(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> 
 // chisq.test() — Chi-squared test for independence
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_chisq_test(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::htest::bi_chisq_test(a) }
+// (bi_chisq_test moved to src/builtins/stats.rs.)
 
 // Phase R.S.2 — Hotelling T² (one-sample / two-sample / paired)
 fn bi_hotelling_test(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
@@ -3975,7 +3692,7 @@ fn bi_difftime(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err
     r2_stats::time::bi_difftime(a)
 }
 // ── Phase R.T.2 — ts() class adapters ─────────────────────────────────
-fn bi_ts(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::time::bi_ts(a) }
+// (bi_ts moved to src/builtins/stats.rs.)
 fn bi_tsp(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::time::bi_tsp(a) }
 fn bi_ts_start(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::time::bi_start(a) }
 fn bi_ts_end(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::time::bi_end(a) }
@@ -4422,15 +4139,13 @@ fn bi_coef(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
 // boxplot() — SVG box-and-whisker plot
 // ═══════════════════════════════════════════════════════════════════════
 
-// Phase R.3: bi_boxplot moved to r2-graphics::plots. Dead body kept under
-// #[cfg(any())] for safe rollback during the migration window.
-fn bi_boxplot(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::plots::bi_boxplot(a)
-}
+// (bi_boxplot moved to src/builtins/graphics.rs. The dead-body
+// fallback below was #[cfg(any())] — never compiled — and is
+// deleted as part of the migration cleanup.)
 
 #[cfg(any())]
 #[allow(dead_code, unused_variables)]
-fn _legacy_bi_boxplot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+fn _deleted_legacy_bi_boxplot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let title = gn(a,"main").map(|v| val_to_str(&v)).unwrap_or("Boxplot".into());
     let (w, h) = (500.0, 400.0);
     let (ml, mr, mt, mb) = (60.0, 30.0, 30.0, 40.0);
@@ -4498,11 +4213,7 @@ fn _legacy_bi_boxplot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 // barplot() — SVG bar chart
 // ═══════════════════════════════════════════════════════════════════════
 
-// Phase R.3: bi_barplot moved to r2-graphics::plots. Dead body kept under
-// #[cfg(any())] for safe rollback during the migration window.
-fn bi_barplot(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::plots::bi_barplot(a)
-}
+// (bi_barplot moved to src/builtins/graphics.rs.)
 
 #[cfg(any())]
 #[allow(dead_code, unused_variables)]
@@ -4552,11 +4263,11 @@ fn _legacy_bi_barplot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 // read.table(), write.table(), read.delim() — more file I/O
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_read_table(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_io::bi_read_table(a) }
+// (bi_read_table moved to src/builtins/io.rs.)
 
-fn bi_read_delim(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Result<RVal, R2Err> { r2_io::bi_read_delim(a) }
+// (bi_read_delim moved to src/builtins/io.rs.)
 
-fn bi_write_table(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_io::bi_write_table(a) }
+// (bi_write_table moved to src/builtins/io.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // which.min(), which.max(), range(), prod(), any(), all()
@@ -4568,7 +4279,7 @@ fn bi_which_max(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Er
 
 fn bi_range(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_range(a) }
 
-fn bi_prod(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::bi_prod(a) }
+// (bi_prod moved to src/builtins/stats.rs.)
 
 fn bi_any(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_logicals(&gv(a,0))?;
@@ -4584,9 +4295,9 @@ fn bi_all(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
 // sprintf(), trimws(), startsWith(), endsWith(), nrow/ncol for matrix
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_sprintf(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_sprintf(a) }
+// (bi_sprintf moved to src/builtins/strings.rs.)
 
-fn bi_trimws(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_trimws(a) }
+// (bi_trimws moved to src/builtins/strings.rs.)
 
 fn bi_starts_with(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let x = match &gv(a,0) { RVal::Character(v,_) => v.clone(), _ => return err!(Type, "startsWith needs character") };
@@ -4692,129 +4403,14 @@ fn bi_confint(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> 
 // These append to the last SVG plot file
 // ═══════════════════════════════════════════════════════════════════════
 
-// Phase R.3: lines/points/abline/legend moved to r2-graphics::overlays.
-// Dead bodies kept under #[cfg(any())] for safe rollback.
-fn bi_lines(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::overlays::bi_lines(a)
-}
+// (overlay shims bi_lines / bi_points / bi_abline / bi_legend moved
+// to src/builtins/graphics.rs. Their pre-Phase-R.3 dead bodies were
+// dropped here too — they had been #[cfg(any())] guarded since the
+// move to r2-graphics::overlays and were never compiled.)
 
-#[cfg(any())]
-#[allow(dead_code, unused_variables)]
-fn _legacy_bi_lines(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let x: Vec<f64> = e.as_reals(&gv(a,0))?.into_iter().filter_map(|x| x).collect();
-    let y: Vec<f64> = e.as_reals(&gv(a,1))?.into_iter().filter_map(|x| x).collect();
-    let col = gn(a,"col").map(|v| val_to_str(&v)).unwrap_or("red".into());
-
-    // Read existing SVG, insert lines before </svg>
-    let svg_path = "plot.svg";
-    let mut svg = std::fs::read_to_string(svg_path).unwrap_or_default();
-    if svg.is_empty() { return err!(Runtime, "no plot open — call plot() first"); }
-
-    let mut line_elements = String::new();
-    for i in 0..x.len().saturating_sub(1) {
-        line_elements.push_str(&format!(
-            r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="2"/>"#,
-            60.0 + x[i] * 10.0, 370.0 - y[i] * 10.0,
-            60.0 + x[i+1] * 10.0, 370.0 - y[i+1] * 10.0,
-            col
-        ));
-    }
-    svg = svg.replace("</svg>", &format!("{}</svg>", line_elements));
-    let _ = std::fs::write(svg_path, &svg);
-    println!("Lines added to {}", svg_path);
-    Ok(RVal::Null)
-}
-
-fn bi_points(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::overlays::bi_points(a)
-}
-
-#[cfg(any())]
-#[allow(dead_code, unused_variables)]
-fn _legacy_bi_points(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let x: Vec<f64> = e.as_reals(&gv(a,0))?.into_iter().filter_map(|x| x).collect();
-    let y: Vec<f64> = e.as_reals(&gv(a,1))?.into_iter().filter_map(|x| x).collect();
-    let col = gn(a,"col").map(|v| val_to_str(&v)).unwrap_or("red".into());
-    let pch = gn(a,"pch").and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(1.0) as i32;
-
-    let svg_path = "plot.svg";
-    let mut svg = std::fs::read_to_string(svg_path).unwrap_or_default();
-    if svg.is_empty() { return err!(Runtime, "no plot open — call plot() first"); }
-
-    let mut elems = String::new();
-    for i in 0..x.len().min(y.len()) {
-        let px = 60.0 + x[i] * 10.0;
-        let py = 370.0 - y[i] * 10.0;
-        match pch {
-            0 => elems.push_str(&format!(r#"<rect x="{:.0}" y="{:.0}" width="6" height="6" fill="none" stroke="{}"/>"#, px-3.0, py-3.0, col)),
-            2 => elems.push_str(&format!(r#"<polygon points="{:.0},{:.0} {:.0},{:.0} {:.0},{:.0}" fill="none" stroke="{}"/>"#, px, py-4.0, px-4.0, py+3.0, px+4.0, py+3.0, col)),
-            _ => elems.push_str(&format!(r#"<circle cx="{:.0}" cy="{:.0}" r="3" fill="{}"/>"#, px, py, col)),
-        }
-    }
-    svg = svg.replace("</svg>", &format!("{}</svg>", elems));
-    let _ = std::fs::write(svg_path, &svg);
-    println!("Points added to {}", svg_path);
-    Ok(RVal::Null)
-}
-
-fn bi_abline(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::overlays::bi_abline(a)
-}
-
-#[cfg(any())]
-#[allow(dead_code, unused_variables)]
-fn _legacy_bi_abline(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    // abline(a = intercept, b = slope) or abline(h = y) or abline(v = x)
-    let col = gn(a,"col").map(|v| val_to_str(&v)).unwrap_or("red".into());
-    let lty = gn(a,"lty").and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(1.0) as i32;
-    let dash = if lty == 2 { r#" stroke-dasharray="5,5""# } else { "" };
-
-    let svg_path = "plot.svg";
-    let mut svg = std::fs::read_to_string(svg_path).unwrap_or_default();
-    if svg.is_empty() { return err!(Runtime, "no plot open — call plot() first"); }
-
-    let elem = if let (Some(h_val), _) = (gn(a, "h"), gn(a, "v")) {
-        let h = e.scalar_f64(&h_val)?.unwrap_or(0.0);
-        let py = 370.0 - h * 10.0;
-        format!(r#"<line x1="60" y1="{:.0}" x2="580" y2="{:.0}" stroke="{}"{}/>"#, py, py, col, dash)
-    } else if let Some(v_val) = gn(a, "v") {
-        let v = e.scalar_f64(&v_val)?.unwrap_or(0.0);
-        let px = 60.0 + v * 10.0;
-        format!(r#"<line x1="{:.0}" y1="30" x2="{:.0}" y2="370" stroke="{}"{}/>"#, px, px, col, dash)
-    } else {
-        // abline(a, b) or abline(intercept, slope)
-        let intercept = gn(a,"a").or_else(|| Some(gv(a,0))).and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(0.0);
-        let slope = gn(a,"b").or_else(|| Some(gv(a,1))).and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(1.0);
-        let x1 = 0.0; let x2 = 50.0;
-        let y1 = intercept + slope * x1;
-        let y2 = intercept + slope * x2;
-        format!(r#"<line x1="{:.0}" y1="{:.0}" x2="{:.0}" y2="{:.0}" stroke="{}"{} stroke-width="2"/>"#,
-            60.0 + x1 * 10.0, 370.0 - y1 * 10.0, 60.0 + x2 * 10.0, 370.0 - y2 * 10.0, col, dash)
-    };
-
-    svg = svg.replace("</svg>", &format!("{}</svg>", elem));
-    let _ = std::fs::write(svg_path, &svg);
-    println!("Line added to {}", svg_path);
-    Ok(RVal::Null)
-}
-
-fn bi_legend(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::overlays::bi_legend(a)
-}
-
-// Phase R.G — graphical-parameter and device-control builtins.
-fn bi_par(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::params::bi_par(a)
-}
-fn bi_dev_off(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::params::bi_dev_off(a)
-}
-fn bi_save_plot(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::params::bi_save_plot(a)
-}
-fn bi_dev_view(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_graphics::params::bi_dev_view(a)
-}
+// (par/dev/colors shims moved to src/builtins/graphics.rs — see
+// `mod builtins;` + `use builtins::graphics::*;` at the top of the
+// file. Phase: r2-engine modularisation, sprint 1.)
 
 #[cfg(any())]
 #[allow(dead_code, unused_variables)]
@@ -4996,13 +4592,13 @@ fn bi_data(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(RVal::Null)
 }
 
-fn bi_dim(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_dim(a) }
+// (bi_dim moved to src/builtins/data.rs.)
 
-fn bi_colnames(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_colnames(a) }
+// (bi_colnames moved to src/builtins/data.rs.)
 
-fn bi_rownames(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_rownames(a) }
+// (bi_rownames moved to src/builtins/data.rs.)
 
-fn bi_is_data_frame(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_is_data_frame(a) }
+// (bi_is_data_frame moved to src/builtins/data.rs.)
 
 fn bi_is_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(rbool(matches!(gv(a, 0), RVal::Factor(_))))
@@ -5030,7 +4626,7 @@ fn r2_next_random() -> f64 { r2_stats::rng::next_random() }
 // as.data.frame() — convert matrix or list to data.frame
 // ═══════════════════════════════════════════════════════════════════════
 
-fn bi_as_data_frame(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::meta::bi_as_data_frame(a) }
+// (bi_as_data_frame moved to src/builtins/data.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // Memory safety: allocation guard (scaffolded, not yet wired into call sites)
@@ -5195,23 +4791,23 @@ fn bi_eigen(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
 // ── prcomp() — Principal Component Analysis ──────────────────────────
 
 // Phase R.1 step 4: bi_prcomp moved to r2-ml::dispatch.
-fn bi_prcomp(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_prcomp(a) }
+// (bi_prcomp moved to src/builtins/ml.rs.)
 
 // ── kmeans() — K-means clustering ────────────────────────────────────
 
 // Phase R.1 step 4: bi_kmeans moved to r2-ml::dispatch. Per-point
 // centroid assignment uses kernel::par_for(Op::PerPointDistance, ...).
-fn bi_kmeans(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_kmeans(a) }
+// (bi_kmeans moved to src/builtins/ml.rs.)
 
 // ── knn() — K-nearest neighbors classification ──────────────────────
 
 // Phase R.1 step 4: bi_knn moved to r2-ml::dispatch.
-fn bi_knn(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_knn(a) }
+// (bi_knn moved to src/builtins/ml.rs.)
 
 // ── naive.bayes() — Naive Bayes classifier ──────────────────────────
 
 // Phase R.1 step 4: bi_naive_bayes moved to r2-ml::dispatch.
-fn bi_naive_bayes(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_naive_bayes(a) }
+// (bi_naive_bayes moved to src/builtins/ml.rs.)
 
 // ── scale() — center and scale matrix columns ───────────────────────
 
@@ -5407,13 +5003,13 @@ fn mse_impurity(indices: &[usize], y: &[f64]) -> f64 {
 // here exists only to satisfy r2-engine's `BuiltinFn` signature, which
 // carries `&mut Engine` and `&EnvRef` for stateful builtins. Pure ML
 // builtins ignore those — the adapter is FFI glue, not bloat.
-fn bi_rpart(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_rpart(a) }
+// (bi_rpart moved to src/builtins/ml.rs.)
 
 // ── rf() — Random Forest ─────────────────────────────────────────────
 
 // Phase R.1 step 4: bi_rf moved to r2-ml::dispatch. Uses kernel::par_for
 // instead of par_iter — Rayon stays below the kernel layer (§4.9).
-fn bi_rf(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_rf(a) }
+// (bi_rf moved to src/builtins/ml.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // PHASE: DATA HANDLING — filter, select, mutate, arrange, regex, etc.
@@ -5421,23 +5017,23 @@ fn bi_rf(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2
 
 // ── sub() / regexpr basics ───────────────────────────────────────────
 
-fn bi_sub(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_sub(a) }
+// (bi_sub moved to src/builtins/strings.rs.)
 
-fn bi_grepl(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_grepl(a) }
+// (bi_grepl moved to src/builtins/strings.rs.)
 
-fn bi_regexpr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_strings::bi_regexpr(a) }
+// (bi_regexpr moved to src/builtins/strings.rs.)
 
 // ── duplicated() / distinct values ───────────────────────────────────
 
-fn bi_duplicated(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::order::bi_duplicated(a) }
+// (bi_duplicated moved to src/builtins/data.rs.)
 
 // ── order() — return indices that would sort the vector ──────────────
 
-fn bi_order(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::order::bi_order(a) }
+// (bi_order moved to src/builtins/data.rs.)
 
 // ── rank() — ranks of values ─────────────────────────────────────────
 
-fn bi_rank(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::order::bi_rank(a) }
+// (bi_rank moved to src/builtins/data.rs.)
 
 // ── cummax, cummin ───────────────────────────────────────────────────
 
@@ -5649,11 +5245,11 @@ fn bi_sys_getenv(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Er
 
 // ── file.exists() — check if file exists ─────────────────────────────
 
-fn bi_file_exists(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_io::bi_file_exists(a) }
+// (bi_file_exists moved to src/builtins/io.rs.)
 
 // ── list.files() — list files in directory ───────────────────────────
 
-fn bi_list_files(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_io::bi_list_files(a) }
+// (bi_list_files moved to src/builtins/io.rs.)
 
 // end of file
 
@@ -5671,7 +5267,7 @@ fn bi_list_files(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Er
 
 // Phase R.1 step 4: bi_gbm moved to r2-ml::dispatch. Per-iteration row work
 // uses kernel::par_for; outer boosting loop stays sequential by algorithm.
-fn bi_gbm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_gbm(a) }
+// (bi_gbm moved to src/builtins/ml.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // save() / load() — Session persistence
@@ -5877,7 +5473,7 @@ fn deserialize_rval(s: &str) -> Option<RVal> {
 
 // Phase R.1 step 4: bi_cv moved to r2-ml::dispatch. Folds run via
 // kernel::par_for(Op::KFoldCV, k, ...).
-fn bi_cv(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Result<RVal, R2Err> { r2_ml::dispatch::bi_cv(a) }
+// (bi_cv moved to src/builtins/ml.rs.)
 
 // ═══════════════════════════════════════════════════════════════════════
 // confusion.matrix() — for classification evaluation

@@ -24,8 +24,23 @@
 //!      `dev.off()` / `save_plot()`.
 
 use std::cell::RefCell;
+use std::sync::atomic::AtomicBool;
 
 use r2_types::{ErrKind, R2Err};
+
+/// Programmatic opt-out of the browser-based plot viewer.
+/// Set by `disable_autoview()` — used by the GUI binary (R2Gui) so
+/// the browser doesn't open on top of the GUI's own plot window.
+/// More reliable than the R2_NO_AUTOVIEW env var since env_set_var
+/// has cross-process/cross-thread caveats on Windows.
+static AUTOVIEW_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Disable the browser plot viewer for the lifetime of this process.
+/// Idempotent. Used by R2Gui (which has its own plot window) and
+/// callable from any other host that wants to suppress the viewer.
+pub fn disable_autoview() {
+    AUTOVIEW_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Everything `par()` can set. Defaults mirror R's `par()` baseline so
 /// scripts that do not call `par()` get R-compatible output.
@@ -77,7 +92,9 @@ impl Default for PlotParams {
             lty: "solid".into(),
             lwd: 1.0,
             pch: 1,
-            las: 0,
+            // R2-default: both axis labels horizontal (las=1) so they
+            // read left-to-right without head-tilting.
+            las: 1,
             new: false,
         }
     }
@@ -147,20 +164,159 @@ impl PlotDevice {
     }
 }
 
+// ─── Multi-device support — session B ──────────────────────────────
+//
+// The legacy `DEVICE` thread-local is replaced by a `DeviceTable` that
+// holds a `BTreeMap<DeviceId, PlotDevice>` plus a `current` pointer.
+// Existing callers reach the "currently active" device via the
+// unchanged `with_device(...)` helper — that now lazily creates device
+// id 1 on first use so a plain `plot()` (no preceding `dev.new()`)
+// still works identically to before.
+
+/// Unique handle for an open plot device. Engine returns this as an
+/// integer scalar from `dev.new()`, `dev.set()`, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceId(pub u32);
+
+/// Events the GUI host polls each frame so it can spawn / hide /
+/// repaint sub-windows in lock-step with engine commands.
+#[derive(Debug, Clone)]
+pub enum DeviceEvent {
+    Created(DeviceId),
+    Closed(DeviceId),
+    Plotted(DeviceId),
+    CurrentChanged(DeviceId),
+}
+
+pub struct DeviceTable {
+    pub devices:        std::collections::BTreeMap<DeviceId, PlotDevice>,
+    pub current:        Option<DeviceId>,
+    pub next_id:        u32,
+    pub pending_events: Vec<DeviceEvent>,
+}
+
+impl DeviceTable {
+    fn new() -> Self {
+        Self {
+            devices: std::collections::BTreeMap::new(),
+            current: None,
+            next_id: 1,
+            pending_events: Vec::new(),
+        }
+    }
+
+    /// Lazily ensure at least one device exists and return its id.
+    /// Used by the `with_device` shim for code that pre-dates the
+    /// multi-device API.
+    fn ensure_current(&mut self) -> DeviceId {
+        if let Some(id) = self.current { return id; }
+        self.spawn()
+    }
+
+    fn spawn(&mut self) -> DeviceId {
+        let id = DeviceId(self.next_id);
+        self.next_id += 1;
+        self.devices.insert(id, PlotDevice::default());
+        self.current = Some(id);
+        self.pending_events.push(DeviceEvent::Created(id));
+        self.pending_events.push(DeviceEvent::CurrentChanged(id));
+        id
+    }
+}
+
 thread_local! {
-    pub(crate) static DEVICE: RefCell<PlotDevice> = RefCell::new(PlotDevice::default());
+    pub(crate) static DEVICE_TABLE: RefCell<DeviceTable> = RefCell::new(DeviceTable::new());
 }
 
 // ─── Public access surface (used by plots.rs, overlays.rs, params.rs) ──
 
 pub fn with_device<R, F: FnOnce(&mut PlotDevice) -> R>(f: F) -> R {
-    DEVICE.with(|d| f(&mut d.borrow_mut()))
+    DEVICE_TABLE.with(|t| {
+        let mut tbl = t.borrow_mut();
+        let id = tbl.ensure_current();
+        f(tbl.devices.get_mut(&id).expect("device just ensured"))
+    })
+}
+
+/// Open a fresh device and make it current. Returns its id.
+pub fn new_device() -> DeviceId {
+    DEVICE_TABLE.with(|t| t.borrow_mut().spawn())
+}
+
+/// Set the active device. Returns the *previous* current id, if any.
+/// `None` return means the requested id was not open.
+pub fn set_device(id: DeviceId) -> Option<DeviceId> {
+    DEVICE_TABLE.with(|t| {
+        let mut tbl = t.borrow_mut();
+        if !tbl.devices.contains_key(&id) { return None; }
+        let prev = tbl.current;
+        tbl.current = Some(id);
+        tbl.pending_events.push(DeviceEvent::CurrentChanged(id));
+        prev
+    })
+}
+
+/// Close the device with `id` (or the current device when `id` is
+/// `None`). If the closed device was current, current shifts to the
+/// next open device (highest remaining id) or `None` if none remain.
+/// Returns the new current id.
+pub fn close_device(id: Option<DeviceId>) -> Option<DeviceId> {
+    DEVICE_TABLE.with(|t| {
+        let mut tbl = t.borrow_mut();
+        let target = id.or(tbl.current)?;
+        if tbl.devices.remove(&target).is_some() {
+            tbl.pending_events.push(DeviceEvent::Closed(target));
+        }
+        if tbl.current == Some(target) {
+            tbl.current = tbl.devices.keys().next_back().copied();
+            if let Some(new_cur) = tbl.current {
+                tbl.pending_events.push(DeviceEvent::CurrentChanged(new_cur));
+            }
+        }
+        tbl.current
+    })
+}
+
+pub fn list_devices() -> Vec<DeviceId> {
+    DEVICE_TABLE.with(|t| t.borrow().devices.keys().copied().collect())
+}
+
+pub fn current_device() -> Option<DeviceId> {
+    DEVICE_TABLE.with(|t| t.borrow().current)
+}
+
+/// Drain pending device events. The GUI host calls this each frame.
+pub fn drain_events() -> Vec<DeviceEvent> {
+    DEVICE_TABLE.with(|t| {
+        let mut tbl = t.borrow_mut();
+        std::mem::take(&mut tbl.pending_events)
+    })
+}
+
+/// Mark the current device as having received fresh plot output —
+/// emit a `Plotted` event so the host can refresh its window.
+pub fn notify_plotted() {
+    DEVICE_TABLE.with(|t| {
+        let mut tbl = t.borrow_mut();
+        if let Some(id) = tbl.current {
+            tbl.pending_events.push(DeviceEvent::Plotted(id));
+        }
+    });
+}
+
+/// Get the full SVG of a specific device. Used by the GUI when it
+/// gets a `Plotted(id)` event to fetch that device's content.
+pub fn device_full_svg(id: DeviceId) -> Option<String> {
+    DEVICE_TABLE.with(|t| t.borrow().devices.get(&id).map(|d| d.full_svg()))
 }
 
 /// Has any plot been opened in this device? Source of truth for overlay
 /// preconditions — replaces the previous file-existence check.
 pub fn current_has_plot() -> bool {
-    DEVICE.with(|d| d.borrow().has_plot)
+    DEVICE_TABLE.with(|t| {
+        let tbl = t.borrow();
+        tbl.current.and_then(|id| tbl.devices.get(&id)).map(|d| d.has_plot).unwrap_or(false)
+    })
 }
 
 /// Begin a new plot. Returns the canvas-coordinate rectangle the plot
@@ -177,7 +333,9 @@ pub fn begin_plot() -> (f64, f64, f64, f64) {
     //
     // Opt-out: set R2_NO_AUTOVIEW=1 in the environment.
     static AUTOVIEW_LAUNCHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if AUTOVIEW_LAUNCHED.get().is_none() && std::env::var("R2_NO_AUTOVIEW").is_err() {
+    let env_disabled = std::env::var("R2_NO_AUTOVIEW").is_ok();
+    let prog_disabled = AUTOVIEW_DISABLED.load(std::sync::atomic::Ordering::Relaxed);
+    if AUTOVIEW_LAUNCHED.get().is_none() && !env_disabled && !prog_disabled {
         let _ = AUTOVIEW_LAUNCHED.set(());
         if let Some(port) = crate::server::ensure_started() {
             println!("Plot viewer opened in browser: http://127.0.0.1:{}/", port);
@@ -186,10 +344,8 @@ pub fn begin_plot() -> (f64, f64, f64, f64) {
         }
     }
 
-    DEVICE.with(|d| {
-        let mut dev = d.borrow_mut();
+    let rect = with_device(|dev| {
         let multipanel = dev.params.mfrow.is_some() || dev.params.mfcol.is_some();
-
         if !multipanel {
             dev.svg_body.clear();
         } else if dev.panel_cursor == 0 {
@@ -197,14 +353,17 @@ pub fn begin_plot() -> (f64, f64, f64, f64) {
         }
         dev.has_plot = true;
         dev.next_panel_rect()
-    })
+    });
+    // Tell the GUI host (if any) that this device just got fresh
+    // plot content — it can fetch the SVG and refresh its window.
+    notify_plotted();
+    rect
 }
 
 /// Append a raw SVG fragment to the device. Errors if no plot is open.
 /// Used by overlay builtins (`lines`, `points`, `abline`, `legend`).
 pub fn append_svg(fragment: &str) -> Result<(), R2Err> {
-    DEVICE.with(|d| {
-        let mut dev = d.borrow_mut();
+    with_device(|dev| {
         if !dev.has_plot {
             return Err(R2Err {
                 msg: "no plot open — call plot() first".into(),
@@ -218,8 +377,38 @@ pub fn append_svg(fragment: &str) -> Result<(), R2Err> {
 
 /// Flush the current device contents to a file. Does not modify device state.
 pub fn save_to_file(path: &str) -> Result<(), std::io::Error> {
-    let svg = DEVICE.with(|d| d.borrow().full_svg());
+    let svg = with_device(|d| d.full_svg());
     std::fs::write(path, svg)
+}
+
+/// Rasterize the current plot to a fresh RGBA buffer at the given
+/// pixel dimensions. Used by "Copy plot as image" — same render
+/// path as `save_to_png` but returns the bytes instead of writing
+/// to disk. Returns `(rgba, width, height)`.
+pub fn render_to_rgba(target_w: u32, target_h: u32) -> Result<(Vec<u8>, u32, u32), R2Err> {
+    let svg = with_device(|d| d.full_svg());
+    let mut opt = usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+    let tree = usvg::Tree::from_str(&svg, &opt)
+        .map_err(|e| R2Err { msg: format!("svg→rgba: parse failed: {}", e), kind: ErrKind::Runtime })?;
+    let svg_size = tree.size();
+    let sw = svg_size.width().max(1.0);
+    let sh = svg_size.height().max(1.0);
+    // Fit-with-aspect inside the requested bounding box. Output
+    // pixmap matches the SVG's aspect ratio — no transparent
+    // borders, no whitespace when the clipboard image is pasted
+    // into Word / Outlook / Excel. The earlier code created a
+    // pixmap of exactly (target_w, target_h) and rendered into a
+    // sub-region, which left ~30 % blank space when the Graphics
+    // window aspect didn't match the SVG's 1.5:1.
+    let scale = (target_w as f32 / sw).min(target_h as f32 / sh);
+    let out_w = (sw * scale).round().max(1.0) as u32;
+    let out_h = (sh * scale).round().max(1.0) as u32;
+    let mut pixmap = tiny_skia::Pixmap::new(out_w, out_h)
+        .ok_or_else(|| R2Err { msg: format!("svg→rgba: cannot allocate {}×{} pixmap", out_w, out_h), kind: ErrKind::Runtime })?;
+    let transform = tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Ok((pixmap.data().to_vec(), out_w, out_h))
 }
 
 /// Rasterize the current SVG plot to a PNG file. Uses resvg under the
@@ -227,7 +416,7 @@ pub fn save_to_file(path: &str) -> Result<(), std::io::Error> {
 /// own pixel dimensions; the user can scale by passing different
 /// width/height via the `png()` device builtin.
 pub fn save_to_png(path: &str, target_w: u32, target_h: u32) -> Result<(), R2Err> {
-    let svg = DEVICE.with(|d| d.borrow().full_svg());
+    let svg = with_device(|d| d.full_svg());
     let mut opt = usvg::Options::default();
     // Load system fonts so axis labels, titles, and legend text render.
     // Without this, resvg silently drops every <text> node.
@@ -267,10 +456,10 @@ pub fn save_plot(path: &str, width: u32, height: u32) -> Result<std::path::PathB
     Ok(std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path)))
 }
 
-/// `dev.off()` equivalent — close the device and reset to default.
-pub fn dev_off() {
-    DEVICE.with(|d| *d.borrow_mut() = PlotDevice::default());
-}
+/// Legacy `dev.off()` equivalent kept for backward compatibility —
+/// closes the *current* device. New code should call
+/// [`close_device(None)`] directly.
+pub fn dev_off() { let _ = close_device(None); }
 
 #[cfg(test)]
 mod tests {
