@@ -11,6 +11,10 @@
 //! Migration policy: move one cohesive domain at a time, verify the
 //! build, ship. Never carry incomplete moves across a commit.
 
+pub(crate) mod core;
+pub(crate) mod data_apply;
+pub(crate) mod sys_models;
+pub(crate) mod ml_data;
 pub(crate) mod data;
 pub(crate) mod graphics;
 pub(crate) mod io;
