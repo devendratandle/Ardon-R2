@@ -1445,3 +1445,84 @@ pub fn bi_apply_yearly(a: &[EvalArg])   -> Result<RVal, R2Err> { aggregate_by_pe
 // Hindu calendar (tithi/hnc.date/saka-era) moved to time/hindu.rs.
 mod hindu;
 pub use hindu::*;
+
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epoch_is_day_zero() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn known_dates_round_trip() {
+        for &(y, m, d) in &[(2000, 1, 1), (2024, 2, 29), (1999, 12, 31), (1900, 3, 1)] {
+            let z = days_from_civil(y, m, d);
+            assert_eq!(civil_from_days(z), (y, m, d), "round-trip failed for {}-{}-{}", y, m, d);
+        }
+    }
+
+    #[test]
+    fn parse_iso_date() {
+        let p = parse_datetime("2024-03-15", "%Y-%m-%d").unwrap();
+        assert_eq!((p.0, p.1, p.2), (2024, 3, 15));
+    }
+
+    #[test]
+    fn format_round_trip() {
+        let days = days_from_civil(2024, 3, 15) as f64;
+        assert_eq!(format_date(days, "%Y-%m-%d"), "2024-03-15");
+        assert_eq!(format_date(days, "%d/%m/%Y"), "15/03/2024");
+    }
+
+    #[test]
+    fn ts_start_end_inference() {
+        // ts(1:24, start=c(1960,1), frequency=12) → ends at Dec 1961
+        let data = RVal::Numeric((1..=24).map(|i| Some(i as f64)).collect::<Vec<_>>().into(), Attrs::default());
+        let args = vec![
+            EvalArg { name: None, value: data },
+            EvalArg { name: Some(Arc::from("start")), value: RVal::Numeric(vec![Some(1960.0), Some(1.0)].into(), Attrs::default()) },
+            EvalArg { name: Some(Arc::from("frequency")), value: RVal::Numeric(vec![Some(12.0)].into(), Attrs::default()) },
+        ];
+        let v = bi_ts(&args).unwrap();
+        let (s, e, f) = get_tsp(&v).unwrap();
+        assert!((s - 1960.0).abs() < 1e-9);
+        assert!((f - 12.0).abs() < 1e-9);
+        // End = 1960 + 23/12 ≈ 1961.9166...
+        assert!((e - (1960.0 + 23.0/12.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ts_window_extracts_subrange() {
+        let data = RVal::Numeric((1..=24).map(|i| Some(i as f64)).collect::<Vec<_>>().into(), Attrs::default());
+        let v = bi_ts(&vec![
+            EvalArg { name: None, value: data },
+            EvalArg { name: Some(Arc::from("start")), value: RVal::Numeric(vec![Some(1960.0), Some(1.0)].into(), Attrs::default()) },
+            EvalArg { name: Some(Arc::from("frequency")), value: RVal::Numeric(vec![Some(12.0)].into(), Attrs::default()) },
+        ]).unwrap();
+        // window(x, start=c(1960,6), end=c(1960,12)) → 7 obs (Jun..Dec 1960)
+        let w = bi_window(&vec![
+            EvalArg { name: None, value: v },
+            EvalArg { name: Some(Arc::from("start")), value: RVal::Numeric(vec![Some(1960.0), Some(6.0)].into(), Attrs::default()) },
+            EvalArg { name: Some(Arc::from("end")),   value: RVal::Numeric(vec![Some(1960.0), Some(12.0)].into(), Attrs::default()) },
+        ]).unwrap();
+        if let RVal::Numeric(xs, _) = &w {
+            assert_eq!(xs.len(), 7);
+            assert_eq!(xs[0], Some(6.0));
+            assert_eq!(xs[6], Some(12.0));
+        } else { panic!("window did not return numeric"); }
+    }
+
+    #[test]
+    fn posixct_seconds_round_trip() {
+        // 2024-03-15 12:34:56 UTC
+        let days = days_from_civil(2024, 3, 15);
+        let secs = days * 86400 + 12 * 3600 + 34 * 60 + 56;
+        assert_eq!(format_posixct(secs as f64, "%Y-%m-%d %H:%M:%S"), "2024-03-15 12:34:56");
+    }
+}
