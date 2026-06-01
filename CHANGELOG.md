@@ -1,8 +1,45 @@
 # Changelog
 
-## v0.2.0 (in progress on `dev` branch — not yet released)
+## v0.2.0 (released June 2026)
 
-### Phase R.S.2 — MANOVA (Multivariate ANOVA) (latest)
+### Headline — native RGui-style desktop GUI
+
+A from-scratch GUI framework (`r2-ui`: winit + wgpu + fontdue) replaces
+the earlier eframe/egui experiment and powers a new desktop app:
+
+- MDI desktop with floating **R2 Console** and **R2 Graphics**
+  sub-windows: drag/resize on all 4 edges + 4 corners, traffic-light
+  buttons, maximize/restore, two-level faint-blue active/passive title
+  strips, title-bar logo, per-window menu sets, right-click context
+  menus, vertical + horizontal scrollbars.
+- **Multiple graphics devices**: `dev.new()`, `dev.set()`,
+  `dev.list()`, `dev.cur()` — one native sub-window per device.
+- Plot text rendered via a **fontdue overlay** (Console-quality
+  crispness in the plot pane; SVG text no longer rasterized soft by
+  resvg). **Copy plot as image** (clipboard bitmap), **Copy plot SVG**,
+  native **Save plot** dialog (SVG/PNG at window resolution).
+- **R-style colour helpers**: `rgb`, `gray`/`grey`, `hsv`, `rainbow`,
+  `heat.colors`, `terrain.colors`, `topo.colors`, `cm.colors`,
+  `adjustcolor`. `col=` / `border=` now honored on `hist`, `boxplot`,
+  `barplot`; 4 % axis padding; Arial/crisp-edge SVG chrome.
+- Universal paste sanitizer (smart quotes, em-dashes, mixed line
+  endings → clean text); multi-line paste flows through the
+  ConsoleBuffer continuation logic.
+
+### Engine modularization
+
+`r2-engine/src/lib.rs` reduced from **6,243 → 2,402 LoC**, with builtins
+distributed across 12 `builtins/*.rs` modules plus `registry.rs`,
+`formula.rs`, `na_bitmap.rs`. `r2-stats/time.rs` split into
+`time/{mod,hindu}.rs`; `r2-stats/multivariate.rs` and `r2-ml/dispatch.rs`
+also split along clean domain seams. See `docs/BIG_FILE_AUDIT.md`.
+
+### Distribution
+
+`R2-Setup-0.2.0.exe` ships `r2.exe` (CLI) + `R2Gui.exe` (R2-UI desktop),
+Start-menu entries for both, GUI launched by default.
+
+### Phase R.S.2 — MANOVA (Multivariate ANOVA)
 
 `manova(formula, data)` now performs full multivariate ANOVA. The
 formula's LHS is a multivariate response (typically built via

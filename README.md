@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.1.1.</em></p>
+<em>An AI-Assisted Project. v0.2.0.</em></p>
 
 ---
 
@@ -20,9 +20,37 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.1.0 (2026) | Inspired by R, Built on Rust
+Version 0.2.0 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
+
+## What's new in v0.2.0 (June 2026)
+
+A native **RGui-style desktop GUI** — the headline of this release.
+Built on a from-scratch GUI framework (`r2-ui`: winit + wgpu +
+fontdue), replacing the earlier eframe/egui experiment:
+
+- **MDI desktop** with floating *R2 Console* and *R2 Graphics*
+  sub-windows — drag/resize on all edges and corners, traffic-light
+  buttons, maximize/restore, per-window menus, right-click context
+  menus, scrollbars.
+- **Multiple graphics devices** (`dev.new()`/`dev.set()`/`dev.list()`/
+  `dev.cur()`) — one window per device, R-style.
+- **Sharp plot text** rendered through fontdue overlay (the plot pane
+  no longer blurs labels), **copy-plot-as-image** to the clipboard,
+  and a native **Save plot** dialog.
+- **R-style colour helpers** (`rgb`/`hsv`/`rainbow`/`heat.colors`/
+  `terrain.colors`/`topo.colors`/`cm.colors`/`adjustcolor`) and
+  `col=`/`border=` on `hist`/`boxplot`/`barplot`.
+- **Hindu calendar** (`tithi()`, `hnc.date()`) alongside time-series
+  and `xts`.
+
+Under the hood, the engine was modularized — `r2-engine/src/lib.rs`
+went from 6,243 to 2,402 LoC across 12 focused `builtins/*.rs`
+modules — making the codebase far easier to read and contribute to.
+
+The Windows installer (`R2-Setup-0.2.0.exe`) ships both `r2.exe`
+(CLI) and `R2Gui.exe` (desktop), launching the GUI by default.
 
 ## What's new in v0.1.0 (May 2026)
 
