@@ -15,6 +15,7 @@ pub(crate) mod core;
 pub(crate) mod data_apply;
 pub(crate) mod sys_models;
 pub(crate) mod ml_data;
+pub(crate) mod misc;
 pub(crate) mod data;
 pub(crate) mod graphics;
 pub(crate) mod io;
