@@ -76,6 +76,7 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}" -Force
 
       - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset }}
@@ -112,7 +113,9 @@ jobs:
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
 
       - name: Build R2Gui + r2 (release)
-        run: cargo build --release -p r2-gui -p r2-repl --bin r2
+        # No --bin filter: build all bins of both packages (r2 + R2Gui).
+        # A --bin filter would restrict the whole build to one binary.
+        run: cargo build --release -p r2-repl -p r2-gui
 
       # Version string for bundle metadata: from the tag (v0.2.2 ->
       # 0.2.2) on a tag push, else a dev placeholder.
@@ -211,7 +214,7 @@ jobs:
           Get-ChildItem installer\Output
 
       - name: Attach installer to release
-        if: steps.inno.outcome == 'success'
+        if: steps.inno.outcome == 'success' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: installer/Output/R2-Setup-*.exe
