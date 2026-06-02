@@ -12,3 +12,8 @@ edition = "2021"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+# Runtime loader for an optional CPU-optimized BLAS variant DLL,
+# selected via the R2_BLAS env var (mirrors R's swappable Rblas).
+# The reference kernels remain pure-Rust; only the opt-in dispatch
+# path in blas_dispatch.rs touches libloading.
+libloading = "0.8"

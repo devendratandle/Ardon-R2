@@ -783,7 +783,9 @@ impl Matrix {
             return Err(format!("incompatible dimensions: {}x{} * {}x{}", self.nrow, self.ncol, other.nrow, other.ncol));
         }
         let mut c = vec![0.0; self.nrow * other.ncol];
-        r2_linalg::dgemm(self.nrow, other.ncol, self.ncol, 1.0, &self.data, &other.data, 0.0, &mut c)
+        // Runtime-dispatched: uses an optimized BLAS variant DLL when
+        // R2_BLAS points to one, else the built-in reference kernel.
+        r2_linalg::dgemm_dispatch(self.nrow, other.ncol, self.ncol, 1.0, &self.data, &other.data, 0.0, &mut c)
             .map_err(|e| e.to_string())?;
         Ok(Matrix::new(c, self.nrow, other.ncol))
     }

@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.2.0.</em></p>
+<em>An AI-Assisted Project. v0.2.1.</em></p>
 
 ---
 
@@ -20,9 +20,20 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.2.0 (2026) | Inspired by R, Built on Rust
+Version 0.2.1 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
+
+## What's new in v0.2.1 (June 2026)
+
+**Runtime-swappable BLAS — still 100% pure Rust.** `r2-linalg` ships a
+pure-Rust reference kernel and exports a stable C-ABI `r2_dgemm`. Set
+`R2_BLAS` to a faster build of *the same kernel* (R2's own code
+compiled for a specific CPU — AVX2/AVX-512) and matrix multiply routes
+through it at runtime, falling back to the built-in kernel otherwise.
+The boundary is C only because separately-compiled Rust `cdylib`s have
+no stable ABI — **no external/C BLAS is involved.** Foundation for
+installer-time CPU dispatch. See `docs/BLAS_DISPATCH.md`.
 
 ## What's new in v0.2.0 (June 2026)
 

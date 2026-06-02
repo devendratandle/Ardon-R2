@@ -8,9 +8,9 @@
 ;    3.  Compile this script with ISCC:
 ;          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\R2.iss
 ;        Or open it in the Inno Setup Compiler GUI (https://jrsoftware.org/isdl.php).
-;    4.  Output:  installer\Output\R2-Setup-0.2.0.exe
+;    4.  Output:  installer\Output\R2-Setup-0.2.1.exe
 ;
-;  v0.2.0 notes:
+;  v0.2.1 notes:
 ;    * R2Gui.exe is the new R2-UI build (winit + wgpu); eframe/egui retired.
 ;    * r2-ui is statically linked into R2Gui.exe — no separate DLL to ship yet.
 ;    * Console body is white; MDI workspace is khaki (R Console palette).
@@ -19,7 +19,7 @@
 ; ═══════════════════════════════════════════════════════════════════════
 
 #define MyAppName        "Ardon-R2"
-#define MyAppVersion     "0.2.0"
+#define MyAppVersion     "0.2.1"
 #define MyAppPublisher   "Devendra Tandale"
 #define MyAppURL         "https://github.com/devendratandle/Ardon-R2"
 #define MyAppExeName     "r2.exe"

@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.2.1 (released June 2026)
+
+### Runtime-swappable BLAS (DLL dispatch) — all pure-Rust
+
+`r2-linalg` is now the **reference kernel** that can hand off to a
+faster build of the *same pure-Rust kernel* at runtime, without
+rebuilding the launcher. R2 stays strictly pure-Rust — the variants
+are R2's own code compiled with different CPU-SIMD targets, not
+external C/Fortran BLAS.
+
+- **Stable C-ABI surface** (`blas_abi.rs`): `r2_dgemm` is exported
+  from `r2_linalg.dll` with a plain C signature (flat `f64` buffers +
+  integer dims). Rust has no stable ABI, so even Rust→Rust across a
+  runtime-loaded `cdylib` must use a C boundary — that's the only
+  reason it's C; both sides are Rust.
+- **Runtime dispatch** (`blas_dispatch.rs`): set the `R2_BLAS`
+  environment variable to a shared library exporting `r2_dgemm` and
+  matrix multiply (`%*%`) routes through it; unset/missing/unreadable
+  falls back to the built-in pure-Rust kernel. Resolved once, cached
+  for the process.
+- Lays the groundwork for the planned installer-time CPU dispatch
+  (`r2_linalg_avx2.dll` / `_avx512.dll` / `_scalar.dll`).
+- Reference kernels stay pure-Rust; only the opt-in dispatch path
+  links `libloading`.
+
+Verified: `A %*% B` produces identical results on the static and
+DLL-loaded paths.
+
 ## v0.2.0 (released June 2026)
 
 ### Headline — native RGui-style desktop GUI

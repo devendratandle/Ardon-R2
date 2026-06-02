@@ -22,12 +22,18 @@ pub mod level2;
 pub mod level3;
 pub mod decomp;
 pub mod solve;
+// Stable C-ABI surface + runtime dispatch for a swappable optimized
+// BLAS (mirrors R's Rblas). See blas_abi / blas_dispatch.
+pub mod blas_abi;
+pub mod blas_dispatch;
 
 pub use level1::*;
 pub use level2::*;
 pub use level3::*;
 pub use decomp::*;
 pub use solve::*;
+pub use blas_dispatch::dgemm_dispatch;
+pub use blas_abi::{r2_dgemm, DgemmCFn};
 
 /// Errors from linear algebra operations
 #[derive(Debug, Clone)]
