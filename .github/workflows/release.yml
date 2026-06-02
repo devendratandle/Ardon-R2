@@ -1,0 +1,105 @@
+# Ardon-R2 — Release artifact publisher
+#
+# Triggers when a version tag (v*) is pushed. Builds downloadable
+# binaries per platform and attaches them to the GitHub Release for
+# that tag. Also runnable manually (workflow_dispatch) for testing.
+#
+# Scope (v1, deliberately conservative):
+#   - CLI `r2` binary for Linux, macOS, Windows — pure cargo build,
+#     guaranteed to compile everywhere (no GUI windowing deps).
+#   - Windows GUI installer (R2Gui.exe + r2.exe via Inno Setup) — the
+#     platform where the GUI is proven; the Inno step is non-blocking
+#     so a hiccup there never sinks the other assets.
+#
+# GUI binaries for macOS/Linux are intentionally deferred until their
+# packaging (deps / .app / AppImage) is handled in a later pass.
+
+name: release
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create/update the Release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ── CLI binary for each platform ──────────────────────────────────
+  cli:
+    name: cli (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: r2-linux-x86_64.tar.gz
+          - os: macos-latest
+            asset: r2-macos-arm64.tar.gz
+          - os: windows-latest
+            asset: r2-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build r2 (release CLI)
+        run: cargo build --release -p r2-repl --bin r2
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/release/r2 dist/
+          cp README.md LICENSE CHANGELOG.md dist/ 2>/dev/null || true
+          tar -czf "${{ matrix.asset }}" -C dist .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/r2.exe dist/
+          Copy-Item README.md,LICENSE,CHANGELOG.md dist/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}" -Force
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          fail_on_unmatched_files: true
+
+  # ── Windows GUI installer (Inno Setup) ────────────────────────────
+  windows-installer:
+    name: windows installer
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build r2.exe + R2Gui.exe (release)
+        run: cargo build --release -p r2-repl -p r2-gui
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer
+        id: inno
+        continue-on-error: true   # never let an installer hiccup sink the release
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\R2.iss
+          Get-ChildItem installer\Output
+
+      - name: Attach installer to release
+        if: steps.inno.outcome == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/Output/R2-Setup-*.exe
+          fail_on_unmatched_files: false
