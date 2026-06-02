@@ -1,0 +1,25 @@
+# Ardon-R2 funding configuration.
+#
+# Enables the "♥ Sponsor" button on the repository.
+#
+# ── Setup ──────────────────────────────────────────────────────────
+# `github:` only works AFTER you have enrolled in GitHub Sponsors at
+#   https://github.com/sponsors  (free; needs a Stripe/bank payout set
+#   up). Until enrolled, leave the `github:` line commented or GitHub
+#   ignores it.
+# You can add other platforms immediately (they need no GitHub
+# enrollment): ko_fi, patreon, buy_me_a_coffee, liberapay, custom.
+#
+# Uncomment / fill the lines that apply to you.
+
+# GitHub Sponsors (after enrolling at github.com/sponsors):
+github: [devendratandle]
+
+# Other platforms (fill the username, then uncomment):
+# ko_fi: your_kofi_name
+# buy_me_a_coffee: your_bmac_name
+# patreon: your_patreon_name
+# liberapay: your_liberapay_name
+
+# Custom URLs (e.g. a donation page) — up to 4:
+# custom: ["https://example.com/donate"]
