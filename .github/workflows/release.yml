@@ -4,15 +4,22 @@
 # binaries per platform and attaches them to the GitHub Release for
 # that tag. Also runnable manually (workflow_dispatch) for testing.
 #
-# Scope (v1, deliberately conservative):
+# Scope:
 #   - CLI `r2` binary for Linux, macOS, Windows — pure cargo build,
 #     guaranteed to compile everywhere (no GUI windowing deps).
+#   - Desktop GUI for Linux (.tar.gz bundle) and macOS (.app, zipped)
+#     — built with the windowing deps installed on each runner. These
+#     jobs ALWAYS build + package and upload a workflow artifact, but
+#     only attach to the Release on a tag push. So a manual
+#     `workflow_dispatch` run validates the GUI builds without cutting
+#     a release.
 #   - Windows GUI installer (R2Gui.exe + r2.exe via Inno Setup) — the
-#     platform where the GUI is proven; the Inno step is non-blocking
-#     so a hiccup there never sinks the other assets.
+#     Inno step is non-blocking so a hiccup there never sinks the
+#     other assets.
 #
-# GUI binaries for macOS/Linux are intentionally deferred until their
-# packaging (deps / .app / AppImage) is handled in a later pass.
+# Note: the macOS .app is unsigned/un-notarized (no Apple Developer ID
+# yet) — first launch needs a Gatekeeper override (documented in the
+# bundled README-FIRST.txt).
 
 name: release
 
@@ -69,6 +76,112 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}" -Force
 
       - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          fail_on_unmatched_files: true
+
+  # ── Desktop GUI for macOS + Linux ─────────────────────────────────
+  # Always builds + packages + uploads a workflow artifact; attaches to
+  # the Release only on a tag push. Run via workflow_dispatch to verify
+  # the GUI compiles on both platforms without cutting a release.
+  gui:
+    name: gui (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: R2Gui-linux-x86_64.tar.gz
+          - os: macos-latest
+            asset: R2Gui-macos-arm64.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # winit + wgpu need X11/Wayland + GL dev headers on Linux. macOS
+      # uses system Cocoa/Metal frameworks — nothing to install.
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libxcb1-dev \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
+
+      - name: Build R2Gui + r2 (release)
+        run: cargo build --release -p r2-gui -p r2-repl --bin r2
+
+      # Version string for bundle metadata: from the tag (v0.2.2 ->
+      # 0.2.2) on a tag push, else a dev placeholder.
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package (Linux .tar.gz)
+        if: runner.os == 'Linux'
+        run: |
+          BUNDLE=dist/Ardon-R2
+          mkdir -p "$BUNDLE"
+          cp target/release/R2Gui "$BUNDLE/"
+          cp target/release/r2    "$BUNDLE/"
+          chmod +x "$BUNDLE/R2Gui" "$BUNDLE/r2"
+          cp packaging/linux/Ardon-R2.desktop "$BUNDLE/"
+          cp packaging/linux/README-FIRST.txt "$BUNDLE/"
+          cp assets/logo.png "$BUNDLE/ardon-r2.png" 2>/dev/null || true
+          cp README.md LICENSE CHANGELOG.md "$BUNDLE/" 2>/dev/null || true
+          tar -czf "${{ matrix.asset }}" -C dist Ardon-R2
+
+      - name: Package (macOS .app)
+        if: runner.os == 'macOS'
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          STAGE=dist/Ardon-R2-macos
+          APP="$STAGE/Ardon-R2.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/R2Gui "$APP/Contents/MacOS/R2Gui"
+          cp target/release/r2    "$APP/Contents/MacOS/r2"
+          chmod +x "$APP/Contents/MacOS/R2Gui" "$APP/Contents/MacOS/r2"
+          sed "s/__VERSION__/${VERSION}/g" packaging/macos/Info.plist.in \
+            > "$APP/Contents/Info.plist"
+          # Best-effort icon: logo.png -> AppIcon.icns. Non-fatal.
+          ICONSET=dist/AppIcon.iconset
+          mkdir -p "$ICONSET"
+          sips -z 16 16     assets/logo.png --out "$ICONSET/icon_16x16.png"      >/dev/null 2>&1 || true
+          sips -z 32 32     assets/logo.png --out "$ICONSET/icon_16x16@2x.png"   >/dev/null 2>&1 || true
+          sips -z 32 32     assets/logo.png --out "$ICONSET/icon_32x32.png"      >/dev/null 2>&1 || true
+          sips -z 64 64     assets/logo.png --out "$ICONSET/icon_32x32@2x.png"   >/dev/null 2>&1 || true
+          sips -z 128 128   assets/logo.png --out "$ICONSET/icon_128x128.png"    >/dev/null 2>&1 || true
+          sips -z 256 256   assets/logo.png --out "$ICONSET/icon_128x128@2x.png" >/dev/null 2>&1 || true
+          sips -z 256 256   assets/logo.png --out "$ICONSET/icon_256x256.png"    >/dev/null 2>&1 || true
+          sips -z 512 512   assets/logo.png --out "$ICONSET/icon_256x256@2x.png" >/dev/null 2>&1 || true
+          sips -z 512 512   assets/logo.png --out "$ICONSET/icon_512x512.png"    >/dev/null 2>&1 || true
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"  2>/dev/null || true
+          # Sidecar files alongside the .app inside the staged folder.
+          cp target/release/r2 "$STAGE/r2"
+          cp packaging/macos/README-FIRST.txt "$STAGE/"
+          cp README.md LICENSE CHANGELOG.md "$STAGE/" 2>/dev/null || true
+          # ditto = macOS-native zip; preserves the bundle layout + exec
+          # perms for the whole staged folder (.app + sidecars).
+          ( cd dist && ditto -c -k --keepParent Ardon-R2-macos "../${{ matrix.asset }}" )
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset }}

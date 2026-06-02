@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Release automation — macOS & Linux desktop GUI
+
+The `release` workflow now builds and packages the desktop GUI for
+**all three** platforms (previously CLI-only on macOS/Linux):
+
+- **Linux**: `R2Gui-linux-x86_64.tar.gz` — `R2Gui` + `r2` binaries, a
+  `.desktop` launcher, icon, and run notes. The Ubuntu runner installs
+  the winit/wgpu system deps (X11/Wayland + GL headers).
+- **macOS**: `R2Gui-macos-arm64.zip` — a proper `Ardon-R2.app` bundle
+  (Info.plist + generated `.icns`), zipped with `ditto`. Unsigned for
+  now (Gatekeeper override documented in the bundled README-FIRST).
+- The GUI jobs always build, package, and upload a workflow artifact;
+  they attach to the GitHub Release only on a tag push — so a manual
+  `workflow_dispatch` run verifies both platforms compile without
+  cutting a release.
+
+No engine/library code changed — packaging and CI only.
+
 ## v0.2.1 (released June 2026)
 
 ### Runtime-swappable BLAS (DLL dispatch) — all pure-Rust

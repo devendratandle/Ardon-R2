@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ardon-R2
+GenericName=Statistical Computing
+Comment=Pure-Rust reimplementation of R
+Exec=R2Gui
+Icon=ardon-r2
+Terminal=false
+Categories=Development;Science;Math;
+Keywords=R;statistics;data;rust;
