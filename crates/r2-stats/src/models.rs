@@ -269,11 +269,17 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mut p_values = vec![1.0; p];
     if let Ok(xtx_inv) = &xtx_inv_result {
         let sigma2 = if n > p { ss_res / (n - p) as f64 } else { 1.0 };
+        // Residual degrees of freedom for the coefficient t-tests. R uses
+        // the t-distribution (Pr(>|t|)), not the normal — the difference
+        // matters at small n. t_cdf is exact (Lentz incomplete beta).
+        let df_resid = if n > p { (n - p) as f64 } else { 0.0 };
         for j in 0..p {
             let var_j = xtx_inv[j * p + j] * sigma2;
             std_errors[j] = if var_j > 0.0 { var_j.sqrt() } else { 0.0 };
             t_values[j] = if std_errors[j] > 1e-15 { coeffs[j] / std_errors[j] } else { 0.0 };
-            p_values[j] = 2.0 * (1.0 - phi(t_values[j].abs()));
+            p_values[j] = if df_resid > 0.0 {
+                2.0 * (1.0 - crate::htest::t_cdf(t_values[j].abs(), df_resid))
+            } else { 1.0 };
         }
     }
     let ss_reg = ss_tot - ss_res;

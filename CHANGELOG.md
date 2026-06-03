@@ -23,6 +23,12 @@ df). Both are replaced with **exact** methods:
   (their `f_to_pvalue` no longer uses Wilson-Hilferty), so small-df
   multivariate cases are exact too (e.g. manova F(2,3)=52.13 →
   p = 0.0047, was 0.0013; Wilks F(2,2)=34.75 → p = 0.028, was 0.0154).
+- **`lm` coefficient p-values** now use the **t-distribution**
+  (`Pr(>|t|)` via the exact `t_cdf`) instead of the normal
+  approximation. This matters at small residual df: for n=10, p=2
+  (df=8) the x-coefficient p went from ≈3.9e-4 (normal) to 0.00755
+  (R's value) — a ~19× correction. (`glm` keeps the normal/Wald *z*
+  test, which is correct for GLMs.)
 
 Effect: **every** F-distribution p-value in R2 — repeated-measures
 ANOVA, one-/two-way ANOVA, `lm` F-tests, `manova`, `hotelling.test` —
