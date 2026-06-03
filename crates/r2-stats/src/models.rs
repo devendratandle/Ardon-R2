@@ -663,12 +663,9 @@ pub fn bi_aov(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let ms_within = if df_within > 0.0 { ss_within / df_within } else { 0.0 };
     let f_stat = if ms_within > 1e-15 { ms_between / ms_within } else { f64::INFINITY };
 
-    // Wilson-Hilferty F→z approximation for p-value
+    // Exact F upper-tail via the incomplete-beta identity.
     let p_value = if df_within > 0.0 {
-        let v1 = df_between; let v2 = df_within; let f = f_stat;
-        let z = ((f / v1).powf(1.0 / 3.0) * (1.0 - 2.0 / (9.0 * v2)) - (1.0 - 2.0 / (9.0 * v1)))
-            / ((f / v1).powf(2.0 / 3.0) / (9.0 * v2) + 1.0 / (9.0 * v1)).sqrt();
-        1.0 - phi(z)
+        crate::htest::f_sf(f_stat, df_between, df_within)
     } else { 1.0 };
 
     println!("\nAnalysis of Variance Table\n");
@@ -872,12 +869,10 @@ fn aov_repeated_measures(
 
     let f_treat = if ms_within > 1e-15 { ms_treat / ms_within } else { f64::INFINITY };
 
-    // Wilson–Hilferty F→z approximation (consistent with bi_aov).
-    let p_treat = if df_within > 0.0 && f_treat.is_finite() {
-        let v1 = df_treat; let v2 = df_within; let f = f_treat;
-        let z = ((f / v1).powf(1.0 / 3.0) * (1.0 - 2.0 / (9.0 * v2)) - (1.0 - 2.0 / (9.0 * v1)))
-            / ((f / v1).powf(2.0 / 3.0) / (9.0 * v2) + 1.0 / (9.0 * v1)).sqrt();
-        1.0 - phi(z)
+    // Exact F upper-tail (consistent with bi_aov). f_sf handles
+    // f = +∞ (zero within-residual) as p = 0.
+    let p_treat = if df_within > 0.0 {
+        crate::htest::f_sf(f_treat, df_treat, df_within)
     } else { 1.0 };
 
     // Treatment column name from the RHS (for the table row label).
@@ -971,10 +966,7 @@ pub fn bi_anova(a: &[EvalArg]) -> Result<RVal, R2Err> {
             let ms_resid = if df_resid > 0 { ss_resid / df_resid as f64 } else { 0.0 };
             let f_stat = if ms_resid > 1e-15 { ms_model / ms_resid } else { f64::INFINITY };
             let p_value = if df_resid > 0 {
-                let v1 = df_model as f64; let v2 = df_resid as f64;
-                let z = ((f_stat / v1).powf(1.0 / 3.0) * (1.0 - 2.0 / (9.0 * v2)) - (1.0 - 2.0 / (9.0 * v1)))
-                    / ((f_stat / v1).powf(2.0 / 3.0) / (9.0 * v2) + 1.0 / (9.0 * v1)).sqrt();
-                1.0 - phi(z)
+                crate::htest::f_sf(f_stat, df_model as f64, df_resid as f64)
             } else { 1.0 };
 
             println!("\nAnalysis of Variance Table\n");

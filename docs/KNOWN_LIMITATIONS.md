@@ -87,20 +87,22 @@ from a single attribute. ~200 LoC of macro work. Tracked for v0.4.0.
 
 ## Multivariate / repeated-measures statistics
 
-### Wilson-Hilferty p-values at very small df
+### Wilson-Hilferty p-values in `manova` / `hotelling.test`
 
-The F→p conversion in `aov` (including the repeated-measures branch)
-and `hotelling.test` uses the Wilson-Hilferty approximation, not the
-exact F-distribution CDF. This is accurate for moderate sample sizes
-(n ≥ 10) and matches R to ~1e-4 there. At very small df (e.g., n=4
-paired Hotelling with p=2 → df=(2, 2)), the approximation can differ
-from R's exact p-value by a factor of ~2. The T², F-statistic, and
-degrees of freedom remain exact regardless of n.
+`aov` (including the repeated-measures branch) and `lm`'s F-test now
+use the **exact** F-distribution CDF via `r2_stats::htest::f_sf`
+(regularized incomplete beta, Lentz continued fraction) — matching R to
+~1e-9, and correctly returning p = 0 (not p = 1) when the residual is
+zero.
 
-**Path to closure:** swap the Wilson-Hilferty call for an exact F-CDF
-based on the regularized incomplete beta function. The math is in
-`r2_stats::htest::incomplete_beta`; one swap closes this gap.
-Tracked for v0.2.1.
+**Remaining:** `manova` and `hotelling.test` still convert their
+F-approximations to p-values with the Wilson-Hilferty approximation
+(`multivariate::f_to_pvalue`), accurate to ~1e-4 for n ≥ 10 but off by
+up to ~2× at very small df (e.g. n=4 paired Hotelling, df=(2,2)). The
+T², F-statistic, and df remain exact regardless of n.
+
+**Path to closure:** route `multivariate::f_to_pvalue` through the same
+`htest::f_sf` the ANOVA tables now use — one swap closes the gap.
 
 ### `Error(treatment/subject)` collapses to outer stratum
 
@@ -482,25 +484,19 @@ for independent two-sample tests the as-input correlation is
 sample-order coincidence, not a meaningful diagnostic, and reporting
 it could mislead users. `$cor` is present only on the paired output.
 
-### `t.test()` — t-CDF accuracy
+### `t.test()` — t-CDF accuracy ✅ resolved
 
-**Status (v0.1.0):** The previous `df > 30 → normal-approx`
-shortcut (~5e-3 absolute error at df=30) has been removed. `t_cdf` now
-routes every df through the incomplete-beta identity. The integrator is
-a 1000-panel trapezoidal rule — ~10× the previous resolution. Typical
-absolute error ~1e-3 for moderate df, worse near boundaries.
+**Status:** **Fixed.** `incomplete_beta` now uses the Lentz continued
+fraction (Numerical Recipes §6.4) with the symmetry swap
+`I_x(a,b) = 1 − I_{1−x}(b,a)` so the CF is always evaluated in its
+fast-converging region — which is exactly what keeps the `b < 1`
+boundary (the `t_cdf` path, `b = 0.5`) well-conditioned, the corner
+that sank the earlier attempt. Accuracy is now ~1e-9 across df.
 
-**Tried and reverted:** A Lentz continued-fraction implementation
-(Numerical Recipes §6.4) was attempted as part of the same polish pass.
-It produced wrong values at the symmetry boundary when `b < 1` — a
-known accuracy edge case for that recipe. Rather than ship a subtly
-wrong implementation, we reverted to the verified rectangle path with
-tighter resolution. The Lentz upgrade is on the roadmap as a focused
-non-budget-constrained session.
-
-**Closure path:** Replace the trapezoidal integrator with a verified
-Lentz CF + symmetry-aware fallback for the `b < 1` corner. ~150 LoC
-including the regression-test corpus needed to pin the corner cases.
+`t_cdf`, the t-test CIs (`qt`), and the F-tests (via `f_sf`) all route
+through it. Pinned by regression tests: exact `pbeta(0.5,2,3)=0.6875`,
+the symmetry identity, `t_cdf(1.96,30)=0.97032884`, and `f_sf` against
+the df1=2 closed form.
 
 ## v0.1.0 Tier 0 polish round (historical record)
 

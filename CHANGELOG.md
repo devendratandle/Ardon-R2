@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Statistics — exact p-values (Lentz incomplete beta)
+
+`incomplete_beta` was a 1000-panel trapezoidal rule (~1e-3–1e-4 error,
+worse near boundaries); the ANOVA tables additionally used a
+Wilson-Hilferty F→p approximation (~1e-3, off by up to ~2× at small
+df). Both are replaced with **exact** methods:
+
+- **`incomplete_beta`** now uses the Lentz continued fraction (Numerical
+  Recipes §6.4) with the symmetry swap, accurate to ~1e-9 across the
+  full range — including the `b < 1` corner the `t.test` path exercises
+  (the case that defeated the earlier CF attempt).
+- **New `f_sf(f, df1, df2)`** — exact F upper-tail via the incomplete
+  beta. `aov` (incl. repeated-measures `Error(...)` strata) and `lm`'s
+  F-test now use it instead of Wilson-Hilferty.
+- A **zero residual** (perfectly-fit / degenerate design) now yields
+  **p = 0** rather than the approximation's spurious p = 1.
+
+Effect: repeated-measures ANOVA, one-/two-way ANOVA, `lm` F-tests, and
+`t.test` p-values/CIs now match R to ~1e-9 (e.g. RM-ANOVA F(2,6)=12.40
+→ p = 0.0074, was 0.0052; two-sample t p = 1.6409e-5, was 1.644e-5).
+`manova` / `hotelling.test` still use the Wilson-Hilferty approximation
+(tracked in KNOWN_LIMITATIONS — same one-line swap closes it).
+
+Repeated-measures ANOVA structure (`aov(y ~ x + Error(subject))`, incl.
+nested `Error(subject/within)`) was already correct; this fixes its
+p-values.
+
 ### Engine — formula support for `aggregate()` (multi-term)
 
 `aggregate(...)` now accepts the **formula interface**, including
