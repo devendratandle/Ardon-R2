@@ -305,12 +305,28 @@ impl CellGridState {
         let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut copied: Option<String> = None;
 
+        // Effective scroll offset, computed exactly as the painter does
+        // (`paint_cells_scrolled`): an explicit override, else
+        // auto-scroll-to-bottom. `hit_test` returns a VIEWPORT-relative
+        // cell, so we add the scroll offsets to get the ABSOLUTE row/col
+        // in `rows`. Without this, every selection in a scrolled console
+        // (i.e. whenever there's more output than fits) lands on the
+        // wrong rows.
+        let scroll_y = self.scroll_y_override
+            .unwrap_or_else(|| auto_scroll_offset(row_count, rect.h, line_h));
+        let scroll_x = self.scroll_x;
+        let to_abs = |p: GridPos| GridPos {
+            row: (p.row + scroll_y).min(row_count.saturating_sub(1)),
+            col: (p.col + scroll_x).min(col_count.saturating_sub(1)),
+        };
+
         for ev in events {
             match *ev {
                 InputEvent::MouseDown { button: MouseButton::Left, pos } => {
                     if let Some(p) = hit_test(rect, cell_w, line_h, pos.x, pos.y, row_count, col_count) {
-                        self.dragging = Some(p);
-                        self.selection = Some(Selection { start: p, end: p });
+                        let a = to_abs(p);
+                        self.dragging = Some(a);
+                        self.selection = Some(Selection { start: a, end: a });
                     } else {
                         // click outside → clear
                         self.dragging  = None;
@@ -324,7 +340,7 @@ impl CellGridState {
                         let mx = pos.x.clamp(rect.x, rect.x + rect.w - 1.0);
                         let my = pos.y.clamp(rect.y, rect.y + rect.h - 1.0);
                         if let Some(p) = hit_test(rect, cell_w, line_h, mx, my, row_count, col_count) {
-                            self.selection = Some(Selection { start: anchor, end: p });
+                            self.selection = Some(Selection { start: anchor, end: to_abs(p) });
                         }
                     }
                 }
@@ -508,6 +524,26 @@ mod tests {
         // grid is 5 cols × 3 rows; click at (790, 590) clamps to (2, 4)
         let p = hit_test(rect, 8.0, 12.0, 790.0, 590.0, 3, 5).unwrap();
         assert_eq!(p, GridPos { row: 2, col: 4 });
+    }
+
+    #[test]
+    fn selection_accounts_for_auto_scroll() {
+        // 10 rows; viewport fits 3 (line_h=20, rect.h=60) → auto-scroll
+        // offset 7. A drag from the TOP visible row must select from
+        // ABSOLUTE row 7 (not row 0). The pre-fix hit_test ignored the
+        // scroll offset, so selections in a scrolled console (i.e. once
+        // there's more output than fits) landed on the wrong rows.
+        let rows: Vec<Vec<Cell>> = (0..10).map(|i| line(&format!("row{}", i))).collect();
+        let rect = Rect { x: 0.0, y: 0.0, w: 200.0, h: 60.0 };
+        let mut state = CellGridState::new();
+        let mut clip = Clipboard::new();
+        state.handle_events(
+            &[ev_down(5.0, 5.0), ev_move(15.0, 45.0), ev_up(15.0, 45.0)],
+            &rows, rect, 10.0, 20.0, &mut clip);
+        let sel = state.selection.expect("drag selection should exist");
+        let (a, b) = sel.normalized();
+        assert_eq!(a.row, 7, "top visible row maps to absolute 7 when scrolled");
+        assert_eq!(b.row, 9, "bottom visible row maps to absolute 9");
     }
 
     #[test]
