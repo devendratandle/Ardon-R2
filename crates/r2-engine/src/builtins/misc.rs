@@ -659,19 +659,11 @@ pub(crate) fn bi_version(_: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<R
     Ok(RVal::Null)
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// clear() / cls() — clear the terminal screen
-// ═══════════════════════════════════════════════════════════════════════
-
-pub(crate) fn bi_clear(_: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    use std::io::Write;
-    // ANSI escape: \x1b[2J clears the visible region; \x1b[3J clears the scrollback
-    // (supported by Windows Terminal, modern conhost, and all *nix terminals).
-    // \x1b[H homes the cursor.
-    sout!("\x1b[3J\x1b[2J\x1b[H");
-    let _ = std::io::stdout().flush();
-    Ok(RVal::Null)
-}
+// clear() / cls() / clr() — see core::bi_clear, which routes through the
+// frontend clear hook (GUI empties its ConsoleBuffer; CLI emits the ANSI
+// clear). The old ANSI-only version here was removed: under the unified
+// line-buffered output it neither flushed (no trailing newline) nor
+// cleared the GUI (escape became literal text).
 
 // ═══════════════════════════════════════════════════════════════════════
 // aov() / anova() — Analysis of Variance

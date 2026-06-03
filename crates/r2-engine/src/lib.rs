@@ -216,6 +216,7 @@ impl Engine {
         // ── CORE: immutable, CANNOT be masked or detached ────────────
         e.registry.add_layer(mkpkg("core", PackageTier::Core, vec![
             ("c",bi_c),("length",bi_length),("print",bi_print),("cat",bi_cat),
+            ("clear",bi_clear),("cls",bi_clear),("clr",bi_clear),
             ("typeof",bi_typeof),("class",bi_class),("is.na",bi_is_na),
             ("is.numeric",bi_is_num),("is.character",bi_is_chr),("is.logical",bi_is_lgl),
             ("as.numeric",bi_as_num),("as.single",bi_as_single),("is.single",bi_is_single),

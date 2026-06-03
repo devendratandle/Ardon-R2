@@ -102,6 +102,14 @@ pub(crate) fn bi_cat(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     e.emit_output(&parts.join(&sep));
     Ok(RVal::Null)
 }
+/// `clear()` / `cls()` — clear the console. Routes through the
+/// frontend-installed clear hook (GUI empties its ConsoleBuffer; CLI
+/// emits an ANSI clear-screen). Returns NULL invisibly.
+pub(crate) fn bi_clear(_e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_types::out::request_clear();
+    Ok(RVal::Null)
+}
+
 pub(crate) fn bi_typeof(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rstr(gv(a,0).type_name())) }
 pub(crate) fn bi_class(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::TypeInstance(i) => Ok(rstr(&i.type_name)), v => Ok(rstr(v.type_name())) } }
 pub(crate) fn bi_is_na(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())), _ => Ok(rbool(false)) } }

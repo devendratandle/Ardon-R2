@@ -335,12 +335,30 @@ impl CellGridState {
                 }
                 InputEvent::MouseMoved(pos) => {
                     if let Some(anchor) = self.dragging {
+                        // Auto-scroll when the drag passes the top/bottom
+                        // edge, so a selection can extend beyond the visible
+                        // rows (one row per move event). Recompute the
+                        // effective scroll afterwards for the hit-test.
+                        let max_visible = if line_h > 0.0 { (rect.h / line_h).floor() as usize } else { 0 };
+                        let max_scroll = row_count.saturating_sub(max_visible);
+                        let mut cur_scroll = self.scroll_y_override.unwrap_or(scroll_y);
+                        if pos.y >= rect.y + rect.h && cur_scroll < max_scroll {
+                            cur_scroll = (cur_scroll + 1).min(max_scroll);
+                            self.scroll_y_override = Some(cur_scroll);
+                        } else if pos.y <= rect.y && cur_scroll > 0 {
+                            cur_scroll -= 1;
+                            self.scroll_y_override = Some(cur_scroll);
+                        }
                         // Clamp to rect even when cursor wanders out so
                         // the selection keeps tracking visually.
                         let mx = pos.x.clamp(rect.x, rect.x + rect.w - 1.0);
                         let my = pos.y.clamp(rect.y, rect.y + rect.h - 1.0);
                         if let Some(p) = hit_test(rect, cell_w, line_h, mx, my, row_count, col_count) {
-                            self.selection = Some(Selection { start: anchor, end: to_abs(p) });
+                            let end = GridPos {
+                                row: (p.row + cur_scroll).min(row_count.saturating_sub(1)),
+                                col: (p.col + scroll_x).min(col_count.saturating_sub(1)),
+                            };
+                            self.selection = Some(Selection { start: anchor, end });
                         }
                     }
                 }

@@ -1905,6 +1905,34 @@ pub mod out {
     pub fn rout(s: &str) { write_routed(s, false); }
     /// Emit error output through the routed sink (line-buffered).
     pub fn rerr(s: &str) { write_routed(s, true); }
+
+    thread_local! {
+        static CLEAR_HOOK: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
+    }
+
+    /// Install (or clear) the per-thread "clear console" hook. The GUI
+    /// installs one that empties its `ConsoleBuffer`; the CLI leaves it
+    /// unset and falls back to an ANSI clear-screen sequence.
+    pub fn set_clear_hook(hook: Option<Box<dyn FnMut()>>) {
+        CLEAR_HOOK.with(|h| *h.borrow_mut() = hook);
+    }
+
+    /// Clear the console — invoked by the `clear()` / `cls()` builtin.
+    /// Routes to the installed hook (GUI buffer); otherwise emits the
+    /// ANSI "clear screen + scrollback + home" sequence for terminals.
+    pub fn request_clear() {
+        CLEAR_HOOK.with(|h| {
+            let mut slot = h.borrow_mut();
+            if let Some(f) = slot.as_mut() {
+                f();
+            } else {
+                // \x1b[2J clear screen, \x1b[3J scrollback, \x1b[H home.
+                print!("\x1b[2J\x1b[3J\x1b[H");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+        });
+    }
 }
 
 #[cfg(test)]

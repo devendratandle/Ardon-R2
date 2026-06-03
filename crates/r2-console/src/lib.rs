@@ -339,6 +339,7 @@ pub fn is_silent(e: &Expr) -> bool {
         if let Expr::Symbol(s) = func.as_ref() {
             return matches!(s.as_ref(),
                 "print" | "cat" | "message" | "warning" | "writeLines" | "invisible" |
+                "clear" | "cls" | "clr" |
                 "plot"  | "hist" | "boxplot" | "barplot" |
                 "lines" | "points" | "abline" | "legend" |
                 "library" | "detach" | "require" | "save.plot" | "dev.view" | "dev.off" |

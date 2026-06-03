@@ -293,6 +293,7 @@ fn is_silent(e: &Expr) -> bool {
         if let Expr::Symbol(s) = func.as_ref() {
             return matches!(s.as_ref(),
                 "print" | "cat" | "message" | "warning" | "writeLines" | "invisible" |
+                "clear" | "cls" | "clr" |
                 // Hypothesis tests / ANOVA print their own formatted output
                 // as a side effect and return an htest/model object whose
                 // Display is just "<… model>" — don't auto-print that.

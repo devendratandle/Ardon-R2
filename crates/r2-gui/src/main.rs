@@ -154,6 +154,14 @@ fn main() -> Result<(), String> {
     // R_WriteConsole.
     let mut engine = Engine::new();
     engine.set_output_sink(Box::new(GuiSink { buf: buffer.clone() }));
+    // clear() / cls() from the console empties this buffer (GUI has no
+    // terminal to send an ANSI clear to).
+    {
+        let buf = buffer.clone();
+        r2_types::out::set_clear_hook(Some(Box::new(move || {
+            if let Ok(mut b) = buf.lock() { b.clear(); }
+        })));
+    }
     let engine = Rc::new(RefCell::new(engine));
 
     let mdi = Rc::new(RefCell::new(MdiHost::new()));
@@ -673,9 +681,13 @@ fn main() -> Result<(), String> {
                 // ── MDI chrome events (drag / resize / close / max)
                 mdi.borrow_mut().handle_events(ctx.events, theme);
 
-                // ── Console widget events (only when console is topmost)
+                // ── Console keyboard input — ALWAYS active so the console
+                //    stays typeable regardless of which MDI window is
+                //    topmost (RGui keeps the console interactive; a plot no
+                //    longer "steals" the keyboard). Clicking a window still
+                //    raises it via the MDI handler above.
                 let topmost = mdi.borrow().z_order().last();
-                if topmost == Some(console_id) {
+                {
                     let mut input_mut = input.borrow_mut();
                     let resp = input_mut.handle_events(ctx.events, ctx.clipboard);
 
@@ -712,9 +724,10 @@ fn main() -> Result<(), String> {
                     }
                     input_mut.set_prompt(buffer.lock().unwrap().current_prompt());
 
-                    // Drag-select / Ctrl+A / Ctrl+C operate on the same
-                    // single grid that gets painted below — transcript
-                    // rows plus the live prompt row at the end.
+                    // Drag-select / Ctrl+A / Ctrl+C — only when the console
+                    // is the focused (topmost) window, so mouse selection
+                    // targets the window the user is actually working in.
+                    if topmost == Some(console_id) {
                     let mut rows = rows_from_buffer(&buffer.lock().unwrap(), theme);
                     let prompt_row: Vec<Cell> = {
                         let prefix = format!("{} ", input_mut.prompt);
@@ -725,10 +738,15 @@ fn main() -> Result<(), String> {
                     let (cell_w, line_h) = renderer.cell_metrics(theme.font_size);
                     let content = mdi.borrow().window(console_id).map(|w| w.content_rect(theme));
                     if let Some(content) = content {
+                        // Must match the PAINT grid_rect below: reserve the
+                        // scrollbar strips on the right/bottom. Otherwise the
+                        // selection hit-area overlaps the scrollbar and
+                        // dragging the scrollbar starts a text selection.
+                        let sbt = r2_ui::SCROLLBAR_THICKNESS;
                         let grid_rect = Rect {
                             x: content.x + 8.0, y: content.y + 8.0,
-                            w: content.w - 16.0,
-                            h: content.h - 16.0,
+                            w: content.w - 16.0 - sbt,
+                            h: content.h - 16.0 - sbt,
                         };
                         // Skip selection events on the frame a context
                         // menu was open / fired — the click that picked
@@ -741,6 +759,7 @@ fn main() -> Result<(), String> {
                             );
                         }
                     }
+                    } // end: grid selection (console topmost)
                 }
 
                 // ── Paint ─────────────────────────────────────────
