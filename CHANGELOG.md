@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Linear algebra — `lm` fits via QR (numerically stable)
+
+`lm` solved the least-squares system through the **normal equations**
+(`dlsq_fused`: form XᵀX, Cholesky), which squares the condition number
+and loses accuracy on near-collinear predictors. It now uses a new
+**Householder-QR** least-squares routine `r2_linalg::dlsq_qr` — it never
+forms XᵀX, so the conditioning is not squared. This matches R's `lm`
+(also QR-based). Well-conditioned fits are identical to before
+(verified); ill-conditioned ones are far more accurate. Normal
+equations remain as a fallback for `m < p`.
+
 ### Statistics — accurate `qnorm` (Wichura AS241)
 
 `qnorm` (inverse normal CDF) used the Abramowitz-Stegun 26.2.23 rational

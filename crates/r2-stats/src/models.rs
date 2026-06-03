@@ -243,7 +243,12 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let n = y_vec.len();
     let p = x_mat.ncol;
 
-    let coeffs = r2_linalg::dlsq_fused(n, p, &x_mat.data, &y_vec)
+    // Solve the least-squares system via Householder QR (does not form
+    // X'X, so the condition number is not squared) — matching R's lm and
+    // numerically stable for near-collinear predictors. Fall back to the
+    // normal-equations path only if QR is inapplicable (e.g. m < p).
+    let coeffs = r2_linalg::dlsq_qr(n, p, &x_mat.data, &y_vec)
+        .or_else(|_| r2_linalg::dlsq_fused(n, p, &x_mat.data, &y_vec))
         .or_else(|_| {
             let xtx = x_mat.crossprod();
             let xty = x_mat.crossprod_vec(&y_vec);

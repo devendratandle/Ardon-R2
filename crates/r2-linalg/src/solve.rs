@@ -146,6 +146,46 @@ pub fn dlsq_fused(m: usize, n: usize, x: &[f64], y: &[f64]) -> Result<Vec<f64>, 
     Ok(xty)
 }
 
+/// Least squares via Householder QR. Solves min‖Xβ − y‖₂ for the
+/// m×n (m ≥ n) column-major X **without forming XᵀX**, so the condition
+/// number is not squared — numerically stable for near-collinear
+/// predictors where the normal-equations path (`dlsq_fused`) loses
+/// accuracy. This is why R's `lm` uses QR.
+///
+/// X = QR (Householder); β solves Rβ = Qᵀy by back-substitution.
+pub fn dlsq_qr(m: usize, n: usize, x: &[f64], y: &[f64]) -> Result<Vec<f64>, LinalgError> {
+    if x.len() != m * n { return Err(LinalgError::InvalidShape("lstsq: X shape".into())); }
+    if y.len() != m { return Err(LinalgError::DimensionMismatch { expected: (m, 1), got: (y.len(), 1) }); }
+    if m < n { return Err(LinalgError::InvalidShape("lstsq: need m >= n".into())); }
+
+    // QR factorize a copy of X. After dgeqrf the upper triangle of `qr`
+    // holds R; below the diagonal holds the Householder vectors v_k
+    // (with v_k[k] = 1 implicit); `tau` holds the reflection scalars.
+    let mut qr = x.to_vec();
+    let tau = crate::dgeqrf(m, n, &mut qr)?;
+
+    // Apply Qᵀ to y in place:  y ← y − τ_k · v_k · (v_kᵀ y),  k = 0..n.
+    let mut b = y.to_vec();
+    for k in 0..n {
+        let mut vb = b[k]; // v_k[k] = 1
+        for i in (k + 1)..m { vb += qr[k * m + i] * b[i]; }
+        vb *= tau[k];
+        b[k] -= vb;
+        for i in (k + 1)..m { b[i] -= vb * qr[k * m + i]; }
+    }
+
+    // Back-substitution Rβ = (Qᵀy)[0..n].  R[i,j] = qr[j*m + i] for i ≤ j.
+    let mut beta = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut s = b[i];
+        for j in (i + 1)..n { s -= qr[j * m + i] * beta[j]; }
+        let rii = qr[i * m + i];
+        if rii.abs() < 1e-300 { return Err(LinalgError::Singular); }
+        beta[i] = s / rii;
+    }
+    Ok(beta)
+}
+
 /// Direct 2×2 solve (avoids all overhead for simple regression)
 #[inline]
 pub fn solve_2x2(a: &[f64; 4], b: &[f64; 2]) -> Result<[f64; 2], LinalgError> {
@@ -197,5 +237,42 @@ mod tests {
         let beta = dlsq_normal(4, 2, &x, &y).unwrap();
         assert!((beta[0] - 1.0).abs() < 1e-8); // intercept
         assert!((beta[1] - 2.0).abs() < 1e-8); // slope
+    }
+
+    #[test]
+    fn test_dlsq_qr_matches_known_fit() {
+        // Same exact y = 2x + 1 system; QR must recover [1, 2].
+        let x = vec![1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 4.0];
+        let y = vec![3.0, 5.0, 7.0, 9.0];
+        let beta = dlsq_qr(4, 2, &x, &y).unwrap();
+        assert!((beta[0] - 1.0).abs() < 1e-10, "intercept {}", beta[0]);
+        assert!((beta[1] - 2.0).abs() < 1e-10, "slope {}", beta[1]);
+    }
+
+    #[test]
+    fn test_dlsq_qr_full_rank_ill_conditioned() {
+        // Columns [1, x, x + δx²]: full rank (the x² term keeps col2
+        // independent of span{1, x}) but ill-conditioned for small δ —
+        // col2 ≈ col1. The data is exactly consistent, so the FIT must
+        // be recovered near machine precision regardless of the
+        // (large, ill-determined) individual coefficients. This is the
+        // regime where normal equations (cond²) degrade and QR doesn't.
+        let m = 6;
+        let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let delta = 1e-3;
+        let col2: Vec<f64> = xs.iter().map(|v| v + delta * v * v).collect();
+        // column-major: col0 = 1s, col1 = x, col2 = x + δx²
+        let mut x = Vec::with_capacity(m * 3);
+        x.extend(std::iter::repeat(1.0).take(m));
+        x.extend(xs.iter());
+        x.extend(col2.iter());
+        let y: Vec<f64> = (0..m).map(|i| 1.0 + 2.0 * xs[i] + 3.0 * col2[i]).collect();
+        let beta = dlsq_qr(m, 3, &x, &y).unwrap();
+        let mut max_resid = 0.0_f64;
+        for i in 0..m {
+            let pred = beta[0] + beta[1] * x[m + i] + beta[2] * x[2 * m + i];
+            max_resid = max_resid.max((pred - y[i]).abs());
+        }
+        assert!(max_resid < 1e-8, "QR fit residual too large: {}", max_resid);
     }
 }
