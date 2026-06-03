@@ -538,7 +538,7 @@ impl Engine {
                     // NSE for formula-based functions: lm(y ~ x, data = df)
                     // When first arg is a tilde expr and data= is provided,
                     // resolve bare symbol names as columns in the data frame
-                    if matches!(fname.as_ref(), "lm" | "glm" | "t.test" | "rpart" | "rf" | "gbm" | "cv" | "aov" | "manova" | "lmer") {
+                    if matches!(fname.as_ref(), "lm" | "glm" | "t.test" | "rpart" | "rf" | "gbm" | "cv" | "aov" | "manova" | "lmer" | "aggregate") {
                         if let Some(first_arg) = args.first() {
                             if let Expr::Binary { op: BinOp::Tilde, lhs, rhs } = &first_arg.value {
                                 // Check if data= is provided
@@ -546,6 +546,39 @@ impl Engine {
                                 if let Some(data_a) = data_arg {
                                     let data_val = self.eval_in(&data_a.value, env)?;
                                     if let RVal::DataFrame(ref df) = data_val {
+                                        // aggregate(value ~ group, data = df, FUN = ...)
+                                        // The formula is purely an input adapter: resolve the
+                                        // response column and grouping column from the frame,
+                                        // then hand them to aggregate's existing
+                                        // (x, by =, FUN =) core unchanged — so the split-apply
+                                        // math is identical to the non-formula call.
+                                        // Phase 1: a single response and a single grouping
+                                        // factor (cbind() / a + b land in Phase 2).
+                                        if fname.as_ref() == "aggregate" {
+                                            let take_one = |rv: RVal| -> Result<RVal, R2Err> {
+                                                match rv {
+                                                    RVal::List(mut items) if items.len() == 1 => Ok(items.remove(0).1),
+                                                    RVal::List(_) => Err(R2Err {
+                                                        msg: "aggregate(): formula with multiple response/grouping terms (cbind() or a + b) is not yet supported — use a single value ~ group".into(),
+                                                        kind: ErrKind::Runtime,
+                                                    }),
+                                                    other => Ok(other),
+                                                }
+                                            };
+                                            let value_col = take_one(self.resolve_formula_term(lhs, df, env)?)?;
+                                            let group_col = take_one(self.resolve_formula_term(rhs, df, env)?)?;
+                                            let f = self.eval_in(func, env)?;
+                                            let mut ea = vec![
+                                                EvalArg { name: None, value: value_col },
+                                                EvalArg { name: Some(Arc::from("by")), value: group_col },
+                                            ];
+                                            // Forward FUN= and any other extra args; drop data=.
+                                            for a in args.iter().skip(1) {
+                                                if a.name.as_ref().map(|n| n.as_ref()) == Some("data") { continue; }
+                                                ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? });
+                                            }
+                                            return self.call_fn(&f, &ea, env);
+                                        }
                                         // Check for dot (.) on RHS — means "all other columns"
                                         let is_dot_rhs = matches!(rhs.as_ref(), Expr::Symbol(s) if s.as_ref() == ".");
 

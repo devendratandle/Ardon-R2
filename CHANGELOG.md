@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Engine — formula support for `aggregate()`
+
+`aggregate(value ~ group, data = df, FUN = ...)` now works. It was the
+one formula-aware function missing from the engine's centralized
+formula preprocessor, so its formula failed with "object '…' not
+found". The fix wires `aggregate` into the same mechanism `lm` / `aov`
+/ `t.test` / `manova` already use: the formula is purely an **input
+adapter** — it resolves the response and grouping columns from `data=`
+and hands them to aggregate's existing `(x, by =, FUN =)` core, so the
+split-apply math is unchanged.
+
+- Both `FUN = mean` (named) and a positional function arg work.
+- Phase 1 covers a single response and a single grouping factor;
+  `cbind()` / `a + b` multi-term formulas are a later phase.
+- Regression tests pin it, including a t.test **formula↔vector
+  equivalence** check (the formula path must yield identical
+  statistics to the two-vector call).
+
+Note (unchanged behaviour): `t.test`, `lm`, `aov`, one-sample `t.test`,
+and `manova(cbind(...) ~ g)` already handled formulas correctly.
+
 ### Release automation — macOS & Linux desktop GUI
 
 The `release` workflow now builds and packages the desktop GUI for
