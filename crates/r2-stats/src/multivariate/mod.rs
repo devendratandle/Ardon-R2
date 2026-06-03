@@ -23,7 +23,6 @@ use r2_types::{fmt_num, Attrs, ErrKind, EvalArg, R2Err, RVal, TypeInstance};
 #[cfg(test)]
 use r2_types::Matrix;
 
-use crate::dist::phi;
 use crate::{fmt_pval, signif_stars};
 
 // ── Small helpers ────────────────────────────────────────────────────
@@ -154,16 +153,13 @@ fn quad_form_inv(x: &[f64], m: &[f64], p: usize) -> Result<f64, R2Err> {
     Ok(q)
 }
 
-/// Wilson–Hilferty F→z conversion for a p-value (matches the existing
-/// aov implementation). Returns 1 - Φ(z).
+/// Exact F upper-tail `P(F > f)` via the regularized incomplete beta
+/// (`htest::f_sf`). Replaces the former Wilson-Hilferty approximation,
+/// so manova / Hotelling p-values now match R to ~1e-9 even at small
+/// df. Non-integer df (from the Rao-style approximations) are fine —
+/// the incomplete beta takes real parameters.
 fn f_to_pvalue(f: f64, df1: f64, df2: f64) -> f64 {
-    if !f.is_finite() || df1 <= 0.0 || df2 <= 0.0 {
-        return 1.0;
-    }
-    let z = ((f / df1).powf(1.0 / 3.0) * (1.0 - 2.0 / (9.0 * df2))
-        - (1.0 - 2.0 / (9.0 * df1)))
-        / ((f / df1).powf(2.0 / 3.0) / (9.0 * df2) + 1.0 / (9.0 * df1)).sqrt();
-    1.0 - phi(z)
+    crate::htest::f_sf(f, df1, df2)
 }
 
 // ── Hotelling T² — one-sample ────────────────────────────────────────

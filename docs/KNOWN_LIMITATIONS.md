@@ -87,22 +87,22 @@ from a single attribute. ~200 LoC of macro work. Tracked for v0.4.0.
 
 ## Multivariate / repeated-measures statistics
 
-### Wilson-Hilferty p-values in `manova` / `hotelling.test`
+### F→p approximation ✅ resolved (all paths)
 
-`aov` (including the repeated-measures branch) and `lm`'s F-test now
-use the **exact** F-distribution CDF via `r2_stats::htest::f_sf`
-(regularized incomplete beta, Lentz continued fraction) — matching R to
-~1e-9, and correctly returning p = 0 (not p = 1) when the residual is
-zero.
+Every F-distribution p-value in R2 now uses the **exact** CDF via
+`r2_stats::htest::f_sf` (regularized incomplete beta, Lentz continued
+fraction) — matching R to ~1e-9, and correctly returning p = 0 (not
+p = 1) when the residual is zero:
 
-**Remaining:** `manova` and `hotelling.test` still convert their
-F-approximations to p-values with the Wilson-Hilferty approximation
-(`multivariate::f_to_pvalue`), accurate to ~1e-4 for n ≥ 10 but off by
-up to ~2× at very small df (e.g. n=4 paired Hotelling, df=(2,2)). The
-T², F-statistic, and df remain exact regardless of n.
+- `aov` (incl. the repeated-measures `Error(...)` branch) and `lm`'s
+  F-test call `f_sf` directly.
+- `manova` and `hotelling.test` route `multivariate::f_to_pvalue`
+  through `f_sf` too (the former Wilson-Hilferty step is gone), so the
+  small-df cases — e.g. n=4 paired Hotelling, df=(2,2) — are now exact
+  rather than off by up to ~2×.
 
-**Path to closure:** route `multivariate::f_to_pvalue` through the same
-`htest::f_sf` the ANOVA tables now use — one swap closes the gap.
+The T², F-statistic, and degrees of freedom were always exact; this
+closes the p-value gap across the whole statistics suite.
 
 ### `Error(treatment/subject)` collapses to outer stratum
 

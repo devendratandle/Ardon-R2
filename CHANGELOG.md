@@ -19,11 +19,16 @@ df). Both are replaced with **exact** methods:
 - A **zero residual** (perfectly-fit / degenerate design) now yields
   **p = 0** rather than the approximation's spurious p = 1.
 
-Effect: repeated-measures ANOVA, one-/two-way ANOVA, `lm` F-tests, and
-`t.test` p-values/CIs now match R to ~1e-9 (e.g. RM-ANOVA F(2,6)=12.40
-→ p = 0.0074, was 0.0052; two-sample t p = 1.6409e-5, was 1.644e-5).
-`manova` / `hotelling.test` still use the Wilson-Hilferty approximation
-(tracked in KNOWN_LIMITATIONS — same one-line swap closes it).
+- **`manova` / `hotelling.test`** now route through `f_sf` as well
+  (their `f_to_pvalue` no longer uses Wilson-Hilferty), so small-df
+  multivariate cases are exact too (e.g. manova F(2,3)=52.13 →
+  p = 0.0047, was 0.0013; Wilks F(2,2)=34.75 → p = 0.028, was 0.0154).
+
+Effect: **every** F-distribution p-value in R2 — repeated-measures
+ANOVA, one-/two-way ANOVA, `lm` F-tests, `manova`, `hotelling.test` —
+plus `t.test` p-values/CIs now match R to ~1e-9 (e.g. RM-ANOVA
+F(2,6)=12.40 → p = 0.0074, was 0.0052; two-sample t p = 1.6409e-5, was
+1.644e-5).
 
 Repeated-measures ANOVA structure (`aov(y ~ x + Error(subject))`, incl.
 nested `Error(subject/within)`) was already correct; this fixes its
