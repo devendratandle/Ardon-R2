@@ -84,6 +84,10 @@ fn repl_main() {
     println!("Type q() to quit.\n");
 
     let mut engine = Engine::new();
+    // Interactive session only: opt in to the browser plot viewer so
+    // `plot()` opens a live view (RGui-style). Script mode (run_script)
+    // and the test suite leave it off, so they never spawn a browser.
+    engine.enable_plot_autoview();
     let mut history: Vec<String> = Vec::new();
     let mut buffer = String::new();
     let mut continuation = false;
@@ -295,7 +299,9 @@ fn is_silent(e: &Expr) -> bool {
                 "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
                 "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
                 "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
-                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test");
+                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test" |
+                // Inspectors that print their report and return NULL.
+                "summary" | "str");
         }
     }
     false

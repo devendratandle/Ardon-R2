@@ -28,18 +28,25 @@ use std::sync::atomic::AtomicBool;
 
 use r2_types::{ErrKind, R2Err};
 
-/// Programmatic opt-out of the browser-based plot viewer.
-/// Set by `disable_autoview()` — used by the GUI binary (R2Gui) so
-/// the browser doesn't open on top of the GUI's own plot window.
-/// More reliable than the R2_NO_AUTOVIEW env var since env_set_var
-/// has cross-process/cross-thread caveats on Windows.
-static AUTOVIEW_DISABLED: AtomicBool = AtomicBool::new(false);
+/// Whether the browser plot viewer may auto-open on the first plot.
+/// **Opt-IN** (default `false`) — mirroring R, where no graphics device
+/// opens unless the frontend installs one. Only the *interactive* CLI
+/// enables it (`enable_autoview()`); scripts, the test suite, and the
+/// GUI (which has its own plot window) never trigger a browser.
+static AUTOVIEW_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Disable the browser plot viewer for the lifetime of this process.
-/// Idempotent. Used by R2Gui (which has its own plot window) and
-/// callable from any other host that wants to suppress the viewer.
+/// Opt in to the browser plot viewer for the lifetime of this process.
+/// Called by the interactive REPL so `plot()` pops a live viewer, the
+/// way RGui/RStudio open a device. Idempotent.
+pub fn enable_autoview() {
+    AUTOVIEW_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Force the browser viewer off (default state). Kept for hosts that
+/// previously called it; with opt-in semantics the default is already
+/// off, so this is only needed to override a prior `enable_autoview()`.
 pub fn disable_autoview() {
-    AUTOVIEW_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    AUTOVIEW_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Everything `par()` can set. Defaults mirror R's `par()` baseline so
@@ -334,8 +341,10 @@ pub fn begin_plot() -> (f64, f64, f64, f64) {
     // Opt-out: set R2_NO_AUTOVIEW=1 in the environment.
     static AUTOVIEW_LAUNCHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let env_disabled = std::env::var("R2_NO_AUTOVIEW").is_ok();
-    let prog_disabled = AUTOVIEW_DISABLED.load(std::sync::atomic::Ordering::Relaxed);
-    if AUTOVIEW_LAUNCHED.get().is_none() && !env_disabled && !prog_disabled {
+    let enabled = AUTOVIEW_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+    // Opt-in: only auto-open when a frontend enabled it (interactive CLI).
+    // Default off → scripts, tests, and the GUI never spawn a browser.
+    if AUTOVIEW_LAUNCHED.get().is_none() && enabled && !env_disabled {
         let _ = AUTOVIEW_LAUNCHED.set(());
         if let Some(port) = crate::server::ensure_started() {
             soutln!("Plot viewer opened in browser: http://127.0.0.1:{}/", port);

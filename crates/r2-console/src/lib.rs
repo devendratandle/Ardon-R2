@@ -350,7 +350,9 @@ pub fn is_silent(e: &Expr) -> bool {
                 "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
                 "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
                 "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
-                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test");
+                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test" |
+                // Inspectors that print their report and return NULL.
+                "summary" | "str");
         }
     }
     false

@@ -103,12 +103,6 @@ pub struct Engine {
     jit_cache: HashMap<usize, Option<Arc<dyn JitHandle>>>,
     /// Master switch — disabled via env `R2_JIT=0`. Default on.
     jit_enabled: bool,
-    /// Output sink installed by the host (CLI / GUI). All engine-side
-    /// `print()`, `cat()`, `message()`, formatter output, etc. write
-    /// through this — never directly to stdout. Default is
-    /// `r2_console::StdoutSink` so headless / unit-test usage still
-    /// shows results in a terminal.
-    output_sink: Box<dyn r2_console::OutputSink>,
 }
 
 /// Info about an installed (but not necessarily loaded) package
@@ -155,21 +149,43 @@ impl r2_types::EngineCtx for Engine {
 }
 
 impl Engine {
-    /// Replace the default `StdoutSink` with a host-provided sink.
-    /// The CLI keeps the default; the GUI installs one backed by its
-    /// `Arc<Mutex<ConsoleBuffer>>` so `print()` output lands in the
-    /// transcript widget.
-    pub fn set_output_sink(&mut self, sink: Box<dyn r2_console::OutputSink>) {
-        self.output_sink = sink;
+    /// Install the host's output sink as the single, process-wide
+    /// console (R's `R_WriteConsole` model). This is the ONE channel:
+    /// engine `print`/`cat`/formatter output AND every compute crate's
+    /// `soutln!` (via `r2_types::out`) converge here, so the frontend
+    /// wires output exactly once. The CLI leaves it unset → output
+    /// falls back to stdout/stderr; the GUI installs a sink backed by
+    /// its `ConsoleBuffer`.
+    ///
+    /// `r2_types::out` is line-buffered and hands the sink complete
+    /// lines (no trailing newline) — `StdoutSink` appends one,
+    /// `ConsoleBuffer::push_output` treats each as a line.
+    pub fn set_output_sink(&mut self, mut sink: Box<dyn r2_console::OutputSink>) {
+        r2_types::out::set_output_hook(Some(Box::new(move |line: &str, is_err: bool| {
+            if is_err { sink.write_error(line); } else { sink.write_output(line); }
+        })));
     }
 
-    /// Emit a line through the active output sink. Used by builtins
-    /// (and gradually-migrated `soutln!` sites).
+    /// Emit through the single console channel. `print`/`cat`/etc. call
+    /// this; it preserves the historical "one trailing newline" sink
+    /// contract, then routes through `r2_types::out` — the same channel
+    /// the compute crates use — so there is exactly one output path.
     pub fn emit_output(&mut self, text: &str) {
-        self.output_sink.write_output(text);
+        if text.ends_with('\n') { r2_types::out::rout(text); }
+        else { r2_types::out::rout(&format!("{}\n", text)); }
     }
     pub fn emit_error(&mut self, text: &str) {
-        self.output_sink.write_error(text);
+        if text.ends_with('\n') { r2_types::out::rerr(text); }
+        else { r2_types::out::rerr(&format!("{}\n", text)); }
+    }
+
+    /// Opt in to the browser-based plot viewer (interactive CLI only).
+    /// By default no auto-view occurs — scripts, the test suite, and the
+    /// GUI (own plot window) never spawn a browser. The interactive REPL
+    /// calls this so `plot()` opens a live viewer, like RGui opening a
+    /// device. Exposed here so `r2-repl` needn't depend on r2-graphics.
+    pub fn enable_plot_autoview(&self) {
+        r2_graphics::device::enable_autoview();
     }
 
     pub fn new() -> Self {
@@ -195,7 +211,6 @@ impl Engine {
             local_scopes: Vec::new(),
             jit_cache: HashMap::new(),
             jit_enabled: std::env::var("R2_JIT").map(|v| v != "0").unwrap_or(true),
-            output_sink: Box::new(r2_console::StdoutSink),
         };
 
         // ── CORE: immutable, CANNOT be masked or detached ────────────
