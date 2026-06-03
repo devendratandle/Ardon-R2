@@ -48,9 +48,12 @@ scratch/
 # The compiled installer .exe — recreated by Inno Setup from .iss + r2.ico
 installer/Output/
 
-# Auto-generated icon: build.rs converts assets/logo.png → installer/r2.ico
-# on every release build. The source of truth is assets/logo.png.
-installer/r2.ico
+# installer/r2.ico is committed (NOT ignored): r2-gui/build.rs only
+# embeds the icon when this file already exists, and cargo may build
+# r2-gui before r2-repl regenerates it — leaving R2Gui.exe iconless.
+# Committing it guarantees the icon is present at build time on clean
+# checkouts/CI. r2-repl/build.rs still regenerates it from assets/logo.png
+# (deterministic, so no churn). Source of truth: assets/logo.png.
 
 # Debug preview written by build.rs so we can eyeball the cropped icon
 # without opening the .ico file. Regenerated every build.

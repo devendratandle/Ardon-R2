@@ -62,6 +62,11 @@ Name: "associate_r2";  Description: "&Associate .r2 files with Ardon-R2"; GroupD
 Source: "..\target\release\r2.exe";    DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\R2Gui.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
+; Ship the icon so shortcuts can reference it directly — belt-and-suspenders
+; so the GUI/Console/desktop shortcuts show the R2 icon even if the exe's
+; embedded icon is somehow missing.
+Source: "r2.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
 ; Documentation.
 Source: "..\README.md";                  DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\LICENSE";                    DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
@@ -77,12 +82,12 @@ Source: "..\samples\*.r2"; DestDir: "{app}\samples"; Flags: ignoreversion recurs
 
 [Icons]
 ; GUI version is what most users will launch (the RGui-style desktop app).
-Name: "{group}\Ardon-R2 (GUI)";       Filename: "{app}\R2Gui.exe"
+Name: "{group}\Ardon-R2 (GUI)";       Filename: "{app}\R2Gui.exe"; IconFilename: "{app}\r2.ico"
 ; CLI version for scripts / automation / SSH.
-Name: "{group}\Ardon-R2 (Console)";   Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\Ardon-R2 (Console)";   Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\r2.ico"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 ; Desktop shortcut launches the GUI by default.
-Name: "{autodesktop}\{#MyAppName}";   Filename: "{app}\R2Gui.exe"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}";   Filename: "{app}\R2Gui.exe"; Tasks: desktopicon; IconFilename: "{app}\r2.ico"
 
 [Registry]
 ; .r2 file association (if user opts in).
