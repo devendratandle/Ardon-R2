@@ -146,6 +146,35 @@ pub fn dlsq_fused(m: usize, n: usize, x: &[f64], y: &[f64]) -> Result<Vec<f64>, 
     Ok(xty)
 }
 
+/// Determinant of an n×n (column-major) matrix via LU with partial
+/// pivoting (`dgetrf`): det = sign(P) · ∏ U[i,i]. A singular matrix
+/// (zero pivot) returns 0.0.
+pub fn ddet(n: usize, a: &[f64]) -> Result<f64, LinalgError> {
+    if a.len() != n * n { return Err(LinalgError::NotSquare); }
+    if n == 0 { return Ok(1.0); }
+    let mut lu = a.to_vec();
+    let ipiv = match crate::dgetrf(n, &mut lu) {
+        Ok(p) => p,
+        Err(LinalgError::Singular) => return Ok(0.0),
+        Err(e) => return Err(e),
+    };
+    // Product of U's diagonal.
+    let mut det = 1.0_f64;
+    for i in 0..n { det *= lu[i * n + i]; }
+    // Permutation parity via cycle decomposition: an even-length cycle
+    // contributes an odd number of transpositions (flip the sign).
+    let mut visited = vec![false; n];
+    for i in 0..n {
+        if !visited[i] {
+            let mut j = i;
+            let mut clen = 0usize;
+            while !visited[j] { visited[j] = true; j = ipiv[j]; clen += 1; }
+            if clen % 2 == 0 { det = -det; }
+        }
+    }
+    Ok(det)
+}
+
 /// Least squares via Householder QR. Solves min‖Xβ − y‖₂ for the
 /// m×n (m ≥ n) column-major X **without forming XᵀX**, so the condition
 /// number is not squared — numerically stable for near-collinear

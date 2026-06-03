@@ -110,6 +110,8 @@ naive.bayes(x,y)        Gaussian naive Bayes
 prcomp(x)               Principal component analysis
 svd(x)                  Singular value decomposition
 eigen(x)                Eigenvalue decomposition
+solve(a[, b])           Matrix inverse, or solve a x = b
+det(a)                  Determinant (LU)
 scale(x)                Center and scale
 cv(x,y,model,k)         K-fold cross-validation
 confusion.matrix(pred,actual) Confusion matrix + F1

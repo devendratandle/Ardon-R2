@@ -273,7 +273,7 @@ impl Engine {
             ("predict",bi_predict),("residuals",bi_residuals),("fitted",bi_fitted),("coef",bi_coef),
             ("glm",bi_glm),("confint",bi_confint),("binomial",bi_binomial),("gaussian",bi_gaussian),("poisson",bi_poisson),("subset",bi_subset),("transform",bi_transform),
             // ML functions
-            ("svd",bi_svd),("eigen",bi_eigen),("prcomp",bi_prcomp),
+            ("svd",bi_svd),("eigen",bi_eigen),("prcomp",bi_prcomp),("solve",bi_solve),("det",bi_det),
             ("kmeans",bi_kmeans),("knn",bi_knn),("naive.bayes",bi_naive_bayes),("scale",bi_scale),
             ("rpart",bi_rpart),("rf",bi_rf),("gbm",bi_gbm),("cv",bi_cv),("aov",bi_aov),("anova",bi_anova),("cor.test",bi_cor_test),("shapiro.test",bi_shapiro_test),("wilcox.test",bi_wilcox_test),("fisher.test",bi_fisher_test),("weighted.mean",bi_weighted_mean),("IQR",bi_iqr),("confusion.matrix",bi_confusion_matrix),
         ]));
@@ -2228,7 +2228,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
                 ("t.test",bi_t_test),("chisq.test",bi_chisq_test),("hotelling.test",bi_hotelling_test),("manova",bi_manova),("lmer",bi_lmer),
                 ("predict",bi_predict),("residuals",bi_residuals),("fitted",bi_fitted),("coef",bi_coef),
                 ("glm",bi_glm),("confint",bi_confint),("binomial",bi_binomial),("gaussian",bi_gaussian),("poisson",bi_poisson),("subset",bi_subset),("transform",bi_transform),
-                ("svd",bi_svd),("eigen",bi_eigen),("prcomp",bi_prcomp),
+                ("svd",bi_svd),("eigen",bi_eigen),("prcomp",bi_prcomp),("solve",bi_solve),("det",bi_det),
                 ("kmeans",bi_kmeans),("knn",bi_knn),("naive.bayes",bi_naive_bayes),("scale",bi_scale),
                 ("rpart",bi_rpart),("rf",bi_rf),("gbm",bi_gbm),("cv",bi_cv),("aov",bi_aov),("anova",bi_anova),("cor.test",bi_cor_test),("shapiro.test",bi_shapiro_test),("wilcox.test",bi_wilcox_test),("fisher.test",bi_fisher_test),("weighted.mean",bi_weighted_mean),("IQR",bi_iqr),("confusion.matrix",bi_confusion_matrix),
             ]));

@@ -36,6 +36,57 @@ pub(crate) fn bi_eigen(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     r2_base::linalg_ops::bi_eigen(a)
 }
 
+// ── det() — matrix determinant via LU (partial pivoting) ─────────────
+
+pub(crate) fn bi_det(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let m = match &gv(a, 0) {
+        RVal::Matrix(m) => m.clone(),
+        _ => return err!(Runtime, "det: argument must be a matrix"),
+    };
+    if m.nrow != m.ncol { return err!(Runtime, "det: 'a' must be a square matrix"); }
+    let d = r2_linalg::ddet(m.nrow, &m.data)
+        .map_err(|e| R2Err { msg: format!("det: {}", e), kind: ErrKind::Runtime })?;
+    Ok(RVal::Numeric(vec![Some(d)].into(), Attrs::default()))
+}
+
+// ── solve() — matrix inverse, or solve a·x = b ───────────────────────
+
+pub(crate) fn bi_solve(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let m = match &gv(a, 0) {
+        RVal::Matrix(m) => m.clone(),
+        _ => return err!(Runtime, "solve: 'a' must be a matrix"),
+    };
+    if m.nrow != m.ncol { return err!(Runtime, "solve: 'a' must be a square matrix"); }
+    match a.get(1).map(|x| &x.value) {
+        // solve(a): inverse.
+        None | Some(RVal::Null) => {
+            let inv = r2_linalg::dgetri(m.nrow, &m.data)
+                .map_err(|e| R2Err { msg: format!("solve: {}", e), kind: ErrKind::Runtime })?;
+            Ok(RVal::Matrix(Matrix::new(inv, m.nrow, m.ncol)))
+        }
+        // solve(a, B): solve for each column of B.
+        Some(RVal::Matrix(b)) => {
+            if b.nrow != m.nrow { return err!(Runtime, "solve: 'b' must have the same number of rows as 'a'"); }
+            let mut out = vec![0.0; b.nrow * b.ncol];
+            for col in 0..b.ncol {
+                let bcol: Vec<f64> = (0..b.nrow).map(|r| b.data[col * b.nrow + r]).collect();
+                let x = m.solve(&bcol)
+                    .map_err(|e| R2Err { msg: format!("solve: {}", e), kind: ErrKind::Runtime })?;
+                for r in 0..b.nrow { out[col * b.nrow + r] = x[r]; }
+            }
+            Ok(RVal::Matrix(Matrix::new(out, b.nrow, b.ncol)))
+        }
+        // solve(a, b): b a vector.
+        Some(other) => {
+            let bvec: Vec<f64> = e.as_reals(other)?.into_iter().flatten().collect();
+            if bvec.len() != m.nrow { return err!(Runtime, "solve: length of 'b' must match the matrix dimension"); }
+            let x = m.solve(&bvec)
+                .map_err(|e| R2Err { msg: format!("solve: {}", e), kind: ErrKind::Runtime })?;
+            Ok(RVal::Numeric(x.iter().map(|v| Some(*v)).collect::<Vec<_>>().into(), Attrs::default()))
+        }
+    }
+}
+
 // ── prcomp() — Principal Component Analysis ──────────────────────────
 
 // Phase R.1 step 4: bi_prcomp moved to r2-ml::dispatch.

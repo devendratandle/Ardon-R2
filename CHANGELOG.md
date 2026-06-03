@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Linear algebra — `solve()` and `det()` exposed
+
+`solve()` and `det()` are now callable functions (previously reachable
+only via the internal dispatcher):
+
+- `solve(A)` → matrix inverse; `solve(A, b)` → solve `A·x = b` (vector
+  or multi-column `b`). Verified `A %*% solve(A)` = I.
+- `det(A)` → determinant via LU with partial pivoting (exact sign from
+  the permutation parity; singular ⇒ 0).
+- New `r2_linalg::ddet`. `svd` singular values and `eigen` were already
+  exact (verified). (`diag()` and a user-level `chol()` remain unexposed
+  — functionality gaps, tracked separately.)
+
 ### Linear algebra — `lm` fits via QR (numerically stable)
 
 `lm` solved the least-squares system through the **normal equations**
