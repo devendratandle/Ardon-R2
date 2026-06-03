@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Statistics — accurate `qnorm` (Wichura AS241)
+
+`qnorm` (inverse normal CDF) used the Abramowitz-Stegun 26.2.23 rational
+fit (~4.5e-4 error). Replaced with **Wichura's AS241** — the algorithm R
+uses — accurate to ~1e-15 across the central and both tail regions.
+
+- `qnorm(0.975)` → 1.959964 (was 1.960395); `qnorm(0.999)` → 3.090232
+  (was 3.090522); deep tail `qnorm(0.9999999)` → 5.199338, all matching
+  R.
+- Underlies normal-based confidence intervals, `qqnorm`, and any
+  normal-quantile lookup.
+
+Audit note: the other implemented quantile/CDF primitives are already
+accurate — `qt` bisects on the (now exact) `t_cdf`, `chi_sq_cdf` and
+`phi`/`erf` are ~1e-7, and F-tails use the exact `f_sf`. (`qf`,
+`qchisq`, `qgamma`, `qbeta` are not yet exposed as builtins — a
+functionality gap, tracked separately, not an accuracy one.)
+
 ### Statistics — exact p-values (Lentz incomplete beta)
 
 `incomplete_beta` was a 1000-panel trapezoidal rule (~1e-3–1e-4 error,

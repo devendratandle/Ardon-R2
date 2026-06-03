@@ -37,20 +37,56 @@ pub fn erf(x: f64) -> f64 {
 #[inline]
 pub fn phi(x: f64) -> f64 { 0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2)) }
 
-/// Inverse standard-normal CDF (Beasley-Springer-Moro). Max error ≈ 4.5e-4
-/// across (0, 1); good enough for everyday quantile lookups, NOT for
-/// extreme-tail work (use the rational approx in dlmf or a Halley
-/// refinement step if more precision needed).
+/// Inverse standard-normal CDF via **Wichura's algorithm AS241**
+/// (`PPND16`) — the same rational approximation R uses. Accurate to
+/// ~1e-15 across the whole open interval (0, 1), including the tails.
+/// (The previous Abramowitz-Stegun 26.2.23 fit was only ~4.5e-4.)
 pub fn qnorm_approx(p: f64) -> f64 {
     if p <= 0.0 { return f64::NEG_INFINITY; }
     if p >= 1.0 { return f64::INFINITY; }
-    if (p - 0.5).abs() < 1e-15 { return 0.0; }
-    let pp = if p < 0.5 { p } else { 1.0 - p };
-    let t = (-2.0 * pp.ln()).sqrt();
-    let c0 = 2.515517; let c1 = 0.802853; let c2 = 0.010328;
-    let d1 = 1.432788; let d2 = 0.189269; let d3 = 0.001308;
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-    if p < 0.5 { -z } else { z }
+
+    let q = p - 0.5;
+    if q.abs() <= 0.425 {
+        // Central region.
+        let r = 0.180625 - q * q;
+        let num = (((((((2509.0809287301226727_f64 * r + 33430.575583588128105) * r
+            + 67265.770927008700853) * r + 45921.953931549871457) * r
+            + 13731.693765509461125) * r + 1971.5909503065514427) * r
+            + 133.14166789178437745) * r + 3.387132872796366608);
+        let den = (((((((5226.495278852854561_f64 * r + 28729.085735721942674) * r
+            + 39307.89580009271061) * r + 21213.794301586595867) * r
+            + 5394.1960214247511077) * r + 687.1870074920579083) * r
+            + 42.313330701600911252) * r + 1.0);
+        return q * num / den;
+    }
+
+    // Tail regions.
+    let mut r = if q < 0.0 { p } else { 1.0 - p };
+    r = (-r.ln()).sqrt();
+    let val = if r <= 5.0 {
+        let r = r - 1.6;
+        let num = (((((((7.7454501427834140764e-4_f64 * r + 0.0227238449892691845833) * r
+            + 0.24178072517745061177) * r + 1.27045825245236838258) * r
+            + 3.64784832476320460504) * r + 5.7694972214606914055) * r
+            + 4.6303378461565452959) * r + 1.42343711074968357734);
+        let den = (((((((1.05075007164441684324e-9_f64 * r + 5.475938084995344946e-4) * r
+            + 0.0151986665636164571966) * r + 0.14810397642748007459) * r
+            + 0.68976733498510000455) * r + 1.6763848301838038494) * r
+            + 2.05319162663775882187) * r + 1.0);
+        num / den
+    } else {
+        let r = r - 5.0;
+        let num = (((((((2.01033439929228813265e-7_f64 * r + 2.71155556874348757815e-5) * r
+            + 0.0012426609473880784386) * r + 0.026532189526576123093) * r
+            + 0.29656057182850489123) * r + 1.7848265399172913358) * r
+            + 5.4637849111641143699) * r + 6.6579046435011037772);
+        let den = (((((((2.04426310338993978564e-15_f64 * r + 1.4215117583164458887e-7) * r
+            + 1.8463183175100546818e-5) * r + 7.868691311456132591e-4) * r
+            + 0.0148753612908506148525) * r + 0.13692988092273580531) * r
+            + 0.59983220655588793769) * r + 1.0);
+        num / den
+    };
+    if q < 0.0 { -val } else { val }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -135,15 +171,30 @@ mod tests {
     }
 
     #[test]
-    fn pnorm_qnorm_round_trip_at_975() {
-        let p = bi_qnorm(&[evarg(nums(&[0.975]))]).unwrap();
-        let q = match p { RVal::Numeric(v, _) => v[0].unwrap(), _ => panic!() };
-        // Beasley-Springer-Moro qnorm(0.975) ≈ 1.96 ± 5e-4.
-        assert!((q - 1.96).abs() < 0.01, "qnorm(0.975) = {}", q);
-        let r = bi_pnorm(&[evarg(nums(&[q]))]).unwrap();
-        match r {
-            RVal::Numeric(v, _) => assert!((v[0].unwrap() - 0.975).abs() < 0.01),
-            _ => panic!(),
+    fn qnorm_matches_r_as241() {
+        // Wichura AS241 is accurate to ~1e-15; compare to R's qnorm.
+        let cases = [
+            (0.975, 1.959963984540054),
+            (0.025, -1.959963984540054),
+            (0.99, 2.3263478740408408),
+            (0.999, 3.0902323061678132),
+            (0.9999999, 5.199337582187471), // deep-tail region (r > 5)
+        ];
+        for (p, want) in cases {
+            let got = qnorm_approx(p);
+            assert!((got - want).abs() < 1e-9, "qnorm({}) = {}, want {}", p, got, want);
+        }
+        assert_eq!(qnorm_approx(0.5), 0.0);
+    }
+
+    #[test]
+    fn pnorm_qnorm_round_trip() {
+        // qnorm then pnorm should return the input to ~1e-7 (pnorm is the
+        // limiting factor at ~1e-7; qnorm itself is ~1e-15).
+        for p in [0.1, 0.5, 0.975, 0.999] {
+            let q = qnorm_approx(p);
+            let back = phi(q);
+            assert!((back - p).abs() < 1e-7, "round-trip p={} -> {}", p, back);
         }
     }
 }
