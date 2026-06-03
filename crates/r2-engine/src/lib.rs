@@ -555,29 +555,76 @@ impl Engine {
                                         // Phase 1: a single response and a single grouping
                                         // factor (cbind() / a + b land in Phase 2).
                                         if fname.as_ref() == "aggregate" {
-                                            let take_one = |rv: RVal| -> Result<RVal, R2Err> {
-                                                match rv {
-                                                    RVal::List(mut items) if items.len() == 1 => Ok(items.remove(0).1),
-                                                    RVal::List(_) => Err(R2Err {
-                                                        msg: "aggregate(): formula with multiple response/grouping terms (cbind() or a + b) is not yet supported — use a single value ~ group".into(),
-                                                        kind: ErrKind::Runtime,
-                                                    }),
-                                                    other => Ok(other),
+                                            // Phase 2: cbind(y1,y2) ~ g1 + g2 — any number of
+                                            // response columns and grouping factors. The formula
+                                            // is purely an input adapter (formula_frame); the
+                                            // split-apply math (FUN per group) is the same as the
+                                            // single-variable case.
+                                            let (responses, groups) = self.formula_frame(lhs, rhs, df, env)?;
+                                            if groups.is_empty() {
+                                                return Err(R2Err { msg: "aggregate(): formula needs at least one grouping factor on the RHS".into(), kind: ErrKind::Runtime });
+                                            }
+                                            if responses.is_empty() {
+                                                return Err(R2Err { msg: "aggregate(): formula needs at least one response on the LHS".into(), kind: ErrKind::Runtime });
+                                            }
+                                            // Resolve FUN: named FUN=, else first positional arg
+                                            // after the formula (skipping data=).
+                                            let fun_expr = args.iter().find(|a| a.name.as_deref() == Some("FUN"))
+                                                .or_else(|| args.iter().skip(1).find(|a| a.name.is_none()))
+                                                .map(|a| &a.value);
+                                            let f = match fun_expr {
+                                                Some(e) => self.eval_in(e, env)?,
+                                                None => return Err(R2Err { msg: "aggregate(): FUN is required".into(), kind: ErrKind::Runtime }),
+                                            };
+                                            // Element-wise labels for each grouping factor.
+                                            let col_labels = |c: &RVal| -> Vec<String> {
+                                                match c {
+                                                    RVal::Numeric(v, _) => v.iter().map(|x| x.map(|n| fmt_num(n)).unwrap_or_else(|| "NA".into())).collect(),
+                                                    RVal::Integer(v, _) => v.iter().map(|x| x.map(|n| n.to_string()).unwrap_or_else(|| "NA".into())).collect(),
+                                                    RVal::Character(v, _) => v.iter().map(|x| x.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "NA".into())).collect(),
+                                                    RVal::Logical(v, _) => v.iter().map(|x| match x { Some(true) => "TRUE".into(), Some(false) => "FALSE".into(), None => "NA".into() }).collect(),
+                                                    _ => Vec::new(),
                                                 }
                                             };
-                                            let value_col = take_one(self.resolve_formula_term(lhs, df, env)?)?;
-                                            let group_col = take_one(self.resolve_formula_term(rhs, df, env)?)?;
-                                            let f = self.eval_in(func, env)?;
-                                            let mut ea = vec![
-                                                EvalArg { name: None, value: value_col },
-                                                EvalArg { name: Some(Arc::from("by")), value: group_col },
-                                            ];
-                                            // Forward FUN= and any other extra args; drop data=.
-                                            for a in args.iter().skip(1) {
-                                                if a.name.as_ref().map(|n| n.as_ref()) == Some("data") { continue; }
-                                                ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? });
+                                            let group_labels: Vec<Vec<String>> = groups.iter().map(|(_, c)| col_labels(c)).collect();
+                                            let nrow = group_labels.first().map(|v| v.len()).unwrap_or(0);
+                                            // Distinct group combinations (composite key per row).
+                                            let mut combos: Vec<Vec<String>> = Vec::new();
+                                            let mut row_combo: Vec<usize> = Vec::with_capacity(nrow);
+                                            for r in 0..nrow {
+                                                let key: Vec<String> = group_labels.iter()
+                                                    .map(|g| g.get(r).cloned().unwrap_or_default()).collect();
+                                                match combos.iter().position(|c| *c == key) {
+                                                    Some(p) => row_combo.push(p),
+                                                    None => { combos.push(key); row_combo.push(combos.len() - 1); }
+                                                }
                                             }
-                                            return self.call_fn(&f, &ea, env);
+                                            // Sort combos lexicographically by label tuple (R orders
+                                            // aggregate output by grouping levels).
+                                            let mut order: Vec<usize> = (0..combos.len()).collect();
+                                            order.sort_by(|&i, &j| combos[i].cmp(&combos[j]));
+                                            let mut rows_per_combo: Vec<Vec<usize>> = vec![Vec::new(); combos.len()];
+                                            for r in 0..nrow { rows_per_combo[row_combo[r]].push(r); }
+                                            // Build output: one column per grouping factor, then
+                                            // one column per response (real source names).
+                                            let mut out_cols: Vec<(Arc<str>, RVal)> = Vec::new();
+                                            for (gi, (gname, _)) in groups.iter().enumerate() {
+                                                let col: Vec<Character> = order.iter()
+                                                    .map(|&ci| Some(Arc::from(combos[ci][gi].as_str()))).collect();
+                                                out_cols.push((gname.clone(), RVal::Character(col, Attrs::default())));
+                                            }
+                                            for (rname, rcol) in &responses {
+                                                let vals = self.as_reals(rcol)?;
+                                                let mut agg: Vec<Real> = Vec::with_capacity(order.len());
+                                                for &ci in &order {
+                                                    let gv: Vec<Real> = rows_per_combo[ci].iter()
+                                                        .map(|&r| vals.get(r).copied().unwrap_or(None)).collect();
+                                                    let res = self.call_fn(&f, &[EvalArg { name: None, value: RVal::Numeric(gv.into(), Attrs::default()) }], env)?;
+                                                    agg.push(res.scalar_f64().unwrap_or(None));
+                                                }
+                                                out_cols.push((rname.clone(), RVal::Numeric(agg.into(), Attrs::default())));
+                                            }
+                                            return Ok(RVal::DataFrame(DataFrame { columns: out_cols, row_names: None }));
                                         }
                                         // Check for dot (.) on RHS — means "all other columns"
                                         let is_dot_rhs = matches!(rhs.as_ref(), Expr::Symbol(s) if s.as_ref() == ".");
@@ -1375,6 +1422,69 @@ impl Engine {
                 self.local_scopes.pop();
                 result
             }
+        }
+    }
+
+    // ── Phase 2 — structured formula frame ───────────────────────────
+    //
+    // Splits a formula into one-or-more response columns (handling
+    // `cbind(a, b, ...)` on the LHS) and one-or-more grouping terms
+    // (handling `a + b` on the RHS), resolving each name against the
+    // data frame. This is the "model.frame" input-adapter: it only
+    // assembles named columns — it never runs any statistics. Returns
+    // (responses, groups) as (name, column) pairs.
+    fn formula_frame(
+        &mut self, lhs: &Expr, rhs: &Expr, df: &DataFrame, env: &EnvRef,
+    ) -> Result<(Vec<(Arc<str>, RVal)>, Vec<(Arc<str>, RVal)>), R2Err> {
+        let responses = self.resolve_response_terms(lhs, df, env)?;
+        let groups = self.resolve_additive_terms(rhs, df, env)?;
+        Ok((responses, groups))
+    }
+
+    /// LHS responses: `cbind(y1, y2, ...)` → one entry per argument;
+    /// anything else → a single response.
+    fn resolve_response_terms(
+        &mut self, lhs: &Expr, df: &DataFrame, env: &EnvRef,
+    ) -> Result<Vec<(Arc<str>, RVal)>, R2Err> {
+        if let Expr::Call { func, args } = lhs {
+            if matches!(func.as_ref(), Expr::Symbol(s) if s.as_ref() == "cbind") {
+                let mut out = Vec::with_capacity(args.len());
+                for a in args {
+                    out.push(self.resolve_single_term(&a.value, df, env)?);
+                }
+                return Ok(out);
+            }
+        }
+        Ok(vec![self.resolve_single_term(lhs, df, env)?])
+    }
+
+    /// RHS additive terms: split on `+` recursively into individual
+    /// grouping terms.
+    fn resolve_additive_terms(
+        &mut self, rhs: &Expr, df: &DataFrame, env: &EnvRef,
+    ) -> Result<Vec<(Arc<str>, RVal)>, R2Err> {
+        if let Expr::Binary { op: BinOp::Add, lhs, rhs } = rhs {
+            let mut l = self.resolve_additive_terms(lhs, df, env)?;
+            let mut r = self.resolve_additive_terms(rhs, df, env)?;
+            l.append(&mut r);
+            return Ok(l);
+        }
+        Ok(vec![self.resolve_single_term(rhs, df, env)?])
+    }
+
+    /// Resolve one formula term (a bare column name or an expression
+    /// like `factor(x)`) to a (display-name, column) pair. Bare symbols
+    /// keep their column name; expressions are deparsed for the name.
+    fn resolve_single_term(
+        &mut self, expr: &Expr, df: &DataFrame, env: &EnvRef,
+    ) -> Result<(Arc<str>, RVal), R2Err> {
+        match self.resolve_formula_term(expr, df, env)? {
+            RVal::List(mut items) if items.len() == 1 => {
+                let (n, col) = items.remove(0);
+                let name = n.unwrap_or_else(|| Arc::from(fmt_expr(expr).as_str()));
+                Ok((name, col))
+            }
+            other => Ok((Arc::from(fmt_expr(expr).as_str()), other)),
         }
     }
 

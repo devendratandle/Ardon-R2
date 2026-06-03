@@ -172,7 +172,7 @@ sapply(x,fun)       Apply and simplify
 lapply(x,fun)       Apply and return list
 apply(x,margin,fun) Apply over matrix margins
 tapply(x,idx,fun)   Apply by groups
-aggregate(x,by,fun) Aggregate by groups (also: aggregate(y ~ g, data=df, FUN))
+aggregate(x,by,fun) Aggregate by groups; formula form: aggregate(cbind(y1,y2) ~ g1+g2, data=df, FUN)
 do.call(fun,args)   Call function with arg list
 ```
 

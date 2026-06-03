@@ -2,23 +2,36 @@
 
 ## Unreleased
 
-### Engine — formula support for `aggregate()`
+### Engine — formula support for `aggregate()` (multi-term)
 
-`aggregate(value ~ group, data = df, FUN = ...)` now works. It was the
+`aggregate(...)` now accepts the **formula interface**, including
+multi-term formulas:
+
+```r
+aggregate(val ~ grp, data = df, FUN = mean)            # single
+aggregate(y1 ~ g1 + g2, data = df, FUN = mean)         # multiple groups
+aggregate(cbind(y1, y2) ~ g1, data = df, FUN = sum)    # multiple responses
+aggregate(cbind(y1, y2) ~ g1 + g2, data = df, FUN = mean)
+```
+
+Previously only the positional `aggregate(x, by, FUN)` form existed and
+the formula failed with "object '…' not found" — `aggregate` was the
 one formula-aware function missing from the engine's centralized
-formula preprocessor, so its formula failed with "object '…' not
-found". The fix wires `aggregate` into the same mechanism `lm` / `aov`
-/ `t.test` / `manova` already use: the formula is purely an **input
-adapter** — it resolves the response and grouping columns from `data=`
-and hands them to aggregate's existing `(x, by =, FUN =)` core, so the
-split-apply math is unchanged.
+formula handling.
 
-- Both `FUN = mean` (named) and a positional function arg work.
-- Phase 1 covers a single response and a single grouping factor;
-  `cbind()` / `a + b` multi-term formulas are a later phase.
-- Regression tests pin it, including a t.test **formula↔vector
-  equivalence** check (the formula path must yield identical
-  statistics to the two-vector call).
+The fix introduces **`formula_frame`**, a small "model.frame"-style
+input adapter in the engine that splits a formula into its response
+columns (handling `cbind(...)`) and grouping factors (handling
+`a + b`), resolving each name against `data=`. It only *assembles named
+columns* — the split-apply math (FUN applied per group) is unchanged,
+so results match the non-formula form.
+
+- Output columns now use the **real source names** (`g1`, `g2`, `y1`,
+  `y2`) and are ordered by grouping level, matching R (previously the
+  single-variable path emitted generic `Group`/`Value`).
+- Both `FUN = mean` (named) and a positional function argument work.
+- Regression tests pin single, multi-group, multi-response, and a
+  t.test **formula↔vector equivalence** check.
 
 Note (unchanged behaviour): `t.test`, `lm`, `aov`, one-sample `t.test`,
 and `manova(cbind(...) ~ g)` already handled formulas correctly.
