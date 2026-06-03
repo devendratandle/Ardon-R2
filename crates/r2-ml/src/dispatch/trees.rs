@@ -33,7 +33,7 @@ pub fn bi_rpart(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mask = vec![true; m];
     let tree = build_tree(&mat.data, &y, m, n, &mask, max_depth, min_samples, 0, is_class);
 
-    println!("\nDecision tree ({}, depth={}):", tree_type, max_depth);
+    soutln!("\nDecision tree ({}, depth={}):", tree_type, max_depth);
     print_tree(&tree, 0, &col_names);
 
     // Training accuracy / MSE
@@ -41,12 +41,12 @@ pub fn bi_rpart(a: &[EvalArg]) -> Result<RVal, R2Err> {
     if is_class {
         let correct = preds.iter().zip(y.iter())
             .filter(|(p, y)| (**p as i64) == (**y as i64)).count();
-        println!("\nTraining accuracy: {}/{} ({}%)", correct, m,
+        soutln!("\nTraining accuracy: {}/{} ({}%)", correct, m,
             fmt_num(correct as f64 / m as f64 * 100.0));
     } else {
         let mse: f64 = preds.iter().zip(y.iter())
             .map(|(p, y)| (p - y).powi(2)).sum::<f64>() / m as f64;
-        println!("\nTraining MSE: {}", fmt_num(mse));
+        soutln!("\nTraining MSE: {}", fmt_num(mse));
     }
 
     // Build the rpart TypeInstance with serialized tree fields
@@ -92,7 +92,7 @@ pub fn bi_rf(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let is_class   = tree_type != "regression";
     let (m, n)     = (mat.nrow, mat.ncol);
 
-    println!("Random Forest: {} trees, max_depth={}, features={}", ntrees, max_depth, n);
+    soutln!("Random Forest: {} trees, max_depth={}, features={}", ntrees, max_depth, n);
 
     // Heap-allocated locals captured by the per-tree closure. Cloned once so
     // the closure is `Sync` (required by kernel::par_for's parallel path).
@@ -135,7 +135,7 @@ pub fn bi_rf(a: &[EvalArg]) -> Result<RVal, R2Err> {
         }
         let correct = final_preds.iter().zip(y.iter())
             .filter(|(p, y)| (**p as i64) == (**y as i64)).count();
-        println!("Training accuracy: {}/{} ({}%)", correct, m,
+        soutln!("Training accuracy: {}/{} ({}%)", correct, m,
             fmt_num(correct as f64 / m as f64 * 100.0));
     } else {
         for i in 0..m {
@@ -143,20 +143,20 @@ pub fn bi_rf(a: &[EvalArg]) -> Result<RVal, R2Err> {
         }
         let mse: f64 = final_preds.iter().zip(y.iter())
             .map(|(p, y)| (p - y).powi(2)).sum::<f64>() / m as f64;
-        println!("Training MSE: {}", fmt_num(mse));
+        soutln!("Training MSE: {}", fmt_num(mse));
     }
 
     let pred_vals: Vec<Real> = final_preds.iter().map(|p| Some(*p)).collect();
     let total_splits: usize = importance.iter().sum();
     if total_splits > 0 {
-        println!("\nFeature importance:");
+        soutln!("\nFeature importance:");
         let mut imp_idx: Vec<(usize, f64)> = importance.iter().enumerate()
             .map(|(i, &c)| (i, c as f64 / total_splits as f64 * 100.0)).collect();
         imp_idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         for (i, pct) in imp_idx.iter().take(n.min(10)) {
             if *pct > 0.0 {
                 let label = col_names.get(*i).map(|s| s.as_str()).unwrap_or("?");
-                println!("  {}: {}%", label, fmt_num(*pct));
+                soutln!("  {}: {}%", label, fmt_num(*pct));
             }
         }
     }
@@ -210,7 +210,7 @@ pub fn bi_gbm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mut trees: Vec<TreeNode> = Vec::new();
     let mut train_losses: Vec<f64> = Vec::new();
 
-    println!("Gradient Boosted Trees: {} trees, lr={}, depth={}, loss={}",
+    soutln!("Gradient Boosted Trees: {} trees, lr={}, depth={}, loss={}",
         ntrees, lr, max_depth, loss_type);
 
     for t in 0..ntrees {
@@ -271,10 +271,10 @@ pub fn bi_gbm(a: &[EvalArg]) -> Result<RVal, R2Err> {
         train_losses.push(loss);
 
         if (t + 1) % 25 == 0 || t == ntrees - 1 {
-            print!("\r  Iter {}/{}: loss = {}", t + 1, ntrees, fmt_num(loss));
+            sout!("\r  Iter {}/{}: loss = {}", t + 1, ntrees, fmt_num(loss));
         }
     }
-    println!();
+    soutln!();
 
     // Final predictions
     let final_preds: Vec<f64> = if is_classification {
@@ -285,13 +285,13 @@ pub fn bi_gbm(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     if is_classification {
         let correct = final_preds.iter().zip(y.iter()).filter(|(p, y)| (**p as i64) == (**y as i64)).count();
-        println!("Training accuracy: {}/{} ({}%)", correct, m, fmt_num(correct as f64 / m as f64 * 100.0));
+        soutln!("Training accuracy: {}/{} ({}%)", correct, m, fmt_num(correct as f64 / m as f64 * 100.0));
     } else {
         let mse = final_preds.iter().zip(y.iter()).map(|(p, y)| (p - y).powi(2)).sum::<f64>() / m as f64;
         let y_mean = y.iter().sum::<f64>() / m as f64;
         let ss_tot = y.iter().map(|y| (y - y_mean).powi(2)).sum::<f64>();
         let r2 = 1.0 - (mse * m as f64) / ss_tot;
-        println!("Training MSE: {},  R²: {}", fmt_num(mse), fmt_num(r2));
+        soutln!("Training MSE: {},  R²: {}", fmt_num(mse), fmt_num(r2));
     }
 
     // Feature importance
@@ -299,14 +299,14 @@ pub fn bi_gbm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     for tree in &trees { count_splits(tree, &mut importance); }
     let total_splits: usize = importance.iter().sum();
     if total_splits > 0 {
-        println!("\nFeature importance:");
+        soutln!("\nFeature importance:");
         let mut imp_idx: Vec<(usize, f64)> = importance.iter().enumerate()
             .map(|(i, &c)| (i, c as f64 / total_splits as f64 * 100.0)).collect();
         imp_idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         for (i, pct) in imp_idx.iter().take(n.min(10)) {
             if *pct > 0.0 {
                 let label = col_names.get(*i).map(|s| s.as_str()).unwrap_or("?");
-                println!("  {}: {}%", label, fmt_num(*pct));
+                soutln!("  {}: {}%", label, fmt_num(*pct));
             }
         }
     }

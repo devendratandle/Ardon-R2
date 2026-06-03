@@ -42,8 +42,8 @@ pub(crate) fn bi_system_time(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Res
     let start = std::time::Instant::now();
     let _ = e.call_fn(&func, &[], env)?;
     let elapsed = start.elapsed();
-    println!("   user  system elapsed");
-    println!("  {:.3}   0.000   {:.3}", elapsed.as_secs_f64(), elapsed.as_secs_f64());
+    soutln!("   user  system elapsed");
+    soutln!("  {:.3}   0.000   {:.3}", elapsed.as_secs_f64(), elapsed.as_secs_f64());
     Ok(RVal::Null)
 }
 
@@ -165,8 +165,8 @@ pub(crate) fn bi_install_from_dir(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) ->
     };
     let m = r2_pkg::install_from_dir(std::path::Path::new(&path))
         .map_err(|e| R2Err { msg: format!("{}", e), kind: ErrKind::Runtime })?;
-    println!("* installing package '{}' (version {}) from {}", m.name, m.version, path);
-    println!("* DONE — load with library(\"{}\")", m.name);
+    soutln!("* installing package '{}' (version {}) from {}", m.name, m.version, path);
+    soutln!("* DONE — load with library(\"{}\")", m.name);
     Ok(RVal::Null)
 }
 
@@ -209,8 +209,8 @@ pub(crate) fn bi_install_from_zip(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) ->
     let m = r2_pkg::install_from_dir(&src_dir)
         .map_err(|e| R2Err { msg: format!("{}", e), kind: ErrKind::Runtime })?;
     let _ = std::fs::remove_dir_all(&tmp);
-    println!("* installing package '{}' (version {}) from {}", m.name, m.version, zip_path);
-    println!("* DONE — load with library(\"{}\")", m.name);
+    soutln!("* installing package '{}' (version {}) from {}", m.name, m.version, zip_path);
+    soutln!("* DONE — load with library(\"{}\")", m.name);
     Ok(RVal::Null)
 }
 
@@ -276,8 +276,8 @@ pub(crate) fn bi_install_from_github(_e: &mut Engine, a: &[EvalArg], _: &EnvRef)
         .map_err(|e| R2Err { msg: format!("{}", e), kind: ErrKind::Runtime })?;
     let _ = std::fs::remove_dir_all(&tmp);
     let from_str = match subdir { Some(s) => format!("github:{}/{}", spec, s), None => format!("github:{}", spec) };
-    println!("* installing package '{}' (version {}) from {}", m.name, m.version, from_str);
-    println!("* DONE — load with library(\"{}\")", m.name);
+    soutln!("* installing package '{}' (version {}) from {}", m.name, m.version, from_str);
+    soutln!("* DONE — load with library(\"{}\")", m.name);
     Ok(RVal::Null)
 }
 
@@ -289,7 +289,7 @@ pub(crate) fn bi_uninstall(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     };
     r2_pkg::uninstall(&name)
         .map_err(|e| R2Err { msg: format!("{}", e), kind: ErrKind::Runtime })?;
-    println!("* removed package '{}'", name);
+    soutln!("* removed package '{}'", name);
     Ok(RVal::Null)
 }
 
@@ -374,7 +374,7 @@ pub(crate) fn bi_install_packages(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -
         let m = r2_pkg::install_from_dir(std::path::Path::new(&path))
             .map_err(|e| R2Err { msg: format!("{}", e), kind: ErrKind::Runtime })?;
         verify_name(&m.name, &name);
-        println!("* installed '{}' (version {}) from local dir {}", m.name, m.version, path);
+        soutln!("* installed '{}' (version {}) from local dir {}", m.name, m.version, path);
         return Ok(RVal::Null);
     }
 
@@ -609,7 +609,7 @@ fn _deleted_legacy_bi_boxplot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resu
     }
     svg.push_str("</svg>");
     let _ = std::fs::write("boxplot.svg", &svg);
-    println!("Boxplot saved to boxplot.svg");
+    soutln!("Boxplot saved to boxplot.svg");
     Ok(RVal::Null)
 }
 
@@ -658,7 +658,7 @@ fn _legacy_bi_barplot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     }
     svg.push_str("</svg>");
     let _ = std::fs::write("barplot.svg", &svg);
-    println!("Barplot saved to barplot.svg");
+    soutln!("Barplot saved to barplot.svg");
     Ok(RVal::Null)
 }
 
@@ -783,11 +783,11 @@ pub(crate) fn bi_confint(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
             // Standard errors (simplified — assumes diagonal of (X'X)^-1 * sigma^2)
             let se = sigma / (df.sqrt());
 
-            println!("{:>15} {:>15} {:>15}", "", fmt_num(alpha/2.0*100.0).to_string() + " %", fmt_num((1.0-alpha/2.0)*100.0).to_string() + " %");
+            soutln!("{:>15} {:>15} {:>15}", "", fmt_num(alpha/2.0*100.0).to_string() + " %", fmt_num((1.0-alpha/2.0)*100.0).to_string() + " %");
             for (i, name) in names.iter().enumerate() {
                 let lo = coeffs[i] - t_crit * se;
                 let hi = coeffs[i] + t_crit * se;
-                println!("{:>15} {:>15} {:>15}", name, fmt_num(lo), fmt_num(hi));
+                soutln!("{:>15} {:>15} {:>15}", name, fmt_num(lo), fmt_num(hi));
             }
             Ok(RVal::Null)
         }

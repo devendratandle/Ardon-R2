@@ -27,10 +27,10 @@ pub fn bi_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 }
             }
             counts.sort_by(|a, b| a.0.cmp(&b.0));
-            for (k, _) in &counts { print!("{:>12}", k); }
-            println!();
-            for (_, v) in &counts { print!("{:>12}", v); }
-            println!();
+            for (k, _) in &counts { sout!("{:>12}", k); }
+            soutln!();
+            for (_, v) in &counts { sout!("{:>12}", v); }
+            soutln!();
             let names: Vec<Character> = counts.iter().map(|(k, _)| Some(Arc::from(k.as_str()))).collect();
             let vals: Vec<Integer> = counts.iter().map(|(_, v)| Some(*v as i32)).collect();
             let mut attrs = Attrs::default();
@@ -48,10 +48,10 @@ pub fn bi_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 }
             }
             counts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            for (k, _) in &counts { print!("{:>8}", k); }
-            println!();
-            for (_, v) in &counts { print!("{:>8}", v); }
-            println!();
+            for (k, _) in &counts { sout!("{:>8}", k); }
+            soutln!();
+            for (_, v) in &counts { sout!("{:>8}", v); }
+            soutln!();
             // Engine compatibility: numeric path returns scalar count.
             Ok(RVal::Integer(vec![Some(counts.len() as i32)].into(), Attrs::default()))
         }
@@ -62,10 +62,10 @@ pub fn bi_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
                     if let Some(entry) = counts.get_mut(*idx as usize) { entry.1 += 1; }
                 }
             }
-            for (k, _) in &counts { print!("{:>12}", k); }
-            println!();
-            for (_, v) in &counts { print!("{:>12}", v); }
-            println!();
+            for (k, _) in &counts { sout!("{:>12}", k); }
+            soutln!();
+            for (_, v) in &counts { sout!("{:>12}", v); }
+            soutln!();
             let names: Vec<Character> = counts.iter().map(|(k, _)| Some(Arc::from(k.as_str()))).collect();
             let vals: Vec<Integer> = counts.iter().map(|(_, v)| Some(*v as i32)).collect();
             let mut attrs = Attrs::default();

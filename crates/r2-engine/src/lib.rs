@@ -28,6 +28,30 @@ pub type BuiltinFn = fn(&mut Engine, &[EvalArg], &EnvRef) -> Result<RVal, R2Err>
 // `use ::*` line brings each shim into the same scope as a bare
 // `bi_plot` / `bi_hist` etc. so the registration tables below don't
 // need a `builtins::graphics::` prefix.
+// ── Routed output macros ─────────────────────────────────────────────
+// Drop-in stdout-macro replacements that send formatted builtin output
+// (str, summary, data-frame printing, package + mode messages, …)
+// through the GUI/CLI-capturable sink (r2_types::out) instead of the raw
+// process console — a windowed GUI has none. Defined before the module
+// declarations so the builtin submodules can use them.
+macro_rules! soutln {
+    () => { $crate::__rout("\n") };
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}\n", format_args!($($arg)*))) };
+}
+macro_rules! sout {
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}", format_args!($($arg)*))) };
+}
+#[allow(unused_macros)]
+macro_rules! serrln {
+    () => { $crate::__rerr("\n") };
+    ($($arg:tt)*) => { $crate::__rerr(&format!("{}\n", format_args!($($arg)*))) };
+}
+#[doc(hidden)]
+pub fn __rout(s: &str) { r2_types::out::rout(s); }
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn __rerr(s: &str) { r2_types::out::rerr(s); }
+
 mod builtins;
 use builtins::core::*;
 use builtins::data_apply::*;
@@ -140,7 +164,7 @@ impl Engine {
     }
 
     /// Emit a line through the active output sink. Used by builtins
-    /// (and gradually-migrated `println!` sites).
+    /// (and gradually-migrated `soutln!` sites).
     pub fn emit_output(&mut self, text: &str) {
         self.output_sink.write_output(text);
     }
@@ -736,8 +760,8 @@ impl Engine {
                             let start = std::time::Instant::now();
                             let _ = self.eval_in(&first_arg.value, env)?;
                             let elapsed = start.elapsed();
-                            println!("   user  system elapsed");
-                            println!("  {:.3}   0.000   {:.3}", elapsed.as_secs_f64(), elapsed.as_secs_f64());
+                            soutln!("   user  system elapsed");
+                            soutln!("  {:.3}   0.000   {:.3}", elapsed.as_secs_f64(), elapsed.as_secs_f64());
                             return Ok(RVal::Null);
                         }
                     }
@@ -2043,24 +2067,24 @@ fn bi_library(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> 
     // 1. Check if already loaded and attached
     let already = e.registry.layers.iter().any(|l| l.name == name);
     if already {
-        println!("package '{}' is already loaded", name);
+        soutln!("package '{}' is already loaded", name);
         return Ok(RVal::Null);
     }
 
     // 2. Try to re-attach a known base package (compiled into binary)
     let base_result = try_reload_base(e, &name);
     if base_result {
-        println!("Loading package: '{}'", name);
+        soutln!("Loading package: '{}'", name);
         // Print masking warnings
-        for w in e.drain_warnings() { println!("{}", w); }
+        for w in e.drain_warnings() { soutln!("{}", w); }
         return Ok(RVal::Null);
     }
 
     // 3. Try to load from disk (addon package)
     let loaded = try_load_from_disk(e, &name)?;
     if loaded {
-        println!("Loading package: '{}'", name);
-        for w in e.drain_warnings() { println!("{}", w); }
+        soutln!("Loading package: '{}'", name);
+        for w in e.drain_warnings() { soutln!("{}", w); }
         return Ok(RVal::Null);
     }
 
@@ -2071,7 +2095,7 @@ fn bi_require(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err
     match bi_library(e, a, env) {
         Ok(_) => Ok(rbool(true)),
         Err(e) => {
-            println!("Warning: {}", e.msg);
+            soutln!("Warning: {}", e.msg);
             Ok(rbool(false))
         }
     }
@@ -2089,9 +2113,9 @@ fn bi_detach(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
 
     match e.detach_package(&name) {
         Ok(restored) => {
-            println!("Detached package: '{}'", name);
+            soutln!("Detached package: '{}'", name);
             if !restored.is_empty() {
-                println!("Restored functions: {}", restored.join(", "));
+                soutln!("Restored functions: {}", restored.join(", "));
             }
             Ok(RVal::Null)
         }
@@ -2101,7 +2125,7 @@ fn bi_detach(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
 
 fn bi_installed_packages(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     // Show base packages (always available)
-    println!("{:<20} {:<10} {}", "Package", "Version", "Tier");
+    soutln!("{:<20} {:<10} {}", "Package", "Version", "Tier");
     
 
     // Built-in base packages
@@ -2114,13 +2138,13 @@ fn bi_installed_packages(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<R
     ];
     for (name, ver, tier) in &base_pkgs {
         let status = if e.registry.layers.iter().any(|l| l.name == *name) { "loaded" } else { "available" };
-        println!("{:<20} {:<10} {} [{}]", name, ver, tier, status);
+        soutln!("{:<20} {:<10} {} [{}]", name, ver, tier, status);
     }
 
     // Installed addons from disk
     for (name, info) in &e.installed {
         let status = if e.registry.layers.iter().any(|l| l.name == *name) { "loaded" } else { "installed" };
-        println!("{:<20} {:<10} addon [{}]", name, info.version, status);
+        soutln!("{:<20} {:<10} addon [{}]", name, info.version, status);
     }
 
     // Scan disk for packages not yet discovered
@@ -2133,7 +2157,7 @@ fn bi_installed_packages(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<R
                     if !e.installed.contains_key(&pkg_name)
                         && entry.path().join("MANIFEST.toml").exists()
                     {
-                        println!("{:<20} {:<10} addon [installed]", pkg_name, "?");
+                        soutln!("{:<20} {:<10} addon [installed]", pkg_name, "?");
                     }
                 }
             }
@@ -2153,7 +2177,7 @@ fn bi_lib_paths(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err
         match &gv(a, 0) {
             RVal::Character(v, _) => {
                 e.lib_paths = v.iter().filter_map(|x| x.as_ref().map(|s| s.to_string())).collect();
-                println!("Library paths updated");
+                soutln!("Library paths updated");
                 Ok(RVal::Null)
             }
             _ => err!(Runtime, ".libPaths() needs character vector"),
@@ -2535,7 +2559,7 @@ fn _legacy_bi_legend(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 
     svg = svg.replace("</svg>", &format!("{}</svg>", elems));
     let _ = std::fs::write(svg_path, &svg);
-    println!("Legend added to {}", svg_path);
+    soutln!("Legend added to {}", svg_path);
     Ok(RVal::Null)
 }
 

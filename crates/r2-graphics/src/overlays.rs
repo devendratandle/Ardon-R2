@@ -30,7 +30,7 @@ pub fn bi_lines(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
     append_svg(&elems)?;
     let _ = save_to_file("plot.svg");
-    println!("Lines added to plot.svg");
+    soutln!("Lines added to plot.svg");
     Ok(RVal::Null)
 }
 
@@ -53,7 +53,7 @@ pub fn bi_points(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
     append_svg(&elems)?;
     let _ = save_to_file("plot.svg");
-    println!("Points added to plot.svg");
+    soutln!("Points added to plot.svg");
     Ok(RVal::Null)
 }
 
@@ -88,7 +88,7 @@ pub fn bi_abline(a: &[EvalArg]) -> Result<RVal, R2Err> {
     };
     append_svg(&elem)?;
     let _ = save_to_file("plot.svg");
-    println!("Line added to plot.svg");
+    soutln!("Line added to plot.svg");
     Ok(RVal::Null)
 }
 
@@ -129,7 +129,7 @@ pub fn bi_legend(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
     append_svg(&elems)?;
     let _ = save_to_file("plot.svg");
-    println!("Legend added to plot.svg");
+    soutln!("Legend added to plot.svg");
     Ok(RVal::Null)
 }
 

@@ -34,6 +34,19 @@
 //!
 //! See r2-stats for the locked-in pattern this crate will follow.
 
+// Routed output macros — see r2_types::out. Send formatted output to the
+// GUI/CLI sink instead of raw stdout (a windowed GUI has no console).
+macro_rules! soutln {
+    () => { $crate::__rout("\n") };
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}\n", format_args!($($arg)*))) };
+}
+#[allow(unused_macros)]
+macro_rules! sout {
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}", format_args!($($arg)*))) };
+}
+#[doc(hidden)]
+pub fn __rout(s: &str) { r2_types::out::rout(s); }
+
 pub mod tree;
 pub mod data;
 pub mod dispatch;

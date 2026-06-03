@@ -14,6 +14,19 @@
 //! Phase R.2 spine: cbind + rbind + their shared `coerce_to_columns`
 //! helper. Other domain functions migrate in subsequent sessions.
 
+// Routed output macros — see r2_types::out. Send formatted output to the
+// GUI/CLI sink instead of raw stdout (a windowed GUI has no console).
+macro_rules! soutln {
+    () => { $crate::__rout("\n") };
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}\n", format_args!($($arg)*))) };
+}
+#[allow(unused_macros)]
+macro_rules! sout {
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}", format_args!($($arg)*))) };
+}
+#[doc(hidden)]
+pub fn __rout(s: &str) { r2_types::out::rout(s); }
+
 pub mod bind;
 pub mod concat;
 pub mod dplyr;

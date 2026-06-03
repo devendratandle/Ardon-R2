@@ -70,15 +70,15 @@ fn summary_dataframe(df: &DataFrame) {
     });
 
     // Print headers + 6-row summary block.
-    for h in &headers { print!("{}", h); }
-    println!();
+    for h in &headers { sout!("{}", h); }
+    soutln!();
     for row in 0..6 {
         for (ci, _) in headers.iter().enumerate() {
             let s = col_summaries.get(ci).and_then(|c| c.get(row))
                 .map(|s| s.as_str()).unwrap_or("");
-            print!("{:<18}", s);
+            sout!("{:<18}", s);
         }
-        println!();
+        soutln!();
     }
 }
 
@@ -132,13 +132,13 @@ fn compute_one(item: &ColData) -> Vec<String> {
 
 fn summary_numeric(v: &[Real]) {
     let mut n: Vec<f64> = v.iter().filter_map(|x| *x).collect();
-    if n.is_empty() { println!("No data"); return; }
+    if n.is_empty() { soutln!("No data"); return; }
     n.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let len = n.len();
     let mean = n.iter().sum::<f64>() / len as f64;
     let median = if len % 2 == 0 { (n[len/2 - 1] + n[len/2]) / 2.0 } else { n[len/2] };
-    println!("   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.");
-    println!("{:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+    soutln!("   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.");
+    soutln!("{:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
         fmt_num(n[0]), fmt_num(n[len/4]), fmt_num(median),
         fmt_num(mean), fmt_num(n[3 * len / 4]), fmt_num(n[len - 1]));
 }

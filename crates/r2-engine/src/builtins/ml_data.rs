@@ -393,7 +393,7 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
         }
     }
 
-    println!("Read {} rows × {} columns from '{}'", nrow, ncol, path);
+    soutln!("Read {} rows × {} columns from '{}'", nrow, ncol, path);
     Ok(RVal::DataFrame(DataFrame { columns, row_names: None }))
 }
 

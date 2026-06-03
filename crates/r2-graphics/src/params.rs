@@ -276,7 +276,7 @@ pub fn bi_dev_view(_a: &[EvalArg]) -> Result<RVal, R2Err> {
     match crate::server::ensure_started() {
         Some(port) => {
             crate::server::open_browser(port);
-            println!(
+            soutln!(
                 "Ardon-R2 plot viewer at http://127.0.0.1:{}/  (auto-refreshes when you call plot())",
                 port
             );
@@ -284,7 +284,7 @@ pub fn bi_dev_view(_a: &[EvalArg]) -> Result<RVal, R2Err> {
             // stay alive for the browser to reach it. In REPL mode this
             // happens naturally. In script mode, end your script with
             // Sys.sleep(N) or the server dies when the script exits.
-            println!("  (REPL: stays alive automatically. Script: end with Sys.sleep(N) or the server exits.)");
+            soutln!("  (REPL: stays alive automatically. Script: end with Sys.sleep(N) or the server exits.)");
             Ok(rstr(&format!("http://127.0.0.1:{}/", port)))
         }
         None => Err(R2Err {
@@ -325,7 +325,7 @@ pub fn bi_save_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let abs = crate::device::save_plot(&path, width, height)?;
     let display = abs.to_string_lossy();
     let clean = display.strip_prefix(r"\\?\").unwrap_or(&display);
-    println!("Plot saved to {}", clean);
+    soutln!("Plot saved to {}", clean);
     Ok(RVal::Character(vec![Some(Arc::from(clean))], Attrs::default()))
 }
 

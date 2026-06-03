@@ -289,9 +289,9 @@ fn print_save_path(rel: &str) {
             let display = abs.to_string_lossy();
             // Strip Windows \\?\ prefix that canonicalize adds.
             let clean = display.strip_prefix(r"\\?\").unwrap_or(&display);
-            println!("Plot saved to {}", clean);
+            soutln!("Plot saved to {}", clean);
         }
-        Err(_) => println!("Plot saved to {}", rel),
+        Err(_) => soutln!("Plot saved to {}", rel),
     }
 }
 

@@ -78,7 +78,7 @@ pub(crate) fn bi_help(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
         "summary" | "str" | "head" | "tail" | "names" | "dim" | "class" => "Data inspection functions:\n  summary(x)  — summary statistics\n  str(x)      — structure\n  head(x, n)  — first n rows\n  tail(x, n)  — last n rows\n  names(x)    — column names\n  dim(x)      — dimensions\n  class(x)    — type/class",
         _ => "Ardon-R2 Help System — Available topics:\n\n  Statistics:  lm, glm, t.test, chisq.test, cor, cor.test\n               aov, anova, shapiro.test, wilcox.test, fisher.test\n               mean, sd, var, median, quantile, IQR, weighted.mean\n  ML:          rpart, rf, gbm, kmeans, knn, prcomp, naive.bayes\n  Evaluation:  cv, confusion.matrix\n  Graphics:    plot, hist, boxplot, barplot\n  Data:        read.csv, filter, select, mutate, arrange\n  Session:     save, load, version\n  Core:        c, library, data.frame, matrix, scale, .Internal\n  Inspection:  summary, str, head, tail, names, dim, class\n\n  Type help(\"topic\") or ?topic for details.",
     };
-    println!("\n{}\n", help_text);
+    soutln!("\n{}\n", help_text);
     Ok(RVal::Null)
 }
 
@@ -148,16 +148,16 @@ pub(crate) fn bi_data(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
         RVal::Character(v, _) => {
             let name = v[0].as_ref().map(|s| s.to_string()).unwrap_or_default();
             if e.global_env.lookup(&name).is_some() {
-                println!("Dataset '{}' is already loaded", name);
+                soutln!("Dataset '{}' is already loaded", name);
             } else {
-                println!("Dataset '{}' not found", name);
+                soutln!("Dataset '{}' not found", name);
             }
         }
         RVal::DataFrame(_) => {
-            println!("Dataset is already loaded in the environment");
+            soutln!("Dataset is already loaded in the environment");
         }
         _ => {
-            println!("Available datasets: iris, mtcars, airquality");
+            soutln!("Available datasets: iris, mtcars, airquality");
         }
     }
     Ok(RVal::Null)
@@ -322,7 +322,7 @@ pub(crate) fn bi_readline(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
         other => val_to_str(other),
     };
     if !prompt_str.is_empty() {
-        print!("{}", prompt_str);
+        sout!("{}", prompt_str);
         let _ = std::io::stdout().flush();
     }
     let mut line = String::new();
@@ -395,7 +395,7 @@ pub(crate) fn bi_save(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
         std::fs::write(&path, &out).map_err(|e| R2Err{msg:format!("cannot save to '{}': {}", path, e),kind:ErrKind::Runtime})?;
         let ext = path.rsplit('.').next().unwrap_or("");
         let kind = match ext { "r2m" => "model", "r2d" => "data", _ => "object" };
-        println!("Saved {} ({}) to '{}'", kind, obj.type_name(), path);
+        soutln!("Saved {} ({}) to '{}'", kind, obj.type_name(), path);
     } else {
         // Session save — all variables
         let mut count = 0;
@@ -408,7 +408,7 @@ pub(crate) fn bi_save(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
             }
         }
         std::fs::write(&path, &out).map_err(|e| R2Err{msg:format!("cannot save to '{}': {}", path, e),kind:ErrKind::Runtime})?;
-        println!("Saved {} objects to '{}'", count, path);
+        soutln!("Saved {} objects to '{}'", count, path);
     }
     Ok(RVal::Null)
 }
@@ -429,7 +429,7 @@ pub(crate) fn bi_load(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
                 if name == "_obj" {
                     // Single-object file — return immediately with the value.
                     let kind = match ext { "r2m" => "model", "r2d" => "data", _ => "object" };
-                    println!("Loaded {} ({}) from '{}'", kind, val.type_name(), path);
+                    soutln!("Loaded {} ({}) from '{}'", kind, val.type_name(), path);
                     return Ok(val);
                 }
                 env_insert(&mut e.global_env, Arc::from(name), val);
@@ -437,7 +437,7 @@ pub(crate) fn bi_load(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
             }
         }
     }
-    println!("Loaded {} objects from '{}'", count, path);
+    soutln!("Loaded {} objects from '{}'", count, path);
     Ok(RVal::Null)
 }
 
@@ -589,31 +589,31 @@ pub(crate) fn bi_confusion_matrix(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> 
     }
 
     // Print
-    println!("\nConfusion Matrix:");
-    print!("{:>12}", "Predicted→");
-    for c in &classes { print!("{:>8}", c); }
-    println!("{:>10}", "Total");
+    soutln!("\nConfusion Matrix:");
+    sout!("{:>12}", "Predicted→");
+    for c in &classes { sout!("{:>8}", c); }
+    soutln!("{:>10}", "Total");
     
 
     let n = pred.len();
     let mut correct = 0;
     for (ai, ac) in classes.iter().enumerate() {
-        print!("Actual {:>4} ", ac);
+        sout!("Actual {:>4} ", ac);
         let mut row_total = 0;
         for pi in 0..k {
-            print!("{:>8}", cm[ai * k + pi]);
+            sout!("{:>8}", cm[ai * k + pi]);
             row_total += cm[ai * k + pi];
             if ai == pi { correct += cm[ai * k + pi]; }
         }
-        println!("{:>10}", row_total);
+        soutln!("{:>10}", row_total);
     }
 
     
     let accuracy = correct as f64 / n as f64;
-    println!("Accuracy: {}/{} ({}%)", correct, n, fmt_num(accuracy * 100.0));
+    soutln!("Accuracy: {}/{} ({}%)", correct, n, fmt_num(accuracy * 100.0));
 
     // Per-class precision and recall
-    println!("\n{:>8} {:>10} {:>10} {:>10}", "Class", "Precision", "Recall", "F1");
+    soutln!("\n{:>8} {:>10} {:>10} {:>10}", "Class", "Precision", "Recall", "F1");
     for (ci, c) in classes.iter().enumerate() {
         let tp = cm[ci * k + ci] as f64;
         let pred_total: f64 = (0..k).map(|ai| cm[ai * k + ci] as f64).sum();
@@ -621,7 +621,7 @@ pub(crate) fn bi_confusion_matrix(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> 
         let precision = if pred_total > 0.0 { tp / pred_total } else { 0.0 };
         let recall = if actual_total > 0.0 { tp / actual_total } else { 0.0 };
         let f1 = if precision + recall > 0.0 { 2.0 * precision * recall / (precision + recall) } else { 0.0 };
-        println!("{:>8} {:>10} {:>10} {:>10}", c, fmt_num(precision), fmt_num(recall), fmt_num(f1));
+        soutln!("{:>8} {:>10} {:>10} {:>10}", c, fmt_num(precision), fmt_num(recall), fmt_num(f1));
     }
 
     let mut fields = HashMap::new();
@@ -644,18 +644,18 @@ pub(crate) fn bi_mutate(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
 // ═══════════════════════════════════════════════════════════════════════
 
 pub(crate) fn bi_version(_: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    println!("\nR2 — Statistical Computing, Reimagined");
-    println!("Version: 0.1.1");
-    println!("Created by: Devendra Tandale");
-    println!("An AI assisted project");
-    println!("Platform: {} ({})", std::env::consts::OS, std::env::consts::ARCH);
-    println!("Kernel: r2-linalg (pure Rust, no C/C++ dependencies)");
-    println!("ML algorithms: 12 built-in");
-    println!("Parallel cores: {}", rayon::current_num_threads());
-    println!("Functions: 191+");
-    println!("Codebase: 9,800+ lines of Rust");
-    println!("License: AGPL v3");
-    println!();
+    soutln!("\nR2 — Statistical Computing, Reimagined");
+    soutln!("Version: 0.1.1");
+    soutln!("Created by: Devendra Tandale");
+    soutln!("An AI assisted project");
+    soutln!("Platform: {} ({})", std::env::consts::OS, std::env::consts::ARCH);
+    soutln!("Kernel: r2-linalg (pure Rust, no C/C++ dependencies)");
+    soutln!("ML algorithms: 12 built-in");
+    soutln!("Parallel cores: {}", rayon::current_num_threads());
+    soutln!("Functions: 191+");
+    soutln!("Codebase: 9,800+ lines of Rust");
+    soutln!("License: AGPL v3");
+    soutln!();
     Ok(RVal::Null)
 }
 
@@ -668,7 +668,7 @@ pub(crate) fn bi_clear(_: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVa
     // ANSI escape: \x1b[2J clears the visible region; \x1b[3J clears the scrollback
     // (supported by Windows Terminal, modern conhost, and all *nix terminals).
     // \x1b[H homes the cursor.
-    print!("\x1b[3J\x1b[2J\x1b[H");
+    sout!("\x1b[3J\x1b[2J\x1b[H");
     let _ = std::io::stdout().flush();
     Ok(RVal::Null)
 }

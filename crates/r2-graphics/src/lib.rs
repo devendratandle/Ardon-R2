@@ -19,6 +19,19 @@
 use r2_types::{EvalArg, R2Err, RVal};
 use std::fmt::Write;
 
+// Routed output macros — see r2_types::out. Send formatted output to the
+// GUI/CLI sink instead of raw stdout (a windowed GUI has no console).
+macro_rules! soutln {
+    () => { $crate::__rout("\n") };
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}\n", format_args!($($arg)*))) };
+}
+#[allow(unused_macros)]
+macro_rules! sout {
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}", format_args!($($arg)*))) };
+}
+#[doc(hidden)]
+pub fn __rout(s: &str) { r2_types::out::rout(s); }
+
 pub mod colors;
 pub mod device;
 pub mod overlays;

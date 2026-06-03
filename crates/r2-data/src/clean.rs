@@ -88,7 +88,7 @@ pub fn bi_na_omit(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 (name.clone(), filter_col_by_mask(col, &keep))
             }).collect();
             let removed = keep.iter().filter(|x| !**x).count();
-            if removed > 0 { println!("Removed {} rows with NA values", removed); }
+            if removed > 0 { soutln!("Removed {} rows with NA values", removed); }
             Ok(RVal::DataFrame(DataFrame { columns, row_names: None }))
         }
         _ => Ok(first_arg(a)),

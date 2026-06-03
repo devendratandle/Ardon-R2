@@ -156,20 +156,20 @@ pub fn bi_kmeans(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let total_withinss: f64 = withinss.iter().sum();
     let betweenss = totss - total_withinss;
 
-    println!("K-means clustering with {} clusters of sizes {}", k,
+    soutln!("K-means clustering with {} clusters of sizes {}", k,
         sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", "));
-    println!("\nCluster means:");
-    print!("     ");
-    for j in 0..n { print!("  {:>10}", col_names.get(j).map(|s| s.as_str()).unwrap_or("?")); }
-    println!();
+    soutln!("\nCluster means:");
+    sout!("     ");
+    for j in 0..n { sout!("  {:>10}", col_names.get(j).map(|s| s.as_str()).unwrap_or("?")); }
+    soutln!();
     for c in 0..k {
-        print!("  [{}]", c + 1);
-        for j in 0..n { print!("  {:>10}", fmt_num(centroids[c * n + j])); }
-        println!();
+        sout!("  [{}]", c + 1);
+        for j in 0..n { sout!("  {:>10}", fmt_num(centroids[c * n + j])); }
+        soutln!();
     }
-    println!("\nWithin cluster sum of squares by cluster:");
-    for w in &withinss { print!("  {}", fmt_num(*w)); }
-    println!("\n(between_SS / total_SS = {}%)", fmt_num(betweenss / totss * 100.0));
+    soutln!("\nWithin cluster sum of squares by cluster:");
+    for w in &withinss { sout!("  {}", fmt_num(*w)); }
+    soutln!("\n(between_SS / total_SS = {}%)", fmt_num(betweenss / totss * 100.0));
 
     let cluster_vals: Vec<Integer> = cluster.iter().map(|c| Some((*c + 1) as i32)).collect();
     let mut centers_mat = Matrix::new(centroids, k, n);
@@ -210,7 +210,7 @@ pub fn bi_cv(a: &[EvalArg]) -> Result<RVal, R2Err> {
         return Err(R2Err { msg: "cv: k must be between 2 and nrow".into(), kind: ErrKind::Runtime });
     }
 
-    println!("{}-fold cross-validation (model: {})", k, model_type);
+    soutln!("{}-fold cross-validation (model: {})", k, model_type);
     let fold_size = m / k;
 
     // Per-fold worker — pure function over its inputs, no shared mutable state.
@@ -299,7 +299,7 @@ pub fn bi_cv(a: &[EvalArg]) -> Result<RVal, R2Err> {
             }
         };
 
-        println!("  Fold {}: MSE = {}", fold + 1, fmt_num(metric));
+        soutln!("  Fold {}: MSE = {}", fold + 1, fmt_num(metric));
         Ok(metric)
     };
 
@@ -315,7 +315,7 @@ pub fn bi_cv(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     let avg = fold_metrics.iter().sum::<f64>() / k as f64;
     let sd = (fold_metrics.iter().map(|x| (x - avg).powi(2)).sum::<f64>() / (k - 1) as f64).sqrt();
-    println!("\nAverage MSE: {} (±{})", fmt_num(avg), fmt_num(sd));
+    soutln!("\nAverage MSE: {} (±{})", fmt_num(avg), fmt_num(sd));
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("mse"), rnums(&fold_metrics));
@@ -366,7 +366,7 @@ pub fn bi_knn(a: &[EvalArg]) -> Result<RVal, R2Err> {
         predictions.push(Some(best as f64));
     }
 
-    println!("KNN: classified {} points using k={}", n_test, k);
+    soutln!("KNN: classified {} points using k={}", n_test, k);
     Ok(RVal::Numeric(predictions.into(), Attrs::default()))
 }
 
@@ -415,9 +415,9 @@ pub fn bi_naive_bayes(a: &[EvalArg]) -> Result<RVal, R2Err> {
         for j in 0..n { class_vars[ci * n + j] /= (class_counts[ci] - 1).max(1) as f64; }
     }
 
-    println!("Naive Bayes classifier: {} classes, {} features", k, n);
+    soutln!("Naive Bayes classifier: {} classes, {} features", k, n);
     for ci in 0..k {
-        println!("  Class {}: prior={}, n={}", classes[ci], fmt_num(class_priors[ci]), class_counts[ci]);
+        soutln!("  Class {}: prior={}, n={}", classes[ci], fmt_num(class_priors[ci]), class_counts[ci]);
     }
 
     let mut fields = HashMap::new();

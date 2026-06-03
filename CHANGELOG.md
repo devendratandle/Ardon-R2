@@ -17,15 +17,19 @@ Fix — route stats output through the existing buffer terminal:
 - New `r2_types::out` — a thread-local, line-buffered output hook. The
   GUI installs a hook forwarding each line to its `ConsoleBuffer`; the
   CLI leaves it unset and falls back to stdout (unchanged behavior).
-- r2-stats now emits via `soutln!` / `sout!` (≈157 sites) instead of
-  `println!` / `print!`, so results flow to whichever frontend is
-  active.
+- All formatted output across **r2-stats, r2-engine, r2-data, r2-ml,
+  r2-graphics** (~360 `println!`/`print!` sites) now emits via
+  `soutln!` / `sout!` → the routed sink, so results flow to whichever
+  frontend is active. This covers `t.test` / `chisq.test` / `aov` /
+  `manova` *and* `summary`, `str`, ML model output (rf/gbm/kmeans),
+  `system.time`, package/mode messages, etc.
 - The self-printing tests/ANOVA functions are marked auto-print-silent,
   so the redundant `<htest model>` / `NULL` no longer trails the
   formatted output (in both GUI and CLI).
 
-Now `t.test(...)`, `chisq.test(...)`, `aov(...)`, `manova(...)` show
-their full formatted results in the GUI exactly as in the CLI.
+Now statistical and model output shows in the desktop GUI console
+exactly as in the CLI terminal — the previously empty/`<… model>`
+results are gone.
 
 ### Linear algebra — `solve()` and `det()` exposed
 

@@ -241,12 +241,12 @@ pub use r2_stats::rng::parallel_random;
 pub fn print_tree(node: &TreeNode, depth: usize, col_names: &[String]) {
     let indent = "  ".repeat(depth);
     if node.is_leaf {
-        println!("{}* predict: {} (n={})", indent, r2_types::fmt_num(node.prediction), node.n_samples);
+        soutln!("{}* predict: {} (n={})", indent, r2_types::fmt_num(node.prediction), node.n_samples);
     } else {
         let fname = col_names.get(node.feature).map(|s| s.as_str()).unwrap_or("?");
-        println!("{}{} <= {} (n={})", indent, fname, r2_types::fmt_num(node.threshold), node.n_samples);
+        soutln!("{}{} <= {} (n={})", indent, fname, r2_types::fmt_num(node.threshold), node.n_samples);
         if let Some(ref left) = node.left { print_tree(left, depth + 1, col_names); }
-        println!("{}{} > {}", indent, fname, r2_types::fmt_num(node.threshold));
+        soutln!("{}{} > {}", indent, fname, r2_types::fmt_num(node.threshold));
         if let Some(ref right) = node.right { print_tree(right, depth + 1, col_names); }
     }
 }

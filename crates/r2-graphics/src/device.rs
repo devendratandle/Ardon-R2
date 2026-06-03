@@ -338,8 +338,8 @@ pub fn begin_plot() -> (f64, f64, f64, f64) {
     if AUTOVIEW_LAUNCHED.get().is_none() && !env_disabled && !prog_disabled {
         let _ = AUTOVIEW_LAUNCHED.set(());
         if let Some(port) = crate::server::ensure_started() {
-            println!("Plot viewer opened in browser: http://127.0.0.1:{}/", port);
-            println!("  (set R2_NO_AUTOVIEW=1 to disable, or close the tab any time.)");
+            soutln!("Plot viewer opened in browser: http://127.0.0.1:{}/", port);
+            soutln!("  (set R2_NO_AUTOVIEW=1 to disable, or close the tab any time.)");
             crate::server::open_browser(port);
         }
     }

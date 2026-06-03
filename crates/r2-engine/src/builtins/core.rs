@@ -176,8 +176,8 @@ pub(crate) fn bi_as_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     }
 }
 pub(crate) fn bi_as_int(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; Ok(RVal::Integer(v.into_iter().map(|x| x.map(|n| n as i32)).collect(), Attrs::default())) }
-pub(crate) fn bi_strict(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Strict; println!("Mode: strict"); Ok(RVal::Null) }
-pub(crate) fn bi_lenient(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Lenient; println!("Mode: lenient"); Ok(RVal::Null) }
+pub(crate) fn bi_strict(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Strict; soutln!("Mode: strict"); Ok(RVal::Null) }
+pub(crate) fn bi_lenient(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Lenient; soutln!("Mode: lenient"); Ok(RVal::Null) }
 pub(crate) fn bi_df(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let cols: Vec<(Arc<str>, RVal)> = a.iter().enumerate().map(|(i,arg)| { let n = arg.name.clone().unwrap_or_else(|| Arc::from(format!("V{}",i+1).as_str())); (n, arg.value.clone()) }).collect(); Ok(RVal::DataFrame(DataFrame { columns: cols, row_names: None })) }
 pub(crate) fn bi_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(RVal::List(a.iter().map(|x| (x.name.clone(), x.value.clone())).collect())) }
 
@@ -325,7 +325,7 @@ pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     let v = gv(a,0);
     match &v {
         RVal::DataFrame(df) => {
-            println!("'data.frame':  {} obs. of  {} variables:", df.nrow(), df.ncol());
+            soutln!("'data.frame':  {} obs. of  {} variables:", df.nrow(), df.ncol());
             for (n, c) in &df.columns {
                 let preview = match c {
                     RVal::Numeric(v, _) => {
@@ -350,14 +350,14 @@ pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
                     }
                     _ => format!(" {}", c.type_name()),
                 };
-                println!(" $ {:15}:{}", n, preview);
+                soutln!(" $ {:15}:{}", n, preview);
             }
         }
-        RVal::Numeric(v, _) => { let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect(); println!(" num [1:{}] {}", v.len(), vals.join(" ")); }
-        RVal::Integer(v, _) => { let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).collect(); println!(" int [1:{}] {}", v.len(), vals.join(" ")); }
-        RVal::Character(v, _) => { let vals: Vec<String> = v.iter().take(5).map(|x| match x { Some(s) => format!("\"{}\"", s), None => "NA".into() }).collect(); println!(" chr [1:{}] {}", v.len(), vals.join(" ")); }
-        RVal::List(items) => { println!("List of {}", items.len()); for (i, (n, v)) in items.iter().enumerate().take(10) { let label = n.as_ref().map(|s| format!("${}", s)).unwrap_or(format!("[[{}]]", i+1)); println!(" {} : {} [1:{}]", label, v.type_name(), rval_length(v)); } }
-        _ => println!(" {} [1:{}]", v.type_name(), rval_length(&v)),
+        RVal::Numeric(v, _) => { let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect(); soutln!(" num [1:{}] {}", v.len(), vals.join(" ")); }
+        RVal::Integer(v, _) => { let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).collect(); soutln!(" int [1:{}] {}", v.len(), vals.join(" ")); }
+        RVal::Character(v, _) => { let vals: Vec<String> = v.iter().take(5).map(|x| match x { Some(s) => format!("\"{}\"", s), None => "NA".into() }).collect(); soutln!(" chr [1:{}] {}", v.len(), vals.join(" ")); }
+        RVal::List(items) => { soutln!("List of {}", items.len()); for (i, (n, v)) in items.iter().enumerate().take(10) { let label = n.as_ref().map(|s| format!("${}", s)).unwrap_or(format!("[[{}]]", i+1)); soutln!(" {} : {} [1:{}]", label, v.type_name(), rval_length(v)); } }
+        _ => soutln!(" {} [1:{}]", v.type_name(), rval_length(&v)),
     }
     Ok(RVal::Null)
 }
@@ -445,26 +445,26 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
             };
 
             // Print columns side by side
-            for h in &headers { print!("{}", h); }
-            println!();
+            for h in &headers { sout!("{}", h); }
+            soutln!();
             for row in 0..6 {
                 for (ci, _) in headers.iter().enumerate() {
                     let s = col_summaries.get(ci).and_then(|c| c.get(row)).map(|s| s.as_str()).unwrap_or("");
-                    print!("{:<18}", s);
+                    sout!("{:<18}", s);
                 }
-                println!();
+                soutln!();
             }
             Ok(RVal::Null)
         }
         RVal::Numeric(v,_) => {
             let mut n: Vec<f64> = v.iter().filter_map(|x| *x).collect();
-            if n.is_empty() { println!("No data"); return Ok(RVal::Null); }
+            if n.is_empty() { soutln!("No data"); return Ok(RVal::Null); }
             n.sort_by(|a,b| a.partial_cmp(b).unwrap());
             let len = n.len();
             let mean = n.iter().sum::<f64>() / len as f64;
             let median = if len % 2 == 0 { (n[len/2-1] + n[len/2]) / 2.0 } else { n[len/2] };
-            println!("   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.");
-            println!("{:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+            soutln!("   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.");
+            soutln!("{:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
                 fmt_num(n[0]), fmt_num(n[len/4]), fmt_num(median),
                 fmt_num(mean), fmt_num(n[3*len/4]), fmt_num(n[len-1]));
             Ok(RVal::Null)
@@ -485,7 +485,7 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                     let call = inst.fields.get("call")
                         .map(|v| val_to_str(v))
                         .unwrap_or_else(|| format!("{}(formula)", inst.type_name));
-                    println!("\nCall:\n{}", call);
+                    soutln!("\nCall:\n{}", call);
                     // Residuals summary
                     if let Some(res) = inst.fields.get("residuals") {
                         let r: Vec<f64> = e.as_reals(res).unwrap_or_default().into_iter().filter_map(|x| x).collect();
@@ -493,9 +493,9 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                             let mut sorted = r.clone();
                             sorted.sort_by(|a,b| a.partial_cmp(b).unwrap());
                             let n = sorted.len();
-                            println!("\nResiduals:");
-                            println!("      Min        1Q    Median        3Q       Max");
-                            println!("{:>9} {:>9} {:>9} {:>9} {:>9}",
+                            soutln!("\nResiduals:");
+                            soutln!("      Min        1Q    Median        3Q       Max");
+                            soutln!("{:>9} {:>9} {:>9} {:>9} {:>9}",
                                 fmt_num(sorted[0]), fmt_num(sorted[n/4]),
                                 fmt_num(sorted[n/2]), fmt_num(sorted[3*n/4]),
                                 fmt_num(sorted[n-1]));
@@ -526,8 +526,8 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                         } else {
                             ("t value", "Pr(>|t|)")
                         };
-                        println!("\nCoefficients:");
-                        println!("{:<15} {:>12} {:>12} {:>10} {:>10}",
+                        soutln!("\nCoefficients:");
+                        soutln!("{:<15} {:>12} {:>12} {:>10} {:>10}",
                             "", "Estimate", "Std. Error", stat_label, pval_label);
                         for i in 0..coeffs.len() {
                             let s = se.get(i).copied().unwrap_or(0.0);
@@ -535,14 +535,14 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                             let p = pv.get(i).copied().unwrap_or(1.0);
                             let stars = signif_stars(p);
                             let p_str = fmt_pval(p);
-                            println!("{:<15} {:>12} {:>12} {:>10} {:>10} {}",
+                            soutln!("{:<15} {:>12} {:>12} {:>10} {:>10} {}",
                                 names.get(i).map(|s| s.as_str()).unwrap_or("?"),
                                 fmt_num(coeffs[i]), fmt_num(s), fmt_num(t), p_str, stars);
                         }
-                        println!("---");
-                        println!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+                        soutln!("---");
+                        soutln!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
                     }
-                    println!();
+                    soutln!();
                     // Residual standard error / R² / F-statistic are LM-specific
                     // (gaussian linear model with closed-form OLS). For GLM the
                     // analogous diagnostics are residual deviance + AIC, printed
@@ -550,20 +550,20 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                     if !is_glm {
                         if let Some(sig) = inst.fields.get("sigma") {
                             let sv = e.scalar_f64(sig).ok().flatten().unwrap_or(0.0);
-                            print!("Residual standard error: {}", fmt_num(sv));
+                            sout!("Residual standard error: {}", fmt_num(sv));
                             if let Some(df) = inst.fields.get("df") {
                                 let dv = e.scalar_f64(df).ok().flatten().unwrap_or(0.0);
-                                print!(" on {} degrees of freedom", dv as i32);
+                                sout!(" on {} degrees of freedom", dv as i32);
                             }
-                            println!();
+                            soutln!();
                         }
                         if let Some(r2) = inst.fields.get("r.squared") {
                             let rv = e.scalar_f64(r2).ok().flatten().unwrap_or(0.0);
-                            print!("Multiple R-squared:  {},", fmt_num(rv));
+                            sout!("Multiple R-squared:  {},", fmt_num(rv));
                         }
                         if let Some(ar2) = inst.fields.get("adj.r.squared") {
                             let av = e.scalar_f64(ar2).ok().flatten().unwrap_or(0.0);
-                            println!("  Adjusted R-squared:  {}", fmt_num(av));
+                            soutln!("  Adjusted R-squared:  {}", fmt_num(av));
                         }
                     }
                     if !is_glm { if let Some(fs) = inst.fields.get("f.statistic") {
@@ -572,9 +572,9 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                             let dv = e.scalar_f64(df).ok().flatten().unwrap_or(0.0) as i32;
                             let coefs: Vec<f64> = inst.fields.get("coefficients").and_then(|v| e.as_reals(v).ok()).unwrap_or_default().into_iter().filter_map(|x| x).collect();
                             let p_1 = coefs.len().saturating_sub(1);
-                            println!("F-statistic: {} on {} and {} DF", fmt_num(fv), p_1, dv);
+                            soutln!("F-statistic: {} on {} and {} DF", fmt_num(fv), p_1, dv);
                         } else {
-                            println!("F-statistic: {}", fmt_num(fv));
+                            soutln!("F-statistic: {}", fmt_num(fv));
                         }
                     } }
                     // GLM-specific diagnostics: Null/Residual deviance + AIC + Fisher iterations.
@@ -582,54 +582,54 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                         if let Some(d) = inst.fields.get("dispersion") {
                             let dv = e.scalar_f64(d).ok().flatten().unwrap_or(1.0);
                             let fam = inst.fields.get("family").map(|v| val_to_str(v)).unwrap_or_default();
-                            println!();
-                            println!("(Dispersion parameter for {} family taken to be {})", fam, fmt_num(dv));
+                            soutln!();
+                            soutln!("(Dispersion parameter for {} family taken to be {})", fam, fmt_num(dv));
                         }
                         if let (Some(nd), Some(dfn)) = (inst.fields.get("null.deviance"), inst.fields.get("df.null")) {
                             let ndv = e.scalar_f64(nd).ok().flatten().unwrap_or(0.0);
                             let dfn = e.scalar_f64(dfn).ok().flatten().unwrap_or(0.0) as i32;
-                            println!();
-                            println!("    Null deviance: {} on {} degrees of freedom", fmt_num(ndv), dfn);
+                            soutln!();
+                            soutln!("    Null deviance: {} on {} degrees of freedom", fmt_num(ndv), dfn);
                         }
                         if let (Some(rd), Some(dfr)) = (inst.fields.get("deviance"), inst.fields.get("df.residual")) {
                             let rdv = e.scalar_f64(rd).ok().flatten().unwrap_or(0.0);
                             let dfr = e.scalar_f64(dfr).ok().flatten().unwrap_or(0.0) as i32;
-                            println!("Residual deviance: {} on {} degrees of freedom", fmt_num(rdv), dfr);
+                            soutln!("Residual deviance: {} on {} degrees of freedom", fmt_num(rdv), dfr);
                         }
                         if let Some(aic) = inst.fields.get("aic") {
                             let av = e.scalar_f64(aic).ok().flatten().unwrap_or(0.0);
-                            println!("AIC: {}", fmt_num(av));
+                            soutln!("AIC: {}", fmt_num(av));
                         }
                         if let Some(it) = inst.fields.get("iter") {
                             let iv = e.scalar_f64(it).ok().flatten().unwrap_or(0.0) as i32;
-                            println!();
-                            println!("Number of Fisher Scoring iterations: {}", iv);
+                            soutln!();
+                            soutln!("Number of Fisher Scoring iterations: {}", iv);
                         }
                     }
                 }
                 "rpart" => {
-                    println!("\nDecision Tree Summary:");
-                    if let Some(tp) = inst.fields.get("type") { println!("Type: {}", tp); }
-                    if let Some(md) = inst.fields.get("max_depth") { println!("Max depth: {}", md); }
-                    if let Some(pred) = inst.fields.get("predictions") { println!("Training samples: {}", rval_length(pred)); }
+                    soutln!("\nDecision Tree Summary:");
+                    if let Some(tp) = inst.fields.get("type") { soutln!("Type: {}", tp); }
+                    if let Some(md) = inst.fields.get("max_depth") { soutln!("Max depth: {}", md); }
+                    if let Some(pred) = inst.fields.get("predictions") { soutln!("Training samples: {}", rval_length(pred)); }
                 }
                 "rf" => {
-                    println!("\nRandom Forest Summary:");
-                    if let Some(nt) = inst.fields.get("ntrees") { println!("Number of trees: {}", nt); }
-                    if let Some(tp) = inst.fields.get("type") { println!("Type: {}", tp); }
-                    if let Some(pred) = inst.fields.get("predictions") { println!("Training samples: {}", rval_length(pred)); }
+                    soutln!("\nRandom Forest Summary:");
+                    if let Some(nt) = inst.fields.get("ntrees") { soutln!("Number of trees: {}", nt); }
+                    if let Some(tp) = inst.fields.get("type") { soutln!("Type: {}", tp); }
+                    if let Some(pred) = inst.fields.get("predictions") { soutln!("Training samples: {}", rval_length(pred)); }
                 }
                 "gbm" => {
-                    println!("\nGradient Boosted Trees Summary:");
-                    if let Some(nt) = inst.fields.get("ntrees") { println!("Number of trees: {}", nt); }
-                    if let Some(lr) = inst.fields.get("learning_rate") { println!("Learning rate: {}", lr); }
-                    if let Some(loss) = inst.fields.get("loss") { println!("Loss function: {}", loss); }
+                    soutln!("\nGradient Boosted Trees Summary:");
+                    if let Some(nt) = inst.fields.get("ntrees") { soutln!("Number of trees: {}", nt); }
+                    if let Some(lr) = inst.fields.get("learning_rate") { soutln!("Learning rate: {}", lr); }
+                    if let Some(loss) = inst.fields.get("loss") { soutln!("Loss function: {}", loss); }
                     if let Some(tl) = inst.fields.get("train.loss") {
                         let losses = e.as_reals(tl).unwrap_or_default();
-                        if let Some(last) = losses.last().and_then(|x| *x) { println!("Final training loss: {}", fmt_num(last)); }
+                        if let Some(last) = losses.last().and_then(|x| *x) { soutln!("Final training loss: {}", fmt_num(last)); }
                     }
                     if let Some(imp) = inst.fields.get("importance") {
-                        println!("Feature importance:");
+                        soutln!("Feature importance:");
                         let vals = e.as_reals(imp).unwrap_or_default();
                         let names: Vec<String> = inst.fields.get("xnames")
                             .and_then(|v| if let RVal::Character(cs, _) = v { Some(cs.iter().map(|x| x.as_ref().map(|s| s.to_string()).unwrap_or_default()).collect()) } else { None })
@@ -639,66 +639,66 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                         for (i, pct) in indexed.iter().take(10) {
                             if *pct > 0.0 {
                                 let label = names.get(*i).map(|s| s.as_str()).unwrap_or("?");
-                                println!("  {}: {}%", label, fmt_num(*pct));
+                                soutln!("  {}: {}%", label, fmt_num(*pct));
                             }
                         }
                     }
                 }
                 "kmeans" => {
-                    println!("\nK-means Clustering Summary:");
-                    if let Some(sz) = inst.fields.get("size") { println!("Cluster sizes: {}", sz); }
-                    if let Some(tw) = inst.fields.get("tot.withinss") { println!("Total within-SS: {}", tw); }
-                    if let Some(bs) = inst.fields.get("betweenss") { println!("Between-SS: {}", bs); }
+                    soutln!("\nK-means Clustering Summary:");
+                    if let Some(sz) = inst.fields.get("size") { soutln!("Cluster sizes: {}", sz); }
+                    if let Some(tw) = inst.fields.get("tot.withinss") { soutln!("Total within-SS: {}", tw); }
+                    if let Some(bs) = inst.fields.get("betweenss") { soutln!("Between-SS: {}", bs); }
                     if let Some(ts) = inst.fields.get("totss") {
                         if let Some(bs) = inst.fields.get("betweenss") {
                             let tot = e.scalar_f64(ts).ok().flatten().unwrap_or(1.0);
                             let bet = e.scalar_f64(bs).ok().flatten().unwrap_or(0.0);
-                            println!("Between/Total: {}%", fmt_num(bet / tot * 100.0));
+                            soutln!("Between/Total: {}%", fmt_num(bet / tot * 100.0));
                         }
                     }
                 }
                 "prcomp" => {
-                    println!("\nPCA Summary:");
-                    if let Some(sd) = inst.fields.get("sdev") { println!("Standard deviations: {}", sd); }
-                    if let Some(pv) = inst.fields.get("prop.variance") { println!("Proportion of variance: {}", pv); }
+                    soutln!("\nPCA Summary:");
+                    if let Some(sd) = inst.fields.get("sdev") { soutln!("Standard deviations: {}", sd); }
+                    if let Some(pv) = inst.fields.get("prop.variance") { soutln!("Proportion of variance: {}", pv); }
                 }
                 "cv" => {
-                    println!("\nCross-Validation Summary:");
-                    if let Some(k) = inst.fields.get("k") { println!("Folds: {}", k); }
-                    if let Some(mm) = inst.fields.get("mean.mse") { println!("Mean MSE: {}", mm); }
-                    if let Some(sd) = inst.fields.get("sd.mse") { println!("SD MSE: {}", sd); }
+                    soutln!("\nCross-Validation Summary:");
+                    if let Some(k) = inst.fields.get("k") { soutln!("Folds: {}", k); }
+                    if let Some(mm) = inst.fields.get("mean.mse") { soutln!("Mean MSE: {}", mm); }
+                    if let Some(sd) = inst.fields.get("sd.mse") { soutln!("SD MSE: {}", sd); }
                 }
                 "confusion" => {
-                    println!("\nConfusion Matrix Summary:");
-                    if let Some(acc) = inst.fields.get("accuracy") { println!("Accuracy: {}", acc); }
+                    soutln!("\nConfusion Matrix Summary:");
+                    if let Some(acc) = inst.fields.get("accuracy") { soutln!("Accuracy: {}", acc); }
                 }
                 "aov" | "anova" => {
                     // Already printed by aov()/anova() — just suppress field dump
                     let fv = inst.fields.get("f.statistic").and_then(|v| e.scalar_f64(v).ok().flatten()).unwrap_or(0.0);
                     let pv = inst.fields.get("p.value").and_then(|v| e.scalar_f64(v).ok().flatten()).unwrap_or(1.0);
-                    println!("\nANOVA: F = {}, p-value = {}", fmt_num(fv), fmt_pval(pv));
+                    soutln!("\nANOVA: F = {}, p-value = {}", fmt_num(fv), fmt_pval(pv));
                 }
                 "cor.test" | "shapiro.test" | "wilcox.test" | "fisher.test" | "htest" => {
                     // Already printed by test function — show key result
                     if let Some(pv) = inst.fields.get("p.value") {
                         let p = e.scalar_f64(pv).ok().flatten().unwrap_or(1.0);
-                        println!("p-value: {}", fmt_pval(p));
+                        soutln!("p-value: {}", fmt_pval(p));
                     }
                     if let Some(est) = inst.fields.get("estimate") {
                         let ev = e.scalar_f64(est).ok().flatten().unwrap_or(0.0);
-                        println!("estimate: {}", fmt_num(ev));
+                        soutln!("estimate: {}", fmt_num(ev));
                     }
                 }
                 _ => {
-                    println!("\n<{}>", inst.type_name);
+                    soutln!("\n<{}>", inst.type_name);
                     for (k, v) in &inst.fields {
-                        if !k.starts_with('_') { println!("  ${}: {}", k, v); }
+                        if !k.starts_with('_') { soutln!("  ${}: {}", k, v); }
                     }
                 }
             }
             Ok(RVal::Null)
         }
-        _ => { println!("{}", v); Ok(RVal::Null) }
+        _ => { soutln!("{}", v); Ok(RVal::Null) }
     }
 }
-pub(crate) fn bi_search(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { for p in e.registry.search_path() { println!("{}", p); } Ok(RVal::Null) }
+pub(crate) fn bi_search(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { for p in e.registry.search_path() { soutln!("{}", p); } Ok(RVal::Null) }
