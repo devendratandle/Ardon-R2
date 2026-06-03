@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### GUI bug fix — statistical output now appears in the desktop console
+
+**Serious fix.** In the GUI, `t.test`, `chisq.test`, `aov`, `manova`,
+`wilcox.test`, etc. printed **nothing useful** — only `<htest model>`
+or `NULL`. Cause: r2-stats formatted its results with `println!` →
+process **stdout**, which the CLI terminal shows but the **windowed GUI
+has no console for** (it captures engine output through a sink). So the
+formatted test output was silently lost, and only the return value's
+placeholder `Display` showed.
+
+Fix — route stats output through the existing buffer terminal:
+
+- New `r2_types::out` — a thread-local, line-buffered output hook. The
+  GUI installs a hook forwarding each line to its `ConsoleBuffer`; the
+  CLI leaves it unset and falls back to stdout (unchanged behavior).
+- r2-stats now emits via `soutln!` / `sout!` (≈157 sites) instead of
+  `println!` / `print!`, so results flow to whichever frontend is
+  active.
+- The self-printing tests/ANOVA functions are marked auto-print-silent,
+  so the redundant `<htest model>` / `NULL` no longer trails the
+  formatted output (in both GUI and CLI).
+
+Now `t.test(...)`, `chisq.test(...)`, `aov(...)`, `manova(...)` show
+their full formatted results in the GUI exactly as in the CLI.
+
 ### Linear algebra — `solve()` and `det()` exposed
 
 `solve()` and `det()` are now callable functions (previously reachable

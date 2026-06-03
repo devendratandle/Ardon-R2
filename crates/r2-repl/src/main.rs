@@ -287,7 +287,15 @@ fn is_silent(e: &Expr) -> bool {
     // R does this via invisible(); we mark a small set by name.
     if let Expr::Call { func, .. } = e {
         if let Expr::Symbol(s) = func.as_ref() {
-            return matches!(s.as_ref(), "print" | "cat" | "message" | "warning" | "writeLines" | "invisible");
+            return matches!(s.as_ref(),
+                "print" | "cat" | "message" | "warning" | "writeLines" | "invisible" |
+                // Hypothesis tests / ANOVA print their own formatted output
+                // as a side effect and return an htest/model object whose
+                // Display is just "<… model>" — don't auto-print that.
+                "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
+                "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
+                "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
+                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test");
         }
     }
     false

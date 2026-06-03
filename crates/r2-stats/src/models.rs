@@ -679,18 +679,18 @@ pub fn bi_aov(a: &[EvalArg]) -> Result<RVal, R2Err> {
         crate::htest::f_sf(f_stat, df_between, df_within)
     } else { 1.0 };
 
-    println!("\nAnalysis of Variance Table\n");
-    println!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}", "Source", "Df", "Sum Sq", "Mean Sq", "F value", "Pr(>F)");
+    soutln!("\nAnalysis of Variance Table\n");
+    soutln!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}", "Source", "Df", "Sum Sq", "Mean Sq", "F value", "Pr(>F)");
     let p_str = fmt_pval(p_value);
     let stars = signif_stars(p_value);
-    println!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10} {}",
+    soutln!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10} {}",
         "Treatment", k - 1, fmt_num(ss_between), fmt_num(ms_between), fmt_num(f_stat), p_str, stars);
-    println!("{:<15} {:>5} {:>12} {:>12}", "Residuals", n - k, fmt_num(ss_within), fmt_num(ms_within));
-    println!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
-    println!("\nGroup means:");
+    soutln!("{:<15} {:>5} {:>12} {:>12}", "Residuals", n - k, fmt_num(ss_within), fmt_num(ms_within));
+    soutln!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+    soutln!("\nGroup means:");
     let max_name = unique_groups.iter().map(|g| g.len()).max().unwrap_or(5);
     for (i, g) in unique_groups.iter().enumerate() {
-        println!("  {:>w$}  {:>10}  (n={})", g, fmt_num(group_means[i]), group_sizes[i], w = max_name);
+        soutln!("  {:>w$}  {:>10}  (n={})", g, fmt_num(group_means[i]), group_sizes[i], w = max_name);
     }
 
     let mut fields = HashMap::new();
@@ -903,27 +903,27 @@ fn aov_repeated_measures(
     };
 
     // ── 5. Print R-compatible multi-stratum table ──────────────────
-    println!();
-    println!("Error: {}", subj_name);
-    println!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}",
+    soutln!();
+    soutln!("Error: {}", subj_name);
+    soutln!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}",
         "Source", "Df", "Sum Sq", "Mean Sq", "F value", "Pr(>F)");
-    println!("{:<15} {:>5} {:>12} {:>12}",
+    soutln!("{:<15} {:>5} {:>12} {:>12}",
         "Residuals", n_subj - 1, fmt_num(ss_subj), fmt_num(ms_subj));
 
-    println!();
-    println!("Error: Within");
-    println!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}",
+    soutln!();
+    soutln!("Error: Within");
+    soutln!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}",
         "Source", "Df", "Sum Sq", "Mean Sq", "F value", "Pr(>F)");
     let p_str = fmt_pval(p_treat);
     let stars = signif_stars(p_treat);
-    println!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10} {}",
+    soutln!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10} {}",
         treat_name, k_treat - 1,
         fmt_num(ss_treat), fmt_num(ms_treat),
         fmt_num(f_treat), p_str, stars);
-    println!("{:<15} {:>5} {:>12} {:>12}",
+    soutln!("{:<15} {:>5} {:>12} {:>12}",
         "Residuals", (n_subj - 1) * (k_treat - 1),
         fmt_num(ss_within), fmt_num(ms_within));
-    println!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+    soutln!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
 
     // ── 6. Return TypeInstance with structured fields ──────────────
     let mut fields = HashMap::new();
@@ -980,14 +980,14 @@ pub fn bi_anova(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 crate::htest::f_sf(f_stat, df_model as f64, df_resid as f64)
             } else { 1.0 };
 
-            println!("\nAnalysis of Variance Table\n");
-            println!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}", "Source", "Df", "Sum Sq", "Mean Sq", "F value", "Pr(>F)");
+            soutln!("\nAnalysis of Variance Table\n");
+            soutln!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10}", "Source", "Df", "Sum Sq", "Mean Sq", "F value", "Pr(>F)");
             let p_str = fmt_pval(p_value);
             let stars = signif_stars(p_value);
-            println!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10} {}",
+            soutln!("{:<15} {:>5} {:>12} {:>12} {:>10} {:>10} {}",
                 "Model", df_model, fmt_num(ss_model), fmt_num(ms_model), fmt_num(f_stat), p_str, stars);
-            println!("{:<15} {:>5} {:>12} {:>12}", "Residuals", df_resid, fmt_num(ss_resid), fmt_num(ms_resid));
-            println!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+            soutln!("{:<15} {:>5} {:>12} {:>12}", "Residuals", df_resid, fmt_num(ss_resid), fmt_num(ms_resid));
+            soutln!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
 
             let mut fields = HashMap::new();
             fields.insert(Arc::from("f.statistic"), rnum(f_stat));

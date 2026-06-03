@@ -151,6 +151,21 @@ fn main() -> Result<(), String> {
     engine.set_output_sink(Box::new(GuiSink { buf: buffer.clone() }));
     let engine = Rc::new(RefCell::new(engine));
 
+    // Route r2-stats output (t.test / aov / manova / chisq.test / …) into
+    // the same console buffer. Those functions format and emit their
+    // results through `r2_types::out` (a thread-local hook), NOT the engine
+    // sink — and a windowed app has no console, so without this hook the
+    // output would be silently lost. The engine evaluates on this (main)
+    // thread, matching the thread-local hook installed here.
+    {
+        let buf = buffer.clone();
+        r2_types::out::set_output_hook(Some(Box::new(move |line: &str, is_err: bool| {
+            if let Ok(mut b) = buf.lock() {
+                if is_err { b.push_error(line); } else { b.push_output(line); }
+            }
+        })));
+    }
+
     let mdi = Rc::new(RefCell::new(MdiHost::new()));
     // Default sizes chosen to read at the same visual proportion R's
     // RGui ships with — Console slightly wider than tall, Graphics

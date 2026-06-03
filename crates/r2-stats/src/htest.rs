@@ -425,14 +425,14 @@ fn welch_two_sample(
     let ci_hi = diff + t_crit * se;
     let conf_pct = (conf_level * 100.0).round() as i64;
 
-    println!("\n\tWelch Two Sample t-test\n");
-    println!("data:  {}", data_line);
-    println!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), fmt_n(df), fmt_n(p_value));
-    println!("alternative hypothesis: true difference in means is not equal to 0");
-    println!("{} percent confidence interval:", conf_pct);
-    println!("  {}  {}", fmt_n(ci_lo), fmt_n(ci_hi));
-    println!("sample estimates:");
-    println!("mean of {} = {}, mean of {} = {}", lab_x, fmt_n(mx), lab_y, fmt_n(my));
+    soutln!("\n\tWelch Two Sample t-test\n");
+    soutln!("data:  {}", data_line);
+    soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), fmt_n(df), fmt_n(p_value));
+    soutln!("alternative hypothesis: true difference in means is not equal to 0");
+    soutln!("{} percent confidence interval:", conf_pct);
+    soutln!("  {}  {}", fmt_n(ci_lo), fmt_n(ci_hi));
+    soutln!("sample estimates:");
+    soutln!("mean of {} = {}, mean of {} = {}", lab_x, fmt_n(mx), lab_y, fmt_n(my));
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("statistic"), rnum(t_stat));
@@ -551,16 +551,16 @@ fn paired_t_test(
     let my = y.iter().sum::<f64>() / nf;
     let cor = pearson_r(x, y);
 
-    println!("\n\tPaired t-test\n");
-    println!("data:  {}", data_line);
-    println!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), fmt_n(df), fmt_n(p_value));
-    println!("alternative hypothesis: true mean difference is not equal to {}", fmt_n(mu));
-    println!("{} percent confidence interval:", conf_pct);
-    println!("  {}  {}", fmt_n(ci_lo), fmt_n(ci_hi));
-    println!("sample estimates:");
-    println!("mean of {} = {}, mean of {} = {}", lab_x, fmt_n(mx), lab_y, fmt_n(my));
-    println!("mean of differences ({} - {}) = {}", lab_x, lab_y, fmt_n(mean_d));
-    println!("correlation between pairs (Pearson r) = {}", fmt_n(cor));
+    soutln!("\n\tPaired t-test\n");
+    soutln!("data:  {}", data_line);
+    soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), fmt_n(df), fmt_n(p_value));
+    soutln!("alternative hypothesis: true mean difference is not equal to {}", fmt_n(mu));
+    soutln!("{} percent confidence interval:", conf_pct);
+    soutln!("  {}  {}", fmt_n(ci_lo), fmt_n(ci_hi));
+    soutln!("sample estimates:");
+    soutln!("mean of {} = {}, mean of {} = {}", lab_x, fmt_n(mx), lab_y, fmt_n(my));
+    soutln!("mean of differences ({} - {}) = {}", lab_x, lab_y, fmt_n(mean_d));
+    soutln!("correlation between pairs (Pearson r) = {}", fmt_n(cor));
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("statistic"), rnum(t_stat));
@@ -595,14 +595,14 @@ fn one_sample_t_test(
     let ci_hi = mean + t_crit * se;
     let conf_pct = (conf_level * 100.0).round() as i64;
 
-    println!("\n\tOne Sample t-test\n");
-    println!("data:  {}", lab);
-    println!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), fmt_n(df), fmt_n(p_value));
-    println!("alternative hypothesis: true mean is not equal to {}", fmt_n(mu));
-    println!("{} percent confidence interval:", conf_pct);
-    println!("  {}  {}", fmt_n(ci_lo), fmt_n(ci_hi));
-    println!("sample estimates:");
-    println!("mean of {} = {}", lab, fmt_n(mean));
+    soutln!("\n\tOne Sample t-test\n");
+    soutln!("data:  {}", lab);
+    soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), fmt_n(df), fmt_n(p_value));
+    soutln!("alternative hypothesis: true mean is not equal to {}", fmt_n(mu));
+    soutln!("{} percent confidence interval:", conf_pct);
+    soutln!("  {}  {}", fmt_n(ci_lo), fmt_n(ci_hi));
+    soutln!("sample estimates:");
+    soutln!("mean of {} = {}", lab, fmt_n(mean));
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("statistic"), rnum(t_stat));
@@ -721,7 +721,7 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 };
                 let (xp, yp, dropped) = pair_by_id(&values, &group_strs, &ids, &lab1, &lab2)?;
                 if dropped > 0 {
-                    println!("# t.test paired-by-id: dropped {} subject(s) without both '{}' and '{}' observations",
+                    soutln!("# t.test paired-by-id: dropped {} subject(s) without both '{}' and '{}' observations",
                         dropped, lab1, lab2);
                 }
                 let dl = format!("{} (paired by id, n = {})", data_line, xp.len());
@@ -769,8 +769,8 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
             let p_value = 1.0 - chi_sq_cdf(chi_sq, df);
             let method = if correct { "Pearson's Chi-squared test with Yates' continuity correction" }
                          else { "Pearson's Chi-squared test" };
-            println!("\n  {}\n", method);
-            println!("X-squared = {}, df = {}, p-value = {}", fmt_n(chi_sq), df as i32, fmt_pval(p_value));
+            soutln!("\n  {}\n", method);
+            soutln!("X-squared = {}, df = {}, p-value = {}", fmt_n(chi_sq), df as i32, fmt_pval(p_value));
 
             let mut fields = HashMap::new();
             fields.insert(Arc::from("statistic"), rnum(chi_sq));
@@ -795,8 +795,8 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 .map(|(o, e)| if *e > 0.0 { (o - e).powi(2) / e } else { 0.0 }).sum();
             let df = (k - 1) as f64;
             let p_value = 1.0 - chi_sq_cdf(chi_sq, df);
-            println!("\n  Chi-squared test for given probabilities\n");
-            println!("X-squared = {}, df = {}, p-value = {}", fmt_n(chi_sq), df as i32, fmt_pval(p_value));
+            soutln!("\n  Chi-squared test for given probabilities\n");
+            soutln!("X-squared = {}, df = {}, p-value = {}", fmt_n(chi_sq), df as i32, fmt_pval(p_value));
 
             let mut fields = HashMap::new();
             fields.insert(Arc::from("statistic"), rnum(chi_sq));
@@ -826,12 +826,12 @@ pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let t_stat = if (1.0 - r * r).abs() > 1e-15 { r * (df / (1.0 - r * r)).sqrt() } else { f64::INFINITY };
     let p_value = 2.0 * (1.0 - phi(t_stat.abs()));
 
-    println!("\n  Pearson's product-moment correlation\n");
-    println!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), n - 2, fmt_pval(p_value));
-    println!("alternative hypothesis: true correlation is not equal to 0");
-    println!("sample estimate:");
-    println!("      cor");
-    println!("{:>9}", fmt_n(r));
+    soutln!("\n  Pearson's product-moment correlation\n");
+    soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), n - 2, fmt_pval(p_value));
+    soutln!("alternative hypothesis: true correlation is not equal to 0");
+    soutln!("sample estimate:");
+    soutln!("      cor");
+    soutln!("{:>9}", fmt_n(r));
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("estimate"), rnum(r));
@@ -870,8 +870,8 @@ pub fn bi_shapiro_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let z = (ln_w - mu) / sigma;
     let p_value = (1.0 - phi(z)).clamp(0.0, 1.0);
 
-    println!("\n  Shapiro-Wilk normality test\n");
-    println!("W = {}, p-value = {}", fmt_n(w), fmt_pval(p_value));
+    soutln!("\n  Shapiro-Wilk normality test\n");
+    soutln!("W = {}, p-value = {}", fmt_n(w), fmt_pval(p_value));
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("statistic"), rnum(w));
@@ -909,9 +909,9 @@ pub fn bi_wilcox_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 let z = if sd_u > 0.0 { (u - mean_u) / sd_u } else { 0.0 };
                 let p_value = 2.0 * (1.0 - phi(z.abs()));
 
-                println!("\n  Wilcoxon rank sum test\n");
-                println!("W = {}, p-value = {}", fmt_n(u), fmt_pval(p_value));
-                println!("alternative hypothesis: true location shift is not equal to 0");
+                soutln!("\n  Wilcoxon rank sum test\n");
+                soutln!("W = {}, p-value = {}", fmt_n(u), fmt_pval(p_value));
+                soutln!("alternative hypothesis: true location shift is not equal to 0");
 
                 let mut fields = HashMap::new();
                 fields.insert(Arc::from("statistic"), rnum(u));
@@ -936,9 +936,9 @@ pub fn bi_wilcox_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let z = if sd_w > 0.0 { (w_plus - mean_w) / sd_w } else { 0.0 };
     let p_value = 2.0 * (1.0 - phi(z.abs()));
 
-    println!("\n  Wilcoxon signed rank test\n");
-    println!("V = {}, p-value = {}", fmt_n(w_plus), fmt_pval(p_value));
-    println!("alternative hypothesis: true location is not equal to {}", mu);
+    soutln!("\n  Wilcoxon signed rank test\n");
+    soutln!("V = {}, p-value = {}", fmt_n(w_plus), fmt_pval(p_value));
+    soutln!("alternative hypothesis: true location is not equal to {}", mu);
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("statistic"), rnum(w_plus));
@@ -1008,11 +1008,11 @@ pub fn bi_fisher_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
     let p_value = p_value.clamp(0.0, 1.0);
 
-    println!("\n  Fisher's Exact Test for Count Data\n");
-    println!("p-value = {}", fmt_pval(p_value));
-    println!("alternative hypothesis: true odds ratio is not equal to 1");
-    println!("sample estimate:");
-    println!("odds ratio: {}", fmt_n(or));
+    soutln!("\n  Fisher's Exact Test for Count Data\n");
+    soutln!("p-value = {}", fmt_pval(p_value));
+    soutln!("alternative hypothesis: true odds ratio is not equal to 1");
+    soutln!("sample estimate:");
+    soutln!("odds ratio: {}", fmt_n(or));
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("p.value"), rnum(p_value));

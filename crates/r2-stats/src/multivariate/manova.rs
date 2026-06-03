@@ -384,42 +384,42 @@ pub fn bi_manova(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let p_roy = f_to_pvalue(f_roy, df1_roy, df2_roy);
 
     // ── Print R-style multi-statistic table ─────────────────────────
-    println!("\nMANOVA test summary\n");
-    println!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10}",
+    soutln!("\nMANOVA test summary\n");
+    soutln!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10}",
         "Statistic", "value", "approx F", "num", "den", "Pr(>F)");
-    println!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
+    soutln!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
         "Pillai's trace",
         fmt_num(pillai), fmt_num(f_pillai),
         df1_pillai as i32, df2_pillai as i32,
         fmt_pval(p_pillai), signif_stars(p_pillai));
-    println!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
+    soutln!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
         "Wilks' Lambda",
         fmt_num(wilks), fmt_num(f_wilks),
         df1_wilks as i32, df2_wilks as i32,
         fmt_pval(p_wilks), signif_stars(p_wilks));
-    println!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
+    soutln!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
         "Hotelling-Lawley",
         fmt_num(hotelling_lawley), fmt_num(f_hl),
         df1_hl as i32, df2_hl as i32,
         fmt_pval(p_hl), signif_stars(p_hl));
-    println!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
+    soutln!("{:<18} {:>10} {:>10} {:>5} {:>6} {:>10} {}",
         "Roy's largest root",
         fmt_num(roy_lambda), fmt_num(f_roy),
         df1_roy as i32, df2_roy as i32,
         fmt_pval(p_roy), signif_stars(p_roy));
-    println!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
-    println!();
-    println!("n = {}, groups = {}, p = {}, error df = {}",
+    soutln!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+    soutln!();
+    soutln!("n = {}, groups = {}, p = {}, error df = {}",
         n, k, p, v_e as i32);
 
     // Eigenvalues of E⁻¹H (useful for understanding which dimensions
     // drive the result).
-    print!("eigenvalues of E⁻¹H: ");
+    sout!("eigenvalues of E⁻¹H: ");
     for (i, l) in lam.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        print!("{}", fmt_num(*l));
+        if i > 0 { sout!(", "); }
+        sout!("{}", fmt_num(*l));
     }
-    println!();
+    soutln!();
 
     // ── Interpretation guidance — what to focus on for this design ──
     //
@@ -435,8 +435,8 @@ pub fn bi_manova(a: &[EvalArg]) -> Result<RVal, R2Err> {
     //   - Roy's largest root has maximum power when the effect is
     //     concentrated along a single dimension; p-value is an *upper
     //     bound* (i.e., possibly anti-conservative).
-    println!();
-    println!("Interpretation:");
+    soutln!();
+    soutln!("Interpretation:");
     let preferred = if v_e < 2.0 * pf {
         "Pillai's trace (small n relative to p — most robust)"
     } else if (s_count as i64) == 1 {
@@ -446,16 +446,16 @@ pub fn bi_manova(a: &[EvalArg]) -> Result<RVal, R2Err> {
     } else {
         "Pillai's trace or Wilks' Lambda (effect is diffuse across dimensions)"
     };
-    println!("  Suggested primary statistic: {}.", preferred);
+    soutln!("  Suggested primary statistic: {}.", preferred);
     if (p_pillai > 0.05) != (p_wilks > 0.05) || (p_pillai > 0.05) != (p_hl > 0.05) {
-        println!("  CAUTION: the four statistics disagree on significance at α=0.05.");
-        println!("           Heteroscedasticity or non-MV-normality likely. Trust Pillai.");
+        soutln!("  CAUTION: the four statistics disagree on significance at α=0.05.");
+        soutln!("           Heteroscedasticity or non-MV-normality likely. Trust Pillai.");
     } else if p_wilks < 0.001 {
-        println!("  All four statistics agree: highly significant multivariate effect.");
+        soutln!("  All four statistics agree: highly significant multivariate effect.");
     } else if p_wilks < 0.05 {
-        println!("  All four statistics agree: significant multivariate effect.");
+        soutln!("  All four statistics agree: significant multivariate effect.");
     } else {
-        println!("  All four statistics agree: no significant multivariate effect detected.");
+        soutln!("  All four statistics agree: no significant multivariate effect detected.");
     }
     let _ = sizes;
 

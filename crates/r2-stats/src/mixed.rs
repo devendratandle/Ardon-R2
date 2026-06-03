@@ -569,22 +569,22 @@ fn print_lmer_compact(
     x_names: &[String], beta: &[f64],
     reml_criterion: f64,
 ) {
-    println!();
-    println!("Linear mixed model fit by REML");
-    println!("REML criterion at convergence: {}", fmt_num(reml_criterion));
-    println!();
-    println!("Random effects:");
-    println!(" Groups   Name        Std.Dev.");
-    println!(" {:<8} (Intercept) {:>8}", group_col_name, fmt_num(sigma_u));
-    println!(" Residual             {:>8}", fmt_num(sigma_e));
-    println!("Number of obs: {}, groups: {}, {}", n, group_col_name, n_groups);
-    println!();
-    println!("Fixed Effects:");
+    soutln!();
+    soutln!("Linear mixed model fit by REML");
+    soutln!("REML criterion at convergence: {}", fmt_num(reml_criterion));
+    soutln!();
+    soutln!("Random effects:");
+    soutln!(" Groups   Name        Std.Dev.");
+    soutln!(" {:<8} (Intercept) {:>8}", group_col_name, fmt_num(sigma_u));
+    soutln!(" Residual             {:>8}", fmt_num(sigma_e));
+    soutln!("Number of obs: {}, groups: {}, {}", n, group_col_name, n_groups);
+    soutln!();
+    soutln!("Fixed Effects:");
     // Print names on one line, values on the next, R-style.
-    for nm in x_names { print!("{:>12} ", nm); }
-    println!();
-    for b in beta { print!("{:>12} ", fmt_num(*b)); }
-    println!();
+    for nm in x_names { sout!("{:>12} ", nm); }
+    soutln!();
+    for b in beta { sout!("{:>12} ", fmt_num(*b)); }
+    soutln!();
 }
 
 /// Verbose summary matching R's `summary(lmerMod)`: adds scaled residuals
@@ -625,18 +625,18 @@ pub fn format_lmer_summary(inst: &TypeInstance) -> Result<(), R2Err> {
         _ => (0..beta.len()).map(|i| format!("x{}", i)).collect(),
     };
 
-    println!();
-    println!("Linear mixed model fit by REML  ['lmerMod']");
+    soutln!();
+    soutln!("Linear mixed model fit by REML  ['lmerMod']");
     if let Some(call) = f("call") {
         if let RVal::Character(c, _) = call {
             if let Some(Some(s)) = c.first() {
-                println!("Formula: {}", s);
+                soutln!("Formula: {}", s);
             }
         }
     }
-    println!();
-    println!("REML criterion at convergence: {}", fmt_num(reml));
-    println!();
+    soutln!();
+    soutln!("REML criterion at convergence: {}", fmt_num(reml));
+    soutln!();
 
     // Scaled residuals quantiles.
     if !scaled.is_empty() {
@@ -647,31 +647,31 @@ pub fn format_lmer_summary(inst: &TypeInstance) -> Result<(), R2Err> {
             let idx = (p * (m - 1) as f64).round() as usize;
             sorted[idx.min(m - 1)]
         };
-        println!("Scaled residuals:");
-        println!("    {:>8} {:>8} {:>8} {:>8} {:>8}",
+        soutln!("Scaled residuals:");
+        soutln!("    {:>8} {:>8} {:>8} {:>8} {:>8}",
             "Min", "1Q", "Median", "3Q", "Max");
-        println!("    {:>8} {:>8} {:>8} {:>8} {:>8}",
+        soutln!("    {:>8} {:>8} {:>8} {:>8} {:>8}",
             fmt_num(sorted[0]), fmt_num(q(0.25)), fmt_num(q(0.5)),
             fmt_num(q(0.75)), fmt_num(sorted[m - 1]));
-        println!();
+        soutln!();
     }
 
     // Random effects with Variance and Std.Dev.
-    println!("Random effects:");
-    println!(" Groups   Name        Variance  Std.Dev.");
-    println!(" {:<8} (Intercept) {:>8}  {:>8}",
+    soutln!("Random effects:");
+    soutln!(" Groups   Name        Variance  Std.Dev.");
+    soutln!(" {:<8} (Intercept) {:>8}  {:>8}",
         group_col_name, fmt_num(sigma2_u), fmt_num(sigma_u));
-    println!(" Residual             {:>8}  {:>8}", fmt_num(sigma2_e), fmt_num(sigma_e));
-    println!("Number of obs: {}, groups: {}, {}", n, group_col_name, n_groups);
-    println!();
+    soutln!(" Residual             {:>8}  {:>8}", fmt_num(sigma2_e), fmt_num(sigma_e));
+    soutln!("Number of obs: {}, groups: {}, {}", n, group_col_name, n_groups);
+    soutln!();
 
     // Fixed effects with Estimate / Std.Error / t value / Pr(>|t|).
-    println!("Fixed effects:");
-    println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+    soutln!("Fixed effects:");
+    soutln!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
         "", "Estimate", "Std.Error", "t value", "Pr(>|t|)");
     for j in 0..beta.len() {
         let stars = if j < pv.len() { signif_stars(pv[j]) } else { "" };
-        println!("  {:<14} {:>10} {:>10} {:>10} {:>10} {}",
+        soutln!("  {:<14} {:>10} {:>10} {:>10} {:>10} {}",
             fixef_names[j],
             fmt_num(beta[j]),
             if j < se.len() { fmt_num(se[j]) } else { "".into() },
@@ -679,31 +679,31 @@ pub fn format_lmer_summary(inst: &TypeInstance) -> Result<(), R2Err> {
             if j < pv.len() { fmt_pval(pv[j]) } else { "".into() },
             stars);
     }
-    println!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
-    println!();
+    soutln!("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+    soutln!();
 
     // Correlation of fixed effects.
     if let Some(RVal::Matrix(corr_mat)) = f("corr.fixed") {
         let p = corr_mat.nrow;
         if p > 1 {
-            println!("Correlation of Fixed Effects:");
+            soutln!("Correlation of Fixed Effects:");
             // Header row.
-            print!("        ");
+            sout!("        ");
             for j in 0..p.saturating_sub(1) {
                 let nm = fixef_names.get(j).map(|s| s.as_str()).unwrap_or("");
                 let short: String = nm.chars().take(6).collect();
-                print!("{:>7} ", short);
+                sout!("{:>7} ", short);
             }
-            println!();
+            soutln!();
             // Each subsequent row shows correlations with earlier coefficients.
             for i in 1..p {
                 let nm = fixef_names.get(i).map(|s| s.as_str()).unwrap_or("");
                 let short: String = nm.chars().take(6).collect();
-                print!("{:<7} ", short);
+                sout!("{:<7} ", short);
                 for j in 0..i {
-                    print!("{:>7} ", fmt_num(corr_mat.get(i, j)));
+                    sout!("{:>7} ", fmt_num(corr_mat.get(i, j)));
                 }
-                println!();
+                soutln!();
             }
         }
     }

@@ -342,7 +342,15 @@ pub fn is_silent(e: &Expr) -> bool {
                 "plot"  | "hist" | "boxplot" | "barplot" |
                 "lines" | "points" | "abline" | "legend" |
                 "library" | "detach" | "require" | "save.plot" | "dev.view" | "dev.off" |
-                "install.packages" | "uninstall" | "set.seed" | "Sys.sleep");
+                "install.packages" | "uninstall" | "set.seed" | "Sys.sleep" |
+                // Hypothesis tests / ANOVA: these format and emit their
+                // own output as a side effect, then return an htest/model
+                // object whose Display is just "<… model>". Suppress the
+                // redundant auto-print of that return value.
+                "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
+                "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
+                "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
+                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test");
         }
     }
     false

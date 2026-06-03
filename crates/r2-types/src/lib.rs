@@ -1844,3 +1844,96 @@ pub fn list_meta(items: &[(Option<Arc<str>>, RVal)]) -> ListMeta {
         homogeneous_kind: if homogeneous { first_kind } else { None },
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Routed console output
+//
+// Compute crates (r2-stats, …) print formatted results but cannot reach
+// the engine's OutputSink. They emit through this thread-local hook
+// instead of writing straight to stdout, so a frontend can capture the
+// output:
+//   * GUI  — installs a hook forwarding each line to its ConsoleBuffer
+//            (otherwise the output is lost: a windowed app has no console).
+//   * CLI  — leaves the hook unset → falls back to stdout / stderr.
+//
+// Output is line-buffered: text is accumulated and only *complete* lines
+// (split on '\n') are dispatched, each WITHOUT the trailing newline —
+// matching `ConsoleBuffer::push_output` and correctly reassembling
+// piecewise `print!` + `println!` sequences (e.g. table rows).
+// ═══════════════════════════════════════════════════════════════════════
+pub mod out {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn FnMut(&str, bool)>>> = RefCell::new(None);
+        static LINEBUF: RefCell<String> = RefCell::new(String::new());
+    }
+
+    /// Install (or clear, with `None`) the per-thread output hook. The
+    /// closure receives one complete line (no trailing newline) and a
+    /// flag: `true` = error stream, `false` = standard output.
+    pub fn set_output_hook(hook: Option<Box<dyn FnMut(&str, bool)>>) {
+        HOOK.with(|h| *h.borrow_mut() = hook);
+    }
+
+    fn dispatch(line: &str, is_err: bool) {
+        HOOK.with(|h| {
+            let mut slot = h.borrow_mut();
+            if let Some(f) = slot.as_mut() {
+                f(line, is_err);
+            } else if is_err {
+                eprintln!("{}", line);
+            } else {
+                println!("{}", line);
+            }
+        });
+    }
+
+    fn write_routed(s: &str, is_err: bool) {
+        LINEBUF.with(|lb| {
+            let mut buf = lb.borrow_mut();
+            buf.push_str(s);
+            while let Some(pos) = buf.find('\n') {
+                let line: String = buf[..pos].to_string();
+                buf.drain(..=pos);
+                dispatch(&line, is_err);
+            }
+        });
+    }
+
+    /// Emit standard output through the routed sink (line-buffered).
+    pub fn rout(s: &str) { write_routed(s, false); }
+    /// Emit error output through the routed sink (line-buffered).
+    pub fn rerr(s: &str) { write_routed(s, true); }
+}
+
+#[cfg(test)]
+mod out_tests {
+    use super::out;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn routed_output_is_line_buffered_and_captured() {
+        let captured: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = captured.clone();
+        out::set_output_hook(Some(Box::new(move |line: &str, is_err: bool| {
+            sink.borrow_mut().push((line.to_string(), is_err));
+        })));
+
+        // println-style: one complete line, trailing newline stripped.
+        out::rout("Welch Two Sample t-test\n");
+        // print-style fragments: joined until the newline flushes them.
+        out::rout("mean of x = 4.86");
+        out::rout(", mean of y = 6.06\n");
+        // error stream carries the is_err flag.
+        out::rerr("a warning\n");
+
+        out::set_output_hook(None);
+
+        let got = captured.borrow();
+        assert_eq!(got[0], ("Welch Two Sample t-test".to_string(), false));
+        assert_eq!(got[1], ("mean of x = 4.86, mean of y = 6.06".to_string(), false));
+        assert_eq!(got[2], ("a warning".to_string(), true));
+    }
+}

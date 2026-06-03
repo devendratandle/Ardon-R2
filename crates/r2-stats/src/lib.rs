@@ -20,6 +20,30 @@
 use r2_kernel::{ReduceOp, MapOp, BinaryOp};
 use r2_types::*;
 
+// ── Routed output macros ─────────────────────────────────────────────
+// Drop-in replacements for `println!` / `print!` that send through the
+// engine/GUI-capturable sink (r2_types::out) instead of raw stdout, so
+// formatted results (t.test, aov, manova, summary, …) appear in the
+// desktop GUI console — not just a terminal. Defined before the module
+// declarations so every submodule can use them.
+macro_rules! soutln {
+    () => { $crate::__rout("\n") };
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}\n", format_args!($($arg)*))) };
+}
+macro_rules! sout {
+    ($($arg:tt)*) => { $crate::__rout(&format!("{}", format_args!($($arg)*))) };
+}
+#[allow(unused_macros)]
+macro_rules! serrln {
+    () => { $crate::__rerr("\n") };
+    ($($arg:tt)*) => { $crate::__rerr(&format!("{}\n", format_args!($($arg)*))) };
+}
+
+#[doc(hidden)]
+pub fn __rout(s: &str) { r2_types::out::rout(s); }
+#[doc(hidden)]
+pub fn __rerr(s: &str) { r2_types::out::rerr(s); }
+
 pub mod dist;
 pub mod summary;
 pub mod htest;

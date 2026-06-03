@@ -204,17 +204,17 @@ pub fn bi_hotelling_one(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let f_stat = t2 * df2 / (df1 * (n as f64 - 1.0));
     let p_value = f_to_pvalue(f_stat, df1, df2);
 
-    println!("\n  Hotelling's one-sample T² test\n");
-    println!("data:  n = {}, p = {}", n, p);
-    println!("T² = {}, F = {}, df1 = {}, df2 = {}, p-value = {}",
+    soutln!("\n  Hotelling's one-sample T² test\n");
+    soutln!("data:  n = {}, p = {}", n, p);
+    soutln!("T² = {}, F = {}, df1 = {}, df2 = {}, p-value = {}",
         fmt_num(t2), fmt_num(f_stat), df1 as i32, df2 as i32, fmt_pval(p_value));
-    println!("alternative hypothesis: true mean vector is not equal to mu");
-    print!("sample means: ");
+    soutln!("alternative hypothesis: true mean vector is not equal to mu");
+    sout!("sample means: ");
     for (j, m) in means.iter().enumerate() {
-        if j > 0 { print!(", "); }
-        print!("{}", fmt_num(*m));
+        if j > 0 { sout!(", "); }
+        sout!("{}", fmt_num(*m));
     }
-    println!();
+    soutln!();
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("method"), rstr("Hotelling one-sample T²"));
@@ -275,11 +275,11 @@ pub fn bi_hotelling_two(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let f_stat = t2 * df2 / (df1 * (n1f + n2f - 2.0));
     let p_value = f_to_pvalue(f_stat, df1, df2);
 
-    println!("\n  Hotelling's two-sample T² test\n");
-    println!("data:  n1 = {}, n2 = {}, p = {}", n1, n2, p);
-    println!("T² = {}, F = {}, df1 = {}, df2 = {}, p-value = {}",
+    soutln!("\n  Hotelling's two-sample T² test\n");
+    soutln!("data:  n1 = {}, n2 = {}, p = {}", n1, n2, p);
+    soutln!("T² = {}, F = {}, df1 = {}, df2 = {}, p-value = {}",
         fmt_num(t2), fmt_num(f_stat), df1 as i32, df2 as i32, fmt_pval(p_value));
-    println!("alternative hypothesis: true mean vectors of groups 1 and 2 differ");
+    soutln!("alternative hypothesis: true mean vectors of groups 1 and 2 differ");
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("method"), rstr("Hotelling two-sample T²"));
@@ -341,17 +341,17 @@ pub fn bi_hotelling_paired(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let f_stat = t2 * df2 / (df1 * (n as f64 - 1.0));
     let p_value = f_to_pvalue(f_stat, df1, df2);
 
-    println!("\n  Hotelling's paired T² test (multivariate)\n");
-    println!("data:  n = {} subjects, p = {} measurements per subject", n, p);
-    println!("T² = {}, F = {}, df1 = {}, df2 = {}, p-value = {}",
+    soutln!("\n  Hotelling's paired T² test (multivariate)\n");
+    soutln!("data:  n = {} subjects, p = {} measurements per subject", n, p);
+    soutln!("T² = {}, F = {}, df1 = {}, df2 = {}, p-value = {}",
         fmt_num(t2), fmt_num(f_stat), df1 as i32, df2 as i32, fmt_pval(p_value));
-    println!("alternative hypothesis: true mean difference vector is not equal to 0");
-    print!("mean difference vector: ");
+    soutln!("alternative hypothesis: true mean difference vector is not equal to 0");
+    sout!("mean difference vector: ");
     for (j, m) in means.iter().enumerate() {
-        if j > 0 { print!(", "); }
-        print!("{}", fmt_num(*m));
+        if j > 0 { sout!(", "); }
+        sout!("{}", fmt_num(*m));
     }
-    println!();
+    soutln!();
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("method"), rstr("Hotelling paired T² (multivariate)"));
