@@ -16,7 +16,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rayon::prelude::*;
 use r2_types::*;
 
 use crate::{gv, gn, val_to_str, Engine};

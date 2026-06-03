@@ -14,15 +14,12 @@
 #![allow(clippy::all)]
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use rayon::prelude::*;
-use r2_stats::dist::{phi, qnorm_approx};
-use r2_stats::htest::{fmt_pval, signif_stars};
+use r2_stats::dist::qnorm_approx;
 use r2_types::*;
 
-use crate::{gv, gn, pure_apply, val_to_str, Engine, PackageLayer, PackageTier, InstalledPkgInfo};
+use crate::{gv, gn, val_to_str, Engine};
 use crate::err;
 
 pub(crate) fn bi_source(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {

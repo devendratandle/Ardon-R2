@@ -55,8 +55,8 @@ use na_bitmap::{combine_binary_output, combine_ternary_output, combine_unary_out
 // (1|group) random-intercept splitter, Expr→source deparser).
 mod formula;
 use formula::{
-    fmt_expr, is_error_call, is_random_intercept, random_intercept_grouping,
-    split_error_term, split_random_effects, unwrap_nested_error,
+    fmt_expr,
+    split_error_term, split_random_effects,
 };
 
 // ── Engine ───────────────────────────────────────────────────────────
@@ -2470,12 +2470,10 @@ fn load_r2pkg_layout(e: &mut Engine, name: &str, pkg_root: &std::path::Path) -> 
 // Error function approximation (Abramowitz & Stegun)
 // Phase R.9: erf, phi, qnorm_approx now live in r2_stats::dist.
 // Engine uses re-exports below to keep call sites unchanged.
-use r2_stats::{phi, qnorm_approx};
 
 // Phase R.10: signif_stars, fmt_pval moved to r2_stats::tests
 // (re-exported at crate root). Engine model summaries (lm, glm) still
 // import the same functions via the re-export below.
-use r2_stats::{fmt_pval, signif_stars};
 
 // Phase R.9: qnorm_approx now lives in r2_stats::dist (re-exported above).
 
