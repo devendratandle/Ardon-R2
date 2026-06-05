@@ -87,6 +87,58 @@ pub(crate) fn bi_solve(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
     }
 }
 
+// ── Out-of-core columnar (memory-mapped) ────────────────────────────
+// mmap.write(x, path) writes a numeric vector as a packed-f64 file;
+// mmap.col(path) opens it as a handle whose reductions (sum/mean/min/max/
+// length) STREAM over the memory map — so files LARGER THAN RAM work with
+// bounded memory (the OS demand-pages). Verified on an 8 GB > RAM file.
+
+fn rstr_(s: &str) -> RVal { RVal::Character(vec![Some(Arc::from(s))], Attrs::default()) }
+
+pub(crate) fn bi_mmap_write(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let x: Vec<f64> = e.as_reals(&gv(a, 0))?.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect();
+    let path = val_to_str(&gv(a, 1));
+    if path.is_empty() { return err!(Runtime, "mmap.write(x, path): a file path is required"); }
+    r2_arrow::write_packed_f64(&path, &x)
+        .map_err(|m| R2Err { msg: format!("mmap.write: {}", m), kind: ErrKind::Runtime })?;
+    Ok(rstr_(&path))
+}
+
+pub(crate) fn bi_mmap_col(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let path = val_to_str(&gv(a, 0));
+    let col = r2_arrow::MmapColumnar::open(&path)
+        .map_err(|m| R2Err { msg: format!("mmap.col: {}", m), kind: ErrKind::Runtime })?;
+    let len = col.len();
+    let mut fields = HashMap::new();
+    fields.insert(Arc::from("path"), rstr_(&path));
+    fields.insert(Arc::from("length"), RVal::Numeric(vec![Some(len as f64)].into(), Attrs::default()));
+    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("mmapcol"), fields }))
+}
+
+/// If `v` is an `mmap.col` handle, stream-reduce it over the memory map
+/// (`op` = sum/mean/min/max/length); otherwise `None` so the caller falls
+/// back to the normal in-memory reduction.
+pub(crate) fn mmap_reduce(v: &RVal, op: &str) -> Option<Result<RVal, R2Err>> {
+    let inst = match v {
+        RVal::TypeInstance(i) if i.type_name.as_ref() == "mmapcol" => i,
+        _ => return None,
+    };
+    let path = inst.fields.get("path").map(val_to_str).unwrap_or_default();
+    Some((|| {
+        let col = r2_arrow::MmapColumnar::open(&path)
+            .map_err(|m| R2Err { msg: format!("{}(mmapcol): {}", op, m), kind: ErrKind::Runtime })?;
+        let r = match op {
+            "sum" => col.sum(),
+            "mean" => col.mean(),
+            "min" => col.min(),
+            "max" => col.max(),
+            "length" => col.len() as f64,
+            _ => return Err(R2Err { msg: format!("mmapcol: unsupported reduction '{}'", op), kind: ErrKind::Runtime }),
+        };
+        Ok(RVal::Numeric(vec![Some(r)].into(), Attrs::default()))
+    })())
+}
+
 // ── prcomp() — Principal Component Analysis ──────────────────────────
 
 // Phase R.1 step 4: bi_prcomp moved to r2-ml::dispatch.

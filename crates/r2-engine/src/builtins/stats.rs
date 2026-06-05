@@ -10,9 +10,11 @@ use crate::Engine;
 
 // ─── summary stats ──────────────────────────────────────────────────
 pub(crate) fn bi_sum(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if let Some(v) = a.first() { if let Some(r) = super::ml_data::mmap_reduce(&v.value, "sum") { return r; } }
     r2_stats::bi_sum(a)
 }
 pub(crate) fn bi_mean(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if let Some(v) = a.first() { if let Some(r) = super::ml_data::mmap_reduce(&v.value, "mean") { return r; } }
     r2_stats::bi_mean(a)
 }
 pub(crate) fn bi_sd(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
@@ -22,9 +24,11 @@ pub(crate) fn bi_var(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     r2_stats::bi_var(a)
 }
 pub(crate) fn bi_max(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if let Some(v) = a.first() { if let Some(r) = super::ml_data::mmap_reduce(&v.value, "max") { return r; } }
     r2_stats::bi_max(a)
 }
 pub(crate) fn bi_min(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if let Some(v) = a.first() { if let Some(r) = super::ml_data::mmap_reduce(&v.value, "min") { return r; } }
     r2_stats::bi_min(a)
 }
 pub(crate) fn bi_prod(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
