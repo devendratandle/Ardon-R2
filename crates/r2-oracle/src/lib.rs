@@ -173,6 +173,12 @@ pub fn hw() -> &'static Hw {
 /// This is a closed-form heuristic, not a calibration. Real `r2-bench`
 /// calibration is deferred to Phase G proper.
 pub fn dispatch(op: Op, shape: Shape) -> Backend {
+    // Measurement / debug override: R2_FORCE_SERIAL=1 makes the oracle
+    // always pick Serial, so the parallel speedup can be A/B benchmarked
+    // (and as an escape hatch on flaky multi-core environments).
+    if std::env::var_os("R2_FORCE_SERIAL").is_some() {
+        return Backend::Serial;
+    }
     let work = shape.work();
     let base: usize = match op {
         Op::PerElementMap     => 50_000,
