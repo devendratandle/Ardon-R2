@@ -308,15 +308,21 @@ impl OutputSink for StdoutSink {
 pub fn is_incomplete(s: &str) -> bool {
     let (mut p, mut b, mut k) = (0i32, 0i32, 0i32);
     let mut in_str = false;
+    let mut in_comment = false;
     let mut q = ' ';
     for ch in s.chars() {
+        // A '#' comment runs to END OF LINE only — it must NOT abort the
+        // whole multi-line scan, or an inline comment inside a multi-line
+        // `c(...)` would leave the closing ')' uncounted (the input would
+        // look "incomplete" forever).
+        if in_comment { if ch == '\n' { in_comment = false; } continue; }
         if in_str { if ch == q { in_str = false; } continue; }
         match ch {
             '"' | '\'' => { in_str = true; q = ch; }
+            '#' => in_comment = true,
             '(' => p += 1, ')' => p -= 1,
             '{' => b += 1, '}' => b -= 1,
             '[' => k += 1, ']' => k -= 1,
-            '#' => break,
             _ => {}
         }
     }
@@ -518,5 +524,16 @@ mod tests {
         assert!(!is_incomplete("'{'"));
         assert!(!is_incomplete("x <- 1  # {"));
         assert!( is_incomplete("x <- '{' + ("));   // still has open paren
+    }
+
+    #[test]
+    fn is_incomplete_inline_comments_dont_abort_multiline() {
+        // Inline comments inside a multi-line c(...) must NOT hide the
+        // closing ')': a '#' runs to end-of-line only, not end-of-buffer.
+        // Open across lines with inline comments → still incomplete.
+        assert!( is_incomplete("c(\n  rnorm(10), # T1\n  rnorm(10),"));
+        // Closed despite the inline comments → COMPLETE (regression: this
+        // used to read as incomplete forever because '#' aborted the scan).
+        assert!(!is_incomplete("c(\n  rnorm(10), # T1\n  rnorm(10) # T2\n)"));
     }
 }

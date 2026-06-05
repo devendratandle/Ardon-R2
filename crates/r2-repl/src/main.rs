@@ -310,13 +310,17 @@ fn is_silent(e: &Expr) -> bool {
 
 fn incomplete(s: &str) -> bool {
     let (mut p, mut b, mut k) = (0i32, 0i32, 0i32);
-    let mut in_str = false; let mut q = ' ';
+    let mut in_str = false; let mut in_comment = false; let mut q = ' ';
     for ch in s.chars() {
+        // '#' comment runs to end of line only — must not abort the scan
+        // (else an inline comment in a multi-line c(...) hides the ')').
+        if in_comment { if ch == '\n' { in_comment = false; } continue; }
         if in_str { if ch == q { in_str = false; } continue; }
         match ch {
             '"'|'\'' => { in_str = true; q = ch; }
+            '#' => in_comment = true,
             '(' => p+=1, ')' => p-=1, '{' => b+=1, '}' => b-=1, '[' => k+=1, ']' => k-=1,
-            '#' => break, _ => {}
+            _ => {}
         }
     }
     p > 0 || b > 0 || k > 0
