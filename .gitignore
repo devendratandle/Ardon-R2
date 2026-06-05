@@ -171,3 +171,6 @@ __pycache__/
 .Rhistory
 .RData
 .Rapp.history
+
+# Local archive of removed ARCHITECTURE phase narrative (also in git history)
+code-history/
