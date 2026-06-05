@@ -1,44 +1,48 @@
-# ================================================================
-#  Ardon-R2 — self-test script for the v0.2.2 fixes
-#  Run in:  R2Gui (paste), CLI interactive (r2), or CLI (r2 this.r2)
-# ================================================================
+# ============================================================
+#  Ardon-R2 v0.2.2 verification script
+#  Paste into the R2Gui console (best — exercises interactive
+#  multi-line entry) or run: r2 test_v0_2_2.r2
+# ============================================================
 
-cat("===== 1. STATS OUTPUT (must be VISIBLE — no <htest model>, no NULL) =====\n")
+# --- 1. Multi-line c() with inline comments (parser fix) ---
+set.seed(123)
+subject  <- factor(rep(1:10, each = 3))
+time     <- factor(rep(c("T1","T2","T3"), times = 10))
+response <- c(
+  rnorm(10, mean = 50, sd = 5),   # T1
+  rnorm(10, mean = 55, sd = 5),   # T2
+  rnorm(10, mean = 60, sd = 5)    # T3
+)
+data <- data.frame(subject, time, response)
+cat("1) response:", length(response), " data:", nrow(data), "x", ncol(data),
+    "  (expect 30 / 30 x 3)\n")
 
-# Welch t-test, formula form (resolves columns from data=)
-t.test(Sepal.Width ~ Species, data = iris[1:100,])
-
-# Two-vector t-test
-t.test(c(5.1,4.9,4.7,4.6,5.0), c(6.2,5.9,6.1,6.3,5.8))
-
-# Chi-squared
-chisq.test(matrix(c(200,400,300,500), byrow=TRUE, nrow=2))
-
-# ANOVA table
+# --- 2. Stats output VISIBLE (no <htest model>, no trailing NULL) ---
+t.test(Sepal.Width ~ Species, data = iris[1:100, ])
+chisq.test(matrix(c(200,400,300,500), byrow = TRUE, nrow = 2))
 aov(Sepal.Length ~ Species, data = iris)
-
-# Inspectors — these used to print a trailing "NULL"; should be clean now
 summary(iris)
 str(iris)
 
-cat("\n===== 2. ACCURACY (compare to R) =====\n")
-
-cat("qnorm(0.975) — R: 1.959964 ->", qnorm(0.975), "\n")
-cat("lm coefficient p-values (t-distribution):\n")
+# --- 3. Accuracy ---
+cat("3) qnorm(0.975)=", qnorm(0.975), " (R: 1.959964)\n")
+A <- matrix(c(4,1,1,3), nrow = 2)
+cat("   det(A)=", det(A), " (expect 11)\n")
+print(solve(A) %*% A)
 print(lm(Sepal.Length ~ Sepal.Width, data = iris)$p.values)
 
-A <- matrix(c(4,1,1,3), nrow = 2)
-cat("det(A) — should be 11 ->", det(A), "\n")
-cat("solve(A) %*% A — should be the identity matrix:\n")
-print(solve(A) %*% A)
+# --- 4. Fusion correctness ---
+v <- as.numeric(1:100)
+cat("4) fusion diff (expect 0):", max(abs((v*2+1) - ((v*2)+1))), "\n")
 
-cat("\n===== 3. GRAPHICS DEVICE =====\n")
-cat("GUI: each plot opens in the Graphics window.\n")
-cat("CLI interactive: first plot opens the browser viewer.\n")
-cat("CLI script (r2 this.r2): plots are saved as .svg files (no popup).\n")
+# --- 5. Out-of-core arrow ---
+mmap.write(as.numeric(1:1000), "ooc_test.bin")
+m <- mmap.col("ooc_test.bin")
+cat("5) mmap sum=", sum(m), " mean=", mean(m), " length=", m$length,
+    "  (expect 500500 / 500.5 / 1000)\n")
 
+# --- 6. Graphics device (GUI window / CLI browser / script .svg) ---
 hist(rnorm(1000), col = "red")
 plot(1:10, (1:10)^2)
-boxplot(rnorm(100))
 
-cat("\n===== done =====\n")
+cat("\n=== script done; clear() next (interactive) ===\n")
