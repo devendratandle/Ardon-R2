@@ -982,8 +982,11 @@ impl ColumnarF64 {
         let n = self.len;
         if self.is_dense() {
             let a = self.values();
-            let mut out = Vec::with_capacity(n);
-            for i in 0..n { out.push(apply_scalar(op, a[i], scalar)); }
+            // map().collect() over an ExactSizeIterator pre-allocates and
+            // lets the compiler auto-vectorize the loop — `push` in a
+            // counted loop does per-element length/capacity bookkeeping
+            // that inhibits SIMD.
+            let out: Vec<f64> = a.iter().map(|&x| apply_scalar(op, x, scalar)).collect();
             return ColumnarF64::from_vec(out);
         }
         let bits = self.valid_bits.as_ref().unwrap();
