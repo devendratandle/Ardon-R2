@@ -153,6 +153,13 @@ Shipped layers:
 - **Arrow bridge** (`r2-arrow`) — `ColumnarF64` + null bitmap + dense
   reductions; **memory-mapped out-of-core** (`mmap.col` → streaming
   `sum`/`mean`/`min`/`max`, larger-than-RAM); vector⊗scalar chain fusion.
+- **Columnar numeric storage (Phase F.3, shipped)** — `RVal::Numeric`
+  holds `Reals`, a lazy dual representation (boxed `Vec<Option<f64>>`
+  ⇄ `Arc<ColumnarF64>`, either canonical, the other materialised on
+  demand). Dense producers (`rnorm`/`seq`/…) and the fusion fast path use
+  `from_dense_f64`/`from_columnar` to stay zero-repack end-to-end. Same
+  dual-storage pattern exists for `Singles`/F32, `Ints`/I32,
+  `Logicals`/Bool.
 - **Domain crates** — `r2-stats`, `r2-ml`, `r2-data`, `r2-linalg`,
   `r2-graphics`, each exposing `register_builtins()`.
 - **Console** — one unified sink (the **r2dterminal**, `r2_types::out`),
@@ -163,19 +170,26 @@ Shipped layers:
 Numerics: exact p-values across the suite (Lentz incomplete beta + AS241
 `qnorm`); `lm` via Householder QR; `solve`/`det` exposed.
 
-### Phase F.3 — `RVal::Numeric` storage migration ← NEXT
+### Phase F.5 — out-of-core operations beyond reductions ← NEXT
 
-Make numeric storage natively `ColumnarF64` (drop the `Option<f64>`
-re-pack). Removes the residual element-wise repack cost the v0.2.2 fusion
-work exposed, makes the engine zero-copy / mmap-friendly, and lets the
-out-of-core path extend beyond reductions. Destructive — shipped as its
-own release.
+The mmap path currently only *reduces* (`sum`/`mean`/`min`/`max`) and
+`mmap.write` needs the whole vector in RAM. Extend it so larger-than-RAM
+data is a first-class citizen end-to-end:
 
-### Phase F.4–F.6 — element-wise kernels, mmap dtypes
+- **Streaming/chunked writer** — append blocks to a packed-f64 file so a
+  >RAM column can be *built* without ever holding it in RAM.
+- **More streaming reductions** — `sd`/`var` (one-pass Welford),
+  `prod`, `range`, `length` over the mmap, wired into the existing
+  `bi_*` interception (like `sum`/`mean` today).
+- **Out-of-core map** — apply a scalar transform (`x*2+1`, `log`, …) over
+  an mmap column, streaming the result to a new packed file (>RAM in,
+  >RAM out, bounded RSS).
 
-General element-wise kernels on the columnar substrate; a chunked/append
-mmap writer + Parquet / Arrow-IPC readers (so >RAM files can be built
-from R2 itself); additional dtypes.
+### Phase F.6 — additional dtypes & on-disk formats
+
+`i64` and `Utf8` columnar dtypes; Parquet / Arrow-IPC readers so files
+produced by other tools can be memory-mapped directly. (Element-wise
+columnar kernels — old Phase F.4 — already shipped.)
 
 ### Phase G — GPU dispatcher (wgpu), FFI hub, cloud RAM
 
