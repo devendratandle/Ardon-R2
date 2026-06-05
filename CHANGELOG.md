@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.2 (June 2026)
 
 ### GUI bug fix — statistical output now appears in the desktop console
 

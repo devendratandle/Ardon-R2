@@ -19,7 +19,7 @@
 ; ═══════════════════════════════════════════════════════════════════════
 
 #define MyAppName        "Ardon-R2"
-#define MyAppVersion     "0.2.1"
+#define MyAppVersion     "0.2.2"
 #define MyAppPublisher   "Devendra Tandale"
 #define MyAppURL         "https://github.com/devendratandle/Ardon-R2"
 #define MyAppExeName     "r2.exe"

@@ -78,7 +78,7 @@ fn repl_main() {
     });
 
     println!("\nArdon-R2 — Statistical Computing, Reimagined");
-    println!("Version 0.1.1 (2026) | Inspired by R. Built on Rust.");
+    println!("Version {} (2026) | Inspired by R. Built on Rust.", env!("CARGO_PKG_VERSION"));
     println!("Created by Devendra Tandale | An AI-Assisted Project");
     println!("Assignment: both <- and = work. Mode: strict.");
     println!("Type q() to quit.\n");

@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.2.1.</em></p>
+<em>An AI-Assisted Project. v0.2.2.</em></p>
 
 ---
 
@@ -20,9 +20,34 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.2.1 (2026) | Inspired by R, Built on Rust
+Version 0.2.2 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
+
+## What's new in v0.2.2 (June 2026)
+
+A correctness, performance, and desktop-usability release.
+
+- **Exact statistical p-values everywhere** — `incomplete_beta` now uses
+  the Lentz continued fraction; `t.test`, `aov` (incl. repeated-measures),
+  `lm` F-test + coefficients (t-distribution), `manova`/`hotelling.test`,
+  and `qnorm` (Wichura AS241) all match R to ~1e-9.
+- **`lm` via Householder QR** (numerically stable on collinear data);
+  `solve()` / `det()` exposed.
+- **Out-of-core columnar (arrow)** — `mmap.write` / `mmap.col` reduce
+  files **larger than RAM** with bounded memory (verified on 8 GB > RAM;
+  beats R's `bigmemory` on the reduction).
+- **Vector⊗scalar fusion** — `v*2+1`-style chains run in one pass
+  (~2.4× faster).
+- **macOS & Linux desktop GUI** packaged in CI alongside Windows.
+- **Desktop GUI fixes** — statistical output now shows in the console
+  (was lost); `summary`/`str` no longer print a stray `NULL`; text
+  selection respects scrolling; **mouse-wheel / two-finger touchpad
+  scroll**; the console stays typeable after a plot; `clear()`/`cls()`;
+  app icon on shortcuts; writable working directory; plots display
+  (saving is explicit); inline comments no longer break multi-line input.
+- Output is unified through one console sink (the **r2dterminal**),
+  mirroring R's `WriteConsole`.
 
 ## What's new in v0.2.1 (June 2026)
 
