@@ -104,6 +104,42 @@ pub(crate) fn bi_mmap_write(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     Ok(rstr_(&path))
 }
 
+/// `mmap.map(path_in, FUN, path_out)` — out-of-core scalar transform.
+/// Streams a named unary transform over the input column and writes the
+/// result to a new packed-f64 file, never holding either column fully in
+/// RAM (>RAM in → >RAM out, bounded RSS). Returns an `mmapcol` handle to
+/// the output, so it composes directly with `sum`/`mean`/`mmap.map`/…
+pub(crate) fn bi_mmap_map(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let path_in = val_to_str(&gv(a, 0));
+    let func = val_to_str(&gv(a, 1)).to_lowercase();
+    let path_out = val_to_str(&gv(a, 2));
+    if path_in.is_empty() || path_out.is_empty() {
+        return err!(Runtime, "mmap.map(path_in, FUN, path_out): input and output paths are required");
+    }
+    let col = r2_arrow::MmapColumnar::open(&path_in)
+        .map_err(|m| R2Err { msg: format!("mmap.map: {}", m), kind: ErrKind::Runtime })?;
+    // Native scalar-transform allowlist, applied streaming/out-of-core.
+    let f: fn(f64) -> f64 = match func.as_str() {
+        "log" | "ln"     => f64::ln,
+        "log2"           => f64::log2,
+        "log10"          => f64::log10,
+        "exp"            => f64::exp,
+        "sqrt"           => f64::sqrt,
+        "abs"            => f64::abs,
+        "square" | "sq"  => |x| x * x,
+        "neg"            => |x| -x,
+        other => return Err(R2Err {
+            msg: format!("mmap.map: unsupported transform '{}' (try log/log2/log10/exp/sqrt/abs/square/neg)", other),
+            kind: ErrKind::Runtime }),
+    };
+    let n = col.map_to(&path_out, f)
+        .map_err(|m| R2Err { msg: format!("mmap.map: {}", m), kind: ErrKind::Runtime })?;
+    let mut fields = HashMap::new();
+    fields.insert(Arc::from("path"), rstr_(&path_out));
+    fields.insert(Arc::from("length"), RVal::Numeric(vec![Some(n as f64)].into(), Attrs::default()));
+    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("mmapcol"), fields }))
+}
+
 pub(crate) fn bi_mmap_col(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let path = val_to_str(&gv(a, 0));
     let col = r2_arrow::MmapColumnar::open(&path)
@@ -127,12 +163,20 @@ pub(crate) fn mmap_reduce(v: &RVal, op: &str) -> Option<Result<RVal, R2Err>> {
     Some((|| {
         let col = r2_arrow::MmapColumnar::open(&path)
             .map_err(|m| R2Err { msg: format!("{}(mmapcol): {}", op, m), kind: ErrKind::Runtime })?;
+        // `range` yields a length-2 vector; every other op is scalar.
+        if op == "range" {
+            let (mn, mx) = col.range();
+            return Ok(RVal::Numeric(vec![Some(mn), Some(mx)].into(), Attrs::default()));
+        }
         let r = match op {
             "sum" => col.sum(),
             "mean" => col.mean(),
             "min" => col.min(),
             "max" => col.max(),
             "length" => col.len() as f64,
+            "prod" => col.prod(),
+            "sd" => col.sd(1),   // R's sample sd (ddof = 1)
+            "var" => col.var(1), // R's sample variance (ddof = 1)
             _ => return Err(R2Err { msg: format!("mmapcol: unsupported reduction '{}'", op), kind: ErrKind::Runtime }),
         };
         Ok(RVal::Numeric(vec![Some(r)].into(), Attrs::default()))

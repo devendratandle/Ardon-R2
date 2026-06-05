@@ -22,7 +22,18 @@ use r2_types::*;
 use crate::{gv, gn, val_to_str, Engine};
 use crate::err;
 
-pub(crate) fn bi_length(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rint(rval_length(&gv(a,0)) as i32)) }
+pub(crate) fn bi_length(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // Out-of-core column: report its element count from the stored field
+    // (no need to open/scan the file).
+    if let RVal::TypeInstance(i) = &gv(a,0) {
+        if i.type_name.as_ref() == "mmapcol" {
+            if let Some(RVal::Numeric(n, _)) = i.fields.get("length") {
+                if let Some(Some(len)) = n.as_vec().first() { return Ok(rint(*len as i32)); }
+            }
+        }
+    }
+    Ok(rint(rval_length(&gv(a,0)) as i32))
+}
 pub(crate) fn bi_print(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
     // Phase R.T.1 — class-aware print for Date / POSIXct. R prints these in

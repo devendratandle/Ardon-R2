@@ -677,7 +677,10 @@ pub(crate) fn bi_which_min(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
 
 pub(crate) fn bi_which_max(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_which_max(a) }
 
-pub(crate) fn bi_range(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::summary::bi_range(a) }
+pub(crate) fn bi_range(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if let Some(v) = a.first() { if let Some(r) = super::ml_data::mmap_reduce(&v.value, "range") { return r; } }
+    r2_stats::summary::bi_range(a)
+}
 
 
 pub(crate) fn bi_any(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

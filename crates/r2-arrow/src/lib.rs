@@ -358,11 +358,139 @@ mod mmap_impl {
             self.as_slice().iter().copied().fold(f64::NEG_INFINITY, f64::max)
         }
 
+        /// Product of all values (8 independent accumulators, like `sum`).
+        pub fn prod(&self) -> f64 {
+            let s = self.as_slice();
+            let mut acc = [1.0f64; 8];
+            let mut it = s.chunks_exact(8);
+            for c in &mut it {
+                acc[0] *= c[0]; acc[1] *= c[1]; acc[2] *= c[2]; acc[3] *= c[3];
+                acc[4] *= c[4]; acc[5] *= c[5]; acc[6] *= c[6]; acc[7] *= c[7];
+            }
+            let mut p = ((acc[0] * acc[1]) * (acc[2] * acc[3]))
+                * ((acc[4] * acc[5]) * (acc[6] * acc[7]));
+            for &v in it.remainder() { p *= v; }
+            p
+        }
+
+        /// `(min, max)` in a single sweep (NaN-skipping via `f64::min`/`max`).
+        pub fn range(&self) -> (f64, f64) {
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+            for &v in self.as_slice() { mn = mn.min(v); mx = mx.max(v); }
+            (mn, mx)
+        }
+
+        /// Sample/population variance with `ddof` delta degrees of freedom
+        /// (`ddof=1` → R's `var()`; `ddof=0` → population). Two-pass for
+        /// numerical fidelity with R: pass 1 is `mean()` (the 8-accumulator
+        /// sum), pass 2 is the centered sum of squares with 8 accumulators.
+        /// Two sweeps over the mmap means ~2× disk read for a >RAM file —
+        /// the price of matching R's stable two-pass result. Returns NaN
+        /// when `n <= ddof`.
+        pub fn var(&self, ddof: usize) -> f64 {
+            let s = self.as_slice();
+            let n = s.len();
+            if n <= ddof { return f64::NAN; }
+            let mean = self.mean();
+            let mut acc = [0.0f64; 8];
+            let mut it = s.chunks_exact(8);
+            for c in &mut it {
+                let d0 = c[0] - mean; let d1 = c[1] - mean;
+                let d2 = c[2] - mean; let d3 = c[3] - mean;
+                let d4 = c[4] - mean; let d5 = c[5] - mean;
+                let d6 = c[6] - mean; let d7 = c[7] - mean;
+                acc[0] += d0 * d0; acc[1] += d1 * d1;
+                acc[2] += d2 * d2; acc[3] += d3 * d3;
+                acc[4] += d4 * d4; acc[5] += d5 * d5;
+                acc[6] += d6 * d6; acc[7] += d7 * d7;
+            }
+            let mut ss = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
+                + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+            for &v in it.remainder() { let d = v - mean; ss += d * d; }
+            ss / (n - ddof) as f64
+        }
+
+        /// Standard deviation = `sqrt(var(ddof))`.
+        pub fn sd(&self, ddof: usize) -> f64 { self.var(ddof).sqrt() }
+
+        /// Out-of-core scalar map: apply `f` to every element and stream
+        /// the result to a new packed-f64 file at `path`. Input is paged
+        /// by the OS; output is written through a small fixed-size buffer,
+        /// so peak RSS stays bounded regardless of column size (>RAM in →
+        /// >RAM out). Returns the number of elements written.
+        pub fn map_to<P: AsRef<Path>, F: Fn(f64) -> f64>(
+            &self, path: P, f: F,
+        ) -> Result<usize, String> {
+            const CHUNK: usize = 1 << 16; // 65_536 f64 = 512 KiB out-buffer
+            let s = self.as_slice();
+            let mut w = MmapWriter::create(path)?;
+            let mut buf: Vec<f64> = Vec::with_capacity(CHUNK);
+            for block in s.chunks(CHUNK) {
+                buf.clear();
+                buf.extend(block.iter().map(|&x| f(x)));
+                w.append(&buf)?;
+            }
+            w.finish()
+        }
+
         /// Copy into an owned `ColumnarF64`. Useful when bridging into
         /// the existing RVal::Numeric storage path — pays a one-time
         /// allocation for full ownership.
         pub fn to_columnar(&self) -> super::ColumnarF64 {
             super::ColumnarF64::from_vec(self.as_slice().to_vec())
+        }
+    }
+
+    /// Streaming/chunked writer for a packed-f64 file. Lets a
+    /// larger-than-RAM column be *built* block by block without ever
+    /// holding the whole thing in memory — the inverse capability of
+    /// `MmapColumnar` (which reads >RAM), closing the out-of-core loop.
+    ///
+    /// Bytes go through a `BufWriter`, so many small `append` calls are
+    /// coalesced into large sequential writes. Call `finish()` to flush;
+    /// dropping without `finish()` still flushes via `BufWriter`'s Drop,
+    /// but `finish()` surfaces any final I/O error.
+    pub struct MmapWriter {
+        w: std::io::BufWriter<std::fs::File>,
+        count: usize,
+    }
+
+    impl MmapWriter {
+        /// Create (or truncate) the file at `path` for streaming writes.
+        pub fn create<P: AsRef<Path>>(path: P) -> Result<MmapWriter, String> {
+            let f = std::fs::File::create(&path).map_err(|e| {
+                format!("MmapWriter::create: cannot create '{}': {}",
+                    path.as_ref().display(), e)
+            })?;
+            Ok(MmapWriter { w: std::io::BufWriter::with_capacity(1 << 20, f), count: 0 })
+        }
+
+        /// Append a block of values. Their packed little-/native-endian
+        /// f64 bytes are appended verbatim (same layout `MmapColumnar`
+        /// reads back).
+        pub fn append(&mut self, vals: &[f64]) -> Result<(), String> {
+            use std::io::Write;
+            // SAFETY: f64 is Copy with a well-defined byte representation.
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(vals.as_ptr() as *const u8, vals.len() * 8)
+            };
+            self.w.write_all(bytes)
+                .map_err(|e| format!("MmapWriter::append: {}", e))?;
+            self.count += vals.len();
+            Ok(())
+        }
+
+        /// Number of f64 elements appended so far.
+        pub fn len(&self) -> usize { self.count }
+        /// True if nothing has been appended.
+        pub fn is_empty(&self) -> bool { self.count == 0 }
+
+        /// Flush and finish; returns the total element count written.
+        pub fn finish(mut self) -> Result<usize, String> {
+            use std::io::Write;
+            self.w.flush().map_err(|e| format!("MmapWriter::finish: {}", e))?;
+            Ok(self.count)
         }
     }
 
@@ -390,7 +518,7 @@ mod mmap_impl {
 }
 
 #[cfg(feature = "mmap")]
-pub use mmap_impl::{MmapColumnar, write_packed_f64};
+pub use mmap_impl::{MmapColumnar, MmapWriter, write_packed_f64};
 
 #[cfg(feature = "mmap")]
 #[cfg(test)]
@@ -471,6 +599,74 @@ mod f5_mmap_tests {
         assert_eq!(a.as_slice().as_ptr(), b.as_slice().as_ptr(),
             "cloned MmapColumnar should point to the same mapped bytes");
         std::fs::remove_file(&path).ok();
+    }
+
+    // ── Phase F.5: out-of-core ops beyond reductions ────────────────
+
+    #[test]
+    fn mmap_var_sd_prod_range_match_r() {
+        // Reference values computed in R for x = 1..10:
+        //   var(x)=9.166667 (ddof=1), sd=3.027650, prod=3628800,
+        //   range=c(1,10). Population var (ddof=0)=8.25.
+        let path = tmp("vsp.f64");
+        let values: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+        write_packed_f64(&path, &values).unwrap();
+        let m = MmapColumnar::open(&path).unwrap();
+        assert!((m.var(1) - 9.166666666666666).abs() < 1e-9, "var={}", m.var(1));
+        assert!((m.var(0) - 8.25).abs() < 1e-9);
+        assert!((m.sd(1) - 3.0276503540974917).abs() < 1e-9, "sd={}", m.sd(1));
+        assert!((m.prod() - 3628800.0).abs() < 1e-3, "prod={}", m.prod());
+        assert_eq!(m.range(), (1.0, 10.0));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mmap_var_needs_enough_elements() {
+        let path = tmp("var1.f64");
+        write_packed_f64(&path, &[42.0]).unwrap();
+        let m = MmapColumnar::open(&path).unwrap();
+        assert!(m.var(1).is_nan(), "var of a single element with ddof=1 is NA");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mmap_writer_builds_file_in_chunks() {
+        // Build a file by appending several blocks; verify it reads back
+        // as one contiguous column (the >RAM build path, in miniature).
+        let path = tmp("chunked.f64");
+        let mut w = MmapWriter::create(&path).unwrap();
+        let mut expected: Vec<f64> = Vec::new();
+        for blk in 0..5 {
+            let block: Vec<f64> = (0..1000).map(|i| (blk * 1000 + i) as f64).collect();
+            w.append(&block).unwrap();
+            expected.extend_from_slice(&block);
+        }
+        let n = w.finish().unwrap();
+        assert_eq!(n, 5000);
+        let m = MmapColumnar::open(&path).unwrap();
+        assert_eq!(m.len(), 5000);
+        assert_eq!(m.as_slice(), &expected[..]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mmap_map_to_streams_transform() {
+        // x*2+1 streamed from one mmap file to another, out-of-core.
+        let src = tmp("map_src.f64");
+        let dst = tmp("map_dst.f64");
+        let values: Vec<f64> = (0..200_000).map(|i| i as f64).collect();
+        write_packed_f64(&src, &values).unwrap();
+        let m = MmapColumnar::open(&src).unwrap();
+        let n = m.map_to(&dst, |x| x * 2.0 + 1.0).unwrap();
+        assert_eq!(n, 200_000);
+        let out = MmapColumnar::open(&dst).unwrap();
+        assert_eq!(out.len(), 200_000);
+        let s = out.as_slice();
+        assert_eq!(s[0], 1.0);
+        assert_eq!(s[1], 3.0);
+        assert_eq!(s[199_999], 199_999.0 * 2.0 + 1.0);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
     }
 }
 
