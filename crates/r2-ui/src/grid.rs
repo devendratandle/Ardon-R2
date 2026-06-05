@@ -394,6 +394,26 @@ impl CellGridState {
                     self.selection = None;
                     self.dragging  = None;
                 }
+                // Mouse wheel / touchpad two-finger scroll. `dy > 0` is
+                // wheel-up → reveal older lines (smaller top-row index).
+                // Scrolling back to the bottom hands control to auto-scroll
+                // (None) so new output keeps the prompt visible.
+                InputEvent::Scroll { dy } => {
+                    if line_h > 0.0 && row_count > 0 {
+                        let max_visible = (rect.h / line_h).floor() as usize;
+                        let max_scroll = row_count.saturating_sub(max_visible);
+                        let cur = self.scroll_y_override
+                            .unwrap_or_else(|| auto_scroll_offset(row_count, rect.h, line_h));
+                        let step = ((dy.abs() / line_h).ceil() as usize).max(1);
+                        let new = if dy > 0.0 {
+                            cur.saturating_sub(step)
+                        } else {
+                            (cur + step).min(max_scroll)
+                        };
+                        self.scroll_y_override =
+                            if new + max_visible >= row_count { None } else { Some(new) };
+                    }
+                }
                 _ => {}
             }
         }
@@ -594,6 +614,22 @@ mod tests {
         let (a, b) = sel.normalized();
         assert_eq!(a.row, 7, "top visible row maps to absolute 7 when scrolled");
         assert_eq!(b.row, 9, "bottom visible row maps to absolute 9");
+    }
+
+    #[test]
+    fn scroll_event_moves_offset() {
+        // 100 rows, viewport fits 3 (line_h 20, rect.h 60) → auto offset 97.
+        let rows: Vec<Vec<Cell>> = (0..100).map(|i| line(&format!("r{}", i))).collect();
+        let rect = Rect { x: 0.0, y: 0.0, w: 200.0, h: 60.0 };
+        let mut s = CellGridState::new();
+        let mut clip = Clipboard::new();
+        // Wheel up (dy>0) from the auto-bottom → sets an override above the top.
+        s.handle_events(&[InputEvent::Scroll { dy: 60.0 }], &rows, rect, 10.0, 20.0, &mut clip);
+        let off = s.scroll_y_override.expect("wheel up should pin an override");
+        assert!(off < 97, "wheel up should reduce the top-row offset, got {}", off);
+        // Wheel down past the bottom → back to auto-scroll (None).
+        s.handle_events(&[InputEvent::Scroll { dy: -1000.0 }], &rows, rect, 10.0, 20.0, &mut clip);
+        assert!(s.scroll_y_override.is_none(), "scrolling to bottom returns to auto-scroll");
     }
 
     #[test]
