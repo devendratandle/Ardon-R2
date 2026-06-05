@@ -65,6 +65,10 @@ impl InputField {
         let mut submitted: Option<String> = None;
         let mut history_up   = false;
         let mut history_down = false;
+        let mut select_up = false;
+        let mut select_down = false;
+        let mut select_left = false;
+        let mut select_right = false;
         let mut auto_submit_lines: Vec<String> = Vec::new();
 
         for ev in events {
@@ -95,15 +99,20 @@ impl InputField {
                             self.current.replace_range(self.cursor..j, "");
                         }
                     }
+                    // Arrows: plain = cursor / history; Shift = extend a
+                    // transcript selection (host applies select_* below),
+                    // and history is suppressed while Shift is held.
                     KeyCode::Left => {
-                        if self.cursor > 0 {
+                        if mods.shift { select_left = true; }
+                        else if self.cursor > 0 {
                             let mut i = self.cursor - 1;
                             while !self.current.is_char_boundary(i) && i > 0 { i -= 1; }
                             self.cursor = i;
                         }
                     }
                     KeyCode::Right => {
-                        if self.cursor < self.current.len() {
+                        if mods.shift { select_right = true; }
+                        else if self.cursor < self.current.len() {
                             let mut j = self.cursor + 1;
                             while j < self.current.len() && !self.current.is_char_boundary(j) { j += 1; }
                             self.cursor = j;
@@ -111,8 +120,8 @@ impl InputField {
                     }
                     KeyCode::Home => self.cursor = 0,
                     KeyCode::End  => self.cursor = self.current.len(),
-                    KeyCode::Up   => history_up   = true,
-                    KeyCode::Down => history_down = true,
+                    KeyCode::Up   => { if mods.shift { select_up   = true; } else { history_up   = true; } }
+                    KeyCode::Down => { if mods.shift { select_down = true; } else { history_down = true; } }
                     KeyCode::KeyV if mods.ctrl => {
                         if let Some(s) = clipboard.get_text() {
                             let s = s.replace('\r', "");
@@ -160,6 +169,10 @@ impl InputField {
             submitted,
             history_up,
             history_down,
+            select_up,
+            select_down,
+            select_left,
+            select_right,
             auto_submit_lines,
         }
     }
@@ -219,6 +232,13 @@ pub struct InputFieldResponse {
     pub history_up: bool,
     /// User pressed Down — `buffer.history_down()` + `set_line`.
     pub history_down: bool,
+    /// Shift+Arrow — extend the transcript selection by one row/column.
+    /// The host applies these to the grid's keyboard selection. History
+    /// is suppressed while Shift is held.
+    pub select_up: bool,
+    pub select_down: bool,
+    pub select_left: bool,
+    pub select_right: bool,
     /// Lines that arrived from a MULTI-LINE clipboard paste, in order.
     /// The host should feed each one to `ConsoleBuffer::submit_line`
     /// (and dispatch the resulting `SubmitAction`) before processing

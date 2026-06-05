@@ -400,6 +400,38 @@ impl CellGridState {
         copied
     }
 
+    /// Keyboard selection (Shift+Arrow): extend — or start — the
+    /// transcript selection by `(drow, dcol)`. With no current selection
+    /// it anchors at the last row so Shift+Up begins selecting upward
+    /// from the bottom (the prompt). Keeps the moving end on screen by
+    /// nudging the scroll override toward it.
+    pub fn extend_selection_keyboard(
+        &mut self, drow: isize, dcol: isize,
+        row_count: usize, col_count: usize,
+        rect_h: f32, line_h: f32,
+    ) {
+        if row_count == 0 { return; }
+        let last_row = row_count - 1;
+        let last_col = col_count.saturating_sub(1);
+        let (anchor, end) = match self.selection {
+            Some(sel) => (sel.start, sel.end),
+            None => { let p = GridPos { row: last_row, col: 0 }; (p, p) }
+        };
+        let new_row = (end.row as isize + drow).clamp(0, last_row as isize) as usize;
+        let new_col = (end.col as isize + dcol).clamp(0, last_col as isize) as usize;
+        self.selection = Some(Selection { start: anchor, end: GridPos { row: new_row, col: new_col } });
+
+        // Keep the moving end visible.
+        let max_visible = if line_h > 0.0 { (rect_h / line_h).floor() as usize } else { 0 };
+        let cur_scroll = self.scroll_y_override
+            .unwrap_or_else(|| auto_scroll_offset(row_count, rect_h, line_h));
+        if new_row < cur_scroll {
+            self.scroll_y_override = Some(new_row);
+        } else if max_visible > 0 && new_row >= cur_scroll + max_visible {
+            self.scroll_y_override = Some(new_row + 1 - max_visible);
+        }
+    }
+
     /// Paint the rows + selection band. Convenience wrapper around
     /// the free `paint_cells` function.
     pub fn paint(

@@ -277,6 +277,11 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // default cwd is the user's Documents folder (R-style), not the
     // .exe's install dir, so the file lands somewhere they can actually
     // see in Explorer.
+    // Display-aware: with a live display (GUI window / CLI browser) the
+    // plot is shown by the device — don't write a file. Only a headless
+    // script auto-saves (so output isn't lost); explicit save is
+    // save_plot() / a filename.
+    if crate::device::display_present() { return Ok(RVal::Null); }
     let path = "plot.svg";
     let _ = save_to_file(path);
     print_save_path(path);
@@ -377,8 +382,10 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
                                      xmax - xmin, yrange, &opts));
 
     with_device(|d| d.svg_body.push_str(&frag));
-    let _ = save_to_file("hist.svg");
-    print_save_path("hist.svg");
+    if !crate::device::display_present() {
+        let _ = save_to_file("hist.svg");
+        print_save_path("hist.svg");
+    }
     Ok(RVal::Null)
 }
 
@@ -480,8 +487,10 @@ pub fn bi_boxplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     frag.push_str(&render_axis_ticks(&panel, 0.0, ng, all_min, all_max, ng.max(1.0), range, &opts));
 
     with_device(|d| d.svg_body.push_str(&frag));
-    let _ = save_to_file("boxplot.svg");
-    print_save_path("boxplot.svg");
+    if !crate::device::display_present() {
+        let _ = save_to_file("boxplot.svg");
+        print_save_path("boxplot.svg");
+    }
     Ok(RVal::Null)
 }
 
@@ -560,8 +569,10 @@ pub fn bi_barplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
                                      max_h.max(1.0), &opts));
 
     with_device(|d| d.svg_body.push_str(&frag));
-    let _ = save_to_file("barplot.svg");
-    print_save_path("barplot.svg");
+    if !crate::device::display_present() {
+        let _ = save_to_file("barplot.svg");
+        print_save_path("barplot.svg");
+    }
     Ok(RVal::Null)
 }
 

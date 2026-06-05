@@ -35,11 +35,21 @@ use r2_types::{ErrKind, R2Err};
 /// GUI (which has its own plot window) never trigger a browser.
 static AUTOVIEW_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a live plot display is present (CLI browser viewer or the GUI
+/// window). When true, `plot()` only *displays* — it does NOT auto-write
+/// a file (the user saves explicitly via `save_plot()` / a filename).
+/// When false (headless script), plots auto-save a default `.svg` so the
+/// output isn't lost. Set by `enable_autoview()` (CLI) and
+/// `set_display_present()` (GUI).
+static DISPLAY_PRESENT: AtomicBool = AtomicBool::new(false);
+
 /// Opt in to the browser plot viewer for the lifetime of this process.
 /// Called by the interactive REPL so `plot()` pops a live viewer, the
-/// way RGui/RStudio open a device. Idempotent.
+/// way RGui/RStudio open a device. Idempotent. Also marks a display as
+/// present so plots stop auto-writing files.
 pub fn enable_autoview() {
     AUTOVIEW_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    DISPLAY_PRESENT.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Force the browser viewer off (default state). Kept for hosts that
@@ -47,6 +57,17 @@ pub fn enable_autoview() {
 /// off, so this is only needed to override a prior `enable_autoview()`.
 pub fn disable_autoview() {
     AUTOVIEW_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Declare that a live plot display exists (the GUI calls this — it has
+/// its own Graphics window). Plots then display only; saving is explicit.
+pub fn set_display_present(present: bool) {
+    DISPLAY_PRESENT.store(present, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True if a live display (browser viewer or GUI window) is present.
+pub fn display_present() -> bool {
+    DISPLAY_PRESENT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Everything `par()` can set. Defaults mirror R's `par()` baseline so
