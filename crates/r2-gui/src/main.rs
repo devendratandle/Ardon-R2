@@ -128,7 +128,43 @@ fn run_source(
 
 // ─── Main ─────────────────────────────────────────────────────────
 
+/// Pick a writable default working directory (R convention): R2_HOME
+/// override, else OneDrive/Windows Documents, else $HOME. Mirrors the
+/// CLI's `pick_user_home`.
+fn pick_user_home() -> Option<std::path::PathBuf> {
+    if let Ok(custom) = std::env::var("R2_HOME") {
+        let p = std::path::PathBuf::from(custom);
+        if p.is_dir() { return Some(p); }
+    }
+    if let Ok(od) = std::env::var("OneDrive") {
+        let p = std::path::PathBuf::from(&od).join("Documents");
+        if p.is_dir() { return Some(p); }
+    }
+    if let Ok(user) = std::env::var("USERPROFILE") {
+        let od = std::path::PathBuf::from(&user).join("OneDrive").join("Documents");
+        if od.is_dir() { return Some(od); }
+        let docs = std::path::PathBuf::from(user).join("Documents");
+        if docs.is_dir() { return Some(docs); }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let docs = std::path::PathBuf::from(&home).join("Documents");
+        if docs.is_dir() { return Some(docs); }
+        let h = std::path::PathBuf::from(home);
+        if h.is_dir() { return Some(h); }
+    }
+    None
+}
+
 fn main() -> Result<(), String> {
+    // Working directory: launched from the Start Menu, the GUI's cwd is
+    // the (read-only) install dir, so file writes — write.csv, save,
+    // mmap.write, plot-save — fail with "Access is denied". Match the
+    // CLI: move to the user's Documents (or $HOME). Relative paths then
+    // land somewhere writable and visible in Explorer.
+    if let Some(home) = pick_user_home() {
+        let _ = std::env::set_current_dir(&home);
+    }
+
     // The engine emits a `dev.view()`-style browser plot by default —
     // we have a native Graphics window, so disable that side-channel.
     r2_graphics::device::disable_autoview();
