@@ -328,8 +328,23 @@ mod mmap_impl {
         // operating on the borrowed slice. No null support (mmap file is
         // a packed array; NaN encodes NA if needed).
 
-        /// Sum of all values.
-        pub fn sum(&self) -> f64 { self.as_slice().iter().sum() }
+        /// Sum of all values. Uses 8 independent accumulators so the
+        /// f64 add chain isn't serialized — the compiler pipelines /
+        /// auto-vectorizes it (plain `iter().sum()` is one dependency
+        /// chain, ~2× slower on out-of-cache data).
+        pub fn sum(&self) -> f64 {
+            let s = self.as_slice();
+            let mut acc = [0.0f64; 8];
+            let mut it = s.chunks_exact(8);
+            for c in &mut it {
+                acc[0] += c[0]; acc[1] += c[1]; acc[2] += c[2]; acc[3] += c[3];
+                acc[4] += c[4]; acc[5] += c[5]; acc[6] += c[6]; acc[7] += c[7];
+            }
+            let mut total = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
+                + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+            for &v in it.remainder() { total += v; }
+            total
+        }
         /// Arithmetic mean. Returns 0.0 on empty.
         pub fn mean(&self) -> f64 {
             if self.len == 0 { 0.0 } else { self.sum() / self.len as f64 }
