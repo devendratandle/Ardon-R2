@@ -169,6 +169,35 @@ unchanged in Phase K (kernels ask Oracle).
 8 reductions go through the bridge. Lazy-bitmap optimization in F.3a.
 Storage migration (F.3 destructive) **deferred** — see ordering below.
 
+**v0.2.2 additions on top of the bridge:**
+- **Out-of-core**: `MmapColumnar` (mmap'd packed-f64) exposed to R2 as
+  `mmap.write` / `mmap.col`; `sum`/`mean`/`min`/`max` stream over the
+  mapping → larger-than-RAM reductions with bounded memory.
+- **Vector⊗scalar fusion**: left-leaning `(v OP lit) OP lit …` chains
+  collapse to one pass in the engine (≈2.4× on `v*2+1`).
+- **Unified console sink** (“r2dterminal”, `r2_types::out`): engine +
+  every compute crate’s output converge on one frontend-installed sink,
+  mirroring R’s `R_WriteConsole`.
+
+### Phase F.3 — destructive storage migration ← NEXT (justified by v0.2.2 perf)
+Make `RVal::Numeric` natively `ColumnarF64` (no `Option<f64>` re-pack).
+This removes the residual element-wise repack cost the fusion work
+exposed, makes the whole engine zero-copy / mmap-friendly, and lets the
+out-of-core path extend beyond reductions.
+
+### Phase K — Kernel layer extraction ✅ largely shipped (correction phase)
+**Goal:** move all parallelism out of builtins into a backend-dispatched
+kernel layer. Lock in the architecture diagram's "Microkernels" tier.
+`crates/r2-kernel/` exists (`reduce`/`map`/`binary`/`par_for`, Oracle-
+dispatched). Reductions/apply/ML route through it. Remaining: migrate the
+last inline reduction sites + columnar `var`/`sd`/`median`.
+
+- New crate `crates/r2-kernel/` (or extend `r2-arrow` / `r2-linalg`).
+- Define traits: `Reducer<T>`, `Mapper<T>`, `BinaryOp<T>`.
+- Each kernel has serial + Rayon impls. Backend chosen via Oracle.
+- Builtins call `kernel::reduce(buf, Op::Sum)` etc. — never `par_iter`
+  directly.
+
 ### Phase K — Kernel layer extraction ← NEXT (correction phase)
 **Goal:** move all parallelism out of builtins into a backend-dispatched
 kernel layer. Lock in the architecture diagram's "Microkernels" tier.

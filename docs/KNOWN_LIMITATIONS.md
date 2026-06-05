@@ -366,6 +366,37 @@ limitation; it is now documented rather than hidden.
 `printf` rules, or wrap `format!` via a runtime template engine.
 No timeline yet.
 
+## Out-of-core / columnar memory (`r2-arrow`)
+
+### Memory-mapped columns — larger-than-RAM ✅ shipped (v0.2.2), with bounds
+
+`mmap.write(x, path)` writes a numeric vector as a packed-`f64` file;
+`mmap.col(path)` opens it as a memory-mapped handle whose `sum`/`mean`/
+`min`/`max` **stream over the mmap**, so files **larger than RAM** reduce
+with bounded memory (verified: an 8 GB file on a 7.4 GB-RAM machine sums
+correctly at ~5 GB peak RSS; the multi-accumulator sum beats R's
+`bigmemory`).
+
+**Current bounds (closure path = follow-up phases):**
+- **Reductions only** — `sum`/`mean`/`min`/`max`/`length`. No general
+  element-wise ops, filtering, joins, or indexing on the mmap path;
+  those would need `to_owned()` back into RAM, defeating the purpose.
+- **Read-only** — the mapping is opened read-only.
+- **`mmap.write` needs the source vector in RAM** — so *building* a
+  >RAM file from R2 itself isn't possible yet. A chunked/append writer
+  (and **Parquet / Arrow-IPC readers** for real datasets) is the next
+  step. Today a >RAM file must be produced externally or in chunks.
+- The default in-memory `RVal::Numeric` path is still RAM-bound; the
+  Phase F.3 storage migration (numeric storage = `ColumnarF64` natively)
+  is what would make *everything* zero-copy / mmap-friendly.
+
+### Element-wise arithmetic — vector⊗scalar fusion ✅ (v0.2.2), residual repack
+
+`v*2+1`-style chains now fuse into a single pass (≈2.4× faster). The
+remaining gap vs R is the `Option<f64> → dense f64` repack on the base
+vector (each `RVal::Numeric` lazily repacks to columnar); the Phase F.3
+storage migration removes it.
+
 ## Data (`r2-data`)
 
 ### `merge(df1, df2)` — single-key inner join only

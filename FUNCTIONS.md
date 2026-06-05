@@ -6,6 +6,7 @@ c(...)              Create vector: c(1,2,3)
 length(x)           Length of vector
 print(x)            Print value
 cat(...)            Print without newline
+clear() / cls()     Clear the console (GUI buffer / terminal)
 typeof(x)           Type name: "numeric", "character", etc.
 class(x)            Class of object
 list(...)           Create named list
@@ -112,6 +113,9 @@ svd(x)                  Singular value decomposition
 eigen(x)                Eigenvalue decomposition
 solve(a[, b])           Matrix inverse, or solve a x = b
 det(a)                  Determinant (LU)
+mmap.write(x, path)     Write a numeric vector as a packed-f64 file
+mmap.col(path)          Open a memory-mapped column (out-of-core, larger
+                        than RAM); sum/mean/min/max stream over the mmap
 scale(x)                Center and scale
 cv(x,y,model,k)         K-fold cross-validation
 confusion.matrix(pred,actual) Confusion matrix + F1
