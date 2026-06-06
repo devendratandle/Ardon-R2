@@ -124,6 +124,12 @@ mmap.csv(file, sep=",") Out-of-core CSV import: stream the file row-by-row
                         and write each NUMERIC column to its own packed-f64
                         sidecar; returns a named list of mmap.col handles
                         (run sum/mean/sd/... on each, larger than RAM)
+mmap.lm(data,response,predictors)
+                        Out-of-core least squares: accumulate XᵀX and Xᵀy in
+                        one streaming pass over the mmap columns, then solve
+                        the normal equations. data = mmap.csv list; response
+                        and predictors name its columns. Returns named
+                        coefficients ((Intercept), predictors…)
 scale(x)                Center and scale
 cv(x,y,model,k)         K-fold cross-validation
 confusion.matrix(pred,actual) Confusion matrix + F1

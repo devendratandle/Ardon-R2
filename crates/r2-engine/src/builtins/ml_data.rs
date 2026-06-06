@@ -265,6 +265,96 @@ pub(crate) fn bi_mmap_csv(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     Ok(RVal::List(items))
 }
 
+/// Look up an `mmap.col` handle by name in an `mmap.csv` result list and
+/// return its packed-f64 file path.
+fn ooc_col_path(list: &RVal, name: &str) -> Option<String> {
+    if let RVal::List(items) = list {
+        for (n, v) in items {
+            if n.as_deref() == Some(name) {
+                if let RVal::TypeInstance(i) = v {
+                    if i.type_name.as_ref() == "mmapcol" {
+                        return i.fields.get("path").map(val_to_str);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `mmap.lm(data, response, predictors)` — out-of-core ordinary least
+/// squares. `data` is an `mmap.csv` list; `response` and `predictors`
+/// (a character vector) name its columns. Accumulates XᵀX (p×p) and Xᵀy
+/// in a SINGLE streaming pass over the memory-mapped columns — peak RAM is
+/// p² + the OS page cache, independent of row count — then solves the
+/// small normal-equations system. Returns named coefficients
+/// (`(Intercept)`, predictors…).
+///
+/// Note: normal equations (not QR), so very ill-conditioned designs lose
+/// precision; NA (NaN) rows poison the fit (no na.omit yet). Fine for the
+/// well-conditioned large-n case this targets.
+pub(crate) fn bi_mmap_lm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let data = gv(a, 0);
+    let resp = val_to_str(&gv(a, 1));
+    let preds: Vec<String> = match &gv(a, 2) {
+        RVal::Character(v, _) => v.iter().filter_map(|o| o.as_ref().map(|s| s.to_string())).collect(),
+        other => { let s = val_to_str(other); if s.is_empty() { vec![] } else { vec![s] } }
+    };
+    if resp.is_empty() || preds.is_empty() {
+        return err!(Runtime, "mmap.lm(data, response, predictors): a response and at least one predictor are required");
+    }
+
+    let y_path = ooc_col_path(&data, &resp)
+        .ok_or_else(|| R2Err { msg: format!("mmap.lm: response column '{}' not found in data", resp), kind: ErrKind::Runtime })?;
+    let y_col = r2_arrow::MmapColumnar::open(&y_path)
+        .map_err(|m| R2Err { msg: format!("mmap.lm: {}", m), kind: ErrKind::Runtime })?;
+    let y = y_col.as_slice();
+    let n = y.len();
+
+    let mut pred_cols = Vec::with_capacity(preds.len());
+    for pn in &preds {
+        let pp = ooc_col_path(&data, pn)
+            .ok_or_else(|| R2Err { msg: format!("mmap.lm: predictor column '{}' not found in data", pn), kind: ErrKind::Runtime })?;
+        let c = r2_arrow::MmapColumnar::open(&pp)
+            .map_err(|m| R2Err { msg: format!("mmap.lm: {}", m), kind: ErrKind::Runtime })?;
+        if c.len() != n {
+            return err!(Runtime, "mmap.lm: column '{}' has length {} but response has {}", pn, c.len(), n);
+        }
+        pred_cols.push(c);
+    }
+    let pred_slices: Vec<&[f64]> = pred_cols.iter().map(|c| c.as_slice()).collect();
+
+    let npred = preds.len();
+    let p = 1 + npred; // intercept + predictors
+    let mut xtx = vec![0.0f64; p * p];
+    let mut xty = vec![0.0f64; p];
+    let mut xr = vec![0.0f64; p];
+    for r in 0..n {
+        xr[0] = 1.0;
+        for j in 0..npred { xr[1 + j] = pred_slices[j][r]; }
+        let yr = y[r];
+        for i in 0..p {
+            xty[i] += xr[i] * yr;
+            for j in i..p { xtx[i * p + j] += xr[i] * xr[j]; }
+        }
+    }
+    // XᵀX is symmetric — mirror the lower triangle (also makes it valid
+    // column-major for Matrix, which is identical for a symmetric matrix).
+    for i in 0..p {
+        for j in 0..i { xtx[i * p + j] = xtx[j * p + i]; }
+    }
+
+    let beta = Matrix::new(xtx, p, p).solve(&xty)
+        .map_err(|e| R2Err { msg: format!("mmap.lm: normal-equations solve failed (collinear predictors?): {}", e), kind: ErrKind::Runtime })?;
+
+    let mut names: Vec<Arc<str>> = Vec::with_capacity(p);
+    names.push(Arc::from("(Intercept)"));
+    for pn in &preds { names.push(Arc::from(pn.as_str())); }
+    let mut attrs = Attrs::default();
+    attrs.names = Some(names);
+    Ok(RVal::Numeric(beta.iter().map(|b| Some(*b)).collect::<Vec<_>>().into(), attrs))
+}
+
 pub(crate) fn bi_mmap_col(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let path = val_to_str(&gv(a, 0));
     let col = r2_arrow::MmapColumnar::open(&path)
