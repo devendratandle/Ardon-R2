@@ -798,20 +798,6 @@ fn main() -> Result<(), String> {
                                 cell_w, line_h, ctx.clipboard,
                             );
                         }
-                        // Shift+Arrow keyboard selection over the transcript
-                        // (history is suppressed while Shift is held — see
-                        // InputField). Lets the user select + Ctrl+C without
-                        // the mouse.
-                        if resp.select_up || resp.select_down
-                            || resp.select_left || resp.select_right
-                        {
-                            let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-                            let mut gs = grid_state.borrow_mut();
-                            if resp.select_up    { gs.extend_selection_keyboard(-1, 0, rows.len(), max_cols, grid_rect.h, line_h); }
-                            if resp.select_down  { gs.extend_selection_keyboard( 1, 0, rows.len(), max_cols, grid_rect.h, line_h); }
-                            if resp.select_left  { gs.extend_selection_keyboard( 0, -1, rows.len(), max_cols, grid_rect.h, line_h); }
-                            if resp.select_right { gs.extend_selection_keyboard( 0,  1, rows.len(), max_cols, grid_rect.h, line_h); }
-                        }
                     }
                     } // end: grid selection (console topmost)
                 }
