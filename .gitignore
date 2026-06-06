@@ -87,6 +87,10 @@ crates/r2-graphics/*.svg
 
 # ─── Private design and roadmap documents (kept locally) ────────────
 
+# AI working-agreement / policy file — kept locally so assistants read it
+# every session, but not part of the public source tree.
+CLAUDE.md
+
 docs/rustR2_ai_library.md
 docs/rustR2_stats_library.md
 docs/status_v*.md
