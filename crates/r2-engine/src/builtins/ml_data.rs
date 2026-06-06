@@ -369,6 +369,23 @@ pub(crate) fn bi_mmap_col(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 /// If `v` is an `mmap.col` handle, stream-reduce it over the memory map
 /// (`op` = sum/mean/min/max/length); otherwise `None` so the caller falls
 /// back to the normal in-memory reduction.
+/// If `v` is an `mmap.col` handle, compute approximate quantiles at
+/// `probs` over the memory map (two-pass histogram, bounded RAM);
+/// otherwise `None` so the caller falls back to the in-memory path.
+pub(crate) fn mmap_quantile(v: &RVal, probs: &[f64]) -> Option<Result<Vec<f64>, R2Err>> {
+    let inst = match v {
+        RVal::TypeInstance(i) if i.type_name.as_ref() == "mmapcol" => i,
+        _ => return None,
+    };
+    let path = inst.fields.get("path").map(val_to_str).unwrap_or_default();
+    let probs = probs.to_vec();
+    Some((|| {
+        let col = r2_arrow::MmapColumnar::open(&path)
+            .map_err(|m| R2Err { msg: format!("quantile(mmapcol): {}", m), kind: ErrKind::Runtime })?;
+        Ok(col.quantile_hist(&probs, 1024))
+    })())
+}
+
 pub(crate) fn mmap_reduce(v: &RVal, op: &str) -> Option<Result<RVal, R2Err>> {
     let inst = match v {
         RVal::TypeInstance(i) if i.type_name.as_ref() == "mmapcol" => i,

@@ -116,7 +116,9 @@ det(a)                  Determinant (LU)
 mmap.write(x, path)     Write a numeric vector as a packed-f64 file
 mmap.col(path)          Open a memory-mapped column (out-of-core, larger
                         than RAM); sum/mean/sd/var/prod/min/max/range/length
-                        stream over the mmap with bounded memory
+                        stream over the mmap with bounded memory.
+                        median/quantile use a streaming two-pass histogram
+                        (approximate, bounded memory)
 mmap.map(path,FUN,out)  Out-of-core scalar map: stream a transform
                         (log/log2/log10/exp/sqrt/abs/square/neg) over an mmap
                         column to a new file (>RAM in → >RAM out)

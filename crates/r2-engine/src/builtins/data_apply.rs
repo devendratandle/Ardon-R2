@@ -561,7 +561,14 @@ pub(crate) fn bi_floor(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
     Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| n.floor())).collect(), Attrs::default()))
 }
 // Phase K.9 — rolling/window reductions
-pub(crate) fn bi_median(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { return r2_stats::bi_median(a);
+pub(crate) fn bi_median(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // Out-of-core column: streaming approximate median over the mmap.
+    if let Some(arg) = a.first() {
+        if let Some(r) = super::ml_data::mmap_quantile(&arg.value, &[0.5]) {
+            return r.map(|q| RVal::Numeric(vec![Some(q[0])].into(), Attrs::default()));
+        }
+    }
+    return r2_stats::bi_median(a);
     #[allow(unreachable_code)]
     let mut v: Vec<f64> = vec![];
     let n = v.len();

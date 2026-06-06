@@ -70,6 +70,27 @@ pub(crate) fn bi_rollsd(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
     r2_stats::summary::bi_rollsd(a)
 }
 pub(crate) fn bi_quantile(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // Out-of-core column: streaming approximate quantiles over the mmap.
+    if let Some(arg) = a.first() {
+        if matches!(&arg.value, RVal::TypeInstance(i) if i.type_name.as_ref() == "mmapcol") {
+            // probs from `probs=` or a positional 2nd arg, else R's default.
+            let pv = a.iter().find(|x| x.name.as_deref() == Some("probs")).map(|x| &x.value)
+                .or_else(|| a.get(1).filter(|x| x.name.is_none()).map(|x| &x.value));
+            let probs: Vec<f64> = match pv {
+                Some(RVal::Numeric(v, _)) => v.as_vec().iter().filter_map(|o| *o).collect(),
+                _ => vec![0.0, 0.25, 0.5, 0.75, 1.0],
+            };
+            if let Some(r) = super::ml_data::mmap_quantile(&arg.value, &probs) {
+                return r.map(|q| {
+                    let names: Vec<std::sync::Arc<str>> =
+                        probs.iter().map(|p| std::sync::Arc::from(format!("{}%", p * 100.0).as_str())).collect();
+                    let mut attrs = r2_types::Attrs::default();
+                    attrs.names = Some(names);
+                    RVal::Numeric(q.iter().map(|x| Some(*x)).collect::<Vec<_>>().into(), attrs)
+                });
+            }
+        }
+    }
     r2_stats::summary::bi_quantile(a)
 }
 

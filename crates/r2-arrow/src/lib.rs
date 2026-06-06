@@ -414,6 +414,54 @@ mod mmap_impl {
         /// Standard deviation = `sqrt(var(ddof))`.
         pub fn sd(&self, ddof: usize) -> f64 { self.var(ddof).sqrt() }
 
+        /// Approximate quantiles via a two-pass histogram — true
+        /// out-of-core (bounded RAM = `bins` counters, independent of n).
+        /// Pass 1 = `range()` (min/max); pass 2 bins values into `bins`
+        /// buckets; each probability is located by cumulative count with
+        /// linear interpolation inside its bucket. `p=0`→min, `p=1`→max are
+        /// exact; interior quantiles are accurate to ≈ (max−min)/bins.
+        /// NaN (NA) values are skipped. Returns one value per probability.
+        pub fn quantile_hist(&self, probs: &[f64], bins: usize) -> Vec<f64> {
+            let s = self.as_slice();
+            if s.is_empty() { return vec![f64::NAN; probs.len()]; }
+            let (mn, mx) = self.range();
+            if !(mx > mn) {
+                // Constant (or single) column — every quantile is that value.
+                return probs.iter().map(|_| mn).collect();
+            }
+            let bins = bins.max(1);
+            let width = (mx - mn) / bins as f64;
+            let mut hist = vec![0u64; bins];
+            for &v in s {
+                if v.is_nan() { continue; }
+                let mut b = ((v - mn) / width) as usize;
+                if b >= bins { b = bins - 1; }
+                hist[b] += 1;
+            }
+            let total: u64 = hist.iter().sum();
+            probs.iter().map(|&p| {
+                let p = p.clamp(0.0, 1.0);
+                if p <= 0.0 { return mn; }
+                if p >= 1.0 { return mx; }
+                let target = p * total as f64;
+                let mut cum = 0u64;
+                let mut q = mx;
+                for b in 0..bins {
+                    let next = cum + hist[b];
+                    if next as f64 >= target {
+                        let bin_lo = mn + b as f64 * width;
+                        let within = if hist[b] > 0 {
+                            (target - cum as f64) / hist[b] as f64
+                        } else { 0.0 };
+                        q = bin_lo + within * width;
+                        break;
+                    }
+                    cum = next;
+                }
+                q
+            }).collect()
+        }
+
         /// Out-of-core scalar map: apply `f` to every element and stream
         /// the result to a new packed-f64 file at `path`. Input is paged
         /// by the OS; output is written through a small fixed-size buffer,
