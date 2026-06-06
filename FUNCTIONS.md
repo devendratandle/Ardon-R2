@@ -182,9 +182,13 @@ aggregate(x,by,fun) Aggregate by groups; formula form: aggregate(cbind(y1,y2) ~ 
 do.call(fun,args)   Call function with arg list
 ```
 
-## I/O (10)
+## I/O (11)
 ```
 read.csv(file)      Read CSV file
+read.parquet(file)  Read a Parquet file as a data.frame (pure-Rust via the
+                    parquet/arrow crates; reads row-group by row-group so
+                    large files import with bounded memory. Numeric types →
+                    numeric, boolean → logical, strings → character)
 write.csv(x,file)   Write CSV file
 read.table(file)    Read delimited file
 write.table(x,file) Write delimited file
