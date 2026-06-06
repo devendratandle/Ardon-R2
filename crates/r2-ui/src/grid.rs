@@ -262,6 +262,25 @@ pub fn scroll_pos_to_col(position: f32, max_cols: usize, visible_cols: usize) ->
     (position.clamp(0.0, 1.0) * max_off).round() as usize
 }
 
+/// Inverse of `scroll_pos_to_row`: map a current row offset back to a
+/// 0..1 scrollbar position. The host calls this every frame so the
+/// thumb tracks the *actual* scroll offset — whether it changed via
+/// wheel/touchpad, auto-scroll, or keyboard selection, not just by
+/// dragging the thumb itself. Without it the bar only moves when the
+/// user drags it (the reported "sidebar never moves while scrolling").
+pub fn row_offset_to_scroll_pos(offset: usize, total_rows: usize, visible_rows: usize) -> f32 {
+    if total_rows <= visible_rows { return 0.0; }
+    let max_off = (total_rows - visible_rows) as f32;
+    (offset.min(total_rows - visible_rows) as f32 / max_off).clamp(0.0, 1.0)
+}
+
+/// Inverse of `scroll_pos_to_col`: column offset → 0..1 position.
+pub fn col_offset_to_scroll_pos(offset: usize, max_cols: usize, visible_cols: usize) -> f32 {
+    if max_cols <= visible_cols { return 0.0; }
+    let max_off = (max_cols - visible_cols) as f32;
+    (offset.min(max_cols - visible_cols) as f32 / max_off).clamp(0.0, 1.0)
+}
+
 // ─── CellGridState — selection state machine ────────────────────────
 //
 // Owned by the host (typically inside a closure capture or app struct).

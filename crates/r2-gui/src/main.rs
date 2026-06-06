@@ -909,6 +909,22 @@ fn main() -> Result<(), String> {
                                 r2_ui::scroll_pos_to_col(p, max_cols, visible_cols);
                         }
 
+                        // ── Keep the thumbs in sync with the ACTUAL scroll
+                        //     offset every frame. Covers wheel / touchpad
+                        //     scroll, auto-scroll-to-bottom, and keyboard
+                        //     (Shift+Arrow) selection — not just dragging the
+                        //     thumb. R-console behaviour: the bar always
+                        //     reflects where the transcript is.
+                        {
+                            let gs = grid_state.borrow();
+                            let eff_y = gs.scroll_y_override
+                                .unwrap_or_else(|| auto_scroll_offset(total_rows, grid_rect.h, line_h));
+                            vscroll.borrow_mut().position =
+                                r2_ui::row_offset_to_scroll_pos(eff_y, total_rows, visible_rows);
+                            hscroll.borrow_mut().position =
+                                r2_ui::col_offset_to_scroll_pos(gs.scroll_x, max_cols, visible_cols);
+                        }
+
                         // ── Transcript paint — uses the scroll state
                         //     CellGridState now owns.
                         grid_state.borrow().paint(frame, renderer, &rows, grid_rect,

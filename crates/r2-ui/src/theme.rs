@@ -100,7 +100,7 @@ impl Theme {
             console_output:    Color::rgb(40,  30, 130),    // violet blue
             console_error:     Color::rgb(180, 22, 30),     // deeper red
             console_banner:    Color::rgb(40,  30, 130),    // matches output
-            console_selection_bg: Color::rgba(70, 130, 180, 90),
+            console_selection_bg: Color::rgba(65, 105, 225, 120), // royal blue, medium
             cursor:            Color::rgb(196, 40, 40),
             button_min:        Color::rgb(40,  160, 60),    // green
             button_max:        Color::rgb(40,  120, 200),   // blue
@@ -127,7 +127,7 @@ impl Theme {
             console_output:    Color::rgb(32, 92, 168),
             console_error:     Color::rgb(208, 48, 48),
             console_banner:    Color::rgb(32, 92, 168),
-            console_selection_bg: Color::rgba(70, 130, 180, 90),
+            console_selection_bg: Color::rgba(65, 105, 225, 120), // royal blue, medium
             cursor:            Color::BLACK,
             button_min:        Color::rgb(40, 160, 60),
             button_max:        Color::rgb(40, 120, 200),

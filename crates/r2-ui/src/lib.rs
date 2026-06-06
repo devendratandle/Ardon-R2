@@ -53,7 +53,8 @@ pub use app::{FrameCtx, FrameFn, R2Ui, R2UiApp};
 pub use context_menu::{ContextItem, ContextMenu};
 pub use event::{normalize_paste, Clipboard, InputEvent, KeyCode, Mods, MouseButton, MousePos};
 pub use grid::{
-    auto_scroll_offset, hit_test, paint_cells, paint_cells_scrolled,
+    auto_scroll_offset, col_offset_to_scroll_pos, hit_test, paint_cells,
+    paint_cells_scrolled, row_offset_to_scroll_pos,
     scroll_pos_to_col, scroll_pos_to_row,
     Cell, CellGrid, CellGridResponse, CellGridState, GridPos, Rect, Selection,
 };
