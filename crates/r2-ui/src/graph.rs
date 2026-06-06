@@ -235,6 +235,27 @@ fn parse_svg_dimensions(svg: &str) -> Option<(f32, f32)> {
     Some((extract(svg, "width")?, extract(svg, "height")?))
 }
 
+/// Process-wide font database, loaded once. `load_system_fonts()` scans
+/// the whole system font directory (hundreds of files on Windows) — doing
+/// it per plot is the graphics cold-start. Cache it in an `Arc` and share
+/// it across every rasterisation.
+fn shared_fontdb() -> std::sync::Arc<usvg::fontdb::Database> {
+    static DB: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    })
+    .clone()
+}
+
+/// Pre-load the shared font database (call once at startup, ideally on a
+/// background thread) so the first plot doesn't pay the system-font scan.
+pub fn warm_fonts() {
+    let _ = shared_fontdb();
+}
+
 fn rasterize_svg(bytes: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
     // Straight SVG → pixmap rasterisation. Text in `font-size="Npx"`
     // *will* scale with the panel — that's a real limitation of the
@@ -244,7 +265,10 @@ fn rasterize_svg(bytes: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
     // when the panel aspect ratio didn't match the SVG's (which is
     // most of the time), so it's removed.
     let mut opt = usvg::Options::default();
-    opt.fontdb_mut().load_system_fonts();
+    // Reuse a process-wide font database loaded ONCE, instead of scanning
+    // the whole system font directory on every plot (that scan is the
+    // "graphics opens late, fast the second time" cold-start).
+    opt.fontdb = shared_fontdb();
     let tree = usvg::Tree::from_data(bytes, &opt).ok()?;
 
     let svg_size = tree.size();

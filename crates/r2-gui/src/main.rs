@@ -165,6 +165,16 @@ fn main() -> Result<(), String> {
         let _ = std::env::set_current_dir(&home);
     }
 
+    // Warm the SVG font database off the critical path. The first plot
+    // otherwise scans the whole system font directory (hundreds of files)
+    // before the Graphics window can show anything — the "plot opens late,
+    // fast the second time" lag. Loading it once on a background thread
+    // while the GUI/engine starts up means the first plot is already warm.
+    std::thread::spawn(|| {
+        r2_ui::graph::warm_fonts();
+        r2_graphics::device::warm_fonts();
+    });
+
     // The engine emits a `dev.view()`-style browser plot by default —
     // we have a native Graphics window, so disable that side-channel.
     r2_graphics::device::disable_autoview();

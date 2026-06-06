@@ -411,6 +411,26 @@ pub fn save_to_file(path: &str) -> Result<(), std::io::Error> {
     std::fs::write(path, svg)
 }
 
+/// Process-wide font database, loaded once. `load_system_fonts()` scans
+/// the whole system font directory (hundreds of files on Windows); doing
+/// it on every render is the graphics cold-start. Cache + share it.
+fn shared_fontdb() -> std::sync::Arc<usvg::fontdb::Database> {
+    static DB: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    })
+    .clone()
+}
+
+/// Pre-load the shared font database (call once at startup, ideally on a
+/// background thread) so the first PNG/RGBA render skips the font scan.
+pub fn warm_fonts() {
+    let _ = shared_fontdb();
+}
+
 /// Rasterize the current plot to a fresh RGBA buffer at the given
 /// pixel dimensions. Used by "Copy plot as image" — same render
 /// path as `save_to_png` but returns the bytes instead of writing
@@ -418,7 +438,7 @@ pub fn save_to_file(path: &str) -> Result<(), std::io::Error> {
 pub fn render_to_rgba(target_w: u32, target_h: u32) -> Result<(Vec<u8>, u32, u32), R2Err> {
     let svg = with_device(|d| d.full_svg());
     let mut opt = usvg::Options::default();
-    opt.fontdb_mut().load_system_fonts();
+    opt.fontdb = shared_fontdb();
     let tree = usvg::Tree::from_str(&svg, &opt)
         .map_err(|e| R2Err { msg: format!("svg→rgba: parse failed: {}", e), kind: ErrKind::Runtime })?;
     let svg_size = tree.size();
@@ -448,9 +468,9 @@ pub fn render_to_rgba(target_w: u32, target_h: u32) -> Result<(Vec<u8>, u32, u32
 pub fn save_to_png(path: &str, target_w: u32, target_h: u32) -> Result<(), R2Err> {
     let svg = with_device(|d| d.full_svg());
     let mut opt = usvg::Options::default();
-    // Load system fonts so axis labels, titles, and legend text render.
-    // Without this, resvg silently drops every <text> node.
-    opt.fontdb_mut().load_system_fonts();
+    // Shared font database (loaded once) so axis labels, titles, and
+    // legend text render without re-scanning the system fonts each call.
+    opt.fontdb = shared_fontdb();
     let tree = usvg::Tree::from_str(&svg, &opt)
         .map_err(|e| R2Err { msg: format!("svg→png: parse failed: {}", e), kind: ErrKind::Runtime })?;
     let mut pixmap = tiny_skia::Pixmap::new(target_w, target_h)
