@@ -115,7 +115,15 @@ solve(a[, b])           Matrix inverse, or solve a x = b
 det(a)                  Determinant (LU)
 mmap.write(x, path)     Write a numeric vector as a packed-f64 file
 mmap.col(path)          Open a memory-mapped column (out-of-core, larger
-                        than RAM); sum/mean/min/max stream over the mmap
+                        than RAM); sum/mean/sd/var/prod/min/max/range/length
+                        stream over the mmap with bounded memory
+mmap.map(path,FUN,out)  Out-of-core scalar map: stream a transform
+                        (log/log2/log10/exp/sqrt/abs/square/neg) over an mmap
+                        column to a new file (>RAM in → >RAM out)
+mmap.csv(file, sep=",") Out-of-core CSV import: stream the file row-by-row
+                        and write each NUMERIC column to its own packed-f64
+                        sidecar; returns a named list of mmap.col handles
+                        (run sum/mean/sd/... on each, larger than RAM)
 scale(x)                Center and scale
 cv(x,y,model,k)         K-fold cross-validation
 confusion.matrix(pred,actual) Confusion matrix + F1

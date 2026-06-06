@@ -339,7 +339,21 @@ pub(crate) fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     })).collect();
     Ok(RVal::Factor(Factor { codes, levels, ordered: false }))
 }
-pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::DataFrame(df) => Ok(RVal::Character(df.columns.iter().map(|(n,_)| Some(n.clone())).collect(), Attrs::default())), _ => Ok(RVal::Null) } }
+pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match &gv(a,0) {
+        RVal::DataFrame(df) => Ok(RVal::Character(df.columns.iter().map(|(n,_)| Some(n.clone())).collect(), Attrs::default())),
+        // Named list: R returns the names, with "" for any unnamed element,
+        // or NULL if the list has no names at all.
+        RVal::List(items) => {
+            if items.iter().all(|(n,_)| n.is_none()) { return Ok(RVal::Null); }
+            Ok(RVal::Character(
+                items.iter().map(|(n,_)| Some(n.clone().unwrap_or_else(|| std::sync::Arc::from("")))).collect(),
+                Attrs::default(),
+            ))
+        }
+        _ => Ok(RVal::Null),
+    }
+}
 pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
     match &v {

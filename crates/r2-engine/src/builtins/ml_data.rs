@@ -163,6 +163,108 @@ pub(crate) fn bi_read_parquet(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
     Ok(RVal::DataFrame(DataFrame { columns, row_names: None }))
 }
 
+/// Append one parsed CSV row's numeric fields to the per-column writers.
+/// Non-numeric / missing cells in a numeric column become NaN (R's NA for
+/// f64). Columns with `None` writers (detected non-numeric) are skipped.
+fn csv_write_row(
+    writers: &mut [Option<(String, r2_arrow::MmapWriter)>],
+    fields: &[String],
+) -> Result<(), String> {
+    for (c, w) in writers.iter_mut().enumerate() {
+        if let Some((_, ww)) = w.as_mut() {
+            let v = fields.get(c).and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::NAN);
+            ww.append(&[v])?;
+        }
+    }
+    Ok(())
+}
+
+/// `mmap.csv(file, sep=",")` — out-of-core CSV import. Streams the file
+/// line by line (never holding it in RAM), writes each NUMERIC column to
+/// its own packed-f64 sidecar (`<stem>__<col>.f64`) via the streaming
+/// `MmapWriter`, and returns a named list of `mmap.col` handles. The
+/// out-of-core reductions (`sum`/`mean`/`sd`/…) then run on each column,
+/// so a larger-than-RAM CSV becomes analyzable with bounded memory.
+/// Numeric columns are detected from the first data row; non-numeric
+/// columns are skipped in this version (string columns await the Utf8
+/// columnar dtype). Missing/garbled numeric cells import as NA (NaN).
+pub(crate) fn bi_mmap_csv(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    use std::io::BufRead;
+    let path = val_to_str(&gv(a, 0));
+    if path.is_empty() { return err!(Runtime, "mmap.csv(file): a file path is required"); }
+    let sep = gn(a, "sep").map(|v| val_to_str(&v)).filter(|s| !s.is_empty()).unwrap_or_else(|| ",".to_string());
+
+    let f = std::fs::File::open(&path)
+        .map_err(|e| R2Err { msg: format!("mmap.csv: cannot open '{}': {}", path, e), kind: ErrKind::Runtime })?;
+    let mut reader = std::io::BufReader::new(f);
+    let rderr = |e: std::io::Error| R2Err { msg: format!("mmap.csv: {}", e), kind: ErrKind::Runtime };
+
+    // Header → column names.
+    let mut header = String::new();
+    if reader.read_line(&mut header).map_err(rderr)? == 0 {
+        return err!(Runtime, "mmap.csv: empty file");
+    }
+    let names = parse_csv_line(header.trim_end_matches(['\r', '\n']), &sep);
+    let ncol = names.len();
+
+    // First data row → detect numeric columns.
+    let mut first = String::new();
+    if reader.read_line(&mut first).map_err(rderr)? == 0 {
+        return err!(Runtime, "mmap.csv: file has a header but no data rows");
+    }
+    let first_fields = parse_csv_line(first.trim_end_matches(['\r', '\n']), &sep);
+    let is_numeric: Vec<bool> = (0..ncol)
+        .map(|c| first_fields.get(c).map(|s| s.parse::<f64>().is_ok()).unwrap_or(false))
+        .collect();
+
+    // One streaming writer per numeric column, sidecar next to the CSV.
+    let dir = std::path::Path::new(&path).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = std::path::Path::new(&path).file_stem()
+        .map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "data".to_string());
+    let mut writers: Vec<Option<(String, r2_arrow::MmapWriter)>> = Vec::with_capacity(ncol);
+    for c in 0..ncol {
+        if is_numeric[c] {
+            let safe: String = names[c].chars().map(|ch| if ch.is_alphanumeric() { ch } else { '_' }).collect();
+            let sidecar = dir.join(format!("{}__{}.f64", stem, if safe.is_empty() { format!("col{}", c) } else { safe }));
+            let pstr = sidecar.to_string_lossy().to_string();
+            let w = r2_arrow::MmapWriter::create(&pstr)
+                .map_err(|m| R2Err { msg: format!("mmap.csv: {}", m), kind: ErrKind::Runtime })?;
+            writers.push(Some((pstr, w)));
+        } else {
+            writers.push(None);
+        }
+    }
+
+    let to_err = |m: String| R2Err { msg: m, kind: ErrKind::Runtime };
+    csv_write_row(&mut writers, &first_fields).map_err(to_err)?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).map_err(rderr)? == 0 { break; }
+        let t = line.trim_end_matches(['\r', '\n']);
+        if t.is_empty() { continue; }
+        let fields = parse_csv_line(t, &sep);
+        csv_write_row(&mut writers, &fields).map_err(to_err)?;
+    }
+
+    // Finish writers → mmap.col handles in a named list.
+    let mut items: Vec<(Option<Arc<str>>, RVal)> = Vec::new();
+    for c in 0..ncol {
+        if let Some((pstr, w)) = writers[c].take() {
+            let len = w.finish().map_err(to_err)?;
+            let mut fields = HashMap::new();
+            fields.insert(Arc::from("path"), rstr_(&pstr));
+            fields.insert(Arc::from("length"), RVal::Numeric(vec![Some(len as f64)].into(), Attrs::default()));
+            items.push((
+                Some(Arc::from(names[c].as_str())),
+                RVal::TypeInstance(TypeInstance { type_name: Arc::from("mmapcol"), fields }),
+            ));
+        }
+    }
+    if items.is_empty() { return err!(Runtime, "mmap.csv: no numeric columns detected in the first data row"); }
+    Ok(RVal::List(items))
+}
+
 pub(crate) fn bi_mmap_col(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let path = val_to_str(&gv(a, 0));
     let col = r2_arrow::MmapColumnar::open(&path)

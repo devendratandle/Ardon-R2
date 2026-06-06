@@ -167,34 +167,42 @@ Shipped layers:
   (CLI → stdout, GUI → `ConsoleBuffer`). Graphics is a separate
   lazy device (GUI window / CLI browser / script SVG).
 
-Numerics: exact p-values across the suite (Lentz incomplete beta + AS241
-`qnorm`); `lm` via Householder QR; `solve`/`det` exposed.
+Numerics: exact p-values (Lentz incomplete beta + AS241 `qnorm`); `lm` via
+Householder QR; `solve`/`det`; **`na.rm=` honored** across all reductions.
+**Level-3 BLAS is Oracle-gated multi-core** — `dgemm` (~3.9× on 6 cores)
+and `crossprod` (~2.75×); reaches users via `%*%`. GUI graphics caches +
+pre-warms the SVG font DB (fast first plot).
 
-### Phase F.5 — out-of-core operations beyond reductions ← NEXT
+### Phase F.5 — out-of-core ops beyond reductions (shipped)
 
-The mmap path currently only *reduces* (`sum`/`mean`/`min`/`max`) and
-`mmap.write` needs the whole vector in RAM. Extend it so larger-than-RAM
-data is a first-class citizen end-to-end:
+`MmapWriter` (chunked >RAM file builder), `MmapColumnar::map_to`
+(out-of-core scalar map), streaming `sd`/`var`/`prod`/`range`/`length`
+wired into the `bi_*` mmap interception. Surfaced as `mmap.map`.
 
-- **Streaming/chunked writer** — append blocks to a packed-f64 file so a
-  >RAM column can be *built* without ever holding it in RAM.
-- **More streaming reductions** — `sd`/`var` (one-pass Welford),
-  `prod`, `range`, `length` over the mmap, wired into the existing
-  `bi_*` interception (like `sum`/`mean` today).
-- **Out-of-core map** — apply a scalar transform (`x*2+1`, `log`, …) over
-  an mmap column, streaming the result to a new packed file (>RAM in,
-  >RAM out, bounded RSS).
+### Phase F.6 — additional dtypes & on-disk formats (partial)
 
-### Phase F.6 — additional dtypes & on-disk formats
+Shipped: `i64` columnar dtype; **`read.parquet`** (pure-Rust parquet/arrow
+crates, row-group streaming). Pending: `Utf8` columnar dtype (native
+string columns) and an Arrow-IPC / Feather zero-copy reader.
 
-`i64` and `Utf8` columnar dtypes; Parquet / Arrow-IPC readers so files
-produced by other tools can be memory-mapped directly. (Element-wise
-columnar kernels — old Phase F.4 — already shipped.)
+### Out-of-core compute ← NEXT
+
+Make "assign big data → stat/ML → result" real end-to-end, with bounded RAM:
+
+- **A1 (shipped):** `mmap.csv` — stream a CSV to per-column packed-f64
+  sidecars, return a named list of `mmap.col` handles → a >RAM CSV is
+  analyzable with the existing out-of-core reductions.
+- **A2:** out-of-core `lm` / `cov` via **streaming normal equations**
+  (accumulate XᵀX + Xᵀy in one pass — reuses the parallel `crossprod` —
+  then solve the small p×p system).
+- **A3:** `quantile` / `median` (external sort / t-digest) + element-wise
+  and filter/subset over mmap columns.
 
 ### Phase G — GPU dispatcher (wgpu), FFI hub, cloud RAM
 
 Oracle V2 adds GPU / Cloud backends *below* the kernel layer; builtins
-stay unchanged.
+stay unchanged. Best tackled once the CPU out-of-core/compute path above
+is complete.
 
 ### Phase H — Accelerator hub (v0.3.0+)
 
