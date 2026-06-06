@@ -152,29 +152,50 @@ fn first_arg(args: &[EvalArg]) -> RVal {
     args.first().map(|a| a.value.clone()).unwrap_or(RVal::Null)
 }
 
+/// The data argument of a reduction — the first arg that isn't the
+/// `na.rm=` flag (so `mean(na.rm=TRUE, x)` also finds `x`).
+fn data_arg(args: &[EvalArg]) -> Option<&EvalArg> {
+    args.iter().find(|a| a.name.as_deref() != Some("na.rm"))
+}
+
+/// Whether `na.rm=TRUE` (or `=T`, or a non-zero numeric) was passed.
+fn na_rm_flag(args: &[EvalArg]) -> bool {
+    args.iter()
+        .find(|a| a.name.as_deref() == Some("na.rm"))
+        .map(|a| match &a.value {
+            RVal::Logical(l, _) => matches!(l.as_vec().first(), Some(Some(true))),
+            RVal::Numeric(n, _) => matches!(n.as_vec().first(), Some(Some(x)) if *x != 0.0),
+            RVal::Integer(i, _) => matches!(i.as_vec().first(), Some(Some(x)) if *x != 0),
+            _ => false,
+        })
+        .unwrap_or(false)
+}
+
 /// Columnar-aware reduction: for `RVal::Numeric` input, dispatches to
 /// `ColumnarF64::{sum,mean,min,max,prod}` on the cached `&[f64]` slice
 /// — no `Vec<Option<f64>>` materialisation. For other input types
 /// (Integer/Logical/Matrix) falls back to coercing into `Vec<Real>` and
 /// then the legacy `&[Real]` kernel path.
 ///
-/// `na_rm` is the R-style `na.rm=` flag; not yet wired to call-site —
-/// reductions in v0.1.x default to `na_rm=false` (NA propagates), matching
-/// the previous behavior.
+/// The R-style `na.rm=` flag is honored: `na.rm=TRUE` drops NAs before
+/// reducing (the columnar path passes the flag to `ColumnarF64`; the
+/// fallback path filters `None` out of the boxed form). Default `false`
+/// → NA propagates, matching R.
 macro_rules! reduce_builtin {
     ($name:ident, $stats_fn:path, $col_method:ident) => {
         pub fn $name(args: &[EvalArg]) -> Result<RVal, R2Err> {
+            let na_rm = na_rm_flag(args);
             // F.3 columnar fast path: skip the Reals Deref-into-Vec<Real>
             // materialisation and reduce on the cached `&[f64]` directly.
-            if let Some(arg) = args.first() {
+            if let Some(arg) = data_arg(args) {
                 if let RVal::Numeric(v, _) = &arg.value {
                     let col = v.columnar();
-                    let result = col.$col_method(false);
-                    return Ok(RVal::Numeric(vec![result].into(), Attrs::default()));
+                    return Ok(RVal::Numeric(vec![col.$col_method(na_rm)].into(), Attrs::default()));
                 }
             }
-            let arg = first_arg(args);
-            let opts = coerce_reals(&arg)?;
+            let arg = data_arg(args).map(|a| a.value.clone()).unwrap_or(RVal::Null);
+            let mut opts = coerce_reals(&arg)?;
+            if na_rm { opts.retain(|x| x.is_some()); }
             Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()))
         }
     };
@@ -192,13 +213,20 @@ reduce_builtin!(bi_max,  max,  max);
 macro_rules! reduce_builtin_legacy {
     ($name:ident, $stats_fn:path) => {
         pub fn $name(args: &[EvalArg]) -> Result<RVal, R2Err> {
-            if let Some(arg) = args.first() {
+            let na_rm = na_rm_flag(args);
+            if let Some(arg) = data_arg(args) {
                 if let RVal::Numeric(v, _) = &arg.value {
+                    if na_rm {
+                        let opts: Vec<Real> =
+                            v.as_vec().iter().copied().filter(|x| x.is_some()).collect();
+                        return Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()));
+                    }
                     return Ok(RVal::Numeric(vec![$stats_fn(v)].into(), Attrs::default()));
                 }
             }
-            let arg = first_arg(args);
-            let opts = coerce_reals(&arg)?;
+            let arg = data_arg(args).map(|a| a.value.clone()).unwrap_or(RVal::Null);
+            let mut opts = coerce_reals(&arg)?;
+            if na_rm { opts.retain(|x| x.is_some()); }
             Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()))
         }
     };
@@ -241,6 +269,30 @@ mod tests {
         assert_eq!(mean(&v), Some(2.5));
         assert_eq!(min(&v),  Some(1.0));
         assert_eq!(max(&v),  Some(4.0));
+    }
+
+    #[test]
+    fn na_rm_flag_is_honored() {
+        fn val(r: RVal) -> Option<f64> {
+            if let RVal::Numeric(v, _) = r { v.as_vec().first().copied().flatten() } else { None }
+        }
+        // data = c(1, 2, NA, 4)
+        let data = EvalArg {
+            name: None,
+            value: RVal::Numeric(vec![Some(1.0), Some(2.0), None, Some(4.0)].into(), Attrs::default()),
+        };
+        let narm = EvalArg {
+            name: Some(std::sync::Arc::from("na.rm")),
+            value: RVal::Logical(Logicals::new(vec![Some(true)]), Attrs::default()),
+        };
+        let with = vec![data.clone(), narm];
+        assert_eq!(val(bi_sum(&with).unwrap()),  Some(7.0));
+        assert_eq!(val(bi_mean(&with).unwrap()), Some(7.0 / 3.0));
+        assert_eq!(val(bi_min(&with).unwrap()),  Some(1.0));
+        assert_eq!(val(bi_max(&with).unwrap()),  Some(4.0));
+        assert_eq!(val(bi_median(&with).unwrap()), Some(2.0));
+        // Default (no na.rm): NA propagates.
+        assert_eq!(val(bi_mean(&[data]).unwrap()), None);
     }
 
     #[test]
