@@ -909,15 +909,22 @@ fn main() -> Result<(), String> {
                                 r2_ui::scroll_pos_to_col(p, max_cols, visible_cols);
                         }
 
-                        // ── Horizontal cursor-follow: when the command line
-                        //     runs past the right edge, slide the view so the
-                        //     typing cursor stays visible (R-console: the text
-                        //     scrolls under the bar as the cursor moves). Only
-                        //     nudges when the cursor would be off-screen, so it
-                        //     doesn't fight a manual horizontal-bar drag.
+                        // ── Horizontal cursor-follow (R-console). Keep the
+                        //     typing cursor visible without dragging the prompt
+                        //     off the left margin:
+                        //   • cursor within the first screen-width ("default
+                        //     frame") → snap scroll_x to 0 so the prompt is
+                        //     shown at the left and the down-bar returns to its
+                        //     default left position;
+                        //   • cursor past the right edge → slide right just
+                        //     enough to reveal it (text scrolls under the bar);
+                        //   • cursor still left of the view but beyond the
+                        //     default frame → follow it so it stays on screen.
                         if visible_cols > 0 {
                             let mut gs = grid_state.borrow_mut();
-                            if cursor_col_in_row >= gs.scroll_x + visible_cols {
+                            if cursor_col_in_row < visible_cols {
+                                gs.scroll_x = 0;
+                            } else if cursor_col_in_row >= gs.scroll_x + visible_cols {
                                 gs.scroll_x = cursor_col_in_row + 1 - visible_cols;
                             } else if cursor_col_in_row < gs.scroll_x {
                                 gs.scroll_x = cursor_col_in_row;
