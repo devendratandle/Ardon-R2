@@ -266,22 +266,59 @@ pub fn dtranspose(m: usize, n: usize, a: &[f64], b: &mut [f64]) -> Result<(), Li
     Ok(())
 }
 
-/// Crossproduct: C = At*A with unrolled dot products
+/// 4-way unrolled dot product of two length-`m` column slices.
+#[inline]
+fn dot4(x: &[f64], y: &[f64], m: usize) -> f64 {
+    let mut dot = 0.0;
+    let main = m - (m % 4);
+    let mut p = 0;
+    while p < main {
+        dot += x[p] * y[p] + x[p + 1] * y[p + 1]
+             + x[p + 2] * y[p + 2] + x[p + 3] * y[p + 3];
+        p += 4;
+    }
+    while p < m { dot += x[p] * y[p]; p += 1; }
+    dot
+}
+
+/// Crossproduct: C = Aᵀ·A (n×n) with unrolled dot products. Oracle-gated
+/// multi-core: parallel over output columns (each is an independent set of
+/// dot products writing the upper triangle of its own contiguous column),
+/// then a cheap serial mirror fills the lower triangle. Powers
+/// `crossprod()` / Xᵀ X for covariance and normal equations.
 pub fn dcrossprod(m: usize, n: usize, a: &[f64], c: &mut [f64]) -> Result<(), LinalgError> {
     if a.len() != m*n { return Err(LinalgError::InvalidShape(format!("A: {}x{}", m, n))); }
     if c.len() != n*n { return Err(LinalgError::InvalidShape(format!("C: {}x{}", n, n))); }
     for ci in c.iter_mut() { *ci = 0.0; }
-    for j in 0..n { let cj = j*m;
-        for i in 0..=j { let ci_off = i*m;
-            let mut dot = 0.0;
-            let main = m - (m % 4); let mut p = 0;
-            while p < main {
-                dot += a[ci_off+p]*a[cj+p] + a[ci_off+p+1]*a[cj+p+1]
-                     + a[ci_off+p+2]*a[cj+p+2] + a[ci_off+p+3]*a[cj+p+3];
-                p += 4;
+
+    // work ≈ n²·m (triangular, so ~2× over-counted — fine for the gate).
+    let parallel = r2_oracle::should_parallelize(
+        r2_oracle::Op::MatMul,
+        r2_oracle::Shape::nmk(n, n, m),
+    );
+
+    if parallel {
+        use rayon::prelude::*;
+        // Each chunk is one column of C (`c[j*n .. (j+1)*n]`); write only
+        // its upper-triangle entries (rows 0..=j) — disjoint per column.
+        c.par_chunks_mut(n).enumerate().for_each(|(j, c_col)| {
+            let cj = j * m;
+            for i in 0..=j {
+                c_col[i] = dot4(&a[i * m..], &a[cj..], m);
             }
-            while p < m { dot += a[ci_off+p]*a[cj+p]; p += 1; }
-            c[j*n+i] = dot; if i != j { c[i*n+j] = dot; }
+        });
+        // Mirror upper → lower (serial, O(n²), negligible vs the dots).
+        for j in 0..n {
+            for i in 0..j { c[i * n + j] = c[j * n + i]; }
+        }
+    } else {
+        for j in 0..n {
+            let cj = j * m;
+            for i in 0..=j {
+                let dot = dot4(&a[i * m..], &a[cj..], m);
+                c[j*n+i] = dot;
+                if i != j { c[i*n+j] = dot; }
+            }
         }
     }
     Ok(())
@@ -321,6 +358,27 @@ mod tests {
         for idx in 0..m * n {
             assert!((c[idx] - r[idx]).abs() < 1e-9,
                 "mismatch at {}: {} vs {}", idx, c[idx], r[idx]);
+        }
+    }
+
+    #[test]
+    fn dcrossprod_parallel_matches_naive() {
+        // n²·m ≈ 55M → parallel path on a multi-core box; correct either way.
+        let (m, n) = (613usize, 301usize);
+        let a: Vec<f64> = (0..m * n).map(|i| ((i * 3 % 17) as f64) - 8.0).collect();
+        let mut c = vec![0.0; n * n];
+        dcrossprod(m, n, &a, &mut c).unwrap();
+        // Naive Aᵀ·A, column-major: c[j*n+i] = Σ_p a[i*m+p]·a[j*m+p].
+        let mut r = vec![0.0; n * n];
+        for j in 0..n {
+            for i in 0..n {
+                let mut d = 0.0;
+                for p in 0..m { d += a[i * m + p] * a[j * m + p]; }
+                r[j * n + i] = d;
+            }
+        }
+        for idx in 0..n * n {
+            assert!((c[idx] - r[idx]).abs() < 1e-6, "mismatch at {}", idx);
         }
     }
 
