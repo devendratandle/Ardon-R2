@@ -140,6 +140,29 @@ pub(crate) fn bi_mmap_map(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("mmapcol"), fields }))
 }
 
+/// `read.parquet(file)` — import a Parquet file as a data.frame.
+/// Pure-Rust (parquet/arrow crates), reads row-group by row-group.
+/// Numeric Parquet types → numeric, boolean → logical, strings → character,
+/// other types (dates/timestamps/decimals) → character via cast.
+pub(crate) fn bi_read_parquet(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let path = val_to_str(&gv(a, 0));
+    if path.is_empty() { return err!(Runtime, "read.parquet(file): a file path is required"); }
+    let table = r2_arrow::read_parquet(&path)
+        .map_err(|m| R2Err { msg: m, kind: ErrKind::Runtime })?;
+    let mut columns: Vec<(Arc<str>, RVal)> = Vec::with_capacity(table.columns.len());
+    for (name, col) in table.names.into_iter().zip(table.columns.into_iter()) {
+        let rv = match col {
+            r2_arrow::ParquetCol::F64(v)  => RVal::Numeric(v.into(), Attrs::default()),
+            r2_arrow::ParquetCol::Bool(v) => RVal::Logical(Logicals::new(v), Attrs::default()),
+            r2_arrow::ParquetCol::Utf8(v) => RVal::Character(
+                v.into_iter().map(|o| o.map(|s| Arc::from(s.as_str()))).collect(),
+                Attrs::default()),
+        };
+        columns.push((Arc::from(name.as_str()), rv));
+    }
+    Ok(RVal::DataFrame(DataFrame { columns, row_names: None }))
+}
+
 pub(crate) fn bi_mmap_col(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let path = val_to_str(&gv(a, 0));
     let col = r2_arrow::MmapColumnar::open(&path)

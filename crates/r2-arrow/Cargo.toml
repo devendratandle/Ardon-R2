@@ -10,6 +10,16 @@ default = ["mmap"]
 # Enable `MmapColumnar` for memory-mapped column reads. Pure-Rust dep
 # (memmap2) ~10 KB compiled. Off → no mmap support.
 mmap = ["dep:memmap2"]
+# Enable the Parquet reader (Phase F.6 interop). Pulls the pure-Rust
+# `parquet` + `arrow` crates (no C / FFI). Heavier dep tree + compile
+# time; off by default so a bare r2-arrow stays light. The engine turns
+# it on. Reads row-group by row-group (bounded memory for big files).
+parquet = ["dep:parquet", "dep:arrow"]
 
 [dependencies]
 memmap2 = { version = "0.9", optional = true }
+# Pure-Rust Parquet + Arrow (no system libs). Default features include the
+# common compression codecs (snappy/zstd/gzip/lz4/brotli) and the arrow
+# bridge, which is exactly what the reader needs.
+parquet = { version = "53", optional = true }
+arrow   = { version = "53", optional = true }

@@ -520,6 +520,12 @@ mod mmap_impl {
 #[cfg(feature = "mmap")]
 pub use mmap_impl::{MmapColumnar, MmapWriter, write_packed_f64};
 
+// ── Parquet interop (Phase F.6) ──────────────────────────────────────
+#[cfg(feature = "parquet")]
+pub mod parquet_io;
+#[cfg(feature = "parquet")]
+pub use parquet_io::{read_parquet, ParquetCol, ParquetTable};
+
 #[cfg(feature = "mmap")]
 #[cfg(test)]
 mod f5_mmap_tests {
@@ -824,6 +830,137 @@ impl Default for ColumnarI32 {
     fn default() -> Self { ColumnarI32::new() }
 }
 
+/// Packed columnar storage for `Option<i64>`. Mechanical mirror of
+/// `ColumnarI32` for the 64-bit integer dtype that external columnar
+/// files (Arrow `int64`, Parquet `INT64`) carry. `sum` accumulates into
+/// `i128` so even a full column of `i64::MAX` cannot overflow.
+#[derive(Debug, Clone)]
+pub struct ColumnarI64 {
+    values: Vec<i64>,
+    valid_bits: Option<Vec<u8>>,
+    len: usize,
+    null_count: usize,
+}
+
+impl ColumnarI64 {
+    /// New empty column.
+    pub fn new() -> Self {
+        ColumnarI64 { values: Vec::new(), valid_bits: None, len: 0, null_count: 0 }
+    }
+
+    /// Build from a dense `Vec<i64>` (no nulls).
+    pub fn from_vec(values: Vec<i64>) -> Self {
+        let len = values.len();
+        ColumnarI64 { values, valid_bits: None, len, null_count: 0 }
+    }
+
+    /// Build from `&[Option<i64>]` with lazy bitmap allocation.
+    pub fn from_option_slice(opts: &[Option<i64>]) -> Self {
+        let len = opts.len();
+        let mut values = Vec::with_capacity(len);
+        let mut bits: Option<Vec<u8>> = None;
+        let mut null_count = 0;
+        for (i, opt) in opts.iter().enumerate() {
+            match opt {
+                Some(v) => {
+                    values.push(*v);
+                    if let Some(b) = bits.as_mut() { b[i / 8] |= 1 << (i % 8); }
+                }
+                None => {
+                    values.push(0);
+                    if bits.is_none() {
+                        let mut new_bits = vec![0u8; (len + 7) / 8];
+                        for j in 0..i { new_bits[j / 8] |= 1 << (j % 8); }
+                        bits = Some(new_bits);
+                    }
+                    null_count += 1;
+                }
+            }
+        }
+        ColumnarI64 { values, valid_bits: bits, len, null_count }
+    }
+
+    /// Materialize back into `Vec<Option<i64>>`.
+    pub fn to_options(&self) -> Vec<Option<i64>> {
+        match &self.valid_bits {
+            None => self.values.iter().take(self.len).map(|v| Some(*v)).collect(),
+            Some(bits) => (0..self.len).map(|i| {
+                if (bits[i / 8] >> (i % 8)) & 1 == 1 { Some(self.values[i]) } else { None }
+            }).collect(),
+        }
+    }
+
+    /// Logical length.
+    pub fn len(&self) -> usize { self.len }
+    /// True if zero elements.
+    pub fn is_empty(&self) -> bool { self.len == 0 }
+    /// Number of nulls.
+    pub fn null_count(&self) -> usize { self.null_count }
+    /// True when no nulls — enables the dense fast path.
+    pub fn is_dense(&self) -> bool { self.null_count == 0 }
+    /// Borrow the raw values buffer (invalid positions are arbitrary).
+    pub fn values(&self) -> &[i64] { &self.values[..self.len] }
+    /// Validity bitmap when present (None ⇒ all valid).
+    pub fn valid_bits(&self) -> Option<&[u8]> { self.valid_bits.as_deref() }
+
+    /// Read one element with bounds check.
+    pub fn get(&self, i: usize) -> Option<i64> {
+        assert!(i < self.len, "ColumnarI64 index {} out of bounds (len {})", i, self.len);
+        match &self.valid_bits {
+            None => Some(self.values[i]),
+            Some(bits) => if (bits[i / 8] >> (i % 8)) & 1 == 1 { Some(self.values[i]) } else { None },
+        }
+    }
+
+    /// Sum as `i128` (cannot overflow). `na_rm=false` with nulls ⇒ `None`.
+    pub fn sum(&self, na_rm: bool) -> Option<i128> {
+        if self.is_dense() {
+            return Some(self.values().iter().map(|v| *v as i128).sum());
+        }
+        if !na_rm { return None; }
+        let bits = self.valid_bits.as_ref().unwrap();
+        let mut s: i128 = 0;
+        for i in 0..self.len {
+            if (bits[i / 8] >> (i % 8)) & 1 == 1 { s += self.values[i] as i128; }
+        }
+        Some(s)
+    }
+
+    /// Min, NA-aware.
+    pub fn min(&self, na_rm: bool) -> Option<i64> {
+        if self.len == 0 { return None; }
+        if self.is_dense() { return Some(*self.values().iter().min().unwrap()); }
+        if !na_rm { return None; }
+        let bits = self.valid_bits.as_ref().unwrap();
+        let mut m: Option<i64> = None;
+        for i in 0..self.len {
+            if (bits[i / 8] >> (i % 8)) & 1 == 1 {
+                m = Some(m.map_or(self.values[i], |x| x.min(self.values[i])));
+            }
+        }
+        m
+    }
+
+    /// Max, NA-aware.
+    pub fn max(&self, na_rm: bool) -> Option<i64> {
+        if self.len == 0 { return None; }
+        if self.is_dense() { return Some(*self.values().iter().max().unwrap()); }
+        if !na_rm { return None; }
+        let bits = self.valid_bits.as_ref().unwrap();
+        let mut m: Option<i64> = None;
+        for i in 0..self.len {
+            if (bits[i / 8] >> (i % 8)) & 1 == 1 {
+                m = Some(m.map_or(self.values[i], |x| x.max(self.values[i])));
+            }
+        }
+        m
+    }
+}
+
+impl Default for ColumnarI64 {
+    fn default() -> Self { ColumnarI64::new() }
+}
+
 /// Packed columnar storage for `Option<bool>`.
 ///
 /// Values use a packed-bit representation (one bit per element) like the
@@ -1017,6 +1154,24 @@ mod f6_dtypes_tests {
         assert_eq!(c.sum(false), None);
         // With na_rm, skip nulls.
         assert_eq!(c.sum(true), Some(4));
+    }
+
+    #[test]
+    fn i64_roundtrip_reductions_and_overflow() {
+        let c = ColumnarI64::from_vec(vec![3, 1, 4, 1, 5, 9, 2, 6]);
+        assert_eq!(c.len(), 8);
+        assert_eq!(c.sum(false), Some(31i128));
+        assert_eq!(c.min(false), Some(1));
+        assert_eq!(c.max(false), Some(9));
+        // i64::MAX summed would overflow i64 but fits the i128 accumulator.
+        let big = ColumnarI64::from_vec(vec![i64::MAX, i64::MAX, i64::MAX]);
+        assert_eq!(big.sum(false), Some(3i128 * i64::MAX as i128));
+        // Nulls: poison without na_rm, skipped with.
+        let n = ColumnarI64::from_option_slice(&[Some(10), None, Some(20)]);
+        assert_eq!(n.null_count(), 1);
+        assert_eq!(n.sum(false), None);
+        assert_eq!(n.sum(true), Some(30i128));
+        assert_eq!(n.to_options(), vec![Some(10), None, Some(20)]);
     }
 
     #[test]

@@ -19,7 +19,7 @@ r2-linalg = { path = "../r2-linalg" }
 r2-ir = { path = "../r2-ir" }
 r2-jit = { path = "../r2-jit" }
 r2-oracle = { path = "../r2-oracle" }
-r2-arrow = { path = "../r2-arrow" }
+r2-arrow = { path = "../r2-arrow", features = ["parquet"] }
 r2-kernel = { path = "../r2-kernel" }
 r2-stats = { path = "../r2-stats" }
 r2-ml = { path = "../r2-ml" }
