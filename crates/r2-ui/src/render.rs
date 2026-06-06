@@ -702,6 +702,21 @@ impl Frame {
                        x: f32, y_baseline: f32, ch: char,
                        size_pt: f32, color: Color)
     {
+        self.paint_glyph_clipped(renderer, x, y_baseline, ch, size_pt, color, f32::INFINITY);
+    }
+
+    /// Like [`paint_glyph`] but hard-clips the quad at `clip_max_x`
+    /// (right edge, in pixels). A glyph crossing the boundary is drawn
+    /// only up to `clip_max_x` — the texture U coordinate is narrowed in
+    /// proportion so the visible slice stays correct. This is how the
+    /// console makes text slide *under* its scrollbar instead of
+    /// painting over the bar or outside the console body. There is no
+    /// GPU scissor (single-batch renderer), so the clip is done here on
+    /// the emitted geometry.
+    pub fn paint_glyph_clipped(&mut self, renderer: &mut Renderer,
+                       x: f32, y_baseline: f32, ch: char,
+                       size_pt: f32, color: Color, clip_max_x: f32)
+    {
         let (g, uv) = renderer.glyph_uv(ch, size_pt);
         if g.width == 0 || g.height == 0 { return; }
         let c = color_to_f32(color);
@@ -713,14 +728,23 @@ impl Frame {
         // between pixels and every glyph looks soft. (Tier 1.)
         let gx = (x + g.xmin as f32).round();
         let gy = (y_baseline - (g.height as f32 + g.ymin as f32)).round();
-        let gw = g.width as f32;
+        let mut gw = g.width as f32;
         let gh = g.height as f32;
+        // uv = [u_left, v_top, u_right, v_bottom].
+        let (u0, v0, mut u1, v1) = (uv[0], uv[1], uv[2], uv[3]);
+        if gx >= clip_max_x { return; }                 // fully past the edge
+        if gx + gw > clip_max_x {
+            let visible = clip_max_x - gx;
+            if visible <= 0.0 { return; }
+            u1 = u0 + (u1 - u0) * (visible / gw);
+            gw = visible;
+        }
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&[
-            Vertex { pos: [gx,      gy     ], uv: [uv[0], uv[1]], color: c },
-            Vertex { pos: [gx + gw, gy     ], uv: [uv[2], uv[1]], color: c },
-            Vertex { pos: [gx + gw, gy + gh], uv: [uv[2], uv[3]], color: c },
-            Vertex { pos: [gx,      gy + gh], uv: [uv[0], uv[3]], color: c },
+            Vertex { pos: [gx,      gy     ], uv: [u0, v0], color: c },
+            Vertex { pos: [gx + gw, gy     ], uv: [u1, v0], color: c },
+            Vertex { pos: [gx + gw, gy + gh], uv: [u1, v1], color: c },
+            Vertex { pos: [gx,      gy + gh], uv: [u0, v1], color: c },
         ]);
         self.indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
     }

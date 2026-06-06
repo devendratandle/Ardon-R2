@@ -222,8 +222,14 @@ pub fn paint_cells_scrolled(
                 if start_col >= scroll_x || end_col >= scroll_x {
                     let sx = rect.x + vis_start as f32 * cell_w;
                     let sy = rect.y + (r - scroll) as f32 * line_h;
-                    let sw = (vis_end - vis_start + 1) as f32 * cell_w;
-                    frame.paint_rect(sx, sy, sw, line_h, theme.console_selection_bg);
+                    // Clamp the highlight band to the console's right edge
+                    // so the selection never paints under/over the sidebar
+                    // or outside the console body.
+                    let sw_full = (vis_end - vis_start + 1) as f32 * cell_w;
+                    let sw = ((sx + sw_full).min(rect.x + rect.w) - sx).max(0.0);
+                    if sw > 0.0 {
+                        frame.paint_rect(sx, sy, sw, line_h, theme.console_selection_bg);
+                    }
                 }
             }
         }
@@ -238,9 +244,13 @@ pub fn paint_cells_scrolled(
         for (c, cell) in row.iter().enumerate() {
             if c < scroll_x { continue; }   // skip columns scrolled off left
             let x = rect.x + (c - scroll_x) as f32 * cell_w;
-            if x >= max_x { break; }        // hard clip on the right
+            if x >= max_x { break; }        // fully off the right edge
             if cell.ch == ' ' { continue; }
-            frame.paint_glyph(renderer, x, y_baseline, cell.ch, size_pt, cell.fg);
+            // Clip the glyph at the console's right edge: a character
+            // crossing the boundary is drawn only up to `max_x`, sliding
+            // under the sidebar (R-console behaviour) rather than painting
+            // over the bar or beyond the console.
+            frame.paint_glyph_clipped(renderer, x, y_baseline, cell.ch, size_pt, cell.fg, max_x);
         }
     }
 }

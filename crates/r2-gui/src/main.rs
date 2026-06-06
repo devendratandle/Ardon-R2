@@ -909,6 +909,21 @@ fn main() -> Result<(), String> {
                                 r2_ui::scroll_pos_to_col(p, max_cols, visible_cols);
                         }
 
+                        // ── Horizontal cursor-follow: when the command line
+                        //     runs past the right edge, slide the view so the
+                        //     typing cursor stays visible (R-console: the text
+                        //     scrolls under the bar as the cursor moves). Only
+                        //     nudges when the cursor would be off-screen, so it
+                        //     doesn't fight a manual horizontal-bar drag.
+                        if visible_cols > 0 {
+                            let mut gs = grid_state.borrow_mut();
+                            if cursor_col_in_row >= gs.scroll_x + visible_cols {
+                                gs.scroll_x = cursor_col_in_row + 1 - visible_cols;
+                            } else if cursor_col_in_row < gs.scroll_x {
+                                gs.scroll_x = cursor_col_in_row;
+                            }
+                        }
+
                         // ── Keep the thumbs in sync with the ACTUAL scroll
                         //     offset every frame. Covers wheel / touchpad
                         //     scroll, auto-scroll-to-bottom, and keyboard
