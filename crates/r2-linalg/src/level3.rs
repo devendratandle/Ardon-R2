@@ -36,28 +36,68 @@ pub fn dgemm(
         return Ok(());
     }
 
+    // Oracle decides serial vs multi-core based on m·n·k (hardware-scaled).
+    // Parallelism is over disjoint COLUMN bands of C: column-major storage
+    // means columns [j0, j0+w) of C occupy the contiguous slice
+    // [j0*m, (j0+w)*m), so `par_chunks_mut` hands each thread its own
+    // non-overlapping band — no locking, no false sharing across bands.
+    let parallel = r2_oracle::should_parallelize(
+        r2_oracle::Op::MatMul,
+        r2_oracle::Shape::nmk(m, n, k),
+    );
+
+    if parallel {
+        use rayon::prelude::*;
+        let cores = r2_oracle::hw().cores.max(1);
+        // ~2 bands per core: enough for Rayon load-balancing, but few
+        // enough that the per-band packing-buffer allocation stays cheap
+        // (too many tiny bands regressed medium matrices in benchmarks).
+        let band = (n / (cores * 2)).max(1);
+        c.par_chunks_mut(band * m).enumerate().for_each(|(blk, c_band)| {
+            let nc_band = c_band.len() / m;
+            gemm_band(m, k, blk * band, nc_band, alpha, a, b, c_band);
+        });
+    } else {
+        gemm_band(m, k, 0, n, alpha, a, b, c);
+    }
+    Ok(())
+}
+
+/// Compute `C[:, j0..j0+band_n] += alpha · A · B[:, j0..j0+band_n]` for one
+/// column band, writing into `c_band` (the band's own contiguous slice,
+/// local column 0 = global column `j0`). Preserves the full L1/L2/L3 cache
+/// blocking *within* the band, so a parallel band is as cache-efficient as
+/// the serial whole. Each call owns its packing buffers — that's what makes
+/// the bands safe to run concurrently.
+#[inline]
+fn gemm_band(
+    m: usize, k: usize, j0: usize, band_n: usize,
+    alpha: f64, a: &[f64], b: &[f64], c_band: &mut [f64],
+) {
     let mut packed_a = vec![0.0f64; MC * KC];
     let mut packed_b = vec![0.0f64; KC * NC];
-
-    let mut jc = 0;
-    while jc < n {
-        let nc = (n - jc).min(NC);
+    let mut j_local = 0;
+    while j_local < band_n {
+        let nc = (band_n - j_local).min(NC);
+        let jc_global = j0 + j_local;
         let mut pc = 0;
         while pc < k {
             let kc = (k - pc).min(KC);
-            pack_b(k, b, pc, jc, kc, nc, &mut packed_b);
+            // B is read at the GLOBAL column offset; C is written at the
+            // LOCAL offset within c_band (so the macro-kernel's `jc` is
+            // j_local, and ldc stays `m`).
+            pack_b(k, b, pc, jc_global, kc, nc, &mut packed_b);
             let mut ic = 0;
             while ic < m {
                 let mc = (m - ic).min(MC);
                 pack_a(m, a, ic, pc, mc, kc, &mut packed_a);
-                macro_kernel(mc, nc, kc, alpha, &packed_a, &packed_b, c, m, ic, jc);
+                macro_kernel(mc, nc, kc, alpha, &packed_a, &packed_b, c_band, m, ic, j_local);
                 ic += MC;
             }
             pc += KC;
         }
-        jc += NC;
+        j_local += NC;
     }
-    Ok(())
 }
 
 #[inline]
@@ -258,6 +298,32 @@ mod tests {
         dgemm(2, 2, 2, 1.0, &a, &b, 0.0, &mut c).unwrap();
         assert_eq!(c, vec![23.0, 34.0, 31.0, 46.0]);
     }
+    #[test]
+    fn dgemm_large_parallel_matches_naive() {
+        // m·n·k ≈ 25.8M comfortably exceeds the MatMul parallel threshold on
+        // a multi-core box, and n=521 > NC=512 exercises multi-block bands.
+        // Non-multiples of MR/NR/NC catch the remainder/edge paths.
+        let (m, k, n) = (257usize, 193usize, 521usize);
+        let a: Vec<f64> = (0..m * k).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
+        let b: Vec<f64> = (0..k * n).map(|i| ((i * 5 % 11) as f64) - 5.0).collect();
+        let mut c = vec![0.0; m * n];
+        dgemm(m, n, k, 1.0, &a, &b, 0.0, &mut c).unwrap();
+        // Naive column-major reference.
+        let mut r = vec![0.0; m * n];
+        for j in 0..n {
+            for p in 0..k {
+                let bpj = b[j * k + p];
+                for i in 0..m {
+                    r[j * m + i] += a[p * m + i] * bpj;
+                }
+            }
+        }
+        for idx in 0..m * n {
+            assert!((c[idx] - r[idx]).abs() < 1e-9,
+                "mismatch at {}: {} vs {}", idx, c[idx], r[idx]);
+        }
+    }
+
     #[test]
     fn test_dgemm_16x16_identity() {
         let n = 16;

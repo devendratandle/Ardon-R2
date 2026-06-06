@@ -25,6 +25,9 @@ pub enum Op {
     Reduction,
     /// Per-row distance / nearest-centroid / classification scoring.
     PerPointDistance,
+    /// Dense matrix multiply (`A·B`). Work ≈ m·n·k; parallelised across
+    /// disjoint column bands of C above the threshold.
+    MatMul,
     /// Tree construction (random forest, gbm one tree).
     TreeBuild,
     /// K-fold cross-validation (each fold independent).
@@ -184,6 +187,12 @@ pub fn dispatch(op: Op, shape: Shape) -> Backend {
         Op::PerElementMap     => 50_000,
         Op::Reduction         => 200_000,
         Op::PerPointDistance  => 10_000,
+        // MatMul: work = m·n·k. Measured crossover: 256³ (16.7M) still
+        // *loses* to serial because each parallel band allocates its own
+        // packing buffers; 512³ (134M) wins ~2.2×. Set the bar at ~32M
+        // (≈350³ after core scaling) so only clearly-net-positive sizes
+        // parallelise. GEMM scales well above that (3.7× at 2048³/6 cores).
+        Op::MatMul            => 32_000_000,
         Op::TreeBuild         => 1,
         Op::KFoldCV           => 2,
         // ListMap: aggregate-work threshold. Set lower than PerElementMap

@@ -17,3 +17,8 @@ crate-type = ["rlib", "cdylib"]
 # The reference kernels remain pure-Rust; only the opt-in dispatch
 # path in blas_dispatch.rs touches libloading.
 libloading = "0.8"
+# Multi-core dispatch for the Level-3 kernels. The Oracle decides the
+# serial/parallel crossover (hardware-scaled); Rayon executes. r2-oracle
+# has no deps of its own, so this adds no cycle.
+rayon = "1.10"
+r2-oracle = { path = "../r2-oracle" }
