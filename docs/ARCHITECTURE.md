@@ -169,9 +169,13 @@ Shipped layers:
 
 Numerics: exact p-values (Lentz incomplete beta + AS241 `qnorm`); `lm` via
 Householder QR; `solve`/`det`; **`na.rm=` honored** across all reductions.
-**Level-3 BLAS is Oracle-gated multi-core** — `dgemm` (~3.9× on 6 cores)
-and `crossprod` (~2.75×); reaches users via `%*%`. GUI graphics caches +
-pre-warms the SVG font DB (fast first plot).
+**Level-3 BLAS is Oracle-gated multi-core *and* runtime SIMD-
+multiversioned** — the `dgemm` kernel is compiled at three tiers
+(AVX-512 → AVX2 → SSE2) and dispatched on `hw()` at runtime: ~2.9×/core
+from AVX2+FMA, **~7× combined** with cores (6-core AVX2 box), one binary
+running on any x86-64 CPU (`R2_SIMD`/`R2_NO_SIMD` knobs). `crossprod` is
+multi-core too but memory-bandwidth-bound (small SIMD gain). Reaches users
+via `%*%`. GUI caches + pre-warms the SVG font DB (fast first plot).
 
 ### Phase F.5 — out-of-core ops beyond reductions (shipped)
 

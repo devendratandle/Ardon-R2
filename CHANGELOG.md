@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+Committed locally since v0.2.2 (not yet tagged).
+
+### Out-of-core compute — analyze larger-than-RAM data
+- `mmap.csv(file)` — stream a CSV to per-column packed-f64 sidecars;
+  returns a named list of `mmap.col` handles (bounded memory).
+- `mmap.lm(data, response, predictors)` — out-of-core least squares via
+  streaming normal equations (one pass over the mmap columns → solve the
+  small p×p system). Verified identical to in-memory `lm()`.
+- `mmap.map(path, FUN, out)` — out-of-core scalar transform (>RAM in/out).
+- Streaming `sd`/`var`/`prod`/`range`/`length` and approximate
+  `median`/`quantile` (two-pass histogram) over mmap columns.
+- `MmapWriter` — chunked larger-than-RAM file builder.
+
+### Interop
+- `read.parquet(file)` — pure-Rust Parquet import (parquet/arrow crates,
+  no C/FFI), row-group streaming → data.frame.
+
+### Performance — hardware-aware linear algebra
+- Multi-core, Oracle-gated `dgemm` (`%*%`) and `crossprod`: ~3.9× and
+  ~2.75× on 6 cores.
+- Runtime SIMD multiversioning of the GEMM kernel (AVX-512 → AVX2 →
+  SSE2): ~2.9×/core from AVX2+FMA, ~7× combined with cores. One binary
+  runs on any x86-64 CPU; `R2_SIMD` / `R2_NO_SIMD` knobs. (crossprod is
+  memory-bound, so its SIMD gain is small by nature.)
+- GUI graphics: SVG font database loaded once + pre-warmed → fast first
+  plot, no per-redraw font rescan.
+
+### Accuracy / fixes
+- `na.rm=TRUE` now honored across `sum`/`mean`/`min`/`max`/`prod`/`var`/
+  `sd`/`median` (previously returned NA whenever an NA was present).
+- `names()` now works on lists.
+- GUI: scrollbar thumb tracks scrolling; royal-blue text selection clamped
+  inside the console; text clips under the sidebar; horizontal cursor-
+  follow keeps the prompt at the left margin; removed the out-of-sync
+  Shift+arrow selection (mouse/touchpad selection only).
+
 ## v0.2.2 (June 2026)
 
 ### GUI bug fix — statistical output now appears in the desktop console
