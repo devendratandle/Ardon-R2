@@ -183,10 +183,11 @@ fn macro_kernel(
 ) {
     #[cfg(target_arch = "x86_64")]
     {
-        if simd_avx2_fma() {
-            // SAFETY: only entered when avx2+fma are runtime-detected.
-            unsafe { macro_kernel_avx2(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc); }
-            return;
+        // SAFETY: each wrapper is entered only when its feature is detected.
+        match simd_tier() {
+            SimdTier::Avx512 => { unsafe { macro_kernel_avx512(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc); } return; }
+            SimdTier::Avx2   => { unsafe { macro_kernel_avx2(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc); } return; }
+            SimdTier::Sse2   => {}
         }
     }
     macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
@@ -202,16 +203,42 @@ unsafe fn macro_kernel_avx2(
     macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
 }
 
-/// Cached "does this CPU have AVX2+FMA" check. `R2_NO_SIMD=1` forces the
-/// baseline so the SIMD speedup can be A/B benchmarked.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn macro_kernel_avx512(
+    mc: usize, nc: usize, kc: usize, alpha: f64,
+    packed_a: &[f64], packed_b: &[f64],
+    c: &mut [f64], ldc: usize, ic: usize, jc: usize,
+) {
+    macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
+}
+
+/// The best SIMD code path this CPU can run for the GEMM kernel.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, PartialEq)]
+enum SimdTier { Sse2, Avx2, Avx512 }
+
+/// Cached, runtime SIMD-tier selection (AVX-512 → AVX2 → SSE2).
+/// Knobs: `R2_NO_SIMD=1` forces SSE2 (A/B benchmarking); `R2_SIMD=avx2`
+/// caps at AVX2 (e.g. to avoid AVX-512 frequency downclock on a mixed
+/// workload), `R2_SIMD=sse2` forces baseline.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-fn simd_avx2_fma() -> bool {
+fn simd_tier() -> SimdTier {
     use std::sync::OnceLock;
-    static AVX2: OnceLock<bool> = OnceLock::new();
-    *AVX2.get_or_init(|| {
-        if std::env::var_os("R2_NO_SIMD").is_some() { return false; }
-        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    static TIER: OnceLock<SimdTier> = OnceLock::new();
+    *TIER.get_or_init(|| {
+        if std::env::var_os("R2_NO_SIMD").is_some() { return SimdTier::Sse2; }
+        let cap = std::env::var("R2_SIMD").ok();
+        match cap.as_deref() {
+            Some("sse2") => return SimdTier::Sse2,
+            _ => {}
+        }
+        let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+        let avx512 = std::is_x86_feature_detected!("avx512f");
+        if avx512 && cap.as_deref() != Some("avx2") { SimdTier::Avx512 }
+        else if avx2 { SimdTier::Avx2 }
+        else { SimdTier::Sse2 }
     })
 }
 

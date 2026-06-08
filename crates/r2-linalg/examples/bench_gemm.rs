@@ -14,6 +14,15 @@ fn main() {
     let b: Vec<f64> = (0..k * n).map(|i| (i % 5) as f64 * 0.3 - 0.5).collect();
     let mut c = vec![0.0; m * n];
 
+    #[cfg(target_arch = "x86_64")]
+    eprintln!(
+        "CPU features: sse2={} avx2={} fma={} avx512f={}",
+        std::is_x86_feature_detected!("sse2"),
+        std::is_x86_feature_detected!("avx2"),
+        std::is_x86_feature_detected!("fma"),
+        std::is_x86_feature_detected!("avx512f"),
+    );
+
     // Warm-up (allocations, thread pool spin-up).
     r2_linalg::dgemm_dispatch(m, n, k, 1.0, &a, &b, 0.0, &mut c).unwrap();
 
