@@ -140,7 +140,6 @@ fn pack_b(ldb: usize, b: &[f64], pc: usize, jc: usize, kc: usize, nc: usize, pac
     }
 }
 
-#[inline]
 /// The macro-kernel body. `#[inline(always)]` so it is *re-codegened*
 /// inside each multiversion wrapper below — the AVX2+FMA wrapper compiles
 /// this exact source with wider vectors + fused multiply-add, the baseline
@@ -343,8 +342,6 @@ pub fn dtranspose(m: usize, n: usize, a: &[f64], b: &mut [f64]) -> Result<(), Li
     Ok(())
 }
 
-/// 4-way unrolled dot product of two length-`m` column slices.
-#[inline]
 /// Dot-product body — 4 independent accumulators so the f64 add chain
 /// isn't serialized (enables ILP + SIMD). `#[inline(always)]` so the
 /// multiversion wrappers below recodegen it under AVX2 / AVX-512.
