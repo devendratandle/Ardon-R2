@@ -33,7 +33,7 @@
 //!   `bi_print`, `bi_cat`, `bi_message`, etc. writes through it
 //!   instead of `println!`.
 
-use r2_types::Expr;
+use r2_types::{Expr, RVal};
 
 // ─── Transcript lines ─────────────────────────────────────────────────
 
@@ -350,6 +350,10 @@ pub fn is_silent(e: &Expr) -> bool {
                 "lines" | "points" | "abline" | "legend" |
                 "library" | "detach" | "require" | "save.plot" | "dev.view" | "dev.off" |
                 "install.packages" | "uninstall" | "set.seed" | "Sys.sleep" |
+                // system.time prints its own timing table and returns NULL —
+                // suppress the redundant trailing NULL (matches R, whose
+                // proc_time prints as the value).
+                "system.time" |
                 // Hypothesis tests / ANOVA: these format and emit their
                 // own output as a side effect, then return an htest/model
                 // object whose Display is just "<… model>". Suppress the
@@ -363,6 +367,31 @@ pub fn is_silent(e: &Expr) -> bool {
         }
     }
     false
+}
+
+/// The single auto-print rule shared by **every** frontend (CLI + GUI),
+/// so the r2dterminal behaves identically everywhere. A top-level result
+/// is printed unless the call is in the silent set OR the value is NULL
+/// (R's invisible return). Frontends must call this — never re-implement
+/// it — so the two consoles can't drift (the cause of the stray-`NULL`
+/// divergence). The only legitimate frontend differences are font/colour
+/// and the graphics device.
+pub fn should_autoprint(stmt: &Expr, val: &RVal) -> bool {
+    !is_silent(stmt) && !matches!(val, RVal::Null)
+}
+
+#[cfg(test)]
+mod autoprint_tests {
+    use super::*;
+    #[test]
+    fn null_result_is_never_autoprinted() {
+        let sym = Expr::Symbol(std::sync::Arc::from("x"));
+        // A visible (non-NULL) top-level value prints…
+        assert!(should_autoprint(&sym, &r2_types::rnum(1.0)));
+        // …but a NULL return is suppressed (R's invisible) — this is the
+        // rule the GUI was missing, which leaked the stray `NULL`.
+        assert!(!should_autoprint(&sym, &RVal::Null));
+    }
 }
 
 /// Detect a top-level call to `q()` / `quit()`. Returns true if the

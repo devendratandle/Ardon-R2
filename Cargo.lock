@@ -3019,6 +3019,7 @@ dependencies = [
  "ctrlc",
  "ico",
  "image",
+ "r2-console",
  "r2-engine",
  "r2-parser",
  "r2-types",

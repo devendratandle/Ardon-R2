@@ -112,10 +112,11 @@ fn run_source(
             *quit_requested.borrow_mut() = true;
             return;
         }
-        let silent = r2_console::is_silent(&stmt);
         match engine.eval(&stmt) {
             Ok(val) => {
-                if !silent {
+                // Unified auto-print rule (shared with the CLI) — silent
+                // set + NULL-invisibility, so both consoles behave identically.
+                if r2_console::should_autoprint(&stmt, &val) {
                     buffer.lock().unwrap().push_output(&format!("{}", val));
                 }
             }

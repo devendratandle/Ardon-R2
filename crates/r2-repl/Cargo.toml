@@ -11,6 +11,9 @@ path = "src/main.rs"
 r2-types = { path = "../r2-types" }
 r2-parser = { path = "../r2-parser" }
 r2-engine = { path = "../r2-engine" }
+# Shared frontend console logic — the single auto-print rule
+# (should_autoprint) + is_silent live here so CLI and GUI behave identically.
+r2-console = { path = "../r2-console" }
 # ctrlc: tiny cross-platform SIGINT handler. Pure-Rust, no transitive
 # dependencies, ~3KB compiled. Used to wire Ctrl+C to the engine's
 # interrupt flag so users can abort runaway evaluations and return to

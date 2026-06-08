@@ -1,6 +1,5 @@
 use r2_parser::Parser;
 use r2_engine::Engine;
-use r2_types::Expr;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,7 +32,7 @@ fn run_script(path: &str) -> i32 {
     for stmt in &exprs {
         match engine.eval(stmt) {
             Ok(val) => {
-                if !is_silent(stmt) && !matches!(&val, r2_types::RVal::Null) {
+                if r2_console::should_autoprint(stmt, &val) {
                     println!("{}", val);
                 }
             }
@@ -204,7 +203,7 @@ fn repl_main() {
                     poller.stop();
                     match result {
                         Ok(Ok(val)) => {
-                            if !is_silent(stmt) && !matches!(&val, r2_types::RVal::Null) {
+                            if r2_console::should_autoprint(stmt, &val) {
                                 println!("{}", val);
                             }
                         }
@@ -282,31 +281,10 @@ fn pick_user_home() -> Option<std::path::PathBuf> {
     None
 }
 
-fn is_silent(e: &Expr) -> bool {
-    if matches!(e, Expr::Assign{..}|Expr::TypeDef{..}|Expr::MethodDef(_)|Expr::For{..}|Expr::While{..}) {
-        return true;
-    }
-    // Calls to functions whose side effect IS the print (and whose return
-    // value is uninteresting) shouldn't trigger auto-print of the return.
-    // R does this via invisible(); we mark a small set by name.
-    if let Expr::Call { func, .. } = e {
-        if let Expr::Symbol(s) = func.as_ref() {
-            return matches!(s.as_ref(),
-                "print" | "cat" | "message" | "warning" | "writeLines" | "invisible" |
-                "clear" | "cls" | "clr" |
-                // Hypothesis tests / ANOVA print their own formatted output
-                // as a side effect and return an htest/model object whose
-                // Display is just "<… model>" — don't auto-print that.
-                "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
-                "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
-                "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
-                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test" |
-                // Inspectors that print their report and return NULL.
-                "summary" | "str");
-        }
-    }
-    false
-}
+// The auto-print rule (silent set + NULL-invisibility) is unified in
+// `r2_console::should_autoprint` so the CLI and GUI consoles behave
+// identically — see the call sites above. (The old local `is_silent`
+// copy was removed; it had drifted from the GUI's.)
 
 fn incomplete(s: &str) -> bool {
     let (mut p, mut b, mut k) = (0i32, 0i32, 0i32);
