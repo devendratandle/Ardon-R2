@@ -163,7 +163,18 @@ impl R2Ui {
         // the same proportionally as 100% — Theme carries the multiplier
         // and L4 widgets read it via theme.fs() / theme.lh() / theme.px().
         let mut theme = self.theme;
-        theme.set_dpi(window_ref.scale_factor() as f32);
+        // Resolution-AND-DPI-aware UI scale, adapting 720p → 4K. Two
+        // signals: the OS scaling setting (`scale_factor`, e.g. 1.5 at
+        // 150%) and the panel's physical height (a 1440p/4K screen at 100%
+        // OS scaling still needs enlarging — the OS isn't asking, but the
+        // pixels are tiny). Reference 1080p = 1.0×. Take whichever asks for
+        // MORE enlargement; never shrink below 1.0 (720p keeps the default).
+        let scale_factor = window_ref.scale_factor() as f32;
+        let res_scale = window_ref
+            .current_monitor()
+            .map(|m| m.size().height as f32 / 1080.0)
+            .unwrap_or(1.0);
+        theme.set_dpi(scale_factor.max(res_scale).max(1.0));
         let mut frame_fn = self.frame_fn;
         let mut clipboard = Clipboard::new();
 
@@ -197,7 +208,14 @@ impl R2Ui {
                     WindowEvent::CloseRequested => target.exit(),
                     WindowEvent::Resized(new) => renderer.resize(new),
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                        theme.set_dpi(scale_factor as f32);
+                        // Re-derive the effective scale (e.g. window moved to
+                        // a different-DPI monitor): same rule as startup —
+                        // max(OS scaling, panel-resolution factor, 1.0).
+                        let res_scale = window_ref
+                            .current_monitor()
+                            .map(|m| m.size().height as f32 / 1080.0)
+                            .unwrap_or(1.0);
+                        theme.set_dpi((scale_factor as f32).max(res_scale).max(1.0));
                     }
                     WindowEvent::RedrawRequested => {
                         let mut frame = renderer.begin_frame();

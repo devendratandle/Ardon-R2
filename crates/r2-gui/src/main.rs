@@ -786,7 +786,7 @@ fn main() -> Result<(), String> {
                         full.chars().map(|c| Cell::plain(c, theme.console_input)).collect()
                     };
                     rows.push(prompt_row);
-                    let (cell_w, line_h) = renderer.cell_metrics(theme.font_size);
+                    let (cell_w, line_h) = renderer.cell_metrics(theme.fs());
                     let content = mdi.borrow().window(console_id).map(|w| w.content_rect(theme));
                     if let Some(content) = content {
                         // Must match the PAINT grid_rect below: reserve the
@@ -834,7 +834,7 @@ fn main() -> Result<(), String> {
                     let content = match content { Some(r) => r, None => continue };
 
                     if id == console_id {
-                        let (cell_w, line_h) = renderer.cell_metrics(theme.font_size);
+                        let (cell_w, line_h) = renderer.cell_metrics(theme.fs());
                         // R Console convention: white body.
                         frame.paint_rect(content.x, content.y, content.w, content.h,
                                          Color::WHITE);
@@ -947,7 +947,7 @@ fn main() -> Result<(), String> {
                         // ── Transcript paint — uses the scroll state
                         //     CellGridState now owns.
                         grid_state.borrow().paint(frame, renderer, &rows, grid_rect,
-                                                  cell_w, line_h, theme.font_size, theme);
+                                                  cell_w, line_h, theme.fs(), theme);
 
                         // ── Cursor — must follow the SAME effective
                         //     vertical scroll the painter used.
