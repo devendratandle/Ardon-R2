@@ -28,11 +28,18 @@ Committed locally since v0.2.2 (not yet tagged).
   memory-bound, so its SIMD gain is small by nature.)
 - GUI graphics: SVG font database loaded once + pre-warmed → fast first
   plot, no per-redraw font rescan.
+- Measured vs **R 4.5.3** (default reference BLAS, 6-core AVX2): `%*%`
+  **14.4×**, `crossprod` 2.5×, `sum` 1.4×, `lm` 1.5× faster — results
+  identical. See `benchmarks/`. (Default R is single-threaded no-AVX
+  BLAS; the gap narrows against R+OpenBLAS/MKL.)
 
 ### Accuracy / fixes
 - `na.rm=TRUE` now honored across `sum`/`mean`/`min`/`max`/`prod`/`var`/
   `sd`/`median` (previously returned NA whenever an NA was present).
 - `names()` now works on lists.
+- `lm`/`glm`/`aov`/etc. now accept the **positional** `data` argument
+  (`lm(y ~ x, df)`, R's convention), not only `data=df` (found via the R
+  comparison).
 - GUI: scrollbar thumb tracks scrolling; royal-blue text selection clamped
   inside the console; text clips under the sidebar; horizontal cursor-
   follow keeps the prompt at the left margin; removed the out-of-sync

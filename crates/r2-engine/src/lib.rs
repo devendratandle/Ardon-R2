@@ -591,8 +591,12 @@ impl Engine {
                     if matches!(fname.as_ref(), "lm" | "glm" | "t.test" | "rpart" | "rf" | "gbm" | "cv" | "aov" | "manova" | "lmer" | "aggregate") {
                         if let Some(first_arg) = args.first() {
                             if let Expr::Binary { op: BinOp::Tilde, lhs, rhs } = &first_arg.value {
-                                // Check if data= is provided
-                                let data_arg = args.iter().find(|a| a.name.as_ref().map(|n| n.as_ref()) == Some("data"));
+                                // Find the data frame: `data=` by name, else
+                                // R's positional convention — the first
+                                // UNNAMED argument after the formula (so
+                                // `lm(y ~ x, df)` works like `lm(y ~ x, data=df)`).
+                                let data_arg = args.iter().find(|a| a.name.as_ref().map(|n| n.as_ref()) == Some("data"))
+                                    .or_else(|| args.iter().skip(1).find(|a| a.name.is_none()));
                                 if let Some(data_a) = data_arg {
                                     let data_val = self.eval_in(&data_a.value, env)?;
                                     if let RVal::DataFrame(ref df) = data_val {
