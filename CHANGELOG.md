@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 (June 2026)
 
-Committed locally since v0.2.2 (not yet tagged).
+Out-of-core compute (analyze larger-than-RAM data), Parquet import, and
+hardware-aware linear algebra (runtime AVX2/AVX-512 multiversioning +
+Oracle multicore — ~14× vs default R on matmul), plus accuracy and GUI
+fixes.
 
 ### Out-of-core compute — analyze larger-than-RAM data
 - `mmap.csv(file)` — stream a CSV to per-column packed-f64 sidecars;

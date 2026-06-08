@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.2.2.</em></p>
+<em>An AI-Assisted Project. v0.3.0.</em></p>
 
 ---
 
@@ -20,9 +20,28 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.2.2 (2026) | Inspired by R, Built on Rust
+Version 0.3.0 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
+
+## What's new in v0.3.0 (June 2026)
+
+An out-of-core, hardware-aware release.
+
+- **Out-of-core compute** — analyze datasets *larger than RAM*: `mmap.csv`
+  streams a CSV to memory-mapped columns; `sum`/`mean`/`sd`/`median`/
+  `quantile` stream over them; **`mmap.lm`** fits out-of-core least squares
+  (streaming normal equations); `mmap.map` transforms >RAM → >RAM.
+- **Parquet import** — **`read.parquet`** (pure-Rust, no C/FFI) reads files
+  from the pandas / polars / Arrow ecosystem.
+- **Hardware-aware linear algebra** — `%*%` / `crossprod` are multi-core
+  (Oracle-gated) and the GEMM kernel is runtime **SIMD-multiversioned**
+  (AVX-512 → AVX2 → SSE2): one portable binary, **~14× faster than default
+  R** on matmul (identical results). See `benchmarks/`.
+- **Accuracy / R-compat fixes** — `na.rm=` honored across reductions;
+  `names()` on lists; positional `data` argument in `lm`/`glm`/`aov`.
+- **Faster GUI** — graphics font-cache (fast first plot); scrollbar,
+  selection, and console-clipping fixes.
 
 ## What's new in v0.2.2 (June 2026)
 
