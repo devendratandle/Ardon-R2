@@ -141,7 +141,12 @@ fn pack_b(ldb: usize, b: &[f64], pc: usize, jc: usize, kc: usize, nc: usize, pac
 }
 
 #[inline]
-fn macro_kernel(
+/// The macro-kernel body. `#[inline(always)]` so it is *re-codegened*
+/// inside each multiversion wrapper below — the AVX2+FMA wrapper compiles
+/// this exact source with wider vectors + fused multiply-add, the baseline
+/// with SSE2. Single source, two machine-code variants.
+#[inline(always)]
+fn macro_kernel_impl(
     mc: usize, nc: usize, kc: usize, alpha: f64,
     packed_a: &[f64], packed_b: &[f64],
     c: &mut [f64], ldc: usize, ic: usize, jc: usize,
@@ -163,6 +168,51 @@ fn macro_kernel(
             }
         }
     }
+}
+
+/// Runtime-multiversioned macro-kernel: dispatch once to the AVX2+FMA
+/// build of `macro_kernel_impl` when the CPU has it (cached detection),
+/// else the SSE2 baseline. Identical numerical result. Mirrors how
+/// NumPy/OpenBLAS pick a CPU kernel at runtime — one binary, runs
+/// everywhere, fast where the hardware allows.
+#[inline]
+fn macro_kernel(
+    mc: usize, nc: usize, kc: usize, alpha: f64,
+    packed_a: &[f64], packed_b: &[f64],
+    c: &mut [f64], ldc: usize, ic: usize, jc: usize,
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if simd_avx2_fma() {
+            // SAFETY: only entered when avx2+fma are runtime-detected.
+            unsafe { macro_kernel_avx2(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc); }
+            return;
+        }
+    }
+    macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn macro_kernel_avx2(
+    mc: usize, nc: usize, kc: usize, alpha: f64,
+    packed_a: &[f64], packed_b: &[f64],
+    c: &mut [f64], ldc: usize, ic: usize, jc: usize,
+) {
+    macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
+}
+
+/// Cached "does this CPU have AVX2+FMA" check. `R2_NO_SIMD=1` forces the
+/// baseline so the SIMD speedup can be A/B benchmarked.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn simd_avx2_fma() -> bool {
+    use std::sync::OnceLock;
+    static AVX2: OnceLock<bool> = OnceLock::new();
+    *AVX2.get_or_init(|| {
+        if std::env::var_os("R2_NO_SIMD").is_some() { return false; }
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    })
 }
 
 /// 8x4 micro-kernel: 32 register accumulators, 32 FMAs per iteration
@@ -209,7 +259,7 @@ fn micro_kernel_8x4(
     c[co3+4]+=alpha*c43; c[co3+5]+=alpha*c53; c[co3+6]+=alpha*c63; c[co3+7]+=alpha*c73;
 }
 
-#[inline]
+#[inline(always)]
 fn micro_kernel_generic(
     mr: usize, nr: usize, kc: usize, alpha: f64,
     a: &[f64], b: &[f64],
