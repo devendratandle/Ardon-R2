@@ -32,7 +32,6 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::thread;
-use std::time::SystemTime;
 
 const DEFAULT_PORT_START: u16 = 8765;
 const PORT_SCAN_RANGE: u16 = 10;
@@ -109,11 +108,15 @@ fn handle_request(mut stream: std::net::TcpStream, root: &Path) -> std::io::Resu
 
     let (status, content_type, body): (&str, &str, Vec<u8>) = match path.as_str() {
         "/" => ("200 OK", "text/html; charset=utf-8", index_html().into_bytes()),
-        "/current.svg" => match latest_svg(root) {
-            Some(p) => serve_file(&p),
+        // Serve the CURRENT plot from the shared in-memory screen buffer —
+        // the live device plot, not a scan of stray .svg files in cwd
+        // (which showed stale/leftover plots from earlier sessions).
+        "/current.svg" => match crate::device::screen_svg() {
+            Some(svg) => ("200 OK", "image/svg+xml", svg.into_bytes()),
             None => ("404 Not Found", "text/plain", b"no plot yet".to_vec()),
         },
-        "/list" => ("200 OK", "application/json; charset=utf-8", list_svgs_json(root).into_bytes()),
+        // No file gallery: R's screen device shows the current plot only.
+        "/list" => ("200 OK", "application/json; charset=utf-8", b"[]".to_vec()),
         // Phase R.G.2 — serve any .svg file from cwd by name. Used by
         // the gallery to display every plot saved during the session
         // (user-chosen names plus the four type-default names).
@@ -146,54 +149,6 @@ fn serve_file(path: &Path) -> (&'static str, &'static str, Vec<u8>) {
         Ok(data) => ("200 OK", "image/svg+xml", data),
         Err(_) => ("404 Not Found", "text/plain", b"file not found".to_vec()),
     }
-}
-
-/// Returns the most-recently-modified `.svg` file in `root` — the one
-/// the auto-refresh image element shows at the top of the index page.
-fn latest_svg(root: &Path) -> Option<PathBuf> {
-    list_all_svgs(root).into_iter().next().map(|(_, p)| p)
-}
-
-/// List every `.svg` file in `root`, sorted by modification time descending
-/// (newest first). Returns `(mtime, path)` pairs.
-fn list_all_svgs(root: &Path) -> Vec<(SystemTime, PathBuf)> {
-    let mut found: Vec<(SystemTime, PathBuf)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("svg") {
-                continue;
-            }
-            if let Ok(meta) = std::fs::metadata(&p) {
-                if let Ok(mtime) = meta.modified() {
-                    found.push((mtime, p));
-                }
-            }
-        }
-    }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
-    found
-}
-
-/// JSON listing of every `.svg` file in `root`, newest first. Used by
-/// the index-page gallery script to render thumbnails for the whole
-/// session's plots.
-fn list_svgs_json(root: &Path) -> String {
-    let entries = list_all_svgs(root);
-    let mut out = String::from("[");
-    for (i, (mtime, p)) in entries.iter().enumerate() {
-        if i > 0 { out.push(','); }
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let ts = mtime
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        // Escape minimal characters: " and \. SVG names rarely contain anything else.
-        let name_esc = name.replace('\\', "\\\\").replace('"', "\\\"");
-        out.push_str(&format!(r#"{{"name":"{}","mtime":{}}}"#, name_esc, ts));
-    }
-    out.push(']');
-    out
 }
 
 fn index_html() -> String {
@@ -332,6 +287,15 @@ fn index_html() -> String {
       const r = await fetch('/list');
       if (!r.ok) return;
       const items = await r.json();
+      const head = document.querySelector('.gallery-head');
+      const galleryEl = document.getElementById('gallery');
+      if (items.length === 0) {
+        if (head) head.style.display = 'none';
+        galleryEl.style.display = 'none';
+        return;
+      }
+      if (head) head.style.display = '';
+      galleryEl.style.display = '';
       const sig = items.map(x => x.name + ':' + x.mtime).join('|');
       if (sig === lastSig) return;
       lastSig = sig;

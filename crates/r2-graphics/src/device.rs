@@ -70,6 +70,65 @@ pub fn display_present() -> bool {
     DISPLAY_PRESENT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// True when the interactive-CLI browser viewer is the active display.
+pub fn autoview_enabled() -> bool {
+    AUTOVIEW_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The current SCREEN-device plot, published here so the browser server
+/// (a SEPARATE thread) can serve the *live* plot from memory. The device
+/// itself is thread-local to the eval thread, so without this shared
+/// buffer the server could only scan the working directory for stray
+/// `.svg` files — which showed stale/leftover plots. Updated after every
+/// high-level plot in interactive-CLI mode; replaced (not accumulated),
+/// so a new `plot()`/`hist()` shows the latest, exactly like R's device.
+static SCREEN_SVG: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Publish the current plot SVG to the shared screen buffer.
+pub fn set_screen_svg(svg: String) {
+    if let Ok(mut g) = SCREEN_SVG.lock() { *g = Some(svg); }
+}
+
+/// The current screen plot SVG, if any (read by the browser server).
+pub fn screen_svg() -> Option<String> {
+    SCREEN_SVG.lock().ok().and_then(|g| g.clone())
+}
+
+/// Called by every high-level plot builtin when it finishes drawing.
+/// Routes the result to the ACTIVE output — the one place that knows
+/// CLI-vs-GUI-vs-script, so graphics behave like R:
+///   * interactive CLI (browser): publish to the shared screen buffer →
+///     the browser shows the current plot (replacing the previous), no
+///     file written;
+///   * GUI window: nothing — the Graphics window paints the device;
+///   * headless script: auto-save `default_name` to cwd (R's Rplots
+///     convention) and report the path.
+/// (When a file device — `pdf()`/`png()`/`svg()` — is active, that path
+/// is handled separately and takes precedence.)
+/// Returns `Some(path)` only when it actually wrote a file (headless
+/// script mode), so callers like `plot()` can echo the filename.
+pub fn finish_plot(default_name: &str) -> Option<String> {
+    if autoview_enabled() {
+        let svg = with_device(|d| d.full_svg());
+        set_screen_svg(svg);
+        return None;
+    }
+    if display_present() {
+        return None;
+    }
+    if save_to_file(default_name).is_ok() {
+        if let Ok(abs) = std::fs::canonicalize(default_name) {
+            let d = abs.to_string_lossy();
+            soutln!("Plot saved to {}", d.strip_prefix(r"\\?\").unwrap_or(&d));
+        } else {
+            soutln!("Plot saved to {}", default_name);
+        }
+        Some(default_name.to_string())
+    } else {
+        None
+    }
+}
+
 /// Everything `par()` can set. Defaults mirror R's `par()` baseline so
 /// scripts that do not call `par()` get R-compatible output.
 #[derive(Debug, Clone)]

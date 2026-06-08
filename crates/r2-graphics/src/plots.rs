@@ -14,7 +14,7 @@
 //! shifts and scales the SVG coordinates without changing the rest
 //! of the drawing code.
 
-use crate::device::{begin_plot, save_to_file, with_device};
+use crate::device::{begin_plot, with_device};
 use crate::{gn, gv, val_to_str};
 use r2_types::{Attrs, ErrKind, EvalArg, R2Err, RVal};
 
@@ -281,22 +281,11 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // plot is shown by the device — don't write a file. Only a headless
     // script auto-saves (so output isn't lost); explicit save is
     // save_plot() / a filename.
-    if crate::device::display_present() { return Ok(RVal::Null); }
-    let path = "plot.svg";
-    let _ = save_to_file(path);
-    print_save_path(path);
-    Ok(rstr(path))
-}
-
-fn print_save_path(rel: &str) {
-    match std::fs::canonicalize(rel) {
-        Ok(abs) => {
-            let display = abs.to_string_lossy();
-            // Strip Windows \\?\ prefix that canonicalize adds.
-            let clean = display.strip_prefix(r"\\?\").unwrap_or(&display);
-            soutln!("Plot saved to {}", clean);
-        }
-        Err(_) => soutln!("Plot saved to {}", rel),
+    // Route to the active output (browser / GUI window / file) via the
+    // single device hook. Returns the filename only when it wrote one.
+    match crate::device::finish_plot("plot.svg") {
+        Some(p) => Ok(rstr(&p)),
+        None => Ok(RVal::Null),
     }
 }
 
@@ -382,10 +371,7 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
                                      xmax - xmin, yrange, &opts));
 
     with_device(|d| d.svg_body.push_str(&frag));
-    if !crate::device::display_present() {
-        let _ = save_to_file("hist.svg");
-        print_save_path("hist.svg");
-    }
+    crate::device::finish_plot("hist.svg");
     Ok(RVal::Null)
 }
 
@@ -487,10 +473,7 @@ pub fn bi_boxplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     frag.push_str(&render_axis_ticks(&panel, 0.0, ng, all_min, all_max, ng.max(1.0), range, &opts));
 
     with_device(|d| d.svg_body.push_str(&frag));
-    if !crate::device::display_present() {
-        let _ = save_to_file("boxplot.svg");
-        print_save_path("boxplot.svg");
-    }
+    crate::device::finish_plot("boxplot.svg");
     Ok(RVal::Null)
 }
 
@@ -569,10 +552,7 @@ pub fn bi_barplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
                                      max_h.max(1.0), &opts));
 
     with_device(|d| d.svg_body.push_str(&frag));
-    if !crate::device::display_present() {
-        let _ = save_to_file("barplot.svg");
-        print_save_path("barplot.svg");
-    }
+    crate::device::finish_plot("barplot.svg");
     Ok(RVal::Null)
 }
 
