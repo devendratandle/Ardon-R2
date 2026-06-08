@@ -345,18 +345,49 @@ pub fn dtranspose(m: usize, n: usize, a: &[f64], b: &mut [f64]) -> Result<(), Li
 
 /// 4-way unrolled dot product of two length-`m` column slices.
 #[inline]
-fn dot4(x: &[f64], y: &[f64], m: usize) -> f64 {
-    let mut dot = 0.0;
+/// Dot-product body — 4 independent accumulators so the f64 add chain
+/// isn't serialized (enables ILP + SIMD). `#[inline(always)]` so the
+/// multiversion wrappers below recodegen it under AVX2 / AVX-512.
+#[inline(always)]
+fn dot4_impl(x: &[f64], y: &[f64], m: usize) -> f64 {
+    let mut acc = [0.0f64; 4];
     let main = m - (m % 4);
     let mut p = 0;
     while p < main {
-        dot += x[p] * y[p] + x[p + 1] * y[p + 1]
-             + x[p + 2] * y[p + 2] + x[p + 3] * y[p + 3];
+        acc[0] += x[p] * y[p];
+        acc[1] += x[p + 1] * y[p + 1];
+        acc[2] += x[p + 2] * y[p + 2];
+        acc[3] += x[p + 3] * y[p + 3];
         p += 4;
     }
+    let mut dot = (acc[0] + acc[1]) + (acc[2] + acc[3]);
     while p < m { dot += x[p] * y[p]; p += 1; }
     dot
 }
+
+/// Runtime-multiversioned dot product (AVX-512 → AVX2 → SSE2), same tiers
+/// as the GEMM kernel. Powers `crossprod` / XᵀX.
+#[inline]
+fn dot4(x: &[f64], y: &[f64], m: usize) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: each wrapper entered only when its feature is detected.
+        match simd_tier() {
+            SimdTier::Avx512 => return unsafe { dot4_avx512(x, y, m) },
+            SimdTier::Avx2 => return unsafe { dot4_avx2(x, y, m) },
+            SimdTier::Sse2 => {}
+        }
+    }
+    dot4_impl(x, y, m)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot4_avx2(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn dot4_avx512(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
 
 /// Crossproduct: C = Aᵀ·A (n×n) with unrolled dot products. Oracle-gated
 /// multi-core: parallel over output columns (each is an independent set of
