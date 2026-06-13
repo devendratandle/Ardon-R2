@@ -10,11 +10,38 @@ use crate::menu::MenuBuilder;
 use crate::render::{Frame, Renderer};
 use crate::theme::Theme;
 
+/// Mouse-cursor shape the frame closure wants for this frame. Maps to a
+/// winit `CursorIcon`. Lets widgets signal resize/move affordances so the
+/// pointer turns into the familiar ↔ ↕ ⤡ ⤢ over window edges/corners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    Default,
+    /// ↔ horizontal resize (left/right edge).
+    ResizeH,
+    /// ↕ vertical resize (top/bottom edge).
+    ResizeV,
+    /// ⤡ NW–SE diagonal (top-left / bottom-right corner).
+    ResizeNwse,
+    /// ⤢ NE–SW diagonal (top-right / bottom-left corner).
+    ResizeNesw,
+    /// ✥ move (title-bar drag).
+    Move,
+}
+
 /// Per-frame context handed to the user closure. Holds the input
 /// events seen since the previous frame plus a clipboard handle.
 pub struct FrameCtx<'a> {
     pub events: &'a [InputEvent],
     pub clipboard: &'a mut Clipboard,
+    /// Cursor the closure requests this frame (default = arrow). The app
+    /// shell applies it to the OS window after the frame.
+    cursor: &'a std::cell::Cell<CursorShape>,
+}
+
+impl<'a> FrameCtx<'a> {
+    /// Request a mouse-cursor shape for this frame (e.g. a resize arrow
+    /// when hovering a window edge). Resets to `Default` each frame.
+    pub fn set_cursor(&self, shape: CursorShape) { self.cursor.set(shape); }
 }
 
 /// Per-frame painter signature. Called once per `RedrawRequested`
@@ -201,6 +228,7 @@ impl R2Ui {
         let mut pending: Vec<InputEvent> = Vec::with_capacity(32);
         let mut mouse_pos = MousePos { x: 0.0, y: 0.0 };
         let mut mods = Mods::default();
+        let mut last_cursor = CursorShape::Default;
 
         event_loop.run(move |event, target| match event {
             Event::WindowEvent { event, .. } => {
@@ -243,12 +271,29 @@ impl R2Ui {
                     }
                     WindowEvent::RedrawRequested => {
                         let mut frame = renderer.begin_frame();
+                        let cursor = std::cell::Cell::new(CursorShape::Default);
                         if let Some(p) = frame_fn.as_mut() {
                             let mut ctx = FrameCtx {
                                 events: &pending,
                                 clipboard: &mut clipboard,
+                                cursor: &cursor,
                             };
                             p(&mut ctx, &mut renderer, &mut frame, &theme);
+                        }
+                        // Apply the requested cursor (only when it changed,
+                        // so we don't spam the OS every frame).
+                        let want = cursor.get();
+                        if want != last_cursor {
+                            last_cursor = want;
+                            let icon = match want {
+                                CursorShape::Default    => winit::window::CursorIcon::Default,
+                                CursorShape::ResizeH    => winit::window::CursorIcon::EwResize,
+                                CursorShape::ResizeV    => winit::window::CursorIcon::NsResize,
+                                CursorShape::ResizeNwse => winit::window::CursorIcon::NwseResize,
+                                CursorShape::ResizeNesw => winit::window::CursorIcon::NeswResize,
+                                CursorShape::Move       => winit::window::CursorIcon::Move,
+                            };
+                            window_ref.set_cursor_icon(icon);
                         }
                         pending.clear();
                         if let Err(e) = renderer.submit(frame, &theme) {

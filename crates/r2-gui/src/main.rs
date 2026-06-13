@@ -759,6 +759,11 @@ fn main() -> Result<(), String> {
                 // ── MDI chrome events (drag / resize / close / max)
                 mdi.borrow_mut().handle_events(ctx.events, theme);
 
+                // Resize/move cursor affordance: turn the pointer into the
+                // familiar ↔ ↕ ⤡ ⤢ arrows over a window's edges/corners so
+                // users see windows are resizable (R/desktop behaviour).
+                ctx.set_cursor(mdi.borrow().hover_cursor(theme));
+
                 // ── Console keyboard input — ALWAYS active so the console
                 //    stays typeable regardless of which MDI window is
                 //    topmost (RGui keeps the console interactive; a plot no

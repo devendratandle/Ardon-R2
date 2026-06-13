@@ -49,7 +49,7 @@ pub mod window;
 
 // Re-export the public surface so callers write `r2_ui::Theme` rather
 // than `r2_ui::theme::Theme`.
-pub use app::{FrameCtx, FrameFn, R2Ui, R2UiApp};
+pub use app::{CursorShape, FrameCtx, FrameFn, R2Ui, R2UiApp};
 pub use context_menu::{ContextItem, ContextMenu};
 pub use event::{normalize_paste, Clipboard, InputEvent, KeyCode, Mods, MouseButton, MousePos};
 pub use grid::{

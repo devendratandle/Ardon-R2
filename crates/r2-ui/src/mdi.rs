@@ -174,6 +174,38 @@ impl MdiHost {
         None
     }
 
+    /// Mouse-cursor shape for the current hover (or active drag) — so the
+    /// pointer turns into the familiar resize arrows over a window's edges
+    /// and corners, signalling that windows are resizable (R/desktop UX).
+    /// Hosts call this each frame and forward it to `FrameCtx::set_cursor`.
+    pub fn hover_cursor(&self, theme: &Theme) -> crate::app::CursorShape {
+        use crate::app::CursorShape as C;
+        // During an active drag, lock the cursor to the drag mode so it
+        // doesn't flicker as the pointer leaves the grab strip.
+        if let Some(d) = self.drag {
+            return match d.mode {
+                DragMode::ResizeL | DragMode::ResizeR => C::ResizeH,
+                DragMode::ResizeT | DragMode::ResizeB => C::ResizeV,
+                DragMode::ResizeTL | DragMode::ResizeBR => C::ResizeNwse,
+                DragMode::ResizeTR | DragMode::ResizeBL => C::ResizeNesw,
+                DragMode::Move => C::Move,
+            };
+        }
+        let pos = self.last_mouse;
+        if let Some(id) = self.hit_topmost(pos) {
+            if let Some(w) = self.window(id) {
+                return match classify_hit(w, pos, theme) {
+                    HitZone::ResizeL | HitZone::ResizeR => C::ResizeH,
+                    HitZone::ResizeT | HitZone::ResizeB => C::ResizeV,
+                    HitZone::ResizeTL | HitZone::ResizeBR => C::ResizeNwse,
+                    HitZone::ResizeTR | HitZone::ResizeBL => C::ResizeNesw,
+                    _ => C::Default,
+                };
+            }
+        }
+        C::Default
+    }
+
     /// Toggle maximize on the given window — save / restore bounds.
     pub fn toggle_maximize(&mut self, id: WindowId) {
         let workspace = self.workspace;
