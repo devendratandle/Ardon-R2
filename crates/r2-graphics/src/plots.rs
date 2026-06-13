@@ -133,6 +133,22 @@ pub(crate) fn render_chrome(p: &PanelRect, title: &str, sub: &str,
     s
 }
 
+/// Format an axis tick value compactly, adapting precision to the
+/// step size — so count axes show `32058`, not `32058.00`, and data
+/// axes still get the decimals they need. Mirrors R's tidy tick labels.
+fn fmt_tick(v: f64, range: f64) -> String {
+    let step = (range / 4.0).abs();
+    if v.abs() < 1e-9 { return "0".to_string(); }
+    if step >= 1.0 {
+        if (v - v.round()).abs() < 1e-6 { format!("{}", v.round() as i64) }
+        else { format!("{:.1}", v) }
+    } else if step >= 0.01 {
+        format!("{:.2}", v)
+    } else {
+        format!("{:.4}", v)
+    }
+}
+
 pub(crate) fn render_axis_ticks(p: &PanelRect,
                                 xmin: f64, _xmax: f64, ymin: f64, _ymax: f64,
                                 xrange: f64, yrange: f64,
@@ -153,13 +169,13 @@ pub(crate) fn render_axis_ticks(p: &PanelRect,
         let ty = p.oy + p.mt + p.ph + 14.0;
         if x_rot {
             s.push_str(&format!(
-                r#"<text x="{:.0}" y="{}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}" transform="rotate(-90,{:.0},{})">{:.2}</text>"#,
-                tx, ty, fs, o.col_axis, tx, ty, xv
+                r#"<text x="{:.0}" y="{}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}" transform="rotate(-90,{:.0},{})">{}</text>"#,
+                tx, ty, fs, o.col_axis, tx, ty, fmt_tick(xv, xrange)
             ));
         } else {
             s.push_str(&format!(
-                r#"<text x="{:.0}" y="{}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{:.2}</text>"#,
-                tx, ty, fs, o.col_axis, xv
+                r#"<text x="{:.0}" y="{}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{}</text>"#,
+                tx, ty, fs, o.col_axis, fmt_tick(xv, xrange)
             ));
         }
         // y-axis tick label to the left of the panel.
@@ -167,13 +183,13 @@ pub(crate) fn render_axis_ticks(p: &PanelRect,
         let ly = py + 3.0;
         if y_rot {
             s.push_str(&format!(
-                r#"<text x="{}" y="{:.0}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}" transform="rotate(-90,{},{:.0})">{:.2}</text>"#,
-                lx, ly, fs, o.col_axis, lx, ly, yv
+                r#"<text x="{}" y="{:.0}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}" transform="rotate(-90,{},{:.0})">{}</text>"#,
+                lx, ly, fs, o.col_axis, lx, ly, fmt_tick(yv, yrange)
             ));
         } else {
             s.push_str(&format!(
-                r#"<text x="{}" y="{:.0}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{:.2}</text>"#,
-                lx, ly, fs, o.col_axis, yv
+                r#"<text x="{}" y="{:.0}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{}</text>"#,
+                lx, ly, fs, o.col_axis, fmt_tick(yv, yrange)
             ));
         }
     }

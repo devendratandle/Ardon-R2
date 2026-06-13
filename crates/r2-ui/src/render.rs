@@ -70,7 +70,7 @@ struct ScreenUniform {
 
 // 2048-square RGBA atlas (16 MB). Headroom for several GraphPanel
 // slots (each up to 1024×768) plus the glyph cache.
-const ATLAS_SIZE: u32 = 2048;
+const ATLAS_SIZE: u32 = 4096;
 const ATLAS_PAD:  u32 = 1;
 
 /// Atlas + layout metrics for one rasterized glyph. Returned by

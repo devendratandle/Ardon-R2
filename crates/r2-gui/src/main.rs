@@ -39,8 +39,8 @@ use r2_engine::Engine;
 use r2_parser::Parser;
 use r2_ui::{
     auto_scroll_offset, Cell, CellGridState, Color, ContextItem, ContextMenu,
-    GraphPanel, GridPos, InputField, MdiHost, MenuBarState, MenuBuilder, R2Ui,
-    Rect, Selection, Theme, WindowId, MENU_BAR_HEIGHT,
+    menu_bar_height, GraphPanel, GridPos, InputField, MdiHost, MenuBarState, MenuBuilder, R2Ui,
+    Rect, Selection, Theme, WindowId,
 };
 
 // ─── Output sink — engine writes through this, lands in ConsoleBuffer
@@ -335,6 +335,8 @@ fn main() -> Result<(), String> {
     let logo_handle: Rc<RefCell<Option<r2_ui::ImageHandle>>> = Rc::new(RefCell::new(None));
 
     let frame_counter = Rc::new(RefCell::new(0u64));
+    // One-time adaptive window layout on the first frame (workspace known).
+    let did_layout = Rc::new(RefCell::new(false));
     // SVG cache key — re-rasterize the GraphPanel only when the engine
     // produces new SVG content. Comparing string length is cheap and
     // catches every plot-mutation we currently emit.
@@ -358,6 +360,7 @@ fn main() -> Result<(), String> {
             let vscroll       = vscroll.clone();
             let hscroll       = hscroll.clone();
             let frame_counter = frame_counter.clone();
+            let did_layout    = did_layout.clone();
             let last_svg_len  = last_svg_len.clone();
             let quit_requested = quit_requested.clone();
             let logo_uploaded  = logo_uploaded.clone();
@@ -391,15 +394,20 @@ fn main() -> Result<(), String> {
                     for ev in drain_events() {
                         match ev {
                             DeviceEvent::Created(id) => {
-                                // R-style: near-square default
-                                // (~680×620). Cascade subsequent
-                                // devices so multiple windows don't
-                                // overlap identically.
+                                // R-style near-square device window,
+                                // sized PROPORTIONALLY to the actual
+                                // window (adapts 720p → 4K). Cascade
+                                // subsequent devices so multiple windows
+                                // don't overlap identically.
+                                let ww = renderer.size.width  as f32;
+                                let wh = renderer.size.height as f32;
                                 let n = id.0 as f32;
+                                let casc = theme.px(32.0);
                                 let bounds = Rect {
-                                    x: 700.0 + (n - 1.0) * 36.0,
-                                    y:  36.0 + (n - 1.0) * 28.0,
-                                    w: 680.0, h: 620.0,
+                                    x: ww * 0.55 + (n - 1.0) * casc,
+                                    y: menu_bar_height(theme) + wh * 0.03 + (n - 1.0) * casc * 0.8,
+                                    w: ww * 0.42,
+                                    h: wh * 0.72,
                                 };
                                 let wid = mdi.borrow_mut()
                                     .add_window(format!("R2 Graphics — Dev {}", id.0), bounds);
@@ -449,10 +457,29 @@ fn main() -> Result<(), String> {
                 }
 
                 // ── Workspace
-                let menu_rect = Rect { x: 0.0, y: 0.0, w: win_w, h: MENU_BAR_HEIGHT };
-                let workspace = Rect { x: 0.0, y: MENU_BAR_HEIGHT,
-                                       w: win_w, h: win_h - MENU_BAR_HEIGHT };
+                let menu_h = menu_bar_height(theme);
+                let menu_rect = Rect { x: 0.0, y: 0.0, w: win_w, h: menu_h };
+                let workspace = Rect { x: 0.0, y: menu_h,
+                                       w: win_w, h: win_h - menu_h };
                 mdi.borrow_mut().set_workspace(workspace);
+
+                // ── One-time adaptive layout (R-style): position the
+                //    console PROPORTIONALLY to the actual workspace the
+                //    first time we know its size, instead of fixed
+                //    pixels. ~52% wide × 66% tall at the top-left, like
+                //    RGui's console. Done once; the user can then drag /
+                //    resize / maximize freely.
+                if !*did_layout.borrow() && workspace.w > 0.0 {
+                    *did_layout.borrow_mut() = true;
+                    if let Some(w) = mdi.borrow_mut().window_mut(console_id) {
+                        w.bounds = Rect {
+                            x: workspace.x + workspace.w * 0.015,
+                            y: workspace.y + workspace.h * 0.03,
+                            w: workspace.w * 0.52,
+                            h: workspace.h * 0.66,
+                        };
+                    }
+                }
 
                 // ── Pick the menu bar belonging to the active window.
                 //     The OTHER menu's open-popup state is closed each

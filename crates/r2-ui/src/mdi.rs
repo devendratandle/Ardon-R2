@@ -66,11 +66,13 @@ impl SubWindow {
 }
 
 #[inline]
-fn title_bar_height(theme: &Theme) -> f32 { (theme.line_height + 8.0).ceil() }
-const BTN_SIZE: f32 = 12.0;
-const BTN_GAP:  f32 =  6.0;
-const RESIZE_GRIP: f32 = 18.0;   // BR corner
-const EDGE_GRAB:   f32 =  6.0;   // right edge + bottom edge thickness
+fn title_bar_height(theme: &Theme) -> f32 { (theme.line_height + theme.px(8.0)).ceil() }
+// Base (unscaled) chrome sizes — every use goes through theme.px() so
+// buttons / grips / grab strips scale with the display (720p → 4K).
+const BTN_SIZE_BASE: f32 = 12.0;
+const BTN_GAP_BASE:  f32 =  6.0;
+const RESIZE_GRIP_BASE: f32 = 18.0;   // BR corner
+const EDGE_GRAB_BASE:   f32 =  6.0;   // right edge + bottom edge thickness
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragMode {
@@ -271,7 +273,7 @@ impl MdiHost {
                             // Left/Top edges shift the window's origin
                             // AND its dimension so the far edge stays
                             // anchored to the same screen position.
-                            const MIN_W: f32 = 180.0;
+                            let min_w = theme.px(180.0);
                             const MIN_H: f32 =  80.0;
                             let right_x  = w.bounds.x + w.bounds.w;
                             let bottom_y = w.bounds.y + w.bounds.h;
@@ -281,11 +283,11 @@ impl MdiHost {
                                     w.bounds.y = pos.y - d.anchor_dy;
                                 }
                                 DragMode::ResizeR => {
-                                    w.bounds.w = (pos.x - d.anchor_dx - w.bounds.x).max(MIN_W);
+                                    w.bounds.w = (pos.x - d.anchor_dx - w.bounds.x).max(min_w);
                                 }
                                 DragMode::ResizeL => {
                                     let new_x = pos.x - d.anchor_dx;
-                                    let new_w = (right_x - new_x).max(MIN_W);
+                                    let new_w = (right_x - new_x).max(min_w);
                                     w.bounds.x = right_x - new_w;
                                     w.bounds.w = new_w;
                                 }
@@ -299,18 +301,18 @@ impl MdiHost {
                                     w.bounds.h = new_h;
                                 }
                                 DragMode::ResizeBR => {
-                                    w.bounds.w = (pos.x - d.anchor_dx - w.bounds.x).max(MIN_W);
+                                    w.bounds.w = (pos.x - d.anchor_dx - w.bounds.x).max(min_w);
                                     w.bounds.h = (pos.y - d.anchor_dy - w.bounds.y).max(MIN_H);
                                 }
                                 DragMode::ResizeBL => {
                                     let new_x = pos.x - d.anchor_dx;
-                                    let new_w = (right_x - new_x).max(MIN_W);
+                                    let new_w = (right_x - new_x).max(min_w);
                                     w.bounds.x = right_x - new_w;
                                     w.bounds.w = new_w;
                                     w.bounds.h = (pos.y - d.anchor_dy - w.bounds.y).max(MIN_H);
                                 }
                                 DragMode::ResizeTR => {
-                                    w.bounds.w = (pos.x - d.anchor_dx - w.bounds.x).max(MIN_W);
+                                    w.bounds.w = (pos.x - d.anchor_dx - w.bounds.x).max(min_w);
                                     let new_y = pos.y - d.anchor_dy;
                                     let new_h = (bottom_y - new_y).max(MIN_H);
                                     w.bounds.y = bottom_y - new_h;
@@ -318,7 +320,7 @@ impl MdiHost {
                                 }
                                 DragMode::ResizeTL => {
                                     let new_x = pos.x - d.anchor_dx;
-                                    let new_w = (right_x - new_x).max(MIN_W);
+                                    let new_w = (right_x - new_x).max(min_w);
                                     w.bounds.x = right_x - new_w;
                                     w.bounds.w = new_w;
                                     let new_y = pos.y - d.anchor_dy;
@@ -445,27 +447,29 @@ fn classify_hit(w: &SubWindow, pos: MousePos, theme: &Theme) -> HitZone {
     // Buttons (top-right of title bar) — checked first so they
     // override the title-bar drag region AND the top-right resize
     // corner that would otherwise overlap.
-    let right = w.bounds.x + w.bounds.w - BTN_GAP;
-    let btn_y = w.bounds.y + (tb - BTN_SIZE) * 0.5;
-    let close_r = Rect { x: right - BTN_SIZE,                       y: btn_y, w: BTN_SIZE, h: BTN_SIZE };
-    let max_r   = Rect { x: close_r.x - BTN_GAP - BTN_SIZE,         y: btn_y, w: BTN_SIZE, h: BTN_SIZE };
-    let min_r   = Rect { x: max_r.x   - BTN_GAP - BTN_SIZE,         y: btn_y, w: BTN_SIZE, h: BTN_SIZE };
+    let (btn_size, btn_gap) = (theme.px(BTN_SIZE_BASE), theme.px(BTN_GAP_BASE));
+    let (resize_grip, edge_grab) = (theme.px(RESIZE_GRIP_BASE), theme.px(EDGE_GRAB_BASE));
+    let right = w.bounds.x + w.bounds.w - btn_gap;
+    let btn_y = w.bounds.y + (tb - btn_size) * 0.5;
+    let close_r = Rect { x: right - btn_size,                       y: btn_y, w: btn_size, h: btn_size };
+    let max_r   = Rect { x: close_r.x - btn_gap - btn_size,         y: btn_y, w: btn_size, h: btn_size };
+    let min_r   = Rect { x: max_r.x   - btn_gap - btn_size,         y: btn_y, w: btn_size, h: btn_size };
     if point_in(close_r, pos) { return HitZone::Button(ButtonHover::Close); }
     if point_in(max_r,   pos) { return HitZone::Button(ButtonHover::Max);   }
     if point_in(min_r,   pos) { return HitZone::Button(ButtonHover::Min);   }
 
     // Corner-resize takes priority over edge-resize.
-    let in_tl = pos.x >= w.bounds.x                  && pos.x <  w.bounds.x + RESIZE_GRIP
-             && pos.y >= w.bounds.y                  && pos.y <  w.bounds.y + RESIZE_GRIP;
-    let in_tr = pos.x >= w.bounds.x + w.bounds.w - RESIZE_GRIP
+    let in_tl = pos.x >= w.bounds.x                  && pos.x <  w.bounds.x + resize_grip
+             && pos.y >= w.bounds.y                  && pos.y <  w.bounds.y + resize_grip;
+    let in_tr = pos.x >= w.bounds.x + w.bounds.w - resize_grip
              && pos.x <  w.bounds.x + w.bounds.w
-             && pos.y >= w.bounds.y                  && pos.y <  w.bounds.y + RESIZE_GRIP;
-    let in_bl = pos.x >= w.bounds.x                  && pos.x <  w.bounds.x + RESIZE_GRIP
-             && pos.y >= w.bounds.y + w.bounds.h - RESIZE_GRIP
+             && pos.y >= w.bounds.y                  && pos.y <  w.bounds.y + resize_grip;
+    let in_bl = pos.x >= w.bounds.x                  && pos.x <  w.bounds.x + resize_grip
+             && pos.y >= w.bounds.y + w.bounds.h - resize_grip
              && pos.y <  w.bounds.y + w.bounds.h;
-    let in_br = pos.x >= w.bounds.x + w.bounds.w - RESIZE_GRIP
+    let in_br = pos.x >= w.bounds.x + w.bounds.w - resize_grip
              && pos.x <  w.bounds.x + w.bounds.w
-             && pos.y >= w.bounds.y + w.bounds.h - RESIZE_GRIP
+             && pos.y >= w.bounds.y + w.bounds.h - resize_grip
              && pos.y <  w.bounds.y + w.bounds.h;
     if in_br { return HitZone::ResizeBR; }
     if in_bl { return HitZone::ResizeBL; }
@@ -473,20 +477,20 @@ fn classify_hit(w: &SubWindow, pos: MousePos, theme: &Theme) -> HitZone {
     if in_tl { return HitZone::ResizeTL; }
 
     // Edges — thin grab strips along each side, excluding corners.
-    let in_left   = pos.x < w.bounds.x + EDGE_GRAB
-                 && pos.y >= w.bounds.y + RESIZE_GRIP
-                 && pos.y <  w.bounds.y + w.bounds.h - RESIZE_GRIP;
-    let in_right  = pos.x >= w.bounds.x + w.bounds.w - EDGE_GRAB
+    let in_left   = pos.x < w.bounds.x + edge_grab
+                 && pos.y >= w.bounds.y + resize_grip
+                 && pos.y <  w.bounds.y + w.bounds.h - resize_grip;
+    let in_right  = pos.x >= w.bounds.x + w.bounds.w - edge_grab
                  && pos.x <  w.bounds.x + w.bounds.w
-                 && pos.y >= w.bounds.y + RESIZE_GRIP
-                 && pos.y <  w.bounds.y + w.bounds.h - RESIZE_GRIP;
-    let in_top    = pos.y < w.bounds.y + EDGE_GRAB
-                 && pos.x >= w.bounds.x + RESIZE_GRIP
-                 && pos.x <  w.bounds.x + w.bounds.w - RESIZE_GRIP;
-    let in_bottom = pos.y >= w.bounds.y + w.bounds.h - EDGE_GRAB
+                 && pos.y >= w.bounds.y + resize_grip
+                 && pos.y <  w.bounds.y + w.bounds.h - resize_grip;
+    let in_top    = pos.y < w.bounds.y + edge_grab
+                 && pos.x >= w.bounds.x + resize_grip
+                 && pos.x <  w.bounds.x + w.bounds.w - resize_grip;
+    let in_bottom = pos.y >= w.bounds.y + w.bounds.h - edge_grab
                  && pos.y <  w.bounds.y + w.bounds.h
-                 && pos.x >= w.bounds.x + RESIZE_GRIP
-                 && pos.x <  w.bounds.x + w.bounds.w - RESIZE_GRIP;
+                 && pos.x >= w.bounds.x + resize_grip
+                 && pos.x <  w.bounds.x + w.bounds.w - resize_grip;
     if in_right  { return HitZone::ResizeR; }
     if in_left   { return HitZone::ResizeL; }
     if in_bottom { return HitZone::ResizeB; }
@@ -576,11 +580,13 @@ fn paint_window_titlebar(frame: &mut Frame, renderer: &mut Renderer,
     // Traffic-light buttons — full color always so users see the
     // same affordances on both windows. (Click still only acts on
     // the topmost window because the MDI host routes events that way.)
-    let right = w.bounds.x + w.bounds.w - BTN_GAP;
-    let btn_y = w.bounds.y + (tb - BTN_SIZE) * 0.5;
-    let close = Rect { x: right - BTN_SIZE,                 y: btn_y, w: BTN_SIZE, h: BTN_SIZE };
-    let max_  = Rect { x: close.x - BTN_GAP - BTN_SIZE,     y: btn_y, w: BTN_SIZE, h: BTN_SIZE };
-    let min_  = Rect { x: max_.x  - BTN_GAP - BTN_SIZE,     y: btn_y, w: BTN_SIZE, h: BTN_SIZE };
+    let (btn_size, btn_gap) = (theme.px(BTN_SIZE_BASE), theme.px(BTN_GAP_BASE));
+    let (_resize_grip, _edge_grab) = (theme.px(RESIZE_GRIP_BASE), theme.px(EDGE_GRAB_BASE));
+    let right = w.bounds.x + w.bounds.w - btn_gap;
+    let btn_y = w.bounds.y + (tb - btn_size) * 0.5;
+    let close = Rect { x: right - btn_size,                 y: btn_y, w: btn_size, h: btn_size };
+    let max_  = Rect { x: close.x - btn_gap - btn_size,     y: btn_y, w: btn_size, h: btn_size };
+    let min_  = Rect { x: max_.x  - btn_gap - btn_size,     y: btn_y, w: btn_size, h: btn_size };
     frame.paint_rect(min_.x,  min_.y,  min_.w,  min_.h,  theme.button_min);
     frame.paint_rect(max_.x,  max_.y,  max_.w,  max_.h,  theme.button_max);
     frame.paint_rect(close.x, close.y, close.w, close.h, theme.button_close);
@@ -621,7 +627,7 @@ mod tests {
         h.set_workspace(Rect { x: 0.0, y: 0.0, w: 1000.0, h: 800.0 });
         let id = h.add_window("W1", Rect { x: 100.0, y: 100.0, w: 400.0, h: 300.0 });
         // Click at the far-right of title bar where the close button sits.
-        let close_cx = 100.0 + 400.0 - BTN_GAP - BTN_SIZE * 0.5;
+        let close_cx = 100.0 + 400.0 - BTN_GAP_BASE - BTN_SIZE_BASE * 0.5;
         let close_cy = 100.0 + title_bar_height(&theme()) * 0.5;
         h.handle_events(&[mouse_down(close_cx, close_cy), mouse_up()], &theme());
         assert!(h.take_close_requested(id));

@@ -24,8 +24,8 @@ use crate::theme::{Color, Theme};
 /// re-rasterisation — the panel writes a sub-rectangle of this
 /// slot at the panel's exact display pixel size, and displays
 /// that sub-rectangle 1:1. Keeps the atlas from fragmenting.
-const SLOT_W: u32 = 1024;
-const SLOT_H: u32 = 768;
+const SLOT_W: u32 = 2048;
+const SLOT_H: u32 = 1536;
 
 pub struct GraphPanel {
     svg: Option<Vec<u8>>,
@@ -122,9 +122,12 @@ impl GraphPanel {
         //   4. Draw exactly the (target_w × target_h) sub-rectangle
         //      of the slot at the panel rect — 1:1 sampling, no GPU
         //      resample blur.
-        let dpi = theme.dpi;
-        let target_w = ((rect.w * dpi).round() as u32).max(64).min(SLOT_W);
-        let target_h = ((rect.h * dpi).round() as u32).max(64).min(SLOT_H);
+        // `rect` is in PHYSICAL pixels (the renderer's coordinate space),
+        // so rasterise at exactly that size — a true 1:1 texel→pixel
+        // mapping with no resample blur. (No extra dpi multiplier: that
+        // would supersample then downscale, softening edges.)
+        let target_w = (rect.w.round() as u32).max(64).min(SLOT_W);
+        let target_h = (rect.h.round() as u32).max(64).min(SLOT_H);
 
         if self.slot.is_none() {
             let placeholder = vec![0u8; (SLOT_W * SLOT_H * 4) as usize];

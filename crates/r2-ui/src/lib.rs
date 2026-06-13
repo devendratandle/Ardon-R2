@@ -61,7 +61,7 @@ pub use grid::{
 pub use input::{InputField, InputFieldResponse};
 pub use layout::{Layout, LayoutBuilder, Mdi};
 pub use mdi::{MdiHost, SubWindow, WindowId};
-pub use menu::{MenuBar, MenuBarState, MenuBuilder, MenuItem, MenuTopLevel, MENU_BAR_HEIGHT};
+pub use menu::{menu_bar_height, MenuBar, MenuBarState, MenuBuilder, MenuItem, MenuTopLevel, MENU_BAR_HEIGHT};
 pub use graph::GraphPanel;
 pub use render::{Frame, GlyphInfo, ImageHandle, Renderer};
 pub use scrollbar::{Scrollbar, ScrollOrientation, SCROLLBAR_THICKNESS};

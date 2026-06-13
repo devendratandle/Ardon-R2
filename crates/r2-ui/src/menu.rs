@@ -68,9 +68,18 @@ impl Default for MenuBuilder { fn default() -> Self { Self::new() } }
 
 // ─── MenuBarState — interaction + painting ──────────────────────────
 
+/// Base (unscaled) menu-bar height. Layout code must use
+/// [`menu_bar_height`] so the bar adapts to the display scale.
 pub const MENU_BAR_HEIGHT: f32 = 22.0;
-const ITEM_HEIGHT: f32 = 20.0;
-const POPUP_MIN_W: f32 = 160.0;
+
+/// DPI-scaled menu-bar height — hosts use this for layout so the bar
+/// adapts from 720p to 4K.
+#[inline]
+pub fn menu_bar_height(theme: &Theme) -> f32 { theme.px(MENU_BAR_HEIGHT) }
+
+/// DPI-scaled popup row height.
+#[inline]
+fn item_height(theme: &Theme) -> f32 { theme.px(20.0) }
 
 /// Stateful menu bar — owns the open-popup state and dispatches
 /// click → action string. Lives across frames.
@@ -102,7 +111,7 @@ impl MenuBarState {
                     let mut clicked_top: Option<usize> = None;
                     for (i, top) in self.bar.items.iter().enumerate() {
                         let w = top.label.chars().count() as f32 * cell_w + 16.0;
-                        let r = Rect { x: pen_x, y: workspace.y, w, h: MENU_BAR_HEIGHT };
+                        let r = Rect { x: pen_x, y: workspace.y, w, h: menu_bar_height(theme) };
                         if point_in(r, pos) { clicked_top = Some(i); break; }
                         pen_x += w;
                     }
@@ -139,10 +148,10 @@ impl MenuBarState {
             if i == top_idx { break; }
             popup_x += t.label.chars().count() as f32 * cell_w + 16.0;
         }
-        let popup_y = workspace.y + MENU_BAR_HEIGHT;
-        let popup_w = popup_width(top, cell_w);
+        let popup_y = workspace.y + menu_bar_height(theme);
+        let popup_w = popup_width(top, cell_w, theme.px(160.0));
         for (j, item) in top.items.iter().enumerate() {
-            let r = Rect { x: popup_x, y: popup_y + j as f32 * ITEM_HEIGHT, w: popup_w, h: ITEM_HEIGHT };
+            let r = Rect { x: popup_x, y: popup_y + j as f32 * item_height(theme), w: popup_w, h: item_height(theme) };
             if point_in(r, pos) { return Some(item.action.clone()); }
         }
         None
@@ -153,19 +162,19 @@ impl MenuBarState {
     pub fn paint_strip(&self, frame: &mut Frame, renderer: &mut Renderer,
                        workspace: Rect, theme: &Theme) {
         // Strip background.
-        frame.paint_rect(workspace.x, workspace.y, workspace.w, MENU_BAR_HEIGHT, theme.menu_background);
+        frame.paint_rect(workspace.x, workspace.y, workspace.w, menu_bar_height(theme), theme.menu_background);
         // Bottom 1px shadow.
-        frame.paint_rect(workspace.x, workspace.y + MENU_BAR_HEIGHT - 1.0,
+        frame.paint_rect(workspace.x, workspace.y + menu_bar_height(theme) - 1.0,
                          workspace.w, 1.0, Color::rgba(0, 0, 0, 40));
 
         let (cell_w, _) = renderer.cell_metrics(theme.font_size);
-        let baseline = workspace.y + MENU_BAR_HEIGHT * 0.74;
+        let baseline = workspace.y + menu_bar_height(theme) * 0.74;
 
         let mut pen_x = workspace.x + 8.0;
         for (i, top) in self.bar.items.iter().enumerate() {
             let w = top.label.chars().count() as f32 * cell_w + 16.0;
             if self.open == Some(i) {
-                frame.paint_rect(pen_x, workspace.y, w, MENU_BAR_HEIGHT,
+                frame.paint_rect(pen_x, workspace.y, w, menu_bar_height(theme),
                                  Color::rgba(70, 130, 180, 70));
             }
             frame.paint_text(renderer, pen_x + 8.0, baseline,
@@ -188,9 +197,9 @@ impl MenuBarState {
             if i == oi { break; }
             popup_x += t.label.chars().count() as f32 * cell_w + 16.0;
         }
-        let popup_y = workspace.y + MENU_BAR_HEIGHT;
-        let popup_w = popup_width(top, cell_w);
-        let popup_h = top.items.len() as f32 * ITEM_HEIGHT + 4.0;
+        let popup_y = workspace.y + menu_bar_height(theme);
+        let popup_w = popup_width(top, cell_w, theme.px(160.0));
+        let popup_h = top.items.len() as f32 * item_height(theme) + 4.0;
 
         // Background + 1-px border, drop a subtle shadow rectangle so
         // the popup reads as a separate plane above whichever window
@@ -203,13 +212,13 @@ impl MenuBarState {
         frame.paint_rect(popup_x + popup_w - 1.0, popup_y, 1.0, popup_h, Color::rgba(0,0,0,80));
 
         for (j, item) in top.items.iter().enumerate() {
-            let row_y = popup_y + 2.0 + j as f32 * ITEM_HEIGHT;
-            let row_r = Rect { x: popup_x, y: row_y, w: popup_w, h: ITEM_HEIGHT };
+            let row_y = popup_y + 2.0 + j as f32 * item_height(theme);
+            let row_r = Rect { x: popup_x, y: row_y, w: popup_w, h: item_height(theme) };
             if point_in(row_r, self.last_mouse) {
-                frame.paint_rect(popup_x + 1.0, row_y, popup_w - 2.0, ITEM_HEIGHT,
+                frame.paint_rect(popup_x + 1.0, row_y, popup_w - 2.0, item_height(theme),
                                  Color::rgba(70, 130, 180, 70));
             }
-            let baseline = row_y + ITEM_HEIGHT * 0.72;
+            let baseline = row_y + item_height(theme) * 0.72;
             frame.paint_text(renderer, popup_x + 12.0, baseline,
                              &item.label, theme.font_size, theme.menu_text);
             if !item.shortcut.is_empty() {
@@ -231,11 +240,11 @@ impl MenuBarState {
     }
 }
 
-fn popup_width(top: &MenuTopLevel, cell_w: f32) -> f32 {
+fn popup_width(top: &MenuTopLevel, cell_w: f32, min_w: f32) -> f32 {
     let max_label = top.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0);
     let max_sc    = top.items.iter().map(|i| i.shortcut.chars().count()).max().unwrap_or(0);
     let needed = (max_label + max_sc) as f32 * cell_w + 36.0;
-    needed.max(POPUP_MIN_W)
+    needed.max(min_w)
 }
 
 #[inline]

@@ -47,27 +47,49 @@ pub struct Theme {
     pub button_close: Color,   // ✕  close
 
     // ── Typography ──────────────────────────────────────────────
+    // `font_size` / `line_height` are the EFFECTIVE (already DPI-scaled)
+    // values — every widget reads these directly, so applying the scale
+    // here at the source makes the whole UI (console, menus, title bars,
+    // context menus) adapt in one place. The unscaled designs live in
+    // `font_size_base` / `line_height_base`; `set_dpi`/`set_font_size`
+    // recompute the effective values.
     pub font_size:   f32,
     pub line_height: f32,
+    font_size_base:   f32,
+    line_height_base: f32,
 
-    // ── Density scale (HiDPI / per-window scaling) ──────────────
-    // Multiply font_size, line_height, button sizes, paddings by
-    // this in painters. Default 1.0 = 96 DPI / 100% scaling. The
-    // app shell updates it from `winit::window::scale_factor()` so
-    // the same widget code looks proportionally identical on 100%,
-    // 150%, 200% scaled displays.
+    // ── Density scale (HiDPI / resolution scaling) ──────────────
+    // Effective UI scale: max(OS scaling factor, panel-height/1080, 1).
+    // 1.0 = 96 DPI / 100% on a 1080p panel. The app shell updates it at
+    // startup and on monitor changes so the same widget code looks
+    // proportionally identical from 720p to 4K.
     pub dpi: f32,
 }
 
 impl Theme {
-    /// Scaled font size (pt × dpi). Use in render calls.
-    #[inline] pub fn fs(&self) -> f32 { self.font_size * self.dpi }
-    /// Scaled line height.
-    #[inline] pub fn lh(&self) -> f32 { self.line_height * self.dpi }
-    /// Scaled length helper — for any pixel constant in widget code.
+    /// Effective (scaled) font size — kept for call sites that used the
+    /// explicit accessor; identical to reading `font_size` now.
+    #[inline] pub fn fs(&self) -> f32 { self.font_size }
+    /// Effective (scaled) line height.
+    #[inline] pub fn lh(&self) -> f32 { self.line_height }
+    /// Scaled length helper — for any pixel constant in widget code
+    /// (button sizes, paddings, bar heights, grips).
     #[inline] pub fn px(&self, v: f32) -> f32 { v * self.dpi }
-    /// Replace the dpi factor without rebuilding the whole theme.
-    pub fn set_dpi(&mut self, dpi: f32) { self.dpi = dpi.max(0.5).min(4.0); }
+    /// Set the UI scale; recomputes the effective typography from the
+    /// stored base design values.
+    pub fn set_dpi(&mut self, dpi: f32) {
+        self.dpi = dpi.max(0.5).min(4.0);
+        self.font_size   = self.font_size_base   * self.dpi;
+        self.line_height = self.line_height_base * self.dpi;
+    }
+    /// User font preference (e.g. a future settings tab): change the BASE
+    /// size; the effective size stays DPI-scaled on top of it.
+    pub fn set_font_size(&mut self, base_pt: f32) {
+        self.font_size_base   = base_pt.clamp(7.0, 32.0);
+        self.line_height_base = (self.font_size_base * 1.3).round();
+        self.font_size   = self.font_size_base   * self.dpi;
+        self.line_height = self.line_height_base * self.dpi;
+    }
 }
 
 impl Theme {
@@ -107,6 +129,8 @@ impl Theme {
             button_close:      Color::rgb(210, 50, 50),     // red
             font_size:   14.0,
             line_height: 18.0,
+            font_size_base:   14.0,
+            line_height_base: 18.0,
             dpi:         1.0,
         }
     }
@@ -134,6 +158,8 @@ impl Theme {
             button_close:      Color::rgb(210, 50, 50),
             font_size:   13.0,
             line_height: 16.0,
+            font_size_base:   13.0,
+            line_height_base: 16.0,
             dpi:         1.0,
         }
     }
