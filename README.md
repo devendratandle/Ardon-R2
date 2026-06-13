@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.3.0.</em></p>
+<em>An AI-Assisted Project. v0.3.1.</em></p>
 
 ---
 
@@ -20,9 +20,21 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.3.0 (2026) | Inspired by R, Built on Rust
+Version 0.3.1 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
+
+## What's new in v0.3.1 (June 2026)
+
+GUI polish on top of v0.3.0:
+
+- **Resolution-adaptive UI (720p → 4K)** — scales from a 1080p reference
+  (≈1.33× at 1440, 2× at 4K), follows OS display scaling, never shrinks
+  below base, and fills the screen at low resolutions.
+- **Native resize affordances** — edge/corner resize cursors (↔ ↕ ⤡ ⤢).
+- **Legible "R2" title-bar logo** at small sizes.
+
+See `CHANGELOG.md` for details.
 
 ## What's new in v0.3.0 (June 2026)
 

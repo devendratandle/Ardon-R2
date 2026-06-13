@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.3.1 (June 2026)
+
+GUI polish: full resolution adaptation, native resize affordances, and a
+legible title-bar logo.
+
+### GUI
+- **Resolution-adaptive UI (720p → 4K).** UI scale derives from
+  `max(OS scale_factor, monitor_height/1080, 1.0)`: a 1080p reference of
+  1.0×, scaling up on taller panels (≈1.33× at 1440, 2× at 4K) and never
+  shrinking below base. Initial window size grows with resolution, clamped
+  to 92% of the monitor so it always fits (verified filling the screen at
+  720p). All window chrome (title bars, menus, scrollbars, resize grips)
+  scales from the same factor via `theme.px()`.
+- **Resize-cursor affordance.** Hovering a window edge/corner shows the
+  matching cursor (↔ / ↕ / ⤡ / ⤢) and the title bar shows the move cursor.
+- **Legible title-bar logo.** The small window icon now crops to the
+  colorful "R2" monogram and fills the title-bar height at its natural
+  aspect, instead of squeezing the full composite logo into an unreadable
+  smudge. Taskbar / Alt-Tab icon still uses the full logo.
+- Graph-device output quality polish.
+
 ## v0.3.0 (June 2026)
 
 Out-of-core compute (analyze larger-than-RAM data), Parquet import, and
