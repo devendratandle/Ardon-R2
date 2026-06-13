@@ -188,13 +188,26 @@ impl Parser {
     }
 
     // Inside function calls: name = value is a NAMED ARGUMENT, not assignment
+    // (see parse_call_args). `soft_keyword_name` below lets R2's soft
+    // keywords double as R argument names.
     fn parse_call_args(&mut self) -> Result<Vec<CallArg>, ParseErr> {
         let mut args = Vec::new();
         self.skip_nl();
         if matches!(self.peek(), Token::RParen) { return Ok(args); }
         loop {
             self.skip_nl();
-            let arg = if let Token::Ident(name) = self.peek().clone() {
+            // A named argument is `<name> = value`. The name is normally an
+            // identifier, but R has no reserved words — so the R2-specific
+            // soft keywords (`type`, `method`, `extends`, …) must also be
+            // usable as argument names. We only treat them as a name when
+            // immediately followed by `=`, so `try(x)` / `match(x)` in
+            // argument position still parse as expressions. `type=` is the
+            // common case (e.g. plot(x, y, type="l")).
+            let name_text: Option<String> = match self.peek() {
+                Token::Ident(s) => Some(s.clone()),
+                other => soft_keyword_name(other).map(|s| s.to_string()),
+            };
+            let arg = if let Some(name) = name_text {
                 let saved = self.pos;
                 self.advance();
                 if matches!(self.peek(), Token::Equals) {
@@ -341,6 +354,22 @@ impl Parser {
         self.expect(&Token::RParen)?; self.skip_nl(); let body = self.parse_expr()?;
         Ok(Expr::MethodDef(Method { name: method_name, type_name, param_name, extra_params: extra, body: Box::new(body) }))
     }
+}
+
+/// The R2-specific soft keywords that may also appear as R argument names
+/// (R has no reserved words). Returns the keyword's spelling so the call
+/// parser can use it as a named-argument name when followed by `=`.
+/// `match`/`try`/`catch` are intentionally excluded — in argument position
+/// they introduce real expressions, and are not used as R argument names.
+fn soft_keyword_name(tok: &Token) -> Option<&'static str> {
+    Some(match tok {
+        Token::Type    => "type",
+        Token::Method  => "method",
+        Token::Extends  => "extends",
+        Token::Strict  => "strict",
+        Token::Lenient => "lenient",
+        _ => return None,
+    })
 }
 
 fn parse_fstring_parts(s: &str) -> Result<Vec<FStringPart>, ParseErr> {

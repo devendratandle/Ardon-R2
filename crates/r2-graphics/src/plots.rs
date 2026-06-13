@@ -72,6 +72,76 @@ impl LabelOpts {
 fn num(v: RVal) -> Option<f64> { v.as_reals().ok()?.into_iter().next()? }
 fn int(v: RVal) -> Option<i32> { v.as_reals().ok()?.into_iter().next()?.map(|x| x as i32) }
 
+/// R's default colour palette (1-based). `col=2` → red, etc. Index 0 /
+/// out-of-range wraps like R's `palette()` recycling.
+pub(crate) fn r_palette(i: i32) -> &'static str {
+    const PAL: [&str; 8] = [
+        "black", "red", "green3", "blue", "cyan", "magenta", "yellow", "gray",
+    ];
+    if i <= 0 { return "black"; }
+    PAL[((i - 1) as usize) % PAL.len()]
+}
+
+/// Resolve a `col=` argument into a per-element colour vector (recycled
+/// by the caller). Accepts a character vector of names/hex, or an integer
+/// vector mapped through [`r_palette`]. Falls back to `default`.
+pub(crate) fn color_vec(arg: Option<RVal>, default: &str) -> Vec<String> {
+    match arg {
+        Some(RVal::Character(v, _)) if !v.is_empty() => v
+            .iter()
+            .map(|c| c.as_ref().map(|s| s.to_string()).unwrap_or_else(|| default.to_string()))
+            .collect(),
+        Some(RVal::Integer(v, _)) if !v.is_empty() => v
+            .iter()
+            .map(|n| n.map(|n| r_palette(n).to_string()).unwrap_or_else(|| default.to_string()))
+            .collect(),
+        Some(RVal::Numeric(v, _)) if !v.is_empty() => v
+            .iter()
+            .map(|n| n.map(|n| r_palette(n as i32).to_string()).unwrap_or_else(|| default.to_string()))
+            .collect(),
+        _ => vec![default.to_string()],
+    }
+}
+
+/// Render one R plotting symbol (`pch`) centred at `(px,py)` with radius
+/// `r` in colour `col`. Covers the commonly-used codes; unknown codes
+/// fall back to an open circle (R's default `pch=1`).
+pub(crate) fn point_symbol(px: f64, py: f64, r: f64, pch: i32, col: &str) -> String {
+    let open = format!(r#"fill="none" stroke="{}" stroke-width="1""#, col);
+    let fill = format!(r#"fill="{}" stroke="{}" stroke-width="0.5""#, col, col);
+    match pch {
+        16 | 19 => format!(r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" {}/>"#, px, py, r, fill),
+        20      => format!(r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" {}/>"#, px, py, r * 0.66, fill),
+        21      => format!(r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" {}/>"#, px, py, r, fill),
+        1       => format!(r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" {}/>"#, px, py, r, open),
+        0 | 15 | 22 => {
+            let s = r * 1.8;
+            let style = if pch == 0 { &open } else { &fill };
+            format!(r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" {}/>"#,
+                    px - s / 2.0, py - s / 2.0, s, s, style)
+        }
+        2 | 17 | 24 => {
+            let s = r * 2.0;
+            let style = if pch == 2 { &open } else { &fill };
+            format!(r#"<polygon points="{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}" {}/>"#,
+                    px, py - s * 0.6, px - s * 0.55, py + s * 0.4, px + s * 0.55, py + s * 0.4, style)
+        }
+        5 | 18 | 23 => {
+            let s = r * 1.6;
+            let style = if pch == 5 { &open } else { &fill };
+            format!(r#"<polygon points="{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}" {}/>"#,
+                    px, py - s, px + s, py, px, py + s, px - s, py, style)
+        }
+        3 => format!(
+            r#"<path d="M{:.1},{:.1} L{:.1},{:.1} M{:.1},{:.1} L{:.1},{:.1}" stroke="{}" stroke-width="1"/>"#,
+            px - r, py, px + r, py, px, py - r, px, py + r, col),
+        4 => format!(
+            r#"<path d="M{:.1},{:.1} L{:.1},{:.1} M{:.1},{:.1} L{:.1},{:.1}" stroke="{}" stroke-width="1"/>"#,
+            px - r, py - r, px + r, py + r, px - r, py + r, px + r, py - r, col),
+        _ => format!(r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" {}/>"#, px, py, r, open),
+    }
+}
+
 /// R's `font` codes: 1 plain, 2 bold, 3 italic, 4 bold+italic.
 fn font_attrs(code: i32) -> &'static str {
     match code {
@@ -231,8 +301,15 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // for THIS plot only.
     let opts = LabelOpts::from_args(a);
 
-    // Per-plot params snapshot.
-    let (col, cex_pt) = with_device(|d| (d.params.col.clone(), d.params.cex));
+    // Per-plot params: inline args (col=, cex=, pch=, lwd=, type=) shadow
+    // the par() device defaults for THIS call only — R semantics.
+    let (dev_col, dev_cex, dev_pch, dev_lwd) =
+        with_device(|d| (d.params.col.clone(), d.params.cex, d.params.pch, d.params.lwd));
+    let cex_pt = gn(a, "cex").and_then(num).unwrap_or(dev_cex);
+    let pch    = gn(a, "pch").and_then(int).unwrap_or(dev_pch);
+    let lwd    = gn(a, "lwd").and_then(num).unwrap_or(dev_lwd);
+    let cols   = color_vec(gn(a, "col"), &dev_col);
+    let ptype  = gn(a, "type").map(|v| val_to_str(&v)).unwrap_or_else(|| "p".into());
 
     let (ox, oy, w, h) = begin_plot();
     let (ml, mr, mt, mb) = (60.0, 20.0, 36.0, 40.0);
@@ -270,17 +347,41 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // Axis tick labels with `las` rotation support.
     frag.push_str(&render_axis_ticks(&panel, xmin, xmax, ymin, ymax, xrange, yrange, &opts));
 
-    // Data points.
-    for i in 0..x.len().min(y.len()) {
+    // Pixel coordinates for each (x,y).
+    let n = x.len().min(y.len());
+    let pts: Vec<(f64, f64)> = (0..n).map(|i| {
         let px = ox + ml + (x[i] - xmin) / xrange * pw;
         let py = oy + mt + ph - (y[i] - ymin) / yrange * ph;
-        // Solid points — fully opaque, R-style. The earlier 0.7
-        // opacity made plot symbols read as faint gray against the
-        // white plot body; opaque solid black/colored points match R.
+        (px, py)
+    }).collect();
+
+    // type=: "p" points (default), "l" lines, "b"/"o" both, "h" needles
+    // to the x-axis baseline, "n" nothing (axes only). The line colour
+    // uses the first recycled colour, matching R.
+    let draw_lines  = matches!(ptype.as_str(), "l" | "b" | "o");
+    let draw_points = matches!(ptype.as_str(), "p" | "b" | "o");
+    let line_col = cols.first().map(|s| s.as_str()).unwrap_or("black");
+    if ptype == "h" {
+        let baseline = oy + mt + ph - (0.0_f64.max(ymin) - ymin) / yrange * ph;
+        for (i, &(px, py)) in pts.iter().enumerate() {
+            let c = &cols[i % cols.len()];
+            frag.push_str(&format!(
+                r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="{:.1}"/>"#,
+                px, baseline, px, py, c, lwd));
+        }
+    }
+    if draw_lines && pts.len() > 1 {
+        let path: String = pts.iter().enumerate()
+            .map(|(i, &(px, py))| format!("{}{:.1},{:.1}", if i == 0 { "M" } else { " L" }, px, py))
+            .collect();
         frag.push_str(&format!(
-            r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" fill="{}" stroke="{}" stroke-width="0.5"/>"#,
-            px, py, 3.0 * cex_pt, col, col
-        ));
+            r#"<path d="{}" fill="none" stroke="{}" stroke-width="{:.1}"/>"#, path, line_col, lwd));
+    }
+    if draw_points {
+        for (i, &(px, py)) in pts.iter().enumerate() {
+            let c = &cols[i % cols.len()];
+            frag.push_str(&point_symbol(px, py, 3.0 * cex_pt, pch, c));
+        }
     }
 
     // Commit to the device. Cannot use append_svg() because the device's
