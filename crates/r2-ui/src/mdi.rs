@@ -596,14 +596,20 @@ fn paint_window_titlebar(frame: &mut Frame, renderer: &mut Renderer,
     // of faint blue), which is enough to read at a glance without
     // making the passive window look broken.
     let _ = is_active;
-    let icon_pad = 4.0;
-    let icon_box = tb - 2.0 * icon_pad;
-    let mut text_x = w.bounds.x + 10.0;
+    // The R2 mark texture is wide (~2.23:1). Draw it filling the title-bar
+    // height at its natural aspect — a square slot would letterbox it and
+    // make it look tiny. The mark is the same on every window, so the aspect
+    // is a fixed property of the cropped logo (see r2-gui main.rs).
+    const LOGO_ASPECT: f32 = 1048.0 / 470.0;
+    let icon_pad = theme.px(3.0);
+    let icon_h = tb - 2.0 * icon_pad;
+    let icon_w = icon_h * LOGO_ASPECT;
+    let mut text_x = w.bounds.x + theme.px(10.0);
     if let Some(handle) = w.icon {
-        let ix = w.bounds.x + icon_pad;
+        let ix = w.bounds.x + icon_pad + theme.px(2.0);
         let iy = w.bounds.y + icon_pad;
-        frame.paint_image(handle, ix, iy, icon_box, icon_box, Color::WHITE);
-        text_x = ix + icon_box + 6.0;
+        frame.paint_image(handle, ix, iy, icon_w, icon_h, Color::WHITE);
+        text_x = ix + icon_w + theme.px(6.0);
     }
     let baseline = w.bounds.y + tb * 0.78;
     frame.paint_text(renderer, text_x, baseline,

@@ -302,34 +302,42 @@ fn main() -> Result<(), String> {
     // Title-bar logo — decoded + resampled to a small square at startup.
     // The actual atlas upload happens on the first frame (we need a
     // Renderer for that, and we only get one inside on_frame).
-    let logo_square: Vec<u8>; let logo_side: u32;
+    let logo_rgba: Vec<u8>; let logo_w: u32; let logo_h: u32;
     {
         const LOGO_BYTES: &[u8] = include_bytes!(
             concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/logo.png"));
-        // Upload at 64 px (~3.5× the displayed 18-px title-bar icon).
-        // The GPU bilinear filter handles the final downscale at draw
-        // time, which keeps edges crisp without rasterising at every
-        // possible target size.
-        let side: u32 = 64;
-        let img = image::load_from_memory(LOGO_BYTES)
+        let full = image::load_from_memory(LOGO_BYTES)
             .map_err(|e| format!("logo decode: {}", e))?
             .into_rgba8();
+        // The full logo is a WIDE composite: the "R2" monogram on top, the
+        // "Ardon" wordmark beneath, plus a faint corner watermark. Squeezed
+        // into the ~18 px title-bar square the whole thing collapses into an
+        // unreadable smudge. Crop to just the colorful "R2" mark (top ~60%,
+        // central ~78%) so the small icon reads as R2. The taskbar / Alt-Tab
+        // icon (set via .icon_png below) still uses the full logo.
+        let (fw, fh) = (full.width(), full.height());
+        let cx = (fw as f32 * 0.11) as u32;
+        let cy = (fh as f32 * 0.03) as u32;
+        let cw = (fw as f32 * 0.78) as u32;
+        let ch = (fh as f32 * 0.60) as u32;
+        let img = image::imageops::crop_imm(&full, cx, cy, cw, ch).to_image();
         let (sw, sh) = (img.width(), img.height());
-        let scale = side as f32 / sw.max(sh) as f32;
-        let nw = (sw as f32 * scale).round() as u32;
-        let nh = (sh as f32 * scale).round() as u32;
-        // Triangle (bilinear) gives sharper results than Lanczos3 when
-        // the source is much larger than the target — Lanczos's lobes
-        // create soft halos at extreme downscale ratios.
+        // Upload the R2 mark at its NATURAL aspect (no square letterbox) so
+        // the title bar can draw it filling the full bar height as a wide
+        // icon. A square canvas would pad the short (vertical) axis with
+        // transparent bands — exactly what made the mark look tiny. ~128 px
+        // on the long edge gives the GPU bilinear filter headroom for a crisp
+        // downscale to the ~20 px title-bar height. Triangle (bilinear) keeps
+        // edges sharper than Lanczos3 at extreme downscale ratios.
+        let target: u32 = 128;
+        let scale = target as f32 / sw.max(sh) as f32;
+        let nw = ((sw as f32 * scale).round() as u32).max(1);
+        let nh = ((sh as f32 * scale).round() as u32).max(1);
         let resized = image::imageops::resize(
             &img, nw, nh, image::imageops::FilterType::Triangle);
-        let mut canvas = image::RgbaImage::from_pixel(side, side,
-            image::Rgba([255, 255, 255, 0]));
-        let ox = (side - nw) / 2;
-        let oy = (side - nh) / 2;
-        image::imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
-        logo_square = canvas.into_raw();
-        logo_side   = side;
+        logo_rgba = resized.into_raw();
+        logo_w = nw;
+        logo_h = nh;
     }
     let logo_uploaded = Rc::new(RefCell::new(false));
     let logo_handle: Rc<RefCell<Option<r2_ui::ImageHandle>>> = Rc::new(RefCell::new(None));
@@ -373,7 +381,7 @@ fn main() -> Result<(), String> {
                 // ImageHandle is cheap to copy after.
                 if !*logo_uploaded.borrow() {
                     if let Some(handle) = renderer.upload_image(
-                        logo_side, logo_side, &logo_square)
+                        logo_w, logo_h, &logo_rgba)
                     {
                         *logo_handle.borrow_mut() = Some(handle);
                         if let Some(w) = mdi.borrow_mut().window_mut(console_id) {
