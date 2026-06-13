@@ -82,7 +82,11 @@ impl Theme {
         self.font_size   = self.font_size_base   * self.dpi;
         self.line_height = self.line_height_base * self.dpi;
     }
-    /// User font preference (e.g. a future settings tab): change the BASE
+    /// The user's BASE font preference (before DPI scaling). The Settings
+    /// panel reads this to display + adjust the size; the rendered size is
+    /// `font_size_base * dpi` (see `fs()`).
+    #[inline] pub fn font_size_base(&self) -> f32 { self.font_size_base }
+    /// User font preference (e.g. the settings tab): change the BASE
     /// size; the effective size stays DPI-scaled on top of it.
     pub fn set_font_size(&mut self, base_pt: f32) {
         self.font_size_base   = base_pt.clamp(7.0, 32.0);

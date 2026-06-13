@@ -33,15 +33,36 @@ pub enum CursorShape {
 pub struct FrameCtx<'a> {
     pub events: &'a [InputEvent],
     pub clipboard: &'a mut Clipboard,
+    /// True on the frame the OS asked the window to close (title-bar ✕,
+    /// Alt-F4, taskbar Close). The app loop does NOT exit on its own —
+    /// the closure decides (e.g. show a "Save workspace?" dialog) and
+    /// calls `request_exit()` when it actually wants to quit.
+    pub close_requested: bool,
     /// Cursor the closure requests this frame (default = arrow). The app
     /// shell applies it to the OS window after the frame.
     cursor: &'a std::cell::Cell<CursorShape>,
+    /// Set by `request_exit()` — the app loop exits after this frame.
+    exit: &'a std::cell::Cell<bool>,
+    /// Set by `set_base_font_size()` — the loop applies it to the Theme
+    /// after the frame (the closure only has `&Theme`, so it can't mutate
+    /// it directly). Drives the Settings font-resize control.
+    font_request: &'a std::cell::Cell<Option<f32>>,
 }
 
 impl<'a> FrameCtx<'a> {
     /// Request a mouse-cursor shape for this frame (e.g. a resize arrow
     /// when hovering a window edge). Resets to `Default` each frame.
     pub fn set_cursor(&self, shape: CursorShape) { self.cursor.set(shape); }
+
+    /// Ask the app loop to exit cleanly after this frame finishes. Use
+    /// this instead of `std::process::exit` so the final frame (e.g. a
+    /// dialog dismissal) still paints and the window tears down normally.
+    pub fn request_exit(&self) { self.exit.set(true); }
+
+    /// Ask the app to change the BASE (pre-DPI) UI font size. Applied to
+    /// the Theme after this frame; takes effect next frame. Clamped to a
+    /// sane range by `Theme::set_font_size`.
+    pub fn set_base_font_size(&self, pt: f32) { self.font_request.set(Some(pt)); }
 }
 
 /// Per-frame painter signature. Called once per `RedrawRequested`
@@ -229,6 +250,10 @@ impl R2Ui {
         let mut mouse_pos = MousePos { x: 0.0, y: 0.0 };
         let mut mods = Mods::default();
         let mut last_cursor = CursorShape::Default;
+        // Latched one-frame signal: the OS asked to close the window.
+        // We surface it to the closure instead of exiting immediately so
+        // it can confirm (Save workspace?) before quitting.
+        let mut pending_close = false;
 
         event_loop.run(move |event, target| match event {
             Event::WindowEvent { event, .. } => {
@@ -257,7 +282,10 @@ impl R2Ui {
                 pending.extend(from_winit(&event, mouse_pos, mods, 1.0));
 
                 match event {
-                    WindowEvent::CloseRequested => target.exit(),
+                    // Don't exit here — latch it and let the closure decide
+                    // (it may pop a confirmation dialog). It calls
+                    // `ctx.request_exit()` when it really wants to quit.
+                    WindowEvent::CloseRequested => { pending_close = true; }
                     WindowEvent::Resized(new) => renderer.resize(new),
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                         // Re-derive the effective scale (e.g. window moved to
@@ -272,13 +300,26 @@ impl R2Ui {
                     WindowEvent::RedrawRequested => {
                         let mut frame = renderer.begin_frame();
                         let cursor = std::cell::Cell::new(CursorShape::Default);
+                        let exit = std::cell::Cell::new(false);
+                        let font_request = std::cell::Cell::new(None);
                         if let Some(p) = frame_fn.as_mut() {
                             let mut ctx = FrameCtx {
                                 events: &pending,
                                 clipboard: &mut clipboard,
+                                close_requested: pending_close,
                                 cursor: &cursor,
+                                exit: &exit,
+                                font_request: &font_request,
                             };
                             p(&mut ctx, &mut renderer, &mut frame, &theme);
+                        }
+                        // Close signal is one-frame: consumed by the frame
+                        // we just ran.
+                        pending_close = false;
+                        // Apply a Settings font-size change (closure had only
+                        // &Theme). Takes effect next frame.
+                        if let Some(pt) = font_request.get() {
+                            theme.set_font_size(pt);
                         }
                         // Apply the requested cursor (only when it changed,
                         // so we don't spam the OS every frame).
@@ -299,6 +340,10 @@ impl R2Ui {
                         if let Err(e) = renderer.submit(frame, &theme) {
                             eprintln!("[r2-ui] render error: {:?}", e);
                         }
+                        // The closure asked to quit (e.g. user confirmed the
+                        // Save-workspace dialog). Exit after the frame is
+                        // submitted so the final UI state is shown.
+                        if exit.get() { target.exit(); }
                     }
                     _ => {}
                 }

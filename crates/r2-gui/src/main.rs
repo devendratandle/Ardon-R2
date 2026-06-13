@@ -39,6 +39,7 @@ use r2_engine::Engine;
 use r2_parser::Parser;
 use r2_ui::{
     auto_scroll_offset, Cell, CellGridState, Color, ContextItem, ContextMenu,
+    Dialog, DialogButton,
     menu_bar_height, GraphPanel, GridPos, InputField, MdiHost, MenuBarState, MenuBuilder, R2Ui,
     Rect, Selection, Theme, WindowId,
 };
@@ -239,6 +240,11 @@ fn main() -> Result<(), String> {
         r2_ui::Scrollbar::new(r2_ui::ScrollOrientation::Horizontal)));
     let input      = Rc::new(RefCell::new(InputField::new()));
     let quit_requested = Rc::new(RefCell::new(false));
+    // Modal dialogs (R-style): quit confirmation ("Save workspace image?")
+    // and the Settings panel (font resize). Owned here, driven + painted
+    // last in the frame closure.
+    let quit_dialog     = Rc::new(RefCell::new(Dialog::new()));
+    let settings_dialog = Rc::new(RefCell::new(Dialog::new()));
 
     // ── Menu bars ──────────────────────────────────────────────────
     // Each sub-window owns its own menu set. The one currently
@@ -255,7 +261,8 @@ fn main() -> Result<(), String> {
     mb_con.top("Edit")
         .item("Copy",          "Ctrl+C", "edit.copy")
         .item("Paste",         "Ctrl+V", "edit.paste")
-        .item("Select all",    "Ctrl+A", "edit.select_all");
+        .item("Select all",    "Ctrl+A", "edit.select_all")
+        .item("Settings…",     "",       "edit.settings");
     mb_con.top("Windows")
         .item("Show Console",  "", "win.console")
         .item("Show Graphics", "", "win.graphics");
@@ -371,6 +378,8 @@ fn main() -> Result<(), String> {
             let did_layout    = did_layout.clone();
             let last_svg_len  = last_svg_len.clone();
             let quit_requested = quit_requested.clone();
+            let quit_dialog    = quit_dialog.clone();
+            let settings_dialog = settings_dialog.clone();
             let logo_uploaded  = logo_uploaded.clone();
             let logo_handle    = logo_handle.clone();
             move |ctx, renderer, frame, theme| {
@@ -459,10 +468,40 @@ fn main() -> Result<(), String> {
                 let win_w = renderer.size.width  as f32;
                 let win_h = renderer.size.height as f32;
 
-                // Quit if engine asked.
-                if *quit_requested.borrow() {
-                    std::process::exit(0);
+                // Quit path (R-style): q()/quit() set `quit_requested`, and
+                // the OS close button (✕ / Alt-F4) arrives as
+                // `ctx.close_requested`. Instead of exiting outright, pop a
+                // modal "Save workspace image? [Yes/No/Cancel]" confirmation.
+                // Consume the engine flag so it fires once.
+                let quit_flag = {
+                    let mut b = quit_requested.borrow_mut();
+                    std::mem::replace(&mut *b, false)
+                };
+                if (quit_flag || ctx.close_requested)
+                    && !quit_dialog.borrow().is_open()
+                    && !settings_dialog.borrow().is_open()
+                {
+                    let mut d = quit_dialog.borrow_mut();
+                    d.title = "Quit Ardon-R2".into();
+                    d.lines = vec!["Save workspace image?".into()];
+                    d.buttons = vec![
+                        DialogButton::new("Yes",    "quit.yes"),
+                        DialogButton::new("No",     "quit.no"),
+                        DialogButton::new("Cancel", "quit.cancel"),
+                    ];
+                    d.default_action = "quit.yes".into();
+                    d.cancel_action  = "quit.cancel".into();
+                    d.open();
                 }
+
+                // While any modal is open it OWNS input: feed the widgets
+                // underneath an empty event slice so clicks/keys don't leak
+                // through to the console, menus, or window chrome. The dialog
+                // itself (handled + painted last) reads the real `ctx.events`.
+                let modal_open = quit_dialog.borrow().is_open()
+                              || settings_dialog.borrow().is_open();
+                let ui_events: &[r2_ui::InputEvent] =
+                    if modal_open { &[] } else { ctx.events };
 
                 // ── Workspace
                 let menu_h = menu_bar_height(theme);
@@ -520,25 +559,38 @@ fn main() -> Result<(), String> {
                 let ctx_was_open = ctx_console.borrow().is_open()
                                 || ctx_graphics.borrow().is_open();
                 let mb_action = active_menu.borrow_mut()
-                    .handle_events(ctx.events, menu_rect, renderer, theme);
+                    .handle_events(ui_events, menu_rect, renderer, theme);
                 let cm_action = match topmost_now {
                     Some(id) if id == console_id => {
                         let content = mdi.borrow().window(console_id)
                             .map(|w| w.content_rect(theme));
                         content.and_then(|c| ctx_console.borrow_mut()
-                            .handle_events(ctx.events, c, renderer, theme))
+                            .handle_events(ui_events, c, renderer, theme))
                     }
                     Some(id) if graphics_id == Some(id) => {
                         let content = graphics_id.and_then(|gid|
                             mdi.borrow().window(gid).map(|w| w.content_rect(theme)));
                         content.and_then(|c| ctx_graphics.borrow_mut()
-                            .handle_events(ctx.events, c, renderer, theme))
+                            .handle_events(ui_events, c, renderer, theme))
                     }
                     _ => None,
                 };
                 if let Some(action) = mb_action.or(cm_action) {
                     match action.as_str() {
                         "file.quit"  => { *quit_requested.borrow_mut() = true; }
+                        "edit.settings" => {
+                            let mut d = settings_dialog.borrow_mut();
+                            d.title = "Settings".into();
+                            d.buttons = vec![
+                                DialogButton::new("A \u{2013}", "settings.font_dec"),
+                                DialogButton::new("A +",        "settings.font_inc"),
+                                DialogButton::new("Reset",      "settings.font_reset"),
+                                DialogButton::new("Close",      "settings.close"),
+                            ];
+                            d.default_action = String::new();
+                            d.cancel_action  = "settings.close".into();
+                            d.open();
+                        }
                         "file.clear" => { buffer.lock().unwrap().clear(); }
                         "file.save_plot" => {
                             if take_engine_svg().is_some() {
@@ -765,7 +817,7 @@ fn main() -> Result<(), String> {
                 }
 
                 // ── MDI chrome events (drag / resize / close / max)
-                mdi.borrow_mut().handle_events(ctx.events, theme);
+                mdi.borrow_mut().handle_events(ui_events, theme);
 
                 // Resize/move cursor affordance: turn the pointer into the
                 // familiar ↔ ↕ ⤡ ⤢ arrows over a window's edges/corners so
@@ -780,7 +832,7 @@ fn main() -> Result<(), String> {
                 let topmost = mdi.borrow().z_order().last();
                 {
                     let mut input_mut = input.borrow_mut();
-                    let resp = input_mut.handle_events(ctx.events, ctx.clipboard);
+                    let resp = input_mut.handle_events(ui_events, ctx.clipboard);
 
                     // Multi-line paste: each pasted line goes through
                     // ConsoleBuffer::submit_line exactly as if typed
@@ -845,7 +897,7 @@ fn main() -> Result<(), String> {
                         // grid and collapse the selection.
                         if !ctx_was_open {
                             let _copied = grid_state.borrow_mut().handle_events(
-                                ctx.events, &rows, grid_rect,
+                                ui_events, &rows, grid_rect,
                                 cell_w, line_h, ctx.clipboard,
                             );
                         }
@@ -933,7 +985,7 @@ fn main() -> Result<(), String> {
                             hscroll.borrow_mut().visible_fraction =
                                 (visible_cols as f32 / max_cols as f32).min(1.0);
                         }
-                        if let Some(p) = vscroll.borrow_mut().handle_events(ctx.events, vtrack) {
+                        if let Some(p) = vscroll.borrow_mut().handle_events(ui_events, vtrack) {
                             let off = r2_ui::scroll_pos_to_row(p, total_rows, visible_rows);
                             // Pin to manual offset; if user dragged to
                             // the bottom, hand control back to
@@ -941,7 +993,7 @@ fn main() -> Result<(), String> {
                             grid_state.borrow_mut().scroll_y_override =
                                 if off + visible_rows >= total_rows { None } else { Some(off) };
                         }
-                        if let Some(p) = hscroll.borrow_mut().handle_events(ctx.events, htrack) {
+                        if let Some(p) = hscroll.borrow_mut().handle_events(ui_events, htrack) {
                             grid_state.borrow_mut().scroll_x =
                                 r2_ui::scroll_pos_to_col(p, max_cols, visible_cols);
                         }
@@ -1069,6 +1121,56 @@ fn main() -> Result<(), String> {
                 active_menu.borrow().paint_popup(frame, renderer, menu_rect, theme);
                 ctx_console.borrow().paint(frame, renderer, theme);
                 ctx_graphics.borrow().paint(frame, renderer, theme);
+
+                // ── Modal dialogs — handled + painted LAST so they dim and
+                //    float above everything and own the keyboard/mouse.
+                if settings_dialog.borrow().is_open() {
+                    // Live body: show the current base (pre-DPI) font size.
+                    {
+                        let mut d = settings_dialog.borrow_mut();
+                        d.lines = vec![
+                            format!("UI font size:  {} pt", theme.font_size_base() as i32),
+                            String::new(),
+                            "Resizes the console + window text.".into(),
+                            "(DPI scaling applies on top automatically.)".into(),
+                        ];
+                    }
+                    let action = settings_dialog.borrow_mut()
+                        .handle_events(ctx.events, renderer, theme, win_w, win_h);
+                    if let Some(a) = action {
+                        match a.as_str() {
+                            "settings.font_dec"   =>
+                                ctx.set_base_font_size(theme.font_size_base() - 1.0),
+                            "settings.font_inc"   =>
+                                ctx.set_base_font_size(theme.font_size_base() + 1.0),
+                            "settings.font_reset" => ctx.set_base_font_size(14.0),
+                            "settings.close"      => settings_dialog.borrow_mut().close(),
+                            _ => {}
+                        }
+                    }
+                    settings_dialog.borrow().paint(frame, renderer, theme, win_w, win_h);
+                }
+
+                if quit_dialog.borrow().is_open() {
+                    let action = quit_dialog.borrow_mut()
+                        .handle_events(ctx.events, renderer, theme, win_w, win_h);
+                    if let Some(a) = action {
+                        match a.as_str() {
+                            "quit.yes" => {
+                                // Save the session (all variables) to a default
+                                // workspace file, then quit — R writes .RData;
+                                // Ardon-R2 writes a .r2s session.
+                                run_source("save(\".r2session.r2s\")",
+                                           &mut engine.borrow_mut(), &buffer, &quit_requested);
+                                ctx.request_exit();
+                            }
+                            "quit.no"     => { ctx.request_exit(); }
+                            "quit.cancel" => { quit_dialog.borrow_mut().close(); }
+                            _ => {}
+                        }
+                    }
+                    quit_dialog.borrow().paint(frame, renderer, theme, win_w, win_h);
+                }
             }
         })
         .run()

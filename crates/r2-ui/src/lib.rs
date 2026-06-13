@@ -34,6 +34,7 @@
 
 pub mod app;
 pub mod context_menu;
+pub mod dialog;
 pub mod event;
 pub mod grid;
 pub mod input;
@@ -51,6 +52,7 @@ pub mod window;
 // than `r2_ui::theme::Theme`.
 pub use app::{CursorShape, FrameCtx, FrameFn, R2Ui, R2UiApp};
 pub use context_menu::{ContextItem, ContextMenu};
+pub use dialog::{Dialog, DialogButton};
 pub use event::{normalize_paste, Clipboard, InputEvent, KeyCode, Mods, MouseButton, MousePos};
 pub use grid::{
     auto_scroll_offset, col_offset_to_scroll_pos, hit_test, paint_cells,
