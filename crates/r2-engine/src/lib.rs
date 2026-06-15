@@ -321,7 +321,7 @@ impl Engine {
             ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),
             ("save.plot",bi_save_plot),
             ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),("text",bi_text),("title",bi_title),("axis",bi_axis),("rect",bi_rect),
-            ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),
+            ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),("pdf",bi_pdf),("png",bi_png),("svg",bi_svg),
             // Session B — multi-device graphics. Each `dev.new()` opens a
             // fresh plot window; `dev.set()` / `dev.list()` / `dev.cur()`
             // navigate the open devices.
@@ -2379,7 +2379,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
                 ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),
             ("save.plot",bi_save_plot),
                 ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),("text",bi_text),("title",bi_title),("axis",bi_axis),("rect",bi_rect),
-                ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),
+                ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),("pdf",bi_pdf),("png",bi_png),("svg",bi_svg),
                 ("dev.new",bi_dev_new),("dev.set",bi_dev_set),("dev.list",bi_dev_list),
                 ("dev.cur",bi_dev_cur),
                 ("rgb",bi_rgb),("gray",bi_gray),("grey",bi_gray),("hsv",bi_hsv),

@@ -108,6 +108,11 @@ pub fn screen_svg() -> Option<String> {
 /// Returns `Some(path)` only when it actually wrote a file (headless
 /// script mode), so callers like `plot()` can echo the filename.
 pub fn finish_plot(default_name: &str) -> Option<String> {
+    // A file device (pdf/png/svg) accumulates until dev.off() — never
+    // auto-display or auto-save its content mid-stream.
+    if with_device(|d| d.file_target.is_some()) {
+        return None;
+    }
     if autoview_enabled() {
         let svg = with_device(|d| d.full_svg());
         set_screen_svg(svg);
@@ -228,6 +233,18 @@ pub struct PlotDevice {
     /// Coordinate system of the most recent high-level plot, so overlays
     /// align with it. `None` until the first plot of a figure.
     pub coords: Option<PlotCoords>,
+    /// For a *file device* (`pdf()`/`png()`/`svg()`): where `dev.off()`
+    /// writes. `None` for an interactive/screen device.
+    pub file_target: Option<FileTarget>,
+}
+
+/// Destination of a file device — set by `pdf()`/`png()`/`svg()`, written
+/// by `dev.off()`. Format is inferred from the path extension.
+#[derive(Debug, Clone)]
+pub struct FileTarget {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl Default for PlotDevice {
@@ -240,6 +257,7 @@ impl Default for PlotDevice {
             params: PlotParams::default(),
             panel_cursor: 0,
             coords: None,
+            file_target: None,
         }
     }
 }
@@ -359,6 +377,23 @@ pub fn with_device<R, F: FnOnce(&mut PlotDevice) -> R>(f: F) -> R {
 /// Open a fresh device and make it current. Returns its id.
 pub fn new_device() -> DeviceId {
     DEVICE_TABLE.with(|t| t.borrow_mut().spawn())
+}
+
+/// Open a *file device* (`pdf()`/`png()`/`svg()`): spawn a device, size
+/// it, and record where `dev.off()` should write. Returns its id.
+pub fn open_file_device(path: &str, width: u32, height: u32) -> DeviceId {
+    let id = new_device();
+    with_device(|d| {
+        d.width = width as f64;
+        d.height = height as f64;
+        d.file_target = Some(FileTarget { path: path.to_string(), width, height });
+    });
+    id
+}
+
+/// The current device's file target, if it is a file device.
+pub fn current_file_target() -> Option<FileTarget> {
+    with_device(|d| d.file_target.clone())
 }
 
 /// Set the active device. Returns the *previous* current id, if any.
@@ -576,8 +611,23 @@ pub fn save_to_png(path: &str, target_w: u32, target_h: u32) -> Result<(), R2Err
         .map_err(|e| R2Err { msg: format!("svg→png: write failed: {}", e), kind: ErrKind::Runtime })
 }
 
-/// Dispatch on file extension: `.svg` → save_to_file, `.png` → save_to_png.
-/// Returns the absolute (canonicalized) path so the caller can echo it.
+/// Rasterize-free vector PDF of the current plot via `svg2pdf` (pure
+/// Rust). Matches the SVG exactly — resolution-independent, ideal for
+/// papers / LaTeX.
+pub fn save_to_pdf(path: &str) -> Result<(), R2Err> {
+    let svg = with_device(|d| d.full_svg());
+    let mut opt = usvg::Options::default();
+    opt.fontdb = shared_fontdb();
+    let tree = usvg::Tree::from_str(&svg, &opt)
+        .map_err(|e| R2Err { msg: format!("svg→pdf: parse failed: {}", e), kind: ErrKind::Runtime })?;
+    let pdf = svg2pdf::to_pdf(&tree, svg2pdf::ConversionOptions::default(), svg2pdf::PageOptions::default())
+        .map_err(|e| R2Err { msg: format!("svg→pdf: {}", e), kind: ErrKind::Runtime })?;
+    std::fs::write(path, pdf)
+        .map_err(|e| R2Err { msg: format!("svg→pdf: write failed: {}", e), kind: ErrKind::Runtime })
+}
+
+/// Dispatch on file extension: `.svg` → save_to_file, `.png` → save_to_png,
+/// `.pdf` → save_to_pdf. Returns the absolute (canonicalized) path.
 pub fn save_plot(path: &str, width: u32, height: u32) -> Result<std::path::PathBuf, R2Err> {
     let lower = path.to_lowercase();
     if lower.ends_with(".svg") {
@@ -587,9 +637,11 @@ pub fn save_plot(path: &str, width: u32, height: u32) -> Result<std::path::PathB
         })?;
     } else if lower.ends_with(".png") {
         save_to_png(path, width, height)?;
+    } else if lower.ends_with(".pdf") {
+        save_to_pdf(path)?;
     } else {
         return Err(R2Err {
-            msg: format!("save_plot(): unsupported extension in '{}'. Use .svg or .png.", path),
+            msg: format!("save_plot(): unsupported extension in '{}'. Use .svg, .png, or .pdf.", path),
             kind: ErrKind::Runtime,
         });
     }

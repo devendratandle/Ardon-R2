@@ -219,10 +219,69 @@ pub fn bi_dev_off(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let target: Option<crate::device::DeviceId> = a.first()
         .and_then(|arg| arg.value.as_reals().ok()?.into_iter().next()?)
         .map(|x| crate::device::DeviceId(x as u32));
-    match crate::device::close_device(target) {
+    // Make the closing device current so the flush reads the right one.
+    if let Some(t) = target { crate::device::set_device(t); }
+    // If it's a file device (pdf/png/svg), write its accumulated plot now.
+    if let Some(ft) = crate::device::current_file_target() {
+        match crate::device::save_plot(&ft.path, ft.width, ft.height) {
+            Ok(abs) => {
+                let d = abs.to_string_lossy();
+                soutln!("Saved {}", d.strip_prefix(r"\\?\").unwrap_or(&d));
+            }
+            Err(e) => soutln!("dev.off(): could not write {}: {}", ft.path, e.msg),
+        }
+    }
+    match crate::device::close_device(crate::device::current_device()) {
         Some(crate::device::DeviceId(n)) => Ok(rint(n as i32)),
         None => Ok(RVal::Null),
     }
+}
+
+/// First positional path, else `file=`/`filename=`, else `default`.
+fn file_arg(a: &[EvalArg], default: &str) -> String {
+    if let Some(e) = a.iter().find(|e| e.name.is_none()) {
+        let s = val_to_str(&e.value);
+        if !s.is_empty() { return s; }
+    }
+    gn(a, "file").or_else(|| gn(a, "filename"))
+        .map(|v| val_to_str(&v))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+#[inline]
+fn dim_arg(a: &[EvalArg], name: &str, default: f64) -> f64 {
+    gn(a, name).and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(default)
+}
+
+/// `pdf(file="Rplots.pdf", width=7, height=7)` — open a vector-PDF file
+/// device (inches → px at 96 dpi). Plots accumulate until `dev.off()`.
+pub fn bi_pdf(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let path = file_arg(a, "Rplots.pdf");
+    let w = (dim_arg(a, "width", 7.0) * 96.0).max(1.0) as u32;
+    let h = (dim_arg(a, "height", 7.0) * 96.0).max(1.0) as u32;
+    let id = crate::device::open_file_device(&path, w, h);
+    Ok(rint(id.0 as i32))
+}
+
+/// `png(filename="Rplot.png", width=480, height=480)` — raster-PNG file
+/// device (pixels). Plots accumulate until `dev.off()`.
+pub fn bi_png(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let path = file_arg(a, "Rplot.png");
+    let w = dim_arg(a, "width", 480.0).max(1.0) as u32;
+    let h = dim_arg(a, "height", 480.0).max(1.0) as u32;
+    let id = crate::device::open_file_device(&path, w, h);
+    Ok(rint(id.0 as i32))
+}
+
+/// `svg(filename="Rplot.svg", width=7, height=7)` — vector-SVG file device
+/// (inches → px at 96 dpi). Plots accumulate until `dev.off()`.
+pub fn bi_svg(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let path = file_arg(a, "Rplot.svg");
+    let w = (dim_arg(a, "width", 7.0) * 96.0).max(1.0) as u32;
+    let h = (dim_arg(a, "height", 7.0) * 96.0).max(1.0) as u32;
+    let id = crate::device::open_file_device(&path, w, h);
+    Ok(rint(id.0 as i32))
 }
 
 /// `dev.new()` — open a fresh device and make it current. Returns

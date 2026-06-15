@@ -136,6 +136,15 @@ pub(crate) fn bi_rect(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
 pub(crate) fn bi_par(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::params::bi_par(a)
 }
+pub(crate) fn bi_pdf(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::params::bi_pdf(a)
+}
+pub(crate) fn bi_png(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::params::bi_png(a)
+}
+pub(crate) fn bi_svg(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::params::bi_svg(a)
+}
 pub(crate) fn bi_dev_off(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::params::bi_dev_off(a)
 }
