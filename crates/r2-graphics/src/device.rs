@@ -500,10 +500,17 @@ pub fn begin_plot() -> (f64, f64, f64, f64) {
     }
 
     let rect = with_device(|dev| {
-        let multipanel = dev.params.mfrow.is_some() || dev.params.mfcol.is_some();
-        if !multipanel {
-            dev.svg_body.clear();
-        } else if dev.panel_cursor == 0 {
+        // Number of panels in the current layout (1 when no mfrow/mfcol).
+        let panels = match (dev.params.mfrow, dev.params.mfcol) {
+            (Some((r, c)), _) | (_, Some((r, c))) => (r.max(1)) * (c.max(1)),
+            _ => 1,
+        };
+        // Start a fresh page (clear the canvas) at every page boundary:
+        // ALWAYS for a single panel, and when the cursor wraps for a grid.
+        // (The old `panel_cursor == 0` check left mfrow=(1,1) — and any
+        // plot after a grid filled — drawing on top of the previous one,
+        // so plots piled up and persisted across runs.)
+        if panels <= 1 || dev.panel_cursor % panels == 0 {
             dev.svg_body.clear();
         }
         dev.has_plot = true;

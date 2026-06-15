@@ -204,6 +204,8 @@ pub fn bi_par(a: &[EvalArg]) -> Result<RVal, R2Err> {
                     old.push((Some(name.clone()), prev));
                 }
                 apply_one(&mut d.params, name.as_ref(), &arg.value)?;
+                // Changing the panel layout starts a fresh page (R behaviour).
+                if matches!(name.as_ref(), "mfrow" | "mfcol") { d.panel_cursor = 0; }
             }
         }
         Ok(())
