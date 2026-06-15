@@ -112,6 +112,18 @@ pub(crate) fn bi_abline(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
 pub(crate) fn bi_legend(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::overlays::bi_legend(a)
 }
+pub(crate) fn bi_text(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::overlays::bi_text(a)
+}
+pub(crate) fn bi_title(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::overlays::bi_title(a)
+}
+pub(crate) fn bi_axis(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::overlays::bi_axis(a)
+}
+pub(crate) fn bi_rect(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::overlays::bi_rect(a)
+}
 
 // ─── par() + dev.*  ────────────────────────────────────────────────
 

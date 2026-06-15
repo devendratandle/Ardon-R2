@@ -266,7 +266,7 @@ pub(crate) fn render_axis_ticks(p: &PanelRect,
     s
 }
 
-fn escape_xml(s: &str) -> String {
+pub(crate) fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
      .replace('"', "&quot;").replace('\'', "&apos;")
 }
@@ -332,6 +332,12 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let ymax = ymax_raw + yrange_raw * pad;
     let xrange = xmax - xmin;
     let yrange = ymax - ymin;
+
+    // Record the coordinate system so overlays (points/lines/abline/text/
+    // rect/…) align with this plot — R's incremental graphics model.
+    with_device(|d| d.coords = Some(crate::device::PlotCoords {
+        px0: ox + ml, py0: oy + mt, pw, ph, xmin, xmax, ymin, ymax,
+    }));
 
     let mut frag = String::new();
     // Plotting region border.

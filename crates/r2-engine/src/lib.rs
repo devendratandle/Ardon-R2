@@ -320,7 +320,7 @@ impl Engine {
         e.registry.add_layer(mkpkg("graphics", PackageTier::Base, vec![
             ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),
             ("save.plot",bi_save_plot),
-            ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),
+            ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),("text",bi_text),("title",bi_title),("axis",bi_axis),("rect",bi_rect),
             ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),
             // Session B — multi-device graphics. Each `dev.new()` opens a
             // fresh plot window; `dev.set()` / `dev.list()` / `dev.cur()`
@@ -2378,7 +2378,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
             e.registry.add_layer(mkpkg("graphics", PackageTier::Base, vec![
                 ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),
             ("save.plot",bi_save_plot),
-                ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),
+                ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),("text",bi_text),("title",bi_title),("axis",bi_axis),("rect",bi_rect),
                 ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),
                 ("dev.new",bi_dev_new),("dev.set",bi_dev_set),("dev.list",bi_dev_list),
                 ("dev.cur",bi_dev_cur),

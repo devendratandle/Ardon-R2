@@ -187,6 +187,33 @@ impl Default for PlotParams {
     }
 }
 
+/// The active plot's coordinate system — the connective tissue that lets
+/// overlay functions (`points`/`lines`/`abline`/`text`/`rect`/…) draw in
+/// *data* coordinates that align with the base plot. A high-level plot
+/// (`plot`/`hist`/`curve`/…) records this after laying out its panel; the
+/// overlays map data → pixels through [`PlotCoords::to_px`]. This is what
+/// makes R's incremental "draw, then add" graphics model work.
+#[derive(Debug, Clone, Copy)]
+pub struct PlotCoords {
+    /// Inner plotting region in canvas pixels (top-left + size).
+    pub px0: f64, pub py0: f64, pub pw: f64, pub ph: f64,
+    /// Data-space ranges mapped onto that region.
+    pub xmin: f64, pub xmax: f64, pub ymin: f64, pub ymax: f64,
+}
+
+impl PlotCoords {
+    /// Map a data-space `(x, y)` to canvas pixels (y inverted: data up =
+    /// pixels down). Degenerate ranges collapse to a unit span so a single
+    /// point still lands inside the region.
+    pub fn to_px(&self, x: f64, y: f64) -> (f64, f64) {
+        let xr = if (self.xmax - self.xmin).abs() < 1e-12 { 1.0 } else { self.xmax - self.xmin };
+        let yr = if (self.ymax - self.ymin).abs() < 1e-12 { 1.0 } else { self.ymax - self.ymin };
+        let sx = self.px0 + (x - self.xmin) / xr * self.pw;
+        let sy = self.py0 + self.ph - (y - self.ymin) / yr * self.ph;
+        (sx, sy)
+    }
+}
+
 /// In-memory canvas. Holds the accumulated SVG body and the panel cursor.
 #[derive(Debug, Clone)]
 pub struct PlotDevice {
@@ -198,6 +225,9 @@ pub struct PlotDevice {
     pub params: PlotParams,
     /// Index of the next panel to fill (0-indexed, wraps on `mfrow`/`mfcol` overflow).
     pub panel_cursor: u32,
+    /// Coordinate system of the most recent high-level plot, so overlays
+    /// align with it. `None` until the first plot of a figure.
+    pub coords: Option<PlotCoords>,
 }
 
 impl Default for PlotDevice {
@@ -209,6 +239,7 @@ impl Default for PlotDevice {
             height: 400.0,
             params: PlotParams::default(),
             panel_cursor: 0,
+            coords: None,
         }
     }
 }
