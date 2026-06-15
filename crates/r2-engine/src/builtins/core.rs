@@ -295,6 +295,23 @@ pub(crate) fn bi_union(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
 pub(crate) fn bi_intersect(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { set_op(e, a, SetOp::Intersect) }
 pub(crate) fn bi_setdiff(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { set_op(e, a, SetOp::Diff) }
 
+/// `x %in% y` — element-wise membership test, returns a logical vector.
+pub(crate) fn bi_in(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let x = gv(a,0); let y = gv(a,1);
+    let chr = matches!(x, RVal::Character(..)|RVal::Factor(..)) || matches!(y, RVal::Character(..)|RVal::Factor(..));
+    if chr {
+        let xs = str_vec(&x);
+        let ys: Vec<Arc<str>> = str_vec(&y).into_iter().flatten().collect();
+        let out: Vec<Option<bool>> = xs.into_iter().map(|o| Some(o.map(|s| ys.contains(&s)).unwrap_or(false))).collect();
+        Ok(RVal::Logical(out.into(), Attrs::default()))
+    } else {
+        let xs = e.as_reals(&x)?;
+        let ys: Vec<f64> = e.as_reals(&y)?.into_iter().flatten().collect();
+        let out: Vec<Option<bool>> = xs.into_iter().map(|o| Some(o.map(|v| ys.contains(&v)).unwrap_or(false))).collect();
+        Ok(RVal::Logical(out.into(), Attrs::default()))
+    }
+}
+
 pub(crate) fn bi_append(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let x = gv(a,0); let vals = gv(a,1);
     let after = gn(a,"after").or_else(|| if a.len() > 2 && a[2].name.is_none() { Some(gv(a,2)) } else { None })
@@ -468,6 +485,83 @@ pub(crate) fn bi_outer(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
         }
     }
     Ok(RVal::Matrix(Matrix::new(data, m, n)))
+}
+
+// ── Tier-1 attribute / format builtins ─────────────────────────────
+
+fn attrs_of(v: &RVal) -> Option<&Attrs> {
+    match v {
+        RVal::Numeric(_, at) | RVal::Integer(_, at)
+        | RVal::Character(_, at) | RVal::Logical(_, at) => Some(at),
+        _ => None,
+    }
+}
+fn names_to_rval(names: &[Arc<str>]) -> RVal {
+    RVal::Character(names.iter().cloned().map(Some).collect(), Attrs::default())
+}
+fn dim_to_rval(dim: &[usize]) -> RVal {
+    rints(&dim.iter().map(|x| *x as i32).collect::<Vec<_>>())
+}
+
+pub(crate) fn bi_attr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let v = gv(a,0);
+    let which = val_to_str(&gv(a,1));
+    let at = match attrs_of(&v) { Some(a) => a, None => return Ok(RVal::Null) };
+    Ok(match which.as_str() {
+        "names" => at.names.as_ref().map(|n| names_to_rval(n)).unwrap_or(RVal::Null),
+        "class" => at.class.as_ref().map(|c| rstr(c)).unwrap_or(RVal::Null),
+        "dim"   => at.dim.as_ref().map(|d| dim_to_rval(d)).unwrap_or(RVal::Null),
+        other   => at.custom.get(&Arc::from(other)).cloned().unwrap_or(RVal::Null),
+    })
+}
+pub(crate) fn bi_attributes(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let v = gv(a,0);
+    let at = match attrs_of(&v) { Some(a) => a, None => return Ok(RVal::Null) };
+    let mut items: Vec<(Option<Arc<str>>, RVal)> = Vec::new();
+    if let Some(n) = &at.names { items.push((Some(Arc::from("names")), names_to_rval(n))); }
+    if let Some(c) = &at.class { items.push((Some(Arc::from("class")), rstr(c))); }
+    if let Some(d) = &at.dim   { items.push((Some(Arc::from("dim")), dim_to_rval(d))); }
+    for (k, val) in &at.custom { items.push((Some(k.clone()), val.clone())); }
+    if items.is_empty() { Ok(RVal::Null) } else { Ok(RVal::List(items)) }
+}
+fn set_one_attr(v: &mut RVal, name: &str, val: &RVal) {
+    let at = match v {
+        RVal::Numeric(_, a) | RVal::Integer(_, a)
+        | RVal::Character(_, a) | RVal::Logical(_, a) => a,
+        _ => return,
+    };
+    match name {
+        "names" | ".Names" =>
+            at.names = Some(str_vec(val).into_iter().map(|o| o.unwrap_or_else(|| Arc::from(""))).collect()),
+        "class" => at.class = Some(Arc::from(val_to_str(val).as_str())),
+        "dim" => if let Ok(r) = val.as_reals() {
+            at.dim = Some(r.into_iter().flatten().map(|x| x as usize).collect());
+        },
+        other => { at.custom.insert(Arc::from(other), val.clone()); }
+    }
+}
+pub(crate) fn bi_structure(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let mut v = gv(a,0);
+    for arg in &a[1..] {
+        if let Some(name) = &arg.name {
+            // R accepts `.Data` as the value itself; ignore here.
+            if name.as_ref() == ".Data" { continue; }
+            set_one_attr(&mut v, name, &arg.value);
+        }
+    }
+    Ok(v)
+}
+pub(crate) fn bi_format(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let v = gv(a,0);
+    let nsmall = gn(a,"nsmall").and_then(|x| e.scalar_f64(&x).ok().flatten()).unwrap_or(0.0) as usize;
+    let out: Vec<Option<Arc<str>>> = match &v {
+        RVal::Numeric(nv, _) => nv.iter().copied().map(|o| o.map(|x| {
+            let s = if nsmall > 0 { format!("{:.*}", nsmall, x) } else { fmt_f64(x) };
+            Arc::from(s.as_str())
+        })).collect(),
+        other => str_vec(other),
+    };
+    Ok(RVal::Character(out, Attrs::default()))
 }
 
 pub(crate) fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Numeric(..)|RVal::Integer(..)))) }

@@ -32,6 +32,10 @@ pub enum Token {
     Library, Require, Detach,
     Type, Method, Extends, Match, Try, Catch, Strict, Lenient,
 
+    /// User/`%name%` infix operator, e.g. `%in%`, `%o%`. Holds the full
+    /// spelling including the surrounding `%`.
+    Infix(String),
+
     Comment(String), Eof,
 }
 
@@ -85,7 +89,7 @@ impl Lexer {
                 '&' => { self.advance(); if self.peek() == Some('&') { self.advance(); Token::AndShort } else { Token::And } }
                 '|' => { self.advance(); match self.peek() { Some('|') => { self.advance(); Token::OrShort } Some('>') => { self.advance(); Token::Pipe } _ => Token::Or } }
                 ':' => { self.advance(); if self.peek() == Some(':') { self.advance(); Token::DblColon } else { Token::Colon } }
-                '%' => { self.advance(); if self.peek() == Some('/') && self.peek2() == Some('%') { self.advance(); self.advance(); Token::IntDiv } else if self.peek() == Some('*') && self.peek2() == Some('%') { self.advance(); self.advance(); Token::MatMul } else if self.peek() == Some('%') { self.advance(); Token::Percent } else { Token::Percent } }
+                '%' => { self.advance(); if self.peek() == Some('/') && self.peek2() == Some('%') { self.advance(); self.advance(); Token::IntDiv } else if self.peek() == Some('*') && self.peek2() == Some('%') { self.advance(); self.advance(); Token::MatMul } else if self.peek() == Some('%') { self.advance(); Token::Percent } else if matches!(self.peek(), Some(c) if c.is_alphabetic() || c == '.') { let mut name = String::from("%"); while let Some(c) = self.peek() { if c == '%' { break; } name.push(c); self.advance(); } name.push('%'); if self.peek() == Some('%') { self.advance(); } Token::Infix(name) } else { Token::Percent } }
                 '[' => { self.advance(); if self.peek() == Some('[') { self.advance(); Token::LDblBrack } else { Token::LBrack } }
                 ']' => { self.advance(); if self.peek() == Some(']') { self.advance(); Token::RDblBrack } else { Token::RBrack } }
                 '"' | '\'' => self.read_string(ch)?,

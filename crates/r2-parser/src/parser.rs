@@ -145,7 +145,22 @@ impl Parser {
     }
     fn parse_mul(&mut self) -> Result<Expr, ParseErr> {
         let mut lhs = self.parse_colon()?;
-        loop { let op = match self.peek() { Token::Star => BinOp::Mul, Token::Slash => BinOp::Div, Token::Percent => BinOp::Mod, Token::IntDiv => BinOp::IntDiv, Token::MatMul => BinOp::MatMul, _ => break }; self.advance(); self.skip_nl(); let rhs = self.parse_colon()?; lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }; }
+        loop {
+            // `%name%` infix operator (e.g. `x %in% y`) desugars to a call of
+            // the function named by the operator: `\`%in%\`(x, y)`.
+            if let Token::Infix(name) = self.peek().clone() {
+                self.advance(); self.skip_nl();
+                let rhs = self.parse_colon()?;
+                lhs = Expr::Call {
+                    func: Box::new(Expr::Symbol(Arc::from(name.as_str()))),
+                    args: vec![
+                        CallArg { name: None, value: lhs },
+                        CallArg { name: None, value: rhs },
+                    ],
+                };
+                continue;
+            }
+            let op = match self.peek() { Token::Star => BinOp::Mul, Token::Slash => BinOp::Div, Token::Percent => BinOp::Mod, Token::IntDiv => BinOp::IntDiv, Token::MatMul => BinOp::MatMul, _ => break }; self.advance(); self.skip_nl(); let rhs = self.parse_colon()?; lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }; }
         Ok(lhs)
     }
     fn parse_colon(&mut self) -> Result<Expr, ParseErr> {
