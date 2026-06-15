@@ -100,7 +100,12 @@ pub struct Engine {
     /// JIT cache keyed by closure body's Arc pointer (Phase C.2).
     /// Value is `None` when compilation has been tried and rejected,
     /// `Some(handle)` when a callable specialization exists.
-    jit_cache: HashMap<usize, Option<Arc<dyn JitHandle>>>,
+    // Keyed by the closure body's Arc pointer. The value RETAINS a clone of
+    // that `Arc<Expr>` so the address cannot be freed and recycled by a
+    // different anonymous closure — without this, short-lived anon closures
+    // (e.g. repeated `Reduce`/`Map`/`sapply` calls) could collide on a reused
+    // pointer and run the WRONG compiled body.
+    jit_cache: HashMap<usize, (Arc<Expr>, Option<Arc<dyn JitHandle>>)>,
     /// Master switch — disabled via env `R2_JIT=0`. Default on.
     jit_enabled: bool,
 }
@@ -238,7 +243,7 @@ impl Engine {
         e.registry.add_layer(mkpkg("base", PackageTier::Base, vec![
             ("seq",bi_seq),("rep",bi_rep),("paste",bi_paste),("paste0",bi_paste0),
             ("which",bi_which),("sort",bi_sort),("rev",bi_rev),("unique",bi_unique),
-            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),
+            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),("Reduce",bi_reduce),("Filter",bi_filter_fp),("Map",bi_map),("split",bi_split),("stopifnot",bi_stopifnot),("outer",bi_outer),
             ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
             ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
             ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),
@@ -584,6 +589,56 @@ impl Engine {
                             ea.push(EvalArg { name, value: val });
                         }
                         return self.call_fn(&f, &ea, env);
+                    }
+
+                    // NSE for `with(data, expr)`: evaluate `expr` in a scope
+                    // where `data`'s columns / list elements are bound.
+                    if fname.as_ref() == "with" && args.len() >= 2 {
+                        let data = self.eval_in(&args[0].value, env)?;
+                        let child = Arc::new(Env {
+                            name: Some(Arc::from(".with.env")),
+                            parent: Some(env.clone()),
+                            bindings: match &data {
+                                RVal::DataFrame(df) =>
+                                    df.columns.iter().map(|(n, v)| (n.clone(), v.clone())).collect(),
+                                RVal::List(items) => items.iter()
+                                    .filter_map(|(n, v)| n.clone().map(|nm| (nm, v.clone()))).collect(),
+                                _ => Default::default(),
+                            },
+                            locked: false,
+                        });
+                        return self.eval_in(&args[1].value, &child);
+                    }
+
+                    // `switch(EXPR, ...)`: EXPR selects which branch expr to
+                    // evaluate — by name (character) or position (numeric).
+                    // The branch exprs are taken UNEVALUATED; only the chosen
+                    // one runs.
+                    if fname.as_ref() == "switch" && !args.is_empty() {
+                        let sel = self.eval_in(&args[0].value, env)?;
+                        let branches = &args[1..];
+                        match &sel {
+                            RVal::Character(cv, _) => {
+                                if let Some(Some(key)) = cv.first() {
+                                    if let Some(b) = branches.iter().find(|b| b.name.as_deref() == Some(key.as_ref())) {
+                                        return self.eval_in(&b.value, env);
+                                    }
+                                    if let Some(d) = branches.iter().find(|b| b.name.is_none()) {
+                                        return self.eval_in(&d.value, env);
+                                    }
+                                }
+                                return Ok(RVal::Null);
+                            }
+                            _ => {
+                                if let Some(n) = sel.scalar_f64().ok().flatten() {
+                                    let i = n as usize;
+                                    if i >= 1 && i <= branches.len() {
+                                        return self.eval_in(&branches[i - 1].value, env);
+                                    }
+                                }
+                                return Ok(RVal::Null);
+                            }
+                        }
                     }
 
                     // NSE for `curve(expr, from, to, n=101, add=FALSE, ...)`:
@@ -978,10 +1033,12 @@ impl Engine {
                     // Resolve cache: try compile if not yet attempted.
                     let key = Arc::as_ptr(&cl.body) as usize;
                     let handle = match self.jit_cache.get(&key) {
-                        Some(slot) => slot.clone(),
-                        None => {
+                        // Only a true hit if the retained Arc is the SAME body
+                        // (guards against a recycled pointer).
+                        Some((body, slot)) if Arc::ptr_eq(body, &cl.body) => slot.clone(),
+                        _ => {
                             let h = r2_jit::try_compile_closure(cl);
-                            self.jit_cache.insert(key, h.clone());
+                            self.jit_cache.insert(key, (cl.body.clone(), h.clone()));
                             h
                         }
                     };
@@ -2374,7 +2431,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
             e.registry.add_layer(mkpkg("base", PackageTier::Base, vec![
                 ("seq",bi_seq),("rep",bi_rep),("paste",bi_paste),("paste0",bi_paste0),
                 ("which",bi_which),("sort",bi_sort),("rev",bi_rev),("unique",bi_unique),
-            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),
+            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),("Reduce",bi_reduce),("Filter",bi_filter_fp),("Map",bi_map),("split",bi_split),("stopifnot",bi_stopifnot),("outer",bi_outer),
                 ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
                 ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
                 ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),

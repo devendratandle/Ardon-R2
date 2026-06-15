@@ -345,6 +345,131 @@ pub(crate) fn bi_cut(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     Ok(RVal::Character(out, Attrs::default()))
 }
 
+// ── Tier-1 functional / control builtins ───────────────────────────
+
+/// Break a value into its elements as length-1 RVals (list items, or
+/// scalars of an atomic vector).
+fn elements(v: &RVal) -> Vec<RVal> {
+    match v {
+        RVal::List(items) => items.iter().map(|(_, x)| x.clone()).collect(),
+        RVal::Numeric(nv, _) => nv.iter().copied().map(|o| RVal::Numeric(vec![o].into(), Attrs::default())).collect(),
+        RVal::Integer(iv, _) => iv.iter().copied().map(|o| RVal::Integer(vec![o].into(), Attrs::default())).collect(),
+        RVal::Character(cv, _) => cv.iter().cloned().map(|o| RVal::Character(vec![o], Attrs::default())).collect(),
+        RVal::Logical(lv, _) => lv.iter().copied().map(|o| RVal::Logical(vec![o].into(), Attrs::default())).collect(),
+        other => vec![other.clone()],
+    }
+}
+fn is_truthy(e: &mut Engine, v: &RVal) -> bool {
+    match v {
+        RVal::Logical(lv, _) => lv.first().and_then(|o| *o).unwrap_or(false),
+        other => e.scalar_f64(other).ok().flatten().map(|x| x != 0.0).unwrap_or(false),
+    }
+}
+
+pub(crate) fn bi_reduce(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let f = gv(a,0);
+    let xs = elements(&gv(a,1));
+    let init = gn(a,"init").or_else(|| if a.len() > 2 && a[2].name.is_none() { Some(gv(a,2)) } else { None });
+    let (mut acc, start) = match init {
+        Some(v) => (v, 0),
+        None => { if xs.is_empty() { return Ok(RVal::Null); } (xs[0].clone(), 1) }
+    };
+    for x in &xs[start..] {
+        acc = e.call_fn(&f, &[EvalArg { name: None, value: acc.clone() },
+                              EvalArg { name: None, value: x.clone() }], env)?;
+    }
+    Ok(acc)
+}
+pub(crate) fn bi_filter_fp(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let f = gv(a,0);
+    let x = gv(a,1);
+    let els = elements(&x);
+    let mut keep = Vec::new();
+    for el in &els {
+        let r = e.call_fn(&f, &[EvalArg { name: None, value: el.clone() }], env)?;
+        if is_truthy(e, &r) { keep.push(el.clone()); }
+    }
+    match x {
+        RVal::List(_) => Ok(RVal::List(keep.into_iter().map(|v| (None, v)).collect())),
+        _ => { let mut out = Vec::new(); for k in &keep { out.extend(e.as_reals(k)?); } Ok(RVal::Numeric(out.into(), Attrs::default())) }
+    }
+}
+pub(crate) fn bi_map(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let f = gv(a,0);
+    let vecs: Vec<Vec<RVal>> = a[1..].iter().filter(|arg| arg.name.is_none())
+        .map(|arg| elements(&arg.value)).collect();
+    let n = vecs.iter().map(|v| v.len()).max().unwrap_or(0);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let call_args: Vec<EvalArg> = vecs.iter()
+            .filter(|v| !v.is_empty())
+            .map(|v| EvalArg { name: None, value: v[i % v.len()].clone() })
+            .collect();
+        out.push((None, e.call_fn(&f, &call_args, env)?));
+    }
+    Ok(RVal::List(out))
+}
+pub(crate) fn bi_split(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let xr = e.as_reals(&gv(a,0))?;
+    let keys = str_vec(&gv(a,1));
+    if keys.is_empty() { return err!(Runtime, "split(): empty grouping factor"); }
+    let mut groups: Vec<(Arc<str>, Vec<Option<f64>>)> = Vec::new();
+    for (i, xv) in xr.iter().enumerate() {
+        let k = keys[i % keys.len()].clone().unwrap_or_else(|| Arc::from("NA"));
+        if let Some(g) = groups.iter_mut().find(|(gk, _)| *gk == k) { g.1.push(*xv); }
+        else { groups.push((k, vec![*xv])); }
+    }
+    groups.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(RVal::List(groups.into_iter()
+        .map(|(k, v)| (Some(k), RVal::Numeric(v.into(), Attrs::default()))).collect()))
+}
+pub(crate) fn bi_stopifnot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    for arg in a {
+        let ok = match &arg.value {
+            RVal::Logical(lv, _) => !lv.is_empty() && lv.iter().all(|o| *o == Some(true)),
+            other => e.as_reals(other).map(|r| !r.is_empty()
+                && r.iter().all(|o| matches!(o, Some(x) if *x != 0.0))).unwrap_or(false),
+        };
+        if !ok {
+            let label = arg.name.as_deref().unwrap_or("a condition");
+            return err!(Runtime, "{} is not TRUE", label);
+        }
+    }
+    Ok(RVal::Null)
+}
+pub(crate) fn bi_outer(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let xs: Vec<f64> = e.as_reals(&gv(a,0))?.into_iter().flatten().collect();
+    let ys: Vec<f64> = e.as_reals(&gv(a,1))?.into_iter().flatten().collect();
+    let fun = gn(a,"FUN").or_else(|| if a.len() > 2 && a[2].name.is_none() { Some(gv(a,2)) } else { None });
+    let (m, n) = (xs.len(), ys.len());
+    let op: Option<char> = match &fun {
+        Some(RVal::Character(cv, _)) => cv.first().and_then(|o| o.as_ref()).and_then(|s| s.chars().next()),
+        None => Some('*'),
+        _ => None,
+    };
+    let mut data = vec![0.0; m * n];
+    for j in 0..n {
+        for i in 0..m {
+            let val = match op {
+                Some('*') => xs[i] * ys[j],
+                Some('+') => xs[i] + ys[j],
+                Some('-') => xs[i] - ys[j],
+                Some('/') => xs[i] / ys[j],
+                Some('^') => xs[i].powf(ys[j]),
+                _ => {
+                    // FUN is a function value — apply it element-wise.
+                    let r = e.call_fn(fun.as_ref().unwrap(),
+                        &[EvalArg { name: None, value: rnum(xs[i]) },
+                          EvalArg { name: None, value: rnum(ys[j]) }], env)?;
+                    e.scalar_f64(&r)?.unwrap_or(f64::NAN)
+                }
+            };
+            data[j * m + i] = val;
+        }
+    }
+    Ok(RVal::Matrix(Matrix::new(data, m, n)))
+}
+
 pub(crate) fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Numeric(..)|RVal::Integer(..)))) }
 pub(crate) fn bi_is_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Character(..)))) }
 pub(crate) fn bi_is_lgl(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Logical(..)))) }
