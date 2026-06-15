@@ -5,7 +5,14 @@ graphics/data-frames. This lists **common base-R functions still missing**,
 found by auditing the engine + parser registries against everyday R
 workflows. Tiered by how often a typical user hits them.
 
-## Tier 1 — Essential everyday idioms (implement first)
+## Tier 1 — Essential everyday idioms — ✅ DONE
+Implemented + verified: `seq_len`, `seq_along`, `%in%`, `setdiff`, `union`,
+`intersect`, `unlist`, `setNames`, `append`, `split`, `pmin`, `pmax`,
+`cut`, `Reduce`, `Filter`, `Map`, `switch`, `with`, `invisible`,
+`stopifnot`, `attr`, `attributes`, `structure`, `inherits`, `format`
+(+ `signif`, and a JIT closure-cache correctness fix). The list below is
+kept for reference.
+
 These show up in almost every R script; their absence makes common code
 fail outright.
 
