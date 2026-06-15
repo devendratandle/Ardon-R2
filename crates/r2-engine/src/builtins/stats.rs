@@ -119,6 +119,19 @@ pub(crate) fn bi_rbinom(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
 pub(crate) fn bi_rpois(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_stats::rng::bi_rpois(a)
 }
+// Tier-2 distributions (d/p/q) — delegators into r2_stats::dist.
+pub(crate) fn bi_dexp(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_dexp(a) }
+pub(crate) fn bi_pexp(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pexp(a) }
+pub(crate) fn bi_qexp(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_qexp(a) }
+pub(crate) fn bi_dbinom(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_dbinom(a) }
+pub(crate) fn bi_pbinom(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pbinom(a) }
+pub(crate) fn bi_dpois(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_dpois(a) }
+pub(crate) fn bi_ppois(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_ppois(a) }
+pub(crate) fn bi_dt(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_dt(a) }
+pub(crate) fn bi_pt(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pt(a) }
+pub(crate) fn bi_dchisq(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_dchisq(a) }
+pub(crate) fn bi_pchisq(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pchisq(a) }
+pub(crate) fn bi_pf(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pf(a) }
 
 // ─── models / hypothesis tests / time series ────────────────────────
 pub(crate) fn bi_lm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

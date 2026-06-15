@@ -126,6 +126,74 @@ pub fn bi_qnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     Ok(RVal::Numeric(result.into(), Attrs::default()))
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Additional distributions (Tier-2): exponential, binomial, Poisson,
+// Student-t, chi-squared, F. d/p forms (+ q for exponential). Reuse the
+// special functions in `crate::htest`.
+// ─────────────────────────────────────────────────────────────────────
+
+use crate::htest::{t_cdf, chi_sq_cdf, incomplete_beta, ln_gamma};
+
+/// `x * ln(y)` with the convention `0 * ln(0) = 0` (avoids NaN in pmf logs).
+#[inline]
+fn xlogy(x: f64, y: f64) -> f64 { if x == 0.0 { 0.0 } else { x * y.ln() } }
+
+/// A scalar parameter by `name=`, else the `pos`-th unnamed argument, else default.
+fn param(a: &[EvalArg], name: &str, pos: usize, dflt: f64) -> f64 {
+    arg_named(a, name).and_then(|v| v.scalar_f64().ok().flatten())
+        .or_else(|| a.iter().filter(|x| x.name.is_none()).nth(pos)
+            .and_then(|x| x.value.scalar_f64().ok().flatten()))
+        .unwrap_or(dflt)
+}
+/// Map the first argument's vector element-wise through `f`.
+fn map_x(a: &[EvalArg], f: impl Fn(f64) -> f64) -> Result<RVal, R2Err> {
+    let x = first(a).as_reals()?;
+    Ok(RVal::Numeric(x.iter().map(|v| v.map(&f)).collect::<Vec<Real>>().into(), Attrs::default()))
+}
+fn ln_binom(n: f64, x: f64, p: f64) -> f64 {
+    ln_gamma(n + 1.0) - ln_gamma(x + 1.0) - ln_gamma(n - x + 1.0) + xlogy(x, p) + xlogy(n - x, 1.0 - p)
+}
+
+pub fn bi_dexp(a: &[EvalArg]) -> Result<RVal, R2Err> { let r = param(a,"rate",1,1.0); map_x(a, move |x| if x < 0.0 { 0.0 } else { r * (-r * x).exp() }) }
+pub fn bi_pexp(a: &[EvalArg]) -> Result<RVal, R2Err> { let r = param(a,"rate",1,1.0); map_x(a, move |x| if x < 0.0 { 0.0 } else { 1.0 - (-r * x).exp() }) }
+pub fn bi_qexp(a: &[EvalArg]) -> Result<RVal, R2Err> { let r = param(a,"rate",1,1.0); map_x(a, move |p| -(1.0 - p).ln() / r) }
+
+pub fn bi_dbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let n = param(a,"size",1,0.0); let p = param(a,"prob",2,0.5);
+    map_x(a, move |x| { let xi = x.round(); if xi < 0.0 || xi > n { 0.0 } else { ln_binom(n, xi, p).exp() } })
+}
+pub fn bi_pbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let n = param(a,"size",1,0.0); let p = param(a,"prob",2,0.5);
+    map_x(a, move |q| { let qi = q.floor(); let mut s = 0.0; let mut i = 0.0;
+        while i <= qi && i <= n { s += ln_binom(n, i, p).exp(); i += 1.0; } s.min(1.0) })
+}
+pub fn bi_dpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let lam = param(a,"lambda",1,1.0);
+    map_x(a, move |x| { let xi = x.round(); if xi < 0.0 { 0.0 } else { (xlogy(xi, lam) - lam - ln_gamma(xi + 1.0)).exp() } })
+}
+pub fn bi_ppois(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let lam = param(a,"lambda",1,1.0);
+    map_x(a, move |q| { let qi = q.floor(); let mut s = 0.0; let mut i = 0.0;
+        while i <= qi { s += (xlogy(i, lam) - lam - ln_gamma(i + 1.0)).exp(); i += 1.0; } s.min(1.0) })
+}
+pub fn bi_dt(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let df = param(a,"df",1,1.0);
+    let c = (ln_gamma((df + 1.0) / 2.0) - ln_gamma(df / 2.0)).exp() / (df * std::f64::consts::PI).sqrt();
+    map_x(a, move |x| c * (1.0 + x * x / df).powf(-(df + 1.0) / 2.0))
+}
+pub fn bi_pt(a: &[EvalArg]) -> Result<RVal, R2Err> { let df = param(a,"df",1,1.0); map_x(a, move |x| t_cdf(x, df)) }
+pub fn bi_dchisq(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let df = param(a,"df",1,1.0); let k = df / 2.0;
+    map_x(a, move |x| if x < 0.0 { 0.0 } else {
+        (xlogy(k - 1.0, x) - x / 2.0 - k * std::f64::consts::LN_2 - ln_gamma(k)).exp()
+    })
+}
+pub fn bi_pchisq(a: &[EvalArg]) -> Result<RVal, R2Err> { let df = param(a,"df",1,1.0); map_x(a, move |x| chi_sq_cdf(x, df)) }
+pub fn bi_pf(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let d1 = param(a,"df1",1,1.0); let d2 = param(a,"df2",2,1.0);
+    map_x(a, move |x| if x <= 0.0 { 0.0 } else { incomplete_beta(d1 / 2.0, d2 / 2.0, d1 * x / (d1 * x + d2)) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

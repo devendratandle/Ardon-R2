@@ -309,6 +309,7 @@ impl Engine {
             ("sum",bi_sum),("mean",bi_mean),("sd",bi_sd),("var",bi_var),("cor",bi_cor),("cov",bi_cov),
             ("lm",bi_lm),("summary",bi_summary),
             ("rnorm",bi_rnorm),("dnorm",bi_dnorm),("runif",bi_runif),("sample",bi_sample),
+            ("dexp",bi_dexp),("pexp",bi_pexp),("qexp",bi_qexp),("dbinom",bi_dbinom),("pbinom",bi_pbinom),("dpois",bi_dpois),("ppois",bi_ppois),("dt",bi_dt),("pt",bi_pt),("dchisq",bi_dchisq),("pchisq",bi_pchisq),("pf",bi_pf),
             // more distributions
             ("pnorm",bi_pnorm),("qnorm",bi_qnorm),("rbinom",bi_rbinom),("rpois",bi_rpois),
             // more stats
@@ -2486,6 +2487,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
                 ("sum",bi_sum),("mean",bi_mean),("sd",bi_sd),("var",bi_var),("cor",bi_cor),("cov",bi_cov),
                 ("lm",bi_lm),("summary",bi_summary),
                 ("rnorm",bi_rnorm),("dnorm",bi_dnorm),("runif",bi_runif),("sample",bi_sample),
+            ("dexp",bi_dexp),("pexp",bi_pexp),("qexp",bi_qexp),("dbinom",bi_dbinom),("pbinom",bi_pbinom),("dpois",bi_dpois),("ppois",bi_ppois),("dt",bi_dt),("pt",bi_pt),("dchisq",bi_dchisq),("pchisq",bi_pchisq),("pf",bi_pf),
                 ("pnorm",bi_pnorm),("qnorm",bi_qnorm),("rbinom",bi_rbinom),("rpois",bi_rpois),
                 ("median",bi_median),("quantile",bi_quantile),
                 ("t.test",bi_t_test),("chisq.test",bi_chisq_test),("hotelling.test",bi_hotelling_test),("manova",bi_manova),("lmer",bi_lmer),
