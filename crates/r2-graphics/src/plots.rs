@@ -621,6 +621,136 @@ pub fn bi_pie(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
+/// Extract columns + names from a matrix / data.frame / plain vector.
+fn matrix_columns(v: &RVal) -> (Vec<Vec<f64>>, Vec<String>) {
+    match v {
+        RVal::Matrix(m) => {
+            let cols = (0..m.ncol).map(|j| m.col_slice(j).to_vec()).collect();
+            let names = (0..m.ncol).map(|j| {
+                m.col_names.as_ref().and_then(|n| n.get(j)).map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("V{}", j + 1))
+            }).collect();
+            (cols, names)
+        }
+        RVal::DataFrame(df) => {
+            let mut cols = Vec::new();
+            let mut names = Vec::new();
+            for (nm, col) in &df.columns {
+                if let Ok(r) = col.as_reals() {
+                    cols.push(r.into_iter().flatten().collect());
+                    names.push(nm.to_string());
+                }
+            }
+            (cols, names)
+        }
+        other => match other.as_reals() {
+            Ok(r) => (vec![r.into_iter().flatten().collect()], vec!["V1".into()]),
+            Err(_) => (Vec::new(), Vec::new()),
+        },
+    }
+}
+
+/// `matplot(x, y, type=, col=, pch=)` — plot the columns of a matrix (or
+/// `matplot(y)` with x = row index) as separate series, each in its own
+/// palette colour + symbol. Honors `type` p/l/b/o.
+pub fn bi_matplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let pos: Vec<&RVal> = a.iter().filter(|e| e.name.is_none()).map(|e| &e.value).collect();
+    let (xarg, yarg) = match pos.len() {
+        0 => return Err(R2Err { msg: "matplot(): need a matrix or x, y".into(), kind: ErrKind::Runtime }),
+        1 => (None, pos[0]),
+        _ => (Some(pos[0]), pos[1]),
+    };
+    let (ycols, ynames) = matrix_columns(yarg);
+    if ycols.is_empty() {
+        return Err(R2Err { msg: "matplot(): no numeric columns in y".into(), kind: ErrKind::Runtime });
+    }
+    let nrow = ycols.iter().map(|c| c.len()).max().unwrap_or(0);
+    let xcols: Vec<Vec<f64>> = match xarg {
+        Some(xv) => {
+            let (xc, _) = matrix_columns(xv);
+            if xc.is_empty() { vec![(1..=nrow).map(|i| i as f64).collect()] } else { xc }
+        }
+        None => vec![(1..=nrow).map(|i| i as f64).collect()],
+    };
+    let x_for = |j: usize| -> &Vec<f64> { &xcols[j % xcols.len()] };
+
+    let title = gn(a, "main").map(|v| val_to_str(&v)).unwrap_or_default();
+    let xlab  = gn(a, "xlab").map(|v| val_to_str(&v)).unwrap_or_else(|| "x".into());
+    let ylab  = gn(a, "ylab").map(|v| val_to_str(&v)).unwrap_or_else(|| "y".into());
+    let opts  = LabelOpts::from_args(a);
+    let ptype = gn(a, "type").map(|v| val_to_str(&v)).unwrap_or_else(|| "p".into());
+    let user_cols = gn(a, "col").map(|c| color_vec(Some(c), "black"));
+
+    // Ranges across every series.
+    let mut xmin = f64::INFINITY; let mut xmax = f64::NEG_INFINITY;
+    let mut ymin = f64::INFINITY; let mut ymax = f64::NEG_INFINITY;
+    for (j, yc) in ycols.iter().enumerate() {
+        let xc = x_for(j);
+        for &v in yc { if v.is_finite() { ymin = ymin.min(v); ymax = ymax.max(v); } }
+        for &v in xc { if v.is_finite() { xmin = xmin.min(v); xmax = xmax.max(v); } }
+    }
+    if !xmin.is_finite() { xmin = 0.0; xmax = 1.0; }
+    if !ymin.is_finite() { ymin = 0.0; ymax = 1.0; }
+    let pad = 0.04;
+    let xr0 = if (xmax - xmin).abs() < 1e-10 { 1.0 } else { xmax - xmin };
+    let yr0 = if (ymax - ymin).abs() < 1e-10 { 1.0 } else { ymax - ymin };
+    let (xmin, xmax) = (xmin - xr0 * pad, xmax + xr0 * pad);
+    let (ymin, ymax) = (ymin - yr0 * pad, ymax + yr0 * pad);
+    let xrange = xmax - xmin; let yrange = ymax - ymin;
+
+    let (ox, oy, w, h) = begin_plot();
+    let (ml, mr, mt, mb) = (60.0, 20.0, 36.0, 40.0);
+    let pw = w - ml - mr; let ph = h - mt - mb;
+    with_device(|d| d.coords = Some(crate::device::PlotCoords {
+        px0: ox + ml, py0: oy + mt, pw, ph, xmin, xmax, ymin, ymax,
+    }));
+
+    let panel = PanelRect { ox, oy, w, h, ml, mt, pw, ph };
+    let mut frag = format!(
+        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+        ox + ml, oy + mt, pw, ph);
+    frag.push_str(&render_chrome(&panel, &title, "", &xlab, &ylab, &opts));
+    frag.push_str(&render_axis_ticks(&panel, xmin, xmax, ymin, ymax, xrange, yrange, &opts));
+
+    let to_px = |xv: f64, yv: f64| -> (f64, f64) {
+        (ox + ml + (xv - xmin) / xrange * pw,
+         oy + mt + ph - (yv - ymin) / yrange * ph)
+    };
+    let draw_lines  = matches!(ptype.as_str(), "l" | "b" | "o");
+    let draw_points = matches!(ptype.as_str(), "p" | "b" | "o");
+    let pch_cycle = [1, 2, 0, 5, 3, 4, 6];
+
+    for (j, yc) in ycols.iter().enumerate() {
+        let xc = x_for(j);
+        let color = match &user_cols {
+            Some(c) => c[j % c.len()].clone(),
+            None => r_palette(j as i32 + 1).to_string(),
+        };
+        let pch = pch_cycle[j % pch_cycle.len()];
+        let n = xc.len().min(yc.len());
+        let pts: Vec<(f64, f64)> = (0..n).map(|i| to_px(xc[i], yc[i])).collect();
+        if draw_lines && pts.len() > 1 {
+            let path: String = pts.iter().enumerate()
+                .map(|(i, &(px, py))| format!("{}{:.1},{:.1}", if i == 0 { "M" } else { " L" }, px, py))
+                .collect();
+            frag.push_str(&format!(
+                r#"<path d="{}" fill="none" stroke="{}" stroke-width="1.5"/>"#, path, color));
+        }
+        if draw_points {
+            for &(px, py) in &pts {
+                frag.push_str(&point_symbol(px, py, 3.0, pch, &color));
+            }
+        }
+    }
+    let _ = ynames;
+
+    with_device(|d| d.svg_body.push_str(&frag));
+    match crate::device::finish_plot("matplot.svg") {
+        Some(p) => Ok(rstr(&p)),
+        None => Ok(RVal::Null),
+    }
+}
+
 /// `hist(x, breaks=, main=)` — text + SVG histogram into the device.
 pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x: Vec<f64> = gv(a, 0).as_reals()?.into_iter().filter_map(|x| x).collect();

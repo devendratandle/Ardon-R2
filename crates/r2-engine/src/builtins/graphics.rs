@@ -100,6 +100,9 @@ pub(crate) fn bi_pairs(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 pub(crate) fn bi_pie(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::plots::bi_pie(a)
 }
+pub(crate) fn bi_matplot(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::plots::bi_matplot(a)
+}
 
 // ─── Overlays ──────────────────────────────────────────────────────
 
