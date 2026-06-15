@@ -554,6 +554,73 @@ pub fn bi_pairs(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
+/// `pie(x, labels=, col=, main=)` — pie chart of non-negative values.
+/// Slices are proportional to `x`; default colours cycle the R palette.
+pub fn bi_pie(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    use std::f64::consts::PI;
+    let x: Vec<f64> = gv(a, 0).as_reals()?.into_iter().flatten().filter(|v| *v > 0.0).collect();
+    if x.is_empty() {
+        return Err(R2Err {
+            msg: "pie(): need at least one positive value".into(),
+            kind: ErrKind::Runtime,
+        });
+    }
+    let total: f64 = x.iter().sum();
+    let labels: Vec<String> = match gn(a, "labels") {
+        Some(RVal::Character(v, _)) =>
+            v.iter().map(|s| s.as_ref().map(|x| x.to_string()).unwrap_or_default()).collect(),
+        _ => (1..=x.len()).map(|i| i.to_string()).collect(),
+    };
+    let slice_cols: Vec<String> = match gn(a, "col") {
+        Some(c) => color_vec(Some(c), "gray"),
+        None => (0..x.len()).map(|i| r_palette(i as i32 + 1).to_string()).collect(),
+    };
+    let main = gn(a, "main").map(|v| val_to_str(&v)).unwrap_or_default();
+
+    let (ox, oy, w, h) = begin_plot();
+    // A pie has no Cartesian data coords — clear them so a stray overlay
+    // doesn't try to align to a nonexistent axis system.
+    with_device(|d| d.coords = None);
+    let cx = ox + w / 2.0;
+    let cy = oy + h / 2.0 + if main.is_empty() { 0.0 } else { 10.0 };
+    let r = w.min(h) / 2.0 * 0.68;
+
+    let mut frag = String::new();
+    if !main.is_empty() {
+        frag.push_str(&format!(
+            r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="15px" font-weight="bold" fill="black">{}</text>"#,
+            cx, oy + 20.0, escape_xml(&main)));
+    }
+    let mut a0 = -PI / 2.0; // start at 12 o'clock
+    for (i, &val) in x.iter().enumerate() {
+        let frac = val / total;
+        let a1 = a0 + frac * 2.0 * PI;
+        let (x0, y0) = (cx + r * a0.cos(), cy + r * a0.sin());
+        let (x1, y1) = (cx + r * a1.cos(), cy + r * a1.sin());
+        let large = if frac > 0.5 { 1 } else { 0 };
+        let color = &slice_cols[i % slice_cols.len()];
+        frag.push_str(&format!(
+            r#"<path d="M{:.1},{:.1} L{:.1},{:.1} A{:.1},{:.1} 0 {} 1 {:.1},{:.1} Z" fill="{}" stroke="white" stroke-width="1"/>"#,
+            cx, cy, x0, y0, r, r, large, x1, y1, color));
+        // Label at the slice's mid-angle, just outside the radius.
+        let am = (a0 + a1) / 2.0;
+        let (lx, ly) = (cx + (r + 16.0) * am.cos(), cy + (r + 16.0) * am.sin());
+        let anchor = if am.cos() > 0.1 { "start" } else if am.cos() < -0.1 { "end" } else { "middle" };
+        if let Some(lab) = labels.get(i) {
+            frag.push_str(&format!(
+                r#"<text x="{:.1}" y="{:.1}" text-anchor="{}" font-family="Arial, Helvetica, sans-serif" font-size="11px" fill="black">{}</text>"#,
+                lx, ly + 3.0, anchor, escape_xml(lab)));
+        }
+        a0 = a1;
+    }
+
+    with_device(|d| d.svg_body.push_str(&frag));
+    match crate::device::finish_plot("pie.svg") {
+        Some(p) => Ok(rstr(&p)),
+        None => Ok(RVal::Null),
+    }
+}
+
 /// `hist(x, breaks=, main=)` — text + SVG histogram into the device.
 pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x: Vec<f64> = gv(a, 0).as_reals()?.into_iter().filter_map(|x| x).collect();
