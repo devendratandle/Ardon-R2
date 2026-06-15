@@ -585,6 +585,70 @@ impl Engine {
                         return self.call_fn(&f, &ea, env);
                     }
 
+                    // NSE for `curve(expr, from, to, n=101, add=FALSE, ...)`:
+                    // the first arg is taken UNEVALUATED and evaluated with
+                    // `x` bound to a sequence (R's vectorized model), so
+                    // `curve(x^2, 0, 10)` works without lazy promises. A bare
+                    // function (`curve(sin, ...)`) is applied to x instead.
+                    if fname.as_ref() == "curve" && !args.is_empty() {
+                        let named = |nm: &str| args.iter().find(|a| a.name.as_deref() == Some(nm));
+                        let positional: Vec<&Expr> =
+                            args[1..].iter().filter(|a| a.name.is_none()).map(|a| &a.value).collect();
+                        let from_e = named("from").map(|a| &a.value).or_else(|| positional.first().copied());
+                        let to_e   = named("to").map(|a| &a.value).or_else(|| positional.get(1).copied());
+                        let n_e    = named("n").map(|a| &a.value).or_else(|| positional.get(2).copied());
+                        let from = match from_e {
+                            Some(e) => self.eval_in(e, env)?.scalar_f64().ok().flatten().unwrap_or(0.0),
+                            None => 0.0,
+                        };
+                        let to = match to_e {
+                            Some(e) => self.eval_in(e, env)?.scalar_f64().ok().flatten().unwrap_or(1.0),
+                            None => 1.0,
+                        };
+                        let n = (match n_e {
+                            Some(e) => self.eval_in(e, env)?.scalar_f64().ok().flatten().unwrap_or(101.0),
+                            None => 101.0,
+                        } as usize).max(2);
+                        let xs: Vec<f64> = (0..n)
+                            .map(|i| from + (to - from) * (i as f64) / ((n - 1) as f64))
+                            .collect();
+                        let xs_val = RVal::Numeric(
+                            xs.iter().map(|v| Some(*v)).collect::<Vec<_>>().into(), Attrs::default());
+                        let child = Arc::new(Env {
+                            name: Some(Arc::from(".curve.env")),
+                            parent: Some(env.clone()),
+                            bindings: std::iter::once((Arc::from("x"), xs_val.clone())).collect(),
+                            locked: false,
+                        });
+                        let mut y_val = self.eval_in(&args[0].value, &child)?;
+                        if matches!(y_val, RVal::Closure(_)) {
+                            y_val = self.call_fn(&y_val, &[EvalArg { name: None, value: xs_val.clone() }], &child)?;
+                        }
+                        let add = match named("add") {
+                            Some(a) => match self.eval_in(&a.value, env)? {
+                                RVal::Logical(v, _) => v.first().and_then(|x| *x).unwrap_or(false),
+                                other => other.scalar_f64().ok().flatten().map(|x| x != 0.0).unwrap_or(false),
+                            },
+                            None => false,
+                        };
+                        let mut ea = vec![
+                            EvalArg { name: None, value: xs_val },
+                            EvalArg { name: None, value: y_val },
+                        ];
+                        for nm in ["col", "lwd", "lty", "main", "xlab", "ylab", "ylim", "xlim"] {
+                            if let Some(arg) = named(nm) {
+                                let v = self.eval_in(&arg.value, env)?;
+                                ea.push(EvalArg { name: Some(Arc::from(nm)), value: v });
+                            }
+                        }
+                        return if add {
+                            r2_graphics::overlays::bi_lines(&ea)
+                        } else {
+                            ea.push(EvalArg { name: Some(Arc::from("type")), value: rstr("l") });
+                            r2_graphics::plots::bi_plot(&ea)
+                        };
+                    }
+
                     // NSE for formula-based functions: lm(y ~ x, data = df)
                     // When first arg is a tilde expr and data= is provided,
                     // resolve bare symbol names as columns in the data frame
