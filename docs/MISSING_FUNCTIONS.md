@@ -1,0 +1,64 @@
+# Missing base-R functions — roadmap to a "basic usable runtime"
+
+R2 implements ~220+ builtins (see FUNCTIONS.md) — strong on stats/ML/
+graphics/data-frames. This lists **common base-R functions still missing**,
+found by auditing the engine + parser registries against everyday R
+workflows. Tiered by how often a typical user hits them.
+
+## Tier 1 — Essential everyday idioms (implement first)
+These show up in almost every R script; their absence makes common code
+fail outright.
+
+| Function | Why it matters |
+|---|---|
+| `seq_len(n)`, `seq_along(x)` | the canonical safe loop/index idioms |
+| `%in%` | membership test — extremely common in filtering |
+| `setdiff`, `union`, `intersect` | set algebra on vectors |
+| `unlist(x)` | flatten a list — pervasive after `lapply`/`Map` |
+| `setNames(x, nm)` | one-liner naming idiom |
+| `pmin`, `pmax` | parallel (element-wise) min/max |
+| `cut(x, breaks)` | bin a numeric into factor intervals |
+| `split(x, f)` | group a vector/df by a factor |
+| `with(data, expr)` | evaluate an expression in a df's scope |
+| `Reduce`, `Filter`, `Map` | functional-programming staples |
+| `append(x, values, after)` | insert into a vector |
+| `invisible(x)` | return without auto-printing |
+| `stopifnot(...)` | assertion guard |
+| `switch(expr, ...)` | multi-branch selection |
+| `format(x, ...)` | generic value formatting (only Date/POSIXct exist) |
+| `attr`, `attributes`, `structure` | generic attribute access / construction |
+| `inherits(x, class)` | class predicate used everywhere in S3 code |
+
+## Tier 2 — Common math / stats
+| Function | Why |
+|---|---|
+| `factorial`, `choose`, `gamma`, `lgamma`, `beta` | combinatorics / stats |
+| `signif(x, digits)` | significant-figure rounding |
+| `outer(x, y, FUN)` | outer product / grid evaluation |
+| `combn(x, m)` | combinations |
+| `density(x)`, `ecdf(x)` | distribution estimation + plotting |
+| `mad`, `fivenum` | robust spread / summary |
+| `rexp`, `dexp/pexp/qexp` | exponential distribution |
+| `dbinom/pbinom/qbinom`, `dpois/ppois/qpois` | discrete distributions |
+| `dt/pt/qt`, `dchisq/pchisq`, `df/pf` | test distributions (d/p/q forms) |
+| `optimize`, `uniroot`, `integrate` | 1-D numerical methods |
+
+## Tier 3 — I/O & misc convenience
+| Function | Why |
+|---|---|
+| `readLines`, `writeLines` | plain-text file I/O |
+| `substring` | (have `substr`; `substring` differs subtly) |
+| `formatC`, `prettyNum`, `strrep`, `chartr` | string formatting |
+| `by`, `ave`, `within`, `stack` | split-apply on data frames |
+| `tryCatch` | function-form error handling (have try/catch syntax) |
+| `Sys.setenv` | (have `Sys.getenv`) |
+| `as.matrix`, `as.vector`, `as.list` | coercions |
+| `is.function`, `is.list`, `is.vector`, `is.element` | type predicates |
+| `match.arg`, `match.call` | argument helpers |
+
+## Suggested build order
+Tier 1 first (most are small, pure-Rust builtins — biggest usability win
+per line), then Tier 2 (distributions extend the existing d/p/q/r family),
+then Tier 3. `with`/`switch`/`Reduce`/`Filter`/`Map`/`outer` need a small
+amount of engine support (closure application / NSE) like `curve()` already
+uses; the rest are straightforward vector builtins.

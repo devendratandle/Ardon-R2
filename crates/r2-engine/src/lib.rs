@@ -238,6 +238,7 @@ impl Engine {
         e.registry.add_layer(mkpkg("base", PackageTier::Base, vec![
             ("seq",bi_seq),("rep",bi_rep),("paste",bi_paste),("paste0",bi_paste0),
             ("which",bi_which),("sort",bi_sort),("rev",bi_rev),("unique",bi_unique),
+            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),
             ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
             ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
             ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),
@@ -2373,6 +2374,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
             e.registry.add_layer(mkpkg("base", PackageTier::Base, vec![
                 ("seq",bi_seq),("rep",bi_rep),("paste",bi_paste),("paste0",bi_paste0),
                 ("which",bi_which),("sort",bi_sort),("rev",bi_rev),("unique",bi_unique),
+            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),
                 ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
                 ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
                 ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),

@@ -169,6 +169,182 @@ pub(crate) fn bi_sqrt(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) as i32; let f = 10f64.powi(d); Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| (n*f).round()/f)).collect(), Attrs::default())) }
 pub(crate) fn bi_sort(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let mut n: Vec<f64> = v.into_iter().filter_map(|x| x).collect(); n.sort_by(|a,b| a.partial_cmp(b).unwrap()); Ok(rnums(&n)) }
 pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Numeric(v,_) => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())), _ => err!(Runtime, "rev() works with numeric, integer, or character vectors") } }
+// ── Tier-1 base-R usability builtins ───────────────────────────────
+
+/// Format an f64 the way R prints atomic numbers (integers without a
+/// trailing `.0`).
+fn fmt_f64(n: f64) -> String {
+    if n.is_finite() && n == n.trunc() && n.abs() < 1e15 { format!("{}", n as i64) } else { format!("{}", n) }
+}
+
+/// The class vector of a value (explicit `class` attr, else implicit type).
+fn class_names(v: &RVal) -> Vec<String> {
+    match v {
+        RVal::Numeric(_, at) | RVal::Integer(_, at)
+        | RVal::Character(_, at) | RVal::Logical(_, at) =>
+            at.class.as_ref().map(|c| vec![c.to_string()])
+                .unwrap_or_else(|| vec![v.type_name().to_string()]),
+        RVal::TypeInstance(i) => vec![i.type_name.to_string()],
+        _ => vec![v.type_name().to_string()],
+    }
+}
+
+/// Coerce any value to a character vector, element-wise.
+fn str_vec(v: &RVal) -> Vec<Option<Arc<str>>> {
+    match v {
+        RVal::Character(cv, _) => cv.clone(),
+        RVal::Numeric(nv, _) => nv.iter().copied().map(|x| x.map(|n| Arc::from(fmt_f64(n).as_str()))).collect(),
+        RVal::Integer(iv, _) => iv.iter().copied().map(|x| x.map(|n| Arc::from(n.to_string().as_str()))).collect(),
+        RVal::Logical(lv, _) => lv.iter().copied().map(|x| x.map(|b| Arc::from(if b { "TRUE" } else { "FALSE" }))).collect(),
+        RVal::Factor(f) => f.codes.iter().map(|&c| c.and_then(|i| f.levels.get(i as usize).cloned())).collect(),
+        other => vec![Some(Arc::from(val_to_str(other).as_str()))],
+    }
+}
+
+pub(crate) fn bi_seq_len(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let n = e.scalar_f64(&gv(a,0))?.unwrap_or(0.0) as i64;
+    Ok(rints(&(1..=n.max(0)).map(|i| i as i32).collect::<Vec<_>>()))
+}
+pub(crate) fn bi_seq_along(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let n = rval_length(&gv(a,0)) as i32;
+    Ok(rints(&(1..=n).collect::<Vec<_>>()))
+}
+pub(crate) fn bi_invisible(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // Value passthrough. (Top-level auto-print suppression is a REPL concern.)
+    Ok(gv(a,0))
+}
+fn signif_one(x: f64, d: i32) -> f64 {
+    if x == 0.0 || !x.is_finite() { return x; }
+    let mag = x.abs().log10().floor() as i32;
+    let f = 10f64.powi((d - 1 - mag).clamp(-300, 300));
+    (x * f).round() / f
+}
+pub(crate) fn bi_signif(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let xs = e.as_reals(&gv(a,0))?;
+    let d = e.scalar_f64(&gv(a,1))?.unwrap_or(6.0) as i32;
+    let out: Vec<Option<f64>> = xs.into_iter().map(|o| o.map(|x| signif_one(x, d.max(1)))).collect();
+    Ok(RVal::Numeric(out.into(), Attrs::default()))
+}
+pub(crate) fn bi_inherits(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let v = gv(a,0);
+    let cls = class_names(&v);
+    let what = str_vec(&gv(a,1));
+    let hit = what.iter().flatten().any(|w| cls.iter().any(|c| c.as_str() == w.as_ref()));
+    Ok(rbool(hit))
+}
+pub(crate) fn bi_set_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let mut v = gv(a,0);
+    let names: Vec<Arc<str>> = str_vec(&gv(a,1)).into_iter().map(|o| o.unwrap_or_else(|| Arc::from(""))).collect();
+    match &mut v {
+        RVal::Numeric(_, at) | RVal::Integer(_, at)
+        | RVal::Character(_, at) | RVal::Logical(_, at) => at.names = Some(names),
+        RVal::List(items) => for (i, (n, _)) in items.iter_mut().enumerate() { *n = names.get(i).cloned(); },
+        _ => {}
+    }
+    Ok(v)
+}
+fn p_extreme(e: &mut Engine, a: &[EvalArg], want_max: bool) -> Result<RVal, R2Err> {
+    let mut vecs = Vec::new();
+    for arg in a {
+        if arg.name.as_deref() == Some("na.rm") { continue; }
+        vecs.push(e.as_reals(&arg.value)?);
+    }
+    let n = vecs.iter().map(|v| v.len()).max().unwrap_or(0);
+    let out: Vec<Option<f64>> = (0..n).map(|i| {
+        let mut acc: Option<f64> = None;
+        for v in &vecs {
+            if v.is_empty() { continue; }
+            if let Some(x) = v[i % v.len()] {
+                acc = Some(match acc { Some(a2) => if want_max { a2.max(x) } else { a2.min(x) }, None => x });
+            }
+        }
+        acc
+    }).collect();
+    Ok(RVal::Numeric(out.into(), Attrs::default()))
+}
+pub(crate) fn bi_pmin(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { p_extreme(e, a, false) }
+pub(crate) fn bi_pmax(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { p_extreme(e, a, true) }
+
+#[derive(Clone, Copy)] enum SetOp { Union, Intersect, Diff }
+fn set_op(e: &mut Engine, a: &[EvalArg], op: SetOp) -> Result<RVal, R2Err> {
+    let x = gv(a,0); let y = gv(a,1);
+    let chr = matches!(x, RVal::Character(..)|RVal::Factor(..)) || matches!(y, RVal::Character(..)|RVal::Factor(..));
+    if chr {
+        let xs: Vec<Arc<str>> = str_vec(&x).into_iter().flatten().collect();
+        let ys: Vec<Arc<str>> = str_vec(&y).into_iter().flatten().collect();
+        let mut out: Vec<Arc<str>> = Vec::new();
+        match op {
+            SetOp::Union => { for v in xs.iter().chain(ys.iter()) { if !out.contains(v) { out.push(v.clone()); } } }
+            SetOp::Intersect => { for v in &xs { if ys.contains(v) && !out.contains(v) { out.push(v.clone()); } } }
+            SetOp::Diff => { for v in &xs { if !ys.contains(v) && !out.contains(v) { out.push(v.clone()); } } }
+        }
+        Ok(RVal::Character(out.into_iter().map(Some).collect(), Attrs::default()))
+    } else {
+        let xs: Vec<f64> = e.as_reals(&x)?.into_iter().flatten().collect();
+        let ys: Vec<f64> = e.as_reals(&y)?.into_iter().flatten().collect();
+        let mut out: Vec<f64> = Vec::new();
+        match op {
+            SetOp::Union => { for &v in xs.iter().chain(ys.iter()) { if !out.contains(&v) { out.push(v); } } }
+            SetOp::Intersect => { for &v in &xs { if ys.contains(&v) && !out.contains(&v) { out.push(v); } } }
+            SetOp::Diff => { for &v in &xs { if !ys.contains(&v) && !out.contains(&v) { out.push(v); } } }
+        }
+        Ok(rnums(&out))
+    }
+}
+pub(crate) fn bi_union(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { set_op(e, a, SetOp::Union) }
+pub(crate) fn bi_intersect(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { set_op(e, a, SetOp::Intersect) }
+pub(crate) fn bi_setdiff(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { set_op(e, a, SetOp::Diff) }
+
+pub(crate) fn bi_append(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let x = gv(a,0); let vals = gv(a,1);
+    let after = gn(a,"after").or_else(|| if a.len() > 2 && a[2].name.is_none() { Some(gv(a,2)) } else { None })
+        .and_then(|v| e.scalar_f64(&v).ok().flatten());
+    let chr = matches!(x, RVal::Character(..)) || matches!(vals, RVal::Character(..));
+    if chr {
+        let xs = str_vec(&x); let vs = str_vec(&vals);
+        let pos = after.map(|f| f as usize).unwrap_or(xs.len()).min(xs.len());
+        let mut out = xs[..pos].to_vec(); out.extend(vs); out.extend_from_slice(&xs[pos..]);
+        Ok(RVal::Character(out, Attrs::default()))
+    } else {
+        let xs = e.as_reals(&x)?; let vs = e.as_reals(&vals)?;
+        let pos = after.map(|f| f as usize).unwrap_or(xs.len()).min(xs.len());
+        let mut out = xs[..pos].to_vec(); out.extend(vs); out.extend_from_slice(&xs[pos..]);
+        Ok(RVal::Numeric(out.into(), Attrs::default()))
+    }
+}
+
+fn collect_leaves<'a>(v: &'a RVal, out: &mut Vec<&'a RVal>) {
+    if let RVal::List(items) = v { for (_, x) in items { collect_leaves(x, out); } } else { out.push(v); }
+}
+pub(crate) fn bi_unlist(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let v = gv(a,0);
+    let mut leaves = Vec::new(); collect_leaves(&v, &mut leaves);
+    let has_chr = leaves.iter().any(|l| matches!(l, RVal::Character(..)|RVal::Factor(..)));
+    if has_chr {
+        let mut out: Vec<Option<Arc<str>>> = Vec::new();
+        for l in &leaves { out.extend(str_vec(l)); }
+        Ok(RVal::Character(out, Attrs::default()))
+    } else {
+        let mut out: Vec<Option<f64>> = Vec::new();
+        for l in &leaves { out.extend(e.as_reals(l)?); }
+        Ok(RVal::Numeric(out.into(), Attrs::default()))
+    }
+}
+
+pub(crate) fn bi_cut(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let xs = e.as_reals(&gv(a,0))?;
+    let mut br: Vec<f64> = e.as_reals(&gv(a,1))?.into_iter().flatten().collect();
+    if br.len() < 2 { return err!(Runtime, "cut(): 'breaks' needs at least 2 values"); }
+    br.sort_by(|a,b| a.partial_cmp(b).unwrap());
+    let labels: Vec<Arc<str>> = (0..br.len()-1)
+        .map(|i| Arc::from(format!("({},{}]", fmt_f64(br[i]), fmt_f64(br[i+1])).as_str()))
+        .collect();
+    let out: Vec<Option<Arc<str>>> = xs.into_iter().map(|o| o.and_then(|x| {
+        (0..br.len()-1).find(|&i| x > br[i] && x <= br[i+1]).map(|i| labels[i].clone())
+    })).collect();
+    Ok(RVal::Character(out, Attrs::default()))
+}
+
 pub(crate) fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Numeric(..)|RVal::Integer(..)))) }
 pub(crate) fn bi_is_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Character(..)))) }
 pub(crate) fn bi_is_lgl(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Logical(..)))) }
