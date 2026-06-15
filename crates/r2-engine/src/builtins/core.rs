@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use r2_stats::htest::{fmt_pval, signif_stars};
+use r2_stats::htest::{fmt_pval, signif_stars, ln_gamma};
 use r2_types::*;
 
 use crate::{gv, gn, val_to_str, Engine};
@@ -485,6 +485,103 @@ pub(crate) fn bi_outer(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
         }
     }
     Ok(RVal::Matrix(Matrix::new(data, m, n)))
+}
+
+// ── Tier-2 math / special functions ────────────────────────────────
+
+/// Γ(x) via lgamma, with Euler reflection for x ≤ 0.
+fn gamma_fn(x: f64) -> f64 {
+    if x > 0.0 { ln_gamma(x).exp() }
+    else {
+        let s = (std::f64::consts::PI * x).sin();
+        if s == 0.0 { f64::NAN } else { std::f64::consts::PI / (s * ln_gamma(1.0 - x).exp()) }
+    }
+}
+fn choose_fn(n: f64, k: f64) -> f64 {
+    let k = k.round();
+    if k < 0.0 { return 0.0; }
+    if n >= 0.0 && (n - n.round()).abs() < 1e-9 && k <= n {
+        (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)).exp().round()
+    } else {
+        let mut r = 1.0;
+        for i in 0..(k as i64) { r *= (n - i as f64) / ((i + 1) as f64); }
+        r
+    }
+}
+fn median_sorted(mut v: Vec<f64>) -> f64 {
+    if v.is_empty() { return f64::NAN; }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len();
+    if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) }
+}
+fn map1(e: &mut Engine, a: &[EvalArg], f: impl Fn(f64) -> f64) -> Result<RVal, R2Err> {
+    let xs = e.as_reals(&gv(a,0))?;
+    Ok(RVal::Numeric(xs.into_iter().map(|o| o.map(&f)).collect::<Vec<_>>().into(), Attrs::default()))
+}
+pub(crate) fn bi_gamma(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { map1(e, a, gamma_fn) }
+pub(crate) fn bi_lgamma(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { map1(e, a, ln_gamma) }
+pub(crate) fn bi_factorial(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { map1(e, a, |x| gamma_fn(x + 1.0)) }
+pub(crate) fn bi_beta(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let aa = e.as_reals(&gv(a,0))?; let bb = e.as_reals(&gv(a,1))?;
+    let m = aa.len().max(bb.len());
+    if aa.is_empty() || bb.is_empty() { return Ok(RVal::Numeric(vec![].into(), Attrs::default())); }
+    let out: Vec<Option<f64>> = (0..m).map(|i| match (aa[i % aa.len()], bb[i % bb.len()]) {
+        (Some(x), Some(y)) => Some((ln_gamma(x) + ln_gamma(y) - ln_gamma(x + y)).exp()),
+        _ => None,
+    }).collect();
+    Ok(RVal::Numeric(out.into(), Attrs::default()))
+}
+pub(crate) fn bi_choose(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let ns = e.as_reals(&gv(a,0))?; let ks = e.as_reals(&gv(a,1))?;
+    if ns.is_empty() || ks.is_empty() { return Ok(RVal::Numeric(vec![].into(), Attrs::default())); }
+    let m = ns.len().max(ks.len());
+    let out: Vec<Option<f64>> = (0..m).map(|i| match (ns[i % ns.len()], ks[i % ks.len()]) {
+        (Some(n), Some(k)) => Some(choose_fn(n, k)),
+        _ => None,
+    }).collect();
+    Ok(RVal::Numeric(out.into(), Attrs::default()))
+}
+pub(crate) fn bi_combn(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let xr: Vec<f64> = e.as_reals(&gv(a,0))?.into_iter().flatten().collect();
+    let x: Vec<f64> = if xr.len() == 1 { (1..=xr[0] as i64).map(|i| i as f64).collect() } else { xr };
+    let m = e.scalar_f64(&gv(a,1))?.unwrap_or(2.0) as usize;
+    let n = x.len();
+    if m == 0 || m > n { return err!(Runtime, "combn(): need 1 <= m <= length(x)"); }
+    let mut cols: Vec<Vec<f64>> = Vec::new();
+    let mut idx: Vec<usize> = (0..m).collect();
+    loop {
+        cols.push(idx.iter().map(|&i| x[i]).collect());
+        let mut i = m as isize - 1;
+        while i >= 0 && idx[i as usize] == n - m + i as usize { i -= 1; }
+        if i < 0 { break; }
+        idx[i as usize] += 1;
+        for j in (i as usize + 1)..m { idx[j] = idx[j - 1] + 1; }
+    }
+    let ncol = cols.len();
+    let mut data = vec![0.0; m * ncol];
+    for (c, col) in cols.iter().enumerate() { for r in 0..m { data[c * m + r] = col[r]; } }
+    Ok(RVal::Matrix(Matrix::new(data, m, ncol)))
+}
+pub(crate) fn bi_mad(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let xs: Vec<f64> = e.as_reals(&gv(a,0))?.into_iter().flatten().collect();
+    let constant = gn(a,"constant").and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(1.4826);
+    let med = median_sorted(xs.clone());
+    let dev: Vec<f64> = xs.iter().map(|v| (v - med).abs()).collect();
+    Ok(rnum(median_sorted(dev) * constant))
+}
+pub(crate) fn bi_fivenum(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let mut x: Vec<f64> = e.as_reals(&gv(a,0))?.into_iter().flatten().collect();
+    if x.is_empty() { return Ok(RVal::Numeric(vec![None; 5].into(), Attrs::default())); }
+    x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = x.len() as f64;
+    let n4 = ((n + 3.0) / 2.0).floor() / 2.0;
+    let d = [1.0, n4, (n + 1.0) / 2.0, n + 1.0 - n4, n];
+    let out: Vec<Option<f64>> = d.iter().map(|&di| {
+        let lo = (di.floor() as usize).saturating_sub(1).min(x.len() - 1);
+        let hi = (di.ceil() as usize).saturating_sub(1).min(x.len() - 1);
+        Some(0.5 * (x[lo] + x[hi]))
+    }).collect();
+    Ok(RVal::Numeric(out.into(), Attrs::default()))
 }
 
 // ── Tier-1 attribute / format builtins ─────────────────────────────
