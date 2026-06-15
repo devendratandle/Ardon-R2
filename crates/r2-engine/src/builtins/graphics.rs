@@ -94,6 +94,9 @@ pub(crate) fn bi_boxplot(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
 pub(crate) fn bi_barplot(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::plots::bi_barplot(a)
 }
+pub(crate) fn bi_pairs(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::plots::bi_pairs(a)
+}
 
 // ─── Overlays ──────────────────────────────────────────────────────
 

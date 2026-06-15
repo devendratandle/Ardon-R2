@@ -406,6 +406,148 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
+/// Min/max of a slice, ignoring non-finite values.
+fn minmax(v: &[f64]) -> (f64, f64) {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &x in v {
+        if x.is_finite() {
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+    }
+    if !lo.is_finite() { (0.0, 1.0) } else { (lo, hi) }
+}
+
+/// Extract numeric columns + their names from a `pairs()` argument list.
+/// Accepts a data.frame / list (named numeric columns) as the first arg,
+/// or two-plus bare numeric-vector args. Non-numeric columns are skipped.
+fn extract_columns(a: &[EvalArg]) -> (Vec<Vec<f64>>, Vec<String>) {
+    let first = a.iter().find(|e| e.name.is_none()).map(|e| &e.value);
+    // data.frame — the common pairs() input.
+    if let Some(RVal::DataFrame(df)) = first {
+        let mut cols = Vec::new();
+        let mut names = Vec::new();
+        for (nm, v) in &df.columns {
+            if let Ok(reals) = v.as_reals() {
+                let col: Vec<f64> = reals.into_iter().flatten().collect();
+                if !col.is_empty() {
+                    cols.push(col);
+                    names.push(nm.to_string());
+                }
+            }
+        }
+        return (cols, names);
+    }
+    // Plain list of named numeric columns.
+    if let Some(RVal::List(items)) = first {
+        let mut cols = Vec::new();
+        let mut names = Vec::new();
+        for (idx, (nm, v)) in items.iter().enumerate() {
+            if let Ok(reals) = v.as_reals() {
+                let col: Vec<f64> = reals.into_iter().flatten().collect();
+                if !col.is_empty() {
+                    cols.push(col);
+                    names.push(nm.as_ref().map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("V{}", idx + 1)));
+                }
+            }
+        }
+        return (cols, names);
+    }
+    // Fallback: multiple bare numeric vectors → columns V1, V2, …
+    let mut cols = Vec::new();
+    let mut names = Vec::new();
+    for (i, e) in a.iter().filter(|e| e.name.is_none()).enumerate() {
+        if let Ok(reals) = e.value.as_reals() {
+            let col: Vec<f64> = reals.into_iter().flatten().collect();
+            if !col.is_empty() {
+                cols.push(col);
+                names.push(format!("V{}", i + 1));
+            }
+        }
+    }
+    (cols, names)
+}
+
+/// `pairs(x)` — scatterplot matrix. `x` is a data.frame / list of numeric
+/// columns (or several numeric vectors). Draws an n×n grid: the diagonal
+/// shows each variable's name; cell (row i, col j) scatters column j on x
+/// against column i on y (R convention). Honors `col=`/`pch=`/`cex=`.
+pub fn bi_pairs(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let (cols, names) = extract_columns(a);
+    let n = cols.len();
+    if n < 2 {
+        return Err(R2Err {
+            msg: "pairs(): need at least 2 numeric columns".into(),
+            kind: ErrKind::Runtime,
+        });
+    }
+
+    let main = gn(a, "main").map(|v| val_to_str(&v)).unwrap_or_default();
+    let pch = gn(a, "pch").and_then(int).unwrap_or_else(|| with_device(|d| d.params.pch));
+    let cex = gn(a, "cex").and_then(num).unwrap_or(1.0);
+    let dev_col = with_device(|d| d.params.col.clone());
+    let point_cols = color_vec(gn(a, "col"), &dev_col);
+
+    // pairs() owns the whole figure — begin_plot opens a fresh panel and
+    // returns its (x, y, w, h); with no mfrow active that's the full canvas.
+    let (ox, oy, w, h) = begin_plot();
+
+    let top = if main.is_empty() { 8.0 } else { 28.0 };
+    let cell_w = w / n as f64;
+    let cell_h = (h - top) / n as f64;
+    let pad = 6.0;
+
+    let mut frag = String::new();
+    if !main.is_empty() {
+        frag.push_str(&format!(
+            r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="15px" font-weight="bold" fill="black">{}</text>"#,
+            ox + w / 2.0, oy + 18.0, escape_xml(&main)));
+    }
+
+    for i in 0..n {            // row → y variable
+        for j in 0..n {        // col → x variable
+            let cx0 = ox + j as f64 * cell_w + pad;
+            let cy0 = oy + top + i as f64 * cell_h + pad;
+            let cwd = cell_w - 2.0 * pad;
+            let chd = cell_h - 2.0 * pad;
+            // Cell border.
+            frag.push_str(&format!(
+                r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+                cx0, cy0, cwd, chd));
+            if i == j {
+                // Diagonal — variable name.
+                frag.push_str(&format!(
+                    r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13px" font-weight="bold" fill="black">{}</text>"#,
+                    cx0 + cwd / 2.0, cy0 + chd / 2.0 + 4.0, escape_xml(&names[i])));
+            } else {
+                let xs = &cols[j];
+                let ys = &cols[i];
+                let (xmin, xmax) = minmax(xs);
+                let (ymin, ymax) = minmax(ys);
+                let xr = if (xmax - xmin).abs() < 1e-10 { 1.0 } else { xmax - xmin };
+                let yr = if (ymax - ymin).abs() < 1e-10 { 1.0 } else { ymax - ymin };
+                let (inx, iny) = (cx0 + 4.0, cy0 + 4.0);
+                let (inw, inh) = (cwd - 8.0, chd - 8.0);
+                let m = xs.len().min(ys.len());
+                for k in 0..m {
+                    let px = inx + (xs[k] - xmin) / xr * inw;
+                    let py = iny + inh - (ys[k] - ymin) / yr * inh;
+                    let c = &point_cols[k % point_cols.len()];
+                    frag.push_str(&point_symbol(px, py, 2.0 * cex, pch, c));
+                }
+            }
+        }
+    }
+
+    with_device(|d| d.svg_body.push_str(&frag));
+    match crate::device::finish_plot("pairs.svg") {
+        Some(p) => Ok(rstr(&p)),
+        None => Ok(RVal::Null),
+    }
+}
+
 /// `hist(x, breaks=, main=)` — text + SVG histogram into the device.
 pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x: Vec<f64> = gv(a, 0).as_reals()?.into_iter().filter_map(|x| x).collect();
