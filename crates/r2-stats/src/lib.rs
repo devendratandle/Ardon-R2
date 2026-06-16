@@ -182,60 +182,79 @@ fn na_rm_flag(args: &[EvalArg]) -> bool {
 /// fallback path filters `None` out of the boxed form). Default `false`
 /// → NA propagates, matching R.
 macro_rules! reduce_builtin {
-    ($name:ident, $stats_fn:path, $col_method:ident) => {
+    ($name:ident, $stats_fn:path, $col_method:ident, $variadic:expr) => {
         pub fn $name(args: &[EvalArg]) -> Result<RVal, R2Err> {
             let na_rm = na_rm_flag(args);
-            // F.3 columnar fast path: skip the Reals Deref-into-Vec<Real>
-            // materialisation and reduce on the cached `&[f64]` directly.
-            if let Some(arg) = data_arg(args) {
-                if let RVal::Numeric(v, _) = &arg.value {
-                    let col = v.columnar();
-                    return Ok(RVal::Numeric(vec![col.$col_method(na_rm)].into(), Attrs::default()));
+            let data_args: Vec<&EvalArg> =
+                args.iter().filter(|a| a.name.as_deref() != Some("na.rm")).collect();
+            // Single data arg: F.3 columnar fast path on the cached &[f64].
+            if data_args.len() <= 1 {
+                if let Some(arg) = data_args.first() {
+                    if let RVal::Numeric(v, _) = &arg.value {
+                        let col = v.columnar();
+                        return Ok(RVal::Numeric(vec![col.$col_method(na_rm)].into(), Attrs::default()));
+                    }
                 }
+                let arg = data_args.first().map(|a| a.value.clone()).unwrap_or(RVal::Null);
+                let mut opts = coerce_reals(&arg)?;
+                if na_rm { opts.retain(|x| x.is_some()); }
+                return Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()));
             }
-            let arg = data_arg(args).map(|a| a.value.clone()).unwrap_or(RVal::Null);
-            let mut opts = coerce_reals(&arg)?;
+            // Multiple data args: variadic fns (sum/min/max) combine ALL of
+            // them; non-variadic (mean) use only the first, matching R.
+            let mut opts: Vec<Real> = Vec::new();
+            if $variadic { for a in &data_args { opts.extend(coerce_reals(&a.value)?); } }
+            else { opts = coerce_reals(&data_args[0].value)?; }
             if na_rm { opts.retain(|x| x.is_some()); }
             Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()))
         }
     };
 }
 
-reduce_builtin!(bi_sum,  sum,  sum);
-reduce_builtin!(bi_mean, mean, mean);
-reduce_builtin!(bi_min,  min,  min);
-reduce_builtin!(bi_max,  max,  max);
+reduce_builtin!(bi_sum,  sum,  sum,  true);
+reduce_builtin!(bi_mean, mean, mean, false);
+reduce_builtin!(bi_min,  min,  min,  true);
+reduce_builtin!(bi_max,  max,  max,  true);
 
 /// Var/Sd/Median don't have ColumnarF64 implementations yet — keep the
 /// legacy `Vec<Real>` path via the kernel `reduce` dispatcher. (Migrating
 /// these is a follow-up; their cost is dominated by the algorithm, not
 /// the boxed-form conversion.)
 macro_rules! reduce_builtin_legacy {
-    ($name:ident, $stats_fn:path) => {
+    ($name:ident, $stats_fn:path, $variadic:expr) => {
         pub fn $name(args: &[EvalArg]) -> Result<RVal, R2Err> {
             let na_rm = na_rm_flag(args);
-            if let Some(arg) = data_arg(args) {
-                if let RVal::Numeric(v, _) = &arg.value {
-                    if na_rm {
-                        let opts: Vec<Real> =
-                            v.as_vec().iter().copied().filter(|x| x.is_some()).collect();
-                        return Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()));
+            let data_args: Vec<&EvalArg> =
+                args.iter().filter(|a| a.name.as_deref() != Some("na.rm")).collect();
+            if data_args.len() <= 1 {
+                if let Some(arg) = data_args.first() {
+                    if let RVal::Numeric(v, _) = &arg.value {
+                        if na_rm {
+                            let opts: Vec<Real> =
+                                v.as_vec().iter().copied().filter(|x| x.is_some()).collect();
+                            return Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()));
+                        }
+                        return Ok(RVal::Numeric(vec![$stats_fn(v)].into(), Attrs::default()));
                     }
-                    return Ok(RVal::Numeric(vec![$stats_fn(v)].into(), Attrs::default()));
                 }
+                let arg = data_args.first().map(|a| a.value.clone()).unwrap_or(RVal::Null);
+                let mut opts = coerce_reals(&arg)?;
+                if na_rm { opts.retain(|x| x.is_some()); }
+                return Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()));
             }
-            let arg = data_arg(args).map(|a| a.value.clone()).unwrap_or(RVal::Null);
-            let mut opts = coerce_reals(&arg)?;
+            let mut opts: Vec<Real> = Vec::new();
+            if $variadic { for a in &data_args { opts.extend(coerce_reals(&a.value)?); } }
+            else { opts = coerce_reals(&data_args[0].value)?; }
             if na_rm { opts.retain(|x| x.is_some()); }
             Ok(RVal::Numeric(vec![$stats_fn(&opts)].into(), Attrs::default()))
         }
     };
 }
 
-reduce_builtin_legacy!(bi_prod,   prod);
-reduce_builtin_legacy!(bi_var,    var);
-reduce_builtin_legacy!(bi_sd,     sd);
-reduce_builtin_legacy!(bi_median, median);
+reduce_builtin_legacy!(bi_prod,   prod,   true);
+reduce_builtin_legacy!(bi_var,    var,    false);
+reduce_builtin_legacy!(bi_sd,     sd,     false);
+reduce_builtin_legacy!(bi_median, median, false);
 
 /// Returns the list of (name, function-pointer) pairs this crate exports.
 /// r2-engine's startup calls this and adds each entry to its registry.
