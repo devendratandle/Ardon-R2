@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 273 Built-in Functions
+# Ardon-R2 Function Reference — 288 Built-in Functions
 
-## Core (39)
+## Core (51)
 ```
 c(...)              Create vector: c(1,2,3)
 length(x)           Length of vector
@@ -42,6 +42,18 @@ attributes(x)       Get all attributes as a named list
 structure(x,...)    Return x with attributes set (class=, names=, dim=, …)
 inherits(x,what)    TRUE if `what` is in class(x)
 format(x,nsmall=)   Format values as character
+numeric(n)          Zero numeric vector of length n
+integer(n)          Zero integer vector
+character(n)        Empty-string vector
+logical(n)          FALSE vector
+as.matrix(x)        Coerce data.frame/vector to a matrix
+as.vector(x)        Strip attributes to a plain vector
+as.list(x)          Coerce to a list (df → list of columns)
+is.function(x)      Test if a function (closure)
+is.list(x)          Test if a list
+is.vector(x)        Test if an atomic vector
+is.element(el,set)  el %in% set
+tryCatch(expr,error=,finally=)  Function-form error handling
 ```
 
 ## Math (27)
@@ -201,7 +213,7 @@ union(x,y)          Set union
 intersect(x,y)      Set intersection
 ```
 
-## String Functions (16)
+## String Functions (17)
 ```
 paste(...,sep)      Concatenate with separator
 paste0(...)         Concatenate without separator
@@ -219,6 +231,7 @@ startsWith(x,pre)   Starts with prefix
 endsWith(x,suf)     Ends with suffix
 sprintf(fmt,...)    Formatted string
 regexpr(pat,x)      Find match position
+substring(x,first,last) Substring (vectorized first/last)
 ```
 
 ## Apply Family (9)
@@ -234,7 +247,7 @@ Filter(f,x)         Keep elements where f(x) is TRUE
 Map(f,...)          Apply f element-wise across vectors → list
 ```
 
-## I/O (11)
+## I/O (13)
 ```
 read.csv(file)      Read CSV file
 read.parquet(file)  Read a Parquet file as a data.frame (pure-Rust via the
@@ -250,6 +263,8 @@ save(file)          Save session
 load(file)          Load session
 file.exists(path)   Check if file exists
 list.files(path)    List directory
+readLines(path,n=)  Read text file lines into a character vector
+writeLines(text,con=) Write a character vector as lines (file or console)
 ```
 
 ## Graphics (23)

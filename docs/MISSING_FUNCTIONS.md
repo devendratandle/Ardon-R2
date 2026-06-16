@@ -50,18 +50,21 @@ Still missing (Tier 2 remainder):
 | `qbinom`, `qpois`, `qt`, `qchisq`, `qf` | quantile (inverse-CDF) forms |
 | `optimize`, `uniroot`, `integrate` | 1-D numerical methods (closure args) |
 
-## Tier 3 — I/O & misc convenience
+## Tier 3 — I/O & misc convenience — mostly DONE
+Implemented + verified: `readLines`, `writeLines`, `substring`, `tryCatch`,
+`as.matrix`/`as.vector`/`as.list`, `is.function`/`is.list`/`is.vector`/
+`is.element`, plus the `numeric`/`integer`/`character`/`logical`
+constructors. **Also fixed (engine):** functional `...` (dots) forwarding,
+variadic `sum`/`min`/`max`/`prod`, `[[`-read, `df[cols]` column select,
+iterate-over-df-columns.
+
+Still missing (Tier 3 remainder):
 | Function | Why |
 |---|---|
-| `readLines`, `writeLines` | plain-text file I/O |
-| `substring` | (have `substr`; `substring` differs subtly) |
 | `formatC`, `prettyNum`, `strrep`, `chartr` | string formatting |
 | `by`, `ave`, `within`, `stack` | split-apply on data frames |
-| `tryCatch` | function-form error handling (have try/catch syntax) |
 | `Sys.setenv` | (have `Sys.getenv`) |
-| `as.matrix`, `as.vector`, `as.list` | coercions |
-| `is.function`, `is.list`, `is.vector`, `is.element` | type predicates |
-| `match.arg`, `match.call` | argument helpers |
+| `match.arg`, `match.call`, `nargs` | argument helpers (`..N` lexer-split also pending) |
 
 ## Suggested build order
 Tier 1 first (most are small, pure-Rust builtins — biggest usability win
