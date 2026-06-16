@@ -487,6 +487,52 @@ pub(crate) fn bi_outer(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
     Ok(RVal::Matrix(Matrix::new(data, m, n)))
 }
 
+// ── Tier-3 argument / grouping helpers ─────────────────────────────
+
+pub(crate) fn bi_match_arg(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let arg = gv(a,0);
+    let choices: Vec<Arc<str>> = str_vec(&gv(a,1)).into_iter().flatten().collect();
+    let supplied = str_vec(&arg);
+    // No explicit value (NULL) or the whole `choices` vector passed → default.
+    if matches!(arg, RVal::Null) || supplied.len() != 1 {
+        return Ok(choices.first().map(|s| rstr(s)).unwrap_or(RVal::Null));
+    }
+    let t = supplied[0].clone().unwrap_or_else(|| Arc::from(""));
+    if let Some(c) = choices.iter().find(|c| c.as_ref() == t.as_ref()) { return Ok(rstr(c)); }
+    let pref: Vec<&Arc<str>> = choices.iter().filter(|c| c.starts_with(t.as_ref())).collect();
+    if pref.len() == 1 { return Ok(rstr(pref[0])); }
+    err!(Runtime, "'arg' should be one of the supplied choices")
+}
+pub(crate) fn bi_ave(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let x: Vec<f64> = e.as_reals(&gv(a,0))?.into_iter().flatten().collect();
+    let n = x.len();
+    let pos: Vec<&EvalArg> = a.iter().filter(|e| e.name.is_none()).collect();
+    let g: Vec<Arc<str>> = if pos.len() >= 2 {
+        str_vec(&pos[1].value).into_iter().map(|o| o.unwrap_or_else(|| Arc::from("NA"))).collect()
+    } else { vec![Arc::from(""); n.max(1)] };
+    let fun = gn(a, "FUN");
+    let mut groups: HashMap<Arc<str>, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let k = g[i % g.len().max(1)].clone();
+        groups.entry(k).or_default().push(i);
+    }
+    let mut out = vec![f64::NAN; n];
+    for idxs in groups.values() {
+        let vals: Vec<f64> = idxs.iter().map(|&i| x[i]).collect();
+        let stat = match &fun {
+            Some(f) => e.call_fn(f, &[EvalArg { name: None, value: rnums(&vals) }], env)?
+                .scalar_f64().ok().flatten().unwrap_or(f64::NAN),
+            None => vals.iter().sum::<f64>() / (vals.len().max(1) as f64),
+        };
+        for &i in idxs { out[i] = stat; }
+    }
+    Ok(RVal::Numeric(out.into_iter().map(Some).collect::<Vec<_>>().into(), Attrs::default()))
+}
+pub(crate) fn bi_nargs(_: &mut Engine, _a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let key: Arc<str> = Arc::from(".nargs");
+    Ok(env.lookup(&key).cloned().unwrap_or_else(|| rint(0)))
+}
+
 // ── Tier-2 1-D numerical methods (function args) ───────────────────
 
 fn interval_bounds(e: &mut Engine, a: &[EvalArg]) -> (f64, f64) {
