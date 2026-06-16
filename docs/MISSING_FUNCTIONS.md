@@ -36,19 +36,19 @@ fail outright.
 | `attr`, `attributes`, `structure` | generic attribute access / construction |
 | `inherits(x, class)` | class predicate used everywhere in S3 code |
 
-## Tier 2 — Common math / stats
+## Tier 2 — Common math / stats — mostly DONE
+Implemented + verified: `factorial`, `choose`, `gamma`, `lgamma`, `beta`,
+`signif`, `outer`, `combn`, `mad`, `fivenum`; distributions `dexp`/`pexp`/
+`qexp`, `dbinom`/`pbinom`, `dpois`/`ppois`, `dt`/`pt`, `dchisq`/`pchisq`,
+`pf` (verified against R to ~1e-6).
+
+Still missing (Tier 2 remainder):
 | Function | Why |
 |---|---|
-| `factorial`, `choose`, `gamma`, `lgamma`, `beta` | combinatorics / stats |
-| `signif(x, digits)` | significant-figure rounding |
-| `outer(x, y, FUN)` | outer product / grid evaluation |
-| `combn(x, m)` | combinations |
 | `density(x)`, `ecdf(x)` | distribution estimation + plotting |
-| `mad`, `fivenum` | robust spread / summary |
-| `rexp`, `dexp/pexp/qexp` | exponential distribution |
-| `dbinom/pbinom/qbinom`, `dpois/ppois/qpois` | discrete distributions |
-| `dt/pt/qt`, `dchisq/pchisq`, `df/pf` | test distributions (d/p/q forms) |
-| `optimize`, `uniroot`, `integrate` | 1-D numerical methods |
+| `rexp(n, rate)` | exponential RNG (have d/p/q; needs the rng module) |
+| `qbinom`, `qpois`, `qt`, `qchisq`, `qf` | quantile (inverse-CDF) forms |
+| `optimize`, `uniroot`, `integrate` | 1-D numerical methods (closure args) |
 
 ## Tier 3 — I/O & misc convenience
 | Function | Why |

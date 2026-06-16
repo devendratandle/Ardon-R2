@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 216 Built-in Functions
+# Ardon-R2 Function Reference — 273 Built-in Functions
 
-## Core (25)
+## Core (39)
 ```
 c(...)              Create vector: c(1,2,3)
 length(x)           Length of vector
@@ -28,9 +28,23 @@ is.matrix(x)        Test if matrix
 TRUE/FALSE/T/F      Logical constants
 NA                  Missing value
 NULL                Null value
+seq_len(n)          1:n (length-safe; empty when n=0)
+seq_along(x)        1:length(x)
+unlist(x)           Flatten a list to an atomic vector
+setNames(x,nm)      Return x with names set
+append(x,vals,after) Insert values into a vector
+invisible(x)        Return x without auto-printing
+switch(expr,...)    Select a branch by name or position
+with(data,expr)     Evaluate expr in data's column/element scope
+stopifnot(...)      Error unless all arguments are TRUE
+attr(x,which)       Get one attribute (names/class/dim/custom)
+attributes(x)       Get all attributes as a named list
+structure(x,...)    Return x with attributes set (class=, names=, dim=, …)
+inherits(x,what)    TRUE if `what` is in class(x)
+format(x,nsmall=)   Format values as character
 ```
 
-## Math (18)
+## Math (27)
 ```
 abs(x)      Absolute value          sqrt(x)     Square root
 round(x,n)  Round to n digits       log(x)      Natural log
@@ -41,9 +55,15 @@ cummin(x)   Cumulative min          diff(x)     Differences
 prod(x)     Product of all          range(x)    Min and max
 max(x)      Maximum                 min(x)      Minimum
 sum(x)      Sum of all              sign(x)     Sign (-1,0,1)
+signif(x,d) Round to d significant figures
+pmin(...)   Parallel (element-wise) minimum of several vectors
+pmax(...)   Parallel (element-wise) maximum
+factorial(x) x!  (via gamma)        gamma(x)    Γ(x)
+lgamma(x)   log Γ(x)                beta(a,b)   Beta function
+choose(n,k) Binomial coefficient    combn(x,m)  m-combinations → matrix
 ```
 
-## Statistics (24)
+## Statistics (38)
 ```
 mean(x)         Arithmetic mean
 sd(x)           Standard deviation
@@ -98,6 +118,14 @@ pnorm(x)        Normal CDF
 qnorm(p)        Normal quantile
 set.seed(n)     Set random seed
 sample(x,n)     Random sample
+mad(x)          Median absolute deviation (constant=1.4826)
+fivenum(x)      Tukey's five-number summary
+dexp/pexp/qexp(x, rate=)         Exponential density / CDF / quantile
+dbinom/pbinom(x, size, prob)     Binomial pmf / CDF
+dpois/ppois(x, lambda)           Poisson pmf / CDF
+dt/pt(x, df)                     Student-t density / CDF
+dchisq/pchisq(x, df)             Chi-squared density / CDF
+pf(q, df1, df2)                  F-distribution CDF
 ```
 
 ## Machine Learning (12)
@@ -137,7 +165,7 @@ cv(x,y,model,k)         K-fold cross-validation
 confusion.matrix(pred,actual) Confusion matrix + F1
 ```
 
-## Data Handling (30)
+## Data Handling (35)
 ```
 head(x,n)           First n rows
 tail(x,n)           Last n rows
@@ -166,6 +194,11 @@ nlevels(f)          Number of levels
 colnames(x)         Column names
 rownames(x)         Row names
 data(name)          Load built-in dataset
+cut(x,breaks)       Bin a numeric into interval factors
+split(x,f)          Split a vector into a list grouped by factor f
+setdiff(x,y)        Set difference
+union(x,y)          Set union
+intersect(x,y)      Set intersection
 ```
 
 ## String Functions (16)
@@ -188,7 +221,7 @@ sprintf(fmt,...)    Formatted string
 regexpr(pat,x)      Find match position
 ```
 
-## Apply Family (6)
+## Apply Family (9)
 ```
 sapply(x,fun)       Apply and simplify
 lapply(x,fun)       Apply and return list
@@ -196,6 +229,9 @@ apply(x,margin,fun) Apply over matrix margins
 tapply(x,idx,fun)   Apply by groups
 aggregate(x,by,fun) Aggregate by groups; formula form: aggregate(cbind(y1,y2) ~ g1+g2, data=df, FUN)
 do.call(fun,args)   Call function with arg list
+Reduce(f,x,init)    Left-fold a binary function over x
+Filter(f,x)         Keep elements where f(x) is TRUE
+Map(f,...)          Apply f element-wise across vectors → list
 ```
 
 ## I/O (11)
@@ -216,16 +252,27 @@ file.exists(path)   Check if file exists
 list.files(path)    List directory
 ```
 
-## Graphics (12)
+## Graphics (23)
 ```
-plot(x,y)         Scatter plot (SVG, draws into in-memory device)
+plot(x,y)         Scatter/line plot; col=/cex=/pch=/type=/lwd= inline params
 hist(x)           Histogram
 boxplot(x)        Box-and-whisker
 barplot(x)        Bar chart
-lines(x,y)        Add lines to plot (errors if no plot is open)
-points(x,y)       Add points
+pairs(df)         Scatterplot matrix of a data.frame / matrix
+matplot(x,y)      Plot each matrix column as its own series
+pie(x)            Pie chart
+curve(expr,from,to) Plot a function/expression in x (add=TRUE to overlay)
+lines(x,y)        Add a line (data coords; errors if no plot is open)
+points(x,y)       Add points (data coords; col/pch/cex)
 abline(a,b)       Add reference line (also abline(h=) / abline(v=))
+text(x,y,labels)  Add text labels at data coordinates (pos=)
+title(main=,...)  Add main/sub/xlab/ylab to the current plot
+axis(side,at=)    Draw an axis (side 1=bottom,2=left,3=top,4=right)
+rect(x1,y1,x2,y2) Draw rectangle(s) in data coordinates
 legend(...)       Add legend
+pdf(file,w,h)     Open a vector-PDF file device (dev.off() writes it)
+png(file,w,h)     Open a raster-PNG file device
+svg(file,w,h)     Open a vector-SVG file device
 par(...)          Get or set graphical parameters
                   par() — return all current params as a named list
                   par("col") — return single param
@@ -276,12 +323,13 @@ readline(prompt)    Block until stdin line is entered; returns character.
                       invisible(readline("Press Enter to continue..."))
 ```
 
-## Operators (20)
+## Operators (21)
 ```
 <-  =           Assignment
 +  -  *  /      Arithmetic
 ^  %%  %/%      Power, modulo, integer division
 %*%             Matrix multiply
+%in%            Membership test (x %in% y → logical); any %name% infix works
 ~               Formula
 |>              Pipe
 ::              Package access
