@@ -487,6 +487,73 @@ pub(crate) fn bi_outer(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
     Ok(RVal::Matrix(Matrix::new(data, m, n)))
 }
 
+// ── Tier-3 constructors / coercions / predicates ───────────────────
+
+pub(crate) fn bi_numeric(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let n = e.scalar_f64(&gv(a,0)).ok().flatten().unwrap_or(0.0).max(0.0) as usize;
+    Ok(RVal::Numeric(vec![Some(0.0); n].into(), Attrs::default()))
+}
+pub(crate) fn bi_integer(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let n = e.scalar_f64(&gv(a,0)).ok().flatten().unwrap_or(0.0).max(0.0) as usize;
+    Ok(RVal::Integer(vec![Some(0); n].into(), Attrs::default()))
+}
+pub(crate) fn bi_character(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let n = e.scalar_f64(&gv(a,0)).ok().flatten().unwrap_or(0.0).max(0.0) as usize;
+    Ok(RVal::Character(vec![Some(Arc::from("")); n], Attrs::default()))
+}
+pub(crate) fn bi_logical(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let n = e.scalar_f64(&gv(a,0)).ok().flatten().unwrap_or(0.0).max(0.0) as usize;
+    Ok(RVal::Logical(vec![Some(false); n].into(), Attrs::default()))
+}
+pub(crate) fn bi_as_matrix(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match &gv(a,0) {
+        RVal::Matrix(m) => Ok(RVal::Matrix(m.clone())),
+        RVal::DataFrame(df) => {
+            let nrow = df.columns.first().map(|(_, v)| rval_length(v)).unwrap_or(0);
+            let mut data = Vec::new();
+            let mut names = Vec::new();
+            let mut ncol = 0;
+            for (nm, v) in &df.columns {
+                if let Ok(r) = v.as_reals() {
+                    data.extend(r.into_iter().map(|o| o.unwrap_or(f64::NAN)));
+                    names.push(nm.clone());
+                    ncol += 1;
+                }
+            }
+            let mut m = Matrix::new(data, nrow, ncol);
+            m.col_names = Some(names);
+            Ok(RVal::Matrix(m))
+        }
+        other => {
+            let r = e.as_reals(other)?;
+            let n = r.len();
+            Ok(RVal::Matrix(Matrix::new(r.into_iter().map(|o| o.unwrap_or(f64::NAN)).collect(), n, 1)))
+        }
+    }
+}
+pub(crate) fn bi_as_vector(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(match gv(a,0) {
+        RVal::Matrix(m) => RVal::Numeric(m.data.iter().map(|x| Some(*x)).collect::<Vec<_>>().into(), Attrs::default()),
+        RVal::Numeric(v, _) => RVal::Numeric(v, Attrs::default()),
+        RVal::Integer(v, _) => RVal::Integer(v, Attrs::default()),
+        RVal::Character(v, _) => RVal::Character(v, Attrs::default()),
+        RVal::Logical(v, _) => RVal::Logical(v, Attrs::default()),
+        other => other,
+    })
+}
+pub(crate) fn bi_as_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(match gv(a,0) {
+        RVal::List(items) => RVal::List(items),
+        RVal::DataFrame(df) => RVal::List(df.columns.iter().map(|(n, v)| (Some(n.clone()), v.clone())).collect()),
+        other => RVal::List(elements(&other).into_iter().map(|v| (None, v)).collect()),
+    })
+}
+pub(crate) fn bi_is_function(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Closure(_)))) }
+pub(crate) fn bi_is_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::List(_)))) }
+pub(crate) fn bi_is_vector(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(rbool(matches!(gv(a,0), RVal::Numeric(..) | RVal::Integer(..) | RVal::Character(..) | RVal::Logical(..))))
+}
+
 // ── Tier-2 math / special functions ────────────────────────────────
 
 /// Γ(x) via lgamma, with Euler reflection for x ≤ 0.
