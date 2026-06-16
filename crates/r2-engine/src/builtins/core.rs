@@ -487,6 +487,77 @@ pub(crate) fn bi_outer(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
     Ok(RVal::Matrix(Matrix::new(data, m, n)))
 }
 
+// ── Tier-2 1-D numerical methods (function args) ───────────────────
+
+fn interval_bounds(e: &mut Engine, a: &[EvalArg]) -> (f64, f64) {
+    if let Some(iv) = gn(a, "interval") {
+        if let Ok(r) = iv.as_reals() {
+            let v: Vec<f64> = r.into_iter().flatten().collect();
+            if v.len() >= 2 { return (v[0], v[1]); }
+        }
+    }
+    let pos: Vec<&EvalArg> = a.iter().filter(|x| x.name.is_none()).collect();
+    let lo = gn(a,"lower").and_then(|v| e.scalar_f64(&v).ok().flatten())
+        .or_else(|| pos.get(1).and_then(|x| e.scalar_f64(&x.value).ok().flatten())).unwrap_or(0.0);
+    let hi = gn(a,"upper").and_then(|v| e.scalar_f64(&v).ok().flatten())
+        .or_else(|| pos.get(2).and_then(|x| e.scalar_f64(&x.value).ok().flatten())).unwrap_or(1.0);
+    (lo, hi)
+}
+fn eval_fn1(e: &mut Engine, f: &RVal, x: f64, env: &EnvRef) -> f64 {
+    e.call_fn(f, &[EvalArg { name: None, value: rnum(x) }], env)
+        .ok().and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(f64::NAN)
+}
+pub(crate) fn bi_uniroot(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let f = gv(a,0);
+    let (mut lo, mut hi) = interval_bounds(e, a);
+    let mut flo = eval_fn1(e, &f, lo, env);
+    for _ in 0..200 {
+        let m = 0.5 * (lo + hi);
+        let fm = eval_fn1(e, &f, m, env);
+        if flo * fm <= 0.0 { hi = m; } else { lo = m; flo = fm; }
+    }
+    let root = 0.5 * (lo + hi);
+    let froot = eval_fn1(e, &f, root, env);
+    Ok(RVal::List(vec![(Some(Arc::from("root")), rnum(root)), (Some(Arc::from("f.root")), rnum(froot))]))
+}
+pub(crate) fn bi_integrate(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let f = gv(a,0);
+    let (lo, hi) = interval_bounds(e, a);
+    let nseg = 1000usize;
+    let h = (hi - lo) / nseg as f64;
+    let mut s = 0.0;
+    for i in 0..=nseg {
+        let x = lo + h * i as f64;
+        let fx = eval_fn1(e, &f, x, env);
+        let w = if i == 0 || i == nseg { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
+        s += w * fx;
+    }
+    Ok(RVal::List(vec![(Some(Arc::from("value")), rnum(s * h / 3.0))]))
+}
+pub(crate) fn bi_optimize(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let f = gv(a,0);
+    let (mut lo, mut hi) = interval_bounds(e, a);
+    let maximum = match gn(a,"maximum") {
+        Some(RVal::Logical(l, _)) => matches!(l.as_vec().first(), Some(Some(true))),
+        Some(other) => e.scalar_f64(&other).ok().flatten().map(|x| x != 0.0).unwrap_or(false),
+        None => false,
+    };
+    let gr = (5f64.sqrt() - 1.0) / 2.0;
+    let mut c = hi - gr * (hi - lo);
+    let mut d = lo + gr * (hi - lo);
+    let mut fc = eval_fn1(e, &f, c, env);
+    let mut fd = eval_fn1(e, &f, d, env);
+    for _ in 0..200 {
+        let c_better = if maximum { fc > fd } else { fc < fd };
+        if c_better { hi = d; d = c; fd = fc; c = hi - gr * (hi - lo); fc = eval_fn1(e, &f, c, env); }
+        else { lo = c; c = d; fc = fd; d = lo + gr * (hi - lo); fd = eval_fn1(e, &f, d, env); }
+    }
+    let xstar = 0.5 * (lo + hi);
+    let obj = eval_fn1(e, &f, xstar, env);
+    let key = if maximum { "maximum" } else { "minimum" };
+    Ok(RVal::List(vec![(Some(Arc::from(key)), rnum(xstar)), (Some(Arc::from("objective")), rnum(obj))]))
+}
+
 // ── Tier-3 string / I/O ────────────────────────────────────────────
 
 pub(crate) fn bi_substring(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

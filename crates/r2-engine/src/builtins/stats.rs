@@ -132,6 +132,13 @@ pub(crate) fn bi_pt(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 pub(crate) fn bi_dchisq(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_dchisq(a) }
 pub(crate) fn bi_pchisq(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pchisq(a) }
 pub(crate) fn bi_pf(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_pf(a) }
+pub(crate) fn bi_rexp(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::rng::bi_rexp(a) }
+pub(crate) fn bi_qt(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_qt(a) }
+pub(crate) fn bi_qchisq(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_qchisq(a) }
+pub(crate) fn bi_qf(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_qf(a) }
+pub(crate) fn bi_qbinom(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_qbinom(a) }
+pub(crate) fn bi_qpois(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_qpois(a) }
+pub(crate) fn bi_density(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_stats::dist::bi_density(a) }
 
 // ─── models / hypothesis tests / time series ────────────────────────
 pub(crate) fn bi_lm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

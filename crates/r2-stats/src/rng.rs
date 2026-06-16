@@ -132,6 +132,19 @@ pub fn bi_runif(a: &[EvalArg]) -> Result<RVal, R2Err> {
     Ok(RVal::Numeric(r2_types::Reals::from_dense_f64(results), Attrs::default()))
 }
 
+pub fn bi_rexp(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let n = resolve_n(a, 1)?;
+    let rate = arg_named(a, "rate").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(1.0);
+    check_alloc(n, 8)?;
+    let mut results: Vec<f64> = Vec::with_capacity(n);
+    for _ in 0..n {
+        // Inverse-CDF: X = -ln(U)/rate.
+        let u = next_random().max(1e-15);
+        results.push(-u.ln() / rate);
+    }
+    Ok(RVal::Numeric(r2_types::Reals::from_dense_f64(results), Attrs::default()))
+}
+
 pub fn bi_sample(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let nth = a.get(1).map(|x| x.value.clone()).unwrap_or(RVal::Null);

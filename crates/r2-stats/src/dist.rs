@@ -9,7 +9,7 @@
 //! `r2_ml::tree::SEED_STATE` and currently live in r2-engine pending
 //! a separate decision on where the RNG primitive should live.
 
-use r2_types::{Attrs, EvalArg, R2Err, RVal, Real};
+use r2_types::{Attrs, ErrKind, EvalArg, R2Err, RVal, Real};
 
 #[inline]
 fn first(a: &[EvalArg]) -> RVal { a.first().map(|x| x.value.clone()).unwrap_or(RVal::Null) }
@@ -192,6 +192,80 @@ pub fn bi_pchisq(a: &[EvalArg]) -> Result<RVal, R2Err> { let df = param(a,"df",1
 pub fn bi_pf(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let d1 = param(a,"df1",1,1.0); let d2 = param(a,"df2",2,1.0);
     map_x(a, move |x| if x <= 0.0 { 0.0 } else { incomplete_beta(d1 / 2.0, d2 / 2.0, d1 * x / (d1 * x + d2)) })
+}
+
+/// Invert a monotone CDF on `[lo, hi]` by bisection (continuous quantiles).
+fn quantile_bisect(p: f64, mut lo: f64, mut hi: f64, cdf: impl Fn(f64) -> f64) -> f64 {
+    if p <= 0.0 { return lo; }
+    if p >= 1.0 { return hi; }
+    for _ in 0..200 {
+        let m = 0.5 * (lo + hi);
+        if cdf(m) < p { lo = m; } else { hi = m; }
+    }
+    0.5 * (lo + hi)
+}
+pub fn bi_qt(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let df = param(a,"df",1,1.0);
+    map_x(a, move |p| quantile_bisect(p, -1.0e7, 1.0e7, |x| t_cdf(x, df)))
+}
+pub fn bi_qchisq(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let df = param(a,"df",1,1.0);
+    map_x(a, move |p| quantile_bisect(p, 0.0, 1.0e7, |x| chi_sq_cdf(x, df)))
+}
+pub fn bi_qf(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let d1 = param(a,"df1",1,1.0); let d2 = param(a,"df2",2,1.0);
+    map_x(a, move |p| quantile_bisect(p, 0.0, 1.0e7, |x|
+        if x <= 0.0 { 0.0 } else { incomplete_beta(d1 / 2.0, d2 / 2.0, d1 * x / (d1 * x + d2)) }))
+}
+pub fn bi_qbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let size = param(a,"size",1,0.0); let pb = param(a,"prob",2,0.5);
+    map_x(a, move |q| {
+        if q <= 0.0 { return 0.0; }
+        if q >= 1.0 { return size; }
+        let (mut cum, mut k) = (0.0, 0.0);
+        while k <= size { cum += ln_binom(size, k, pb).exp(); if cum >= q { return k; } k += 1.0; }
+        size
+    })
+}
+pub fn bi_qpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let lam = param(a,"lambda",1,1.0);
+    map_x(a, move |q| {
+        if q <= 0.0 { return 0.0; }
+        let (mut cum, mut k) = (0.0, 0.0);
+        while k < 1.0e7 { cum += (xlogy(k, lam) - lam - ln_gamma(k + 1.0)).exp(); if cum >= q { return k; } k += 1.0; }
+        k
+    })
+}
+
+/// `density(x)` — Gaussian kernel density estimate on a 512-point grid.
+/// Returns a list with `$x` and `$y` (R's density object, simplified).
+pub fn bi_density(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    use std::sync::Arc;
+    let x: Vec<f64> = first(a).as_reals()?.into_iter().flatten().collect();
+    if x.is_empty() {
+        return Err(R2Err { msg: "density: need a non-empty numeric vector".into(), kind: ErrKind::Runtime });
+    }
+    let n = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / n;
+    let sd = (x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0)).sqrt();
+    let h = (0.9 * sd * n.powf(-0.2)).max(1e-6); // Silverman's rule of thumb
+    let xmin = x.iter().cloned().fold(f64::INFINITY, f64::min);
+    let xmax = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let (lo, hi) = (xmin - 3.0 * h, xmax + 3.0 * h);
+    let ng = 512usize;
+    let norm = 1.0 / (n * h * (2.0 * std::f64::consts::PI).sqrt());
+    let mut gx = Vec::with_capacity(ng);
+    let mut gy = Vec::with_capacity(ng);
+    for i in 0..ng {
+        let xi = lo + (hi - lo) * (i as f64) / ((ng - 1) as f64);
+        let dens: f64 = x.iter().map(|&xj| { let z = (xi - xj) / h; (-0.5 * z * z).exp() }).sum::<f64>() * norm;
+        gx.push(Some(xi));
+        gy.push(Some(dens));
+    }
+    Ok(RVal::List(vec![
+        (Some(Arc::from("x")), RVal::Numeric(gx.into(), Attrs::default())),
+        (Some(Arc::from("y")), RVal::Numeric(gy.into(), Attrs::default())),
+    ]))
 }
 
 #[cfg(test)]
