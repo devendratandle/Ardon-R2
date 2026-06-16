@@ -444,6 +444,9 @@ impl Engine {
                 else if let Some(val) = self.global_env.lookup(name) { Ok(val.clone()) }
                 // 4. Check builtins
                 else if self.registry.resolve(name.as_ref()).is_some() { Ok(RVal::BuiltinFn(name.clone())) }
+                // ..1, ..2, … — the N-th element of the captured `...`.
+                else if let Some(v) = name.strip_prefix("..").and_then(|s| s.parse::<usize>().ok())
+                    .and_then(|n| match self.lookup_dots(env) { Some(RVal::List(d)) => d.get(n.wrapping_sub(1)).map(|(_, v)| v.clone()), _ => None }) { Ok(v) }
                 else { err!(Runtime, "object '{}' not found", name) }
             }
             Expr::Assign { target, value } => {
@@ -917,9 +920,19 @@ impl Engine {
                         }
                     }
                 }
-                // Normal call: evaluate all arguments
+                // Normal call: evaluate all arguments. `...` in the argument
+                // list splices the caller's captured dots into this call.
                 let f = self.eval_in(func, env)?;
-                let mut ea = Vec::new(); for a in args { ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? }); }
+                let mut ea = Vec::new();
+                for a in args {
+                    if matches!(a.value, Expr::Dots) {
+                        if let Some(RVal::List(dots)) = self.lookup_dots(env) {
+                            for (nm, val) in dots { ea.push(EvalArg { name: nm, value: val }); }
+                        }
+                    } else {
+                        ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? });
+                    }
+                }
                 self.call_fn(&f, &ea, env)
             }
             Expr::Pipe { lhs, rhs } => {
@@ -999,7 +1012,7 @@ impl Engine {
             Expr::Return(v) => { let val = self.eval_in(v, env)?; Err(R2Err { msg: String::new(), kind: ErrKind::CtrlReturn(Box::new(val)) }) }
             Expr::Break => Err(R2Err { msg: String::new(), kind: ErrKind::CtrlBreak }),
             Expr::Next => Err(R2Err { msg: String::new(), kind: ErrKind::CtrlNext }),
-            Expr::Dots => Ok(RVal::Null),
+            Expr::Dots => Ok(self.lookup_dots(env).unwrap_or(RVal::Null)),
             _ => err!(Runtime, "cannot evaluate expression"),
         }
     }
@@ -1164,7 +1177,38 @@ impl Engine {
                 // ── Fallback: tree-walking interpreter (existing path) ──────
                 let mut ce = Env::new_child(cl.env.clone(), None);
                 let m = Arc::make_mut(&mut ce);
-                for (i, p) in cl.params.iter().enumerate() { let v = self.get_arg(args, i, &p.name).or_else(|| p.default.as_ref().and_then(|d| self.eval_in(d, env).ok())).unwrap_or(RVal::Null); m.bindings.insert(p.name.clone(), v); }
+                // R-style argument matching with `...`: named args bind to
+                // formals by name; positional args fill the formals before
+                // `...`; everything left over is collected into `...` (bound
+                // as a List of (name, value) under the key "...").
+                let dots_pos = cl.params.iter().position(|p| p.dots);
+                let mut used = vec![false; args.len()];
+                for p in cl.params.iter().filter(|p| !p.dots) {
+                    if let Some(j) = (0..args.len()).find(|&j| !used[j] && args[j].name.as_deref() == Some(p.name.as_ref())) {
+                        used[j] = true;
+                        m.bindings.insert(p.name.clone(), args[j].value.clone());
+                    }
+                }
+                let before = dots_pos.unwrap_or(cl.params.len());
+                let mut pos = 0usize;
+                for (i, p) in cl.params.iter().enumerate() {
+                    if p.dots || i >= before || m.bindings.contains_key(p.name.as_ref()) { continue; }
+                    while pos < args.len() && (used[pos] || args[pos].name.is_some()) { pos += 1; }
+                    if pos < args.len() { used[pos] = true; m.bindings.insert(p.name.clone(), args[pos].value.clone()); pos += 1; }
+                }
+                if dots_pos.is_some() {
+                    let dots: Vec<(Option<Arc<str>>, RVal)> = (0..args.len())
+                        .filter(|&j| !used[j])
+                        .map(|j| (args[j].name.clone(), args[j].value.clone()))
+                        .collect();
+                    m.bindings.insert(Arc::from("..."), RVal::List(dots));
+                }
+                for p in cl.params.iter().filter(|p| !p.dots) {
+                    if !m.bindings.contains_key(p.name.as_ref()) {
+                        let v = p.default.as_ref().and_then(|d| self.eval_in(d, env).ok()).unwrap_or(RVal::Null);
+                        m.bindings.insert(p.name.clone(), v);
+                    }
+                }
                 let func_env = Arc::new(m.clone());
                 self.local_scopes.push(HashMap::new());
                 let result = match self.eval_in(&cl.body, &func_env) { Err(R2Err { kind: ErrKind::CtrlReturn(v), .. }) => Ok(*v), r => r };
@@ -1177,6 +1221,15 @@ impl Engine {
     }
     fn get_arg(&self, args: &[EvalArg], pos: usize, name: &str) -> Option<RVal> {
         args.iter().find(|a| a.name.as_ref().map(|n| n.as_ref()) == Some(name)).map(|a| a.value.clone()).or_else(|| args.get(pos).map(|a| a.value.clone()))
+    }
+    /// Resolve the captured `...` (a List of (name,value)) in the current
+    /// scope, if any. Used to expand `...` / `..N` in function bodies.
+    fn lookup_dots(&self, env: &EnvRef) -> Option<RVal> {
+        for scope in self.local_scopes.iter().rev() {
+            if let Some(v) = scope.get("...") { return Some(v.clone()); }
+        }
+        let key: Arc<str> = Arc::from("...");
+        env.lookup(&key).cloned()
     }
 
     fn binary_op(&mut self, op: BinOp, lhs: &RVal, rhs: &RVal) -> Result<RVal, R2Err> {
