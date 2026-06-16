@@ -1574,6 +1574,9 @@ impl RVal {
             RVal::Numeric(v, _) => Ok(v.iter().map(|x| RVal::Numeric(vec![*x].into(), Attrs::default())).collect()),
             RVal::Character(v, _) => Ok(v.iter().map(|x| RVal::Character(vec![x.clone()], Attrs::default())).collect()),
             RVal::List(v) => Ok(v.iter().map(|(_, val)| val.clone()).collect()),
+            // A data.frame iterates over its COLUMNS (R's list-like semantics),
+            // so lapply/sapply/Map fold over columns, not cells.
+            RVal::DataFrame(df) => Ok(df.columns.iter().map(|(_, val)| val.clone()).collect()),
             _ => Err(R2Err {
                 msg: format!("cannot iterate over {}", self.type_name()),
                 kind: ErrKind::Runtime,

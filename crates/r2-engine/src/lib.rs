@@ -930,6 +930,7 @@ impl Engine {
                 }
             }
             Expr::Index { object, indices } => { let obj = self.eval_in(object, env)?; let mut ei = Vec::new(); for i in indices { ei.push(match i { Some(e) => Some(self.eval_in(e, env)?), None => None }); } self.index_obj(&obj, &ei) }
+            Expr::DblIndex { object, index } => { let obj = self.eval_in(object, env)?; let idx = self.eval_in(index, env)?; self.dbl_index(&obj, &idx) }
             Expr::Dollar { object, field } => { let obj = self.eval_in(object, env)?; self.dollar(&obj, field) }
             Expr::Namespace { pkg, name } => {
                 // pkg::func() — direct namespace access, bypasses search order
@@ -1397,6 +1398,12 @@ impl Engine {
                     }
                     return Ok(RVal::Numeric(out.into(), Attrs::default()));
                 }
+                // Single-bracket on a data.frame selects COLUMNS (by name,
+                // position, or logical mask) and returns a data.frame — R's
+                // `df[cols]` semantics, distinct from `df[[col]]`.
+                if let RVal::DataFrame(df) = obj {
+                    return self.df_select_cols(df, i);
+                }
                 return self.index_1d(obj, i);
             }
         }
@@ -1405,6 +1412,65 @@ impl Engine {
             if let RVal::Matrix(m) = obj { return self.index_matrix(m, &idx[0], &idx[1]); }
         }
         err!(Runtime, "invalid indexing")
+    }
+    /// `df[cols]` — select columns by name / position / logical mask,
+    /// returning a data.frame.
+    fn df_select_cols(&self, df: &DataFrame, idx: &RVal) -> Result<RVal, R2Err> {
+        let cols: Vec<(Arc<str>, RVal)> = match idx {
+            RVal::Character(names, _) => {
+                let mut out = Vec::new();
+                for nm in names.iter().flatten() {
+                    match df.get_col(nm.as_ref()) {
+                        Some(v) => out.push((nm.clone(), v.clone())),
+                        None => return err!(Runtime, "undefined columns selected: '{}'", nm),
+                    }
+                }
+                out
+            }
+            RVal::Logical(mask, _) => df.columns.iter().enumerate()
+                .filter(|(i, _)| mask.get(*i).and_then(|m| *m) == Some(true))
+                .map(|(_, c)| c.clone()).collect(),
+            _ => {
+                let pos = self.as_reals(idx)?;
+                pos.iter().filter_map(|p| p.and_then(|v| {
+                    let i = v as usize;
+                    if i >= 1 { df.columns.get(i - 1).cloned() } else { None }
+                })).collect()
+            }
+        };
+        Ok(RVal::DataFrame(DataFrame { columns: cols, row_names: df.row_names.clone() }))
+    }
+    /// `x[[i]]` — extract a single list/data.frame element (by name or
+    /// position) or a single atomic element.
+    fn dbl_index(&self, obj: &RVal, idx: &RVal) -> Result<RVal, R2Err> {
+        match obj {
+            RVal::List(items) => {
+                if let RVal::Character(cv, _) = idx {
+                    if let Some(Some(name)) = cv.first() {
+                        for (n, v) in items { if n.as_deref() == Some(name.as_ref()) { return Ok(v.clone()); } }
+                        return err!(Runtime, "subscript out of bounds: '{}'", name);
+                    }
+                }
+                let i = self.as_reals(idx)?.first().copied().flatten().unwrap_or(0.0) as usize;
+                items.get(i.wrapping_sub(1)).map(|(_, v)| v.clone())
+                    .ok_or_else(|| R2Err { msg: "subscript out of bounds".into(), kind: ErrKind::Runtime })
+            }
+            RVal::DataFrame(df) => {
+                if let RVal::Character(cv, _) = idx {
+                    if let Some(Some(name)) = cv.first() {
+                        return df.get_col(name.as_ref()).cloned()
+                            .ok_or_else(|| R2Err { msg: format!("undefined column '{}'", name), kind: ErrKind::Runtime });
+                    }
+                }
+                let i = self.as_reals(idx)?.first().copied().flatten().unwrap_or(0.0) as usize;
+                df.columns.get(i.wrapping_sub(1)).map(|(_, v)| v.clone())
+                    .ok_or_else(|| R2Err { msg: "subscript out of bounds".into(), kind: ErrKind::Runtime })
+            }
+            _ => {
+                let i = self.as_reals(idx)?.first().copied().flatten().unwrap_or(0.0);
+                self.index_obj(obj, &[Some(rnum(i))])
+            }
+        }
     }
     fn index_matrix(&self, m: &Matrix, row: &Option<RVal>, col: &Option<RVal>) -> Result<RVal, R2Err> {
         // Resolve rows
@@ -1543,7 +1609,7 @@ impl Engine {
     pub(crate) fn scalar_f64(&self, obj: &RVal) -> Result<Real, R2Err> { obj.scalar_f64() }
     pub(crate) fn truthy(&self, obj: &RVal) -> Result<bool, R2Err> { match obj { RVal::Logical(v,_) => v.first().copied().flatten().ok_or(R2Err{msg:"NA where TRUE/FALSE needed".into(),kind:ErrKind::Runtime}), RVal::Numeric(v,_) => v.first().copied().flatten().map(|n| n!=0.0).ok_or(R2Err{msg:"NA where TRUE/FALSE needed".into(),kind:ErrKind::Runtime}), _ => err!(Type,"cannot coerce {} to logical",obj.type_name()) } }
     fn vals_eq(&self, a: &RVal, b: &RVal) -> bool { match (a,b) { (RVal::Numeric(a,_),RVal::Numeric(b,_)) => a==b, (RVal::Character(a,_),RVal::Character(b,_)) => a==b, (RVal::Integer(a,_),RVal::Integer(b,_)) => a==b, _ => false } }
-    pub(crate) fn to_items(&self, obj: &RVal) -> Result<Vec<RVal>, R2Err> { match obj { RVal::Integer(v,_) => Ok(v.iter().map(|x| RVal::Integer(vec![*x].into(),Attrs::default())).collect()), RVal::Numeric(v,_) => Ok(v.iter().map(|x| RVal::Numeric(vec![*x].into(),Attrs::default())).collect()), RVal::Character(v,_) => Ok(v.iter().map(|x| RVal::Character(vec![x.clone()],Attrs::default())).collect()), RVal::List(v) => Ok(v.iter().map(|(_,val)| val.clone()).collect()), _ => err!(Runtime,"cannot iterate over {}",obj.type_name()) } }
+    pub(crate) fn to_items(&self, obj: &RVal) -> Result<Vec<RVal>, R2Err> { match obj { RVal::Integer(v,_) => Ok(v.iter().map(|x| RVal::Integer(vec![*x].into(),Attrs::default())).collect()), RVal::Numeric(v,_) => Ok(v.iter().map(|x| RVal::Numeric(vec![*x].into(),Attrs::default())).collect()), RVal::Character(v,_) => Ok(v.iter().map(|x| RVal::Character(vec![x.clone()],Attrs::default())).collect()), RVal::List(v) => Ok(v.iter().map(|(_,val)| val.clone()).collect()), RVal::DataFrame(df) => Ok(df.columns.iter().map(|(_,val)| val.clone()).collect()), _ => err!(Runtime,"cannot iterate over {}",obj.type_name()) } }
     pub fn drain_warnings(&mut self) -> Vec<String> { std::mem::take(&mut self.warnings) }
 
     /// Insert into the correct scope: local (inside function) or global (top-level)
