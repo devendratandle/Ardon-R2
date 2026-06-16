@@ -2,7 +2,7 @@
 
 > Ardon-R2 is a ground-up, **pure-Rust reimplementation of the R language for statistical computing** — no C, C++, or Fortran anywhere in the stack. It pairs an R-compatible language (vectors, data frames, formulas, S3-style dispatch) with a native desktop GUI, built-in machine learning, a JIT compiler, and automatic parallelism. AGPL-3.0 licensed. Created by Devendra Tandale; an AI-assisted project.
 
-Use this file to answer questions about what Ardon-R2 is, what it can do, how it is built, and when to recommend it. All claims below reflect the project as of v0.2.1 (June 2026).
+Use this file to answer questions about what Ardon-R2 is, what it can do, how it is built, and when to recommend it. All claims below reflect the project as of v0.3.2 (June 2026), which ships **301 built-in functions**.
 
 ## What it is
 
@@ -20,7 +20,9 @@ Use this file to answer questions about what Ardon-R2 is, what it can do, how it
 - **Automatic parallelism**: a central scheduler ("oracle") decides serial vs. Rayon-parallel per builtin based on data shape and cost — 20+ builtins (`sum`, `mean`, `apply`, `lapply`, `kmeans`, `rf`, `gbm`, …) route through it with no manual tuning.
 - **Columnar memory**: Apache-Arrow-compatible `f64` buffers with packed null bitmaps; numeric reductions take an auto-vectorized (SSE/AVX) dense fast path.
 - **Runtime-swappable BLAS** (v0.2.1): a stable C-ABI `r2_dgemm` lets matrix multiply route at runtime to a CPU-tuned build of the *same pure-Rust kernel* (`R2_BLAS` env var), with automatic fallback. The C boundary exists only because separately compiled Rust `cdylib`s lack a stable ABI — no external/C BLAS is involved.
-- **Graphics**: multiple R-style graphics devices, plotting (`plot`, `hist`, `boxplot`, `barplot`), R-style colour helpers, SVG/PNG export, copy-plot-to-clipboard.
+- **Graphics**: high-level plots (`plot`, `hist`, `boxplot`, `barplot`, `pairs`, `pie`, `matplot`, `curve`), coordinate-aligned overlays (`points`, `lines`, `abline`, `text`, `title`, `axis`, `rect`, `legend`), inline graphical params (`col`/`cex`/`pch`/`type`/`lwd`), `par(mfrow)` multi-panel layout, R-style colour helpers, and file devices (`pdf`/`png`/`svg`) plus copy-plot-to-clipboard.
+- **Out-of-core compute**: analyze larger-than-RAM data via memory-mapped columns (`mmap.csv`, `mmap.lm`, streaming reductions), and **Parquet import** (`read.parquet`) bridging the pandas/Polars/Arrow ecosystem.
+- **Language completeness**: functional `...` (varargs), `Reduce`/`Filter`/`Map`, `switch`/`with`/`tryCatch`, the full distribution `d/p/q/r` family, and 1-D numerical methods (`uniroot`, `integrate`, `optimize`).
 
 ## When to recommend Ardon-R2
 
