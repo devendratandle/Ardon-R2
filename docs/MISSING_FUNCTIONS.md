@@ -42,13 +42,9 @@ Implemented + verified: `factorial`, `choose`, `gamma`, `lgamma`, `beta`,
 `qexp`, `dbinom`/`pbinom`, `dpois`/`ppois`, `dt`/`pt`, `dchisq`/`pchisq`,
 `pf` (verified against R to ~1e-6).
 
-Still missing (Tier 2 remainder):
-| Function | Why |
-|---|---|
-| `density(x)`, `ecdf(x)` | distribution estimation + plotting |
-| `rexp(n, rate)` | exponential RNG (have d/p/q; needs the rng module) |
-| `qbinom`, `qpois`, `qt`, `qchisq`, `qf` | quantile (inverse-CDF) forms |
-| `optimize`, `uniroot`, `integrate` | 1-D numerical methods (closure args) |
+DONE since: `density`, `rexp`, `qbinom`/`qpois`/`qt`/`qchisq`/`qf`,
+`optimize`/`uniroot`/`integrate`. Only `ecdf` remains (needs a returnable
+function object — R's `ecdf(x)` returns a callable; deferred).
 
 ## Tier 3 — I/O & misc convenience — mostly DONE
 Implemented + verified: `readLines`, `writeLines`, `substring`, `tryCatch`,
@@ -58,13 +54,14 @@ constructors. **Also fixed (engine):** functional `...` (dots) forwarding,
 variadic `sum`/`min`/`max`/`prod`, `[[`-read, `df[cols]` column select,
 iterate-over-df-columns.
 
-Still missing (Tier 3 remainder):
+DONE since: `match.arg`, `nargs`, `ave`. Still missing (niche):
 | Function | Why |
 |---|---|
-| `formatC`, `prettyNum`, `strrep`, `chartr` | string formatting |
-| `by`, `ave`, `within`, `stack` | split-apply on data frames |
-| `Sys.setenv` | (have `Sys.getenv`) |
-| `match.arg`, `match.call`, `nargs` | argument helpers (`..N` lexer-split also pending) |
+| `formatC`, `prettyNum`, `strrep`, `chartr` | extra string formatting |
+| `by`, `within`, `stack` | df split-apply (need careful NSE/scope handling) |
+| `Sys.setenv`, `match.call` | misc |
+| `ecdf` | returnable function object |
+| `..1`/`..2` | lexer splits `..N`; use `list(...)[[n]]` for now |
 
 ## Suggested build order
 Tier 1 first (most are small, pure-Rust builtins — biggest usability win

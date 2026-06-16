@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 288 Built-in Functions
+# Ardon-R2 Function Reference — 301 Built-in Functions
 
-## Core (51)
+## Core (53)
 ```
 c(...)              Create vector: c(1,2,3)
 length(x)           Length of vector
@@ -54,9 +54,11 @@ is.list(x)          Test if a list
 is.vector(x)        Test if an atomic vector
 is.element(el,set)  el %in% set
 tryCatch(expr,error=,finally=)  Function-form error handling
+match.arg(arg,choices)  Match arg against choices (exact / unique prefix)
+nargs()             Number of arguments the enclosing call received
 ```
 
-## Math (27)
+## Math (30)
 ```
 abs(x)      Absolute value          sqrt(x)     Square root
 round(x,n)  Round to n digits       log(x)      Natural log
@@ -73,9 +75,12 @@ pmax(...)   Parallel (element-wise) maximum
 factorial(x) x!  (via gamma)        gamma(x)    Γ(x)
 lgamma(x)   log Γ(x)                beta(a,b)   Beta function
 choose(n,k) Binomial coefficient    combn(x,m)  m-combinations → matrix
+uniroot(f,lower,upper)   Find a root of f by bisection (→ $root)
+integrate(f,lower,upper) Numerical integral of f (Simpson) (→ $value)
+optimize(f,lower,upper)  Golden-section minimize/maximize (→ $minimum)
 ```
 
-## Statistics (38)
+## Statistics (45)
 ```
 mean(x)         Arithmetic mean
 sd(x)           Standard deviation
@@ -138,6 +143,12 @@ dpois/ppois(x, lambda)           Poisson pmf / CDF
 dt/pt(x, df)                     Student-t density / CDF
 dchisq/pchisq(x, df)             Chi-squared density / CDF
 pf(q, df1, df2)                  F-distribution CDF
+qt/qchisq(p, df)                 t / chi-squared quantiles
+qf(p, df1, df2)                  F quantile
+qbinom(p, size, prob)            Binomial quantile
+qpois(p, lambda)                 Poisson quantile
+rexp(n, rate)                    Exponential random variates
+density(x)                       Gaussian kernel density estimate (list $x/$y)
 ```
 
 ## Machine Learning (12)
@@ -177,7 +188,7 @@ cv(x,y,model,k)         K-fold cross-validation
 confusion.matrix(pred,actual) Confusion matrix + F1
 ```
 
-## Data Handling (35)
+## Data Handling (36)
 ```
 head(x,n)           First n rows
 tail(x,n)           Last n rows
@@ -211,6 +222,7 @@ split(x,f)          Split a vector into a list grouped by factor f
 setdiff(x,y)        Set difference
 union(x,y)          Set union
 intersect(x,y)      Set intersection
+ave(x,g,FUN=)       Group-wise statistic broadcast back over x
 ```
 
 ## String Functions (17)
