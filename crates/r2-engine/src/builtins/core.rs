@@ -487,6 +487,49 @@ pub(crate) fn bi_outer(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
     Ok(RVal::Matrix(Matrix::new(data, m, n)))
 }
 
+// ── Tier-3 string / I/O ────────────────────────────────────────────
+
+pub(crate) fn bi_substring(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let x = str_vec(&gv(a,0));
+    let first: Vec<f64> = e.as_reals(&gv(a,1)).unwrap_or_default().into_iter().flatten().collect();
+    let last: Vec<f64> = e.as_reals(&gv(a,2)).unwrap_or_default().into_iter().flatten().collect();
+    let out: Vec<Option<Arc<str>>> = (0..x.len()).map(|i| {
+        x[i].as_ref().map(|s| {
+            let chars: Vec<char> = s.chars().collect();
+            let f = if first.is_empty() { 1 } else { first[i % first.len()].max(1.0) as usize };
+            let l = if last.is_empty() { chars.len() } else { (last[i % last.len()] as usize).min(chars.len()) };
+            let fi = f.saturating_sub(1);
+            let sub: String = if fi < chars.len() && l >= f { chars[fi..l].iter().collect() } else { String::new() };
+            Arc::from(sub.as_str())
+        })
+    }).collect();
+    Ok(RVal::Character(out, Attrs::default()))
+}
+pub(crate) fn bi_read_lines(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let path = val_to_str(&gv(a,0));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|err| R2Err { msg: format!("readLines: cannot open '{}': {}", path, err), kind: ErrKind::Runtime })?;
+    let mut lines: Vec<Option<Arc<str>>> = content.lines().map(|l| Some(Arc::from(l))).collect();
+    if let Some(n) = e.scalar_f64(&gv(a,1)).ok().flatten() {
+        if n >= 0.0 { lines.truncate(n as usize); }
+    }
+    Ok(RVal::Character(lines, Attrs::default()))
+}
+pub(crate) fn bi_write_lines(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let text = str_vec(&gv(a,0));
+    let body: String = text.iter().map(|o| o.as_deref().unwrap_or("NA")).collect::<Vec<_>>().join("\n");
+    let con = gn(a,"con").or_else(|| if a.len() > 1 && a[1].name.is_none() { Some(gv(a,1)) } else { None });
+    match con {
+        Some(c) if !matches!(c, RVal::Null) => {
+            let path = val_to_str(&c);
+            std::fs::write(&path, format!("{}\n", body))
+                .map_err(|err| R2Err { msg: format!("writeLines: cannot write '{}': {}", path, err), kind: ErrKind::Runtime })?;
+        }
+        _ => { e.emit_output(&format!("{}\n", body)); }
+    }
+    Ok(RVal::Null)
+}
+
 // ── Tier-3 constructors / coercions / predicates ───────────────────
 
 pub(crate) fn bi_numeric(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

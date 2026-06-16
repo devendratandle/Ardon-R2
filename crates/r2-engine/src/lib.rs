@@ -243,7 +243,7 @@ impl Engine {
         e.registry.add_layer(mkpkg("base", PackageTier::Base, vec![
             ("seq",bi_seq),("rep",bi_rep),("paste",bi_paste),("paste0",bi_paste0),
             ("which",bi_which),("sort",bi_sort),("rev",bi_rev),("unique",bi_unique),
-            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),("Reduce",bi_reduce),("Filter",bi_filter_fp),("Map",bi_map),("split",bi_split),("stopifnot",bi_stopifnot),("outer",bi_outer),("attr",bi_attr),("attributes",bi_attributes),("structure",bi_structure),("format",bi_format),("%in%",bi_in),("factorial",bi_factorial),("choose",bi_choose),("gamma",bi_gamma),("lgamma",bi_lgamma),("beta",bi_beta),("combn",bi_combn),("mad",bi_mad),("fivenum",bi_fivenum),("numeric",bi_numeric),("integer",bi_integer),("character",bi_character),("logical",bi_logical),("as.matrix",bi_as_matrix),("as.vector",bi_as_vector),("as.list",bi_as_list),("is.function",bi_is_function),("is.list",bi_is_list),("is.vector",bi_is_vector),("is.element",bi_in),
+            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),("Reduce",bi_reduce),("Filter",bi_filter_fp),("Map",bi_map),("split",bi_split),("stopifnot",bi_stopifnot),("outer",bi_outer),("attr",bi_attr),("attributes",bi_attributes),("structure",bi_structure),("format",bi_format),("%in%",bi_in),("factorial",bi_factorial),("choose",bi_choose),("gamma",bi_gamma),("lgamma",bi_lgamma),("beta",bi_beta),("combn",bi_combn),("mad",bi_mad),("fivenum",bi_fivenum),("numeric",bi_numeric),("integer",bi_integer),("character",bi_character),("logical",bi_logical),("as.matrix",bi_as_matrix),("as.vector",bi_as_vector),("as.list",bi_as_list),("is.function",bi_is_function),("is.list",bi_is_list),("is.vector",bi_is_vector),("is.element",bi_in),("substring",bi_substring),("readLines",bi_read_lines),("writeLines",bi_write_lines),
             ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
             ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
             ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),
@@ -593,6 +593,30 @@ impl Engine {
                             ea.push(EvalArg { name, value: val });
                         }
                         return self.call_fn(&f, &ea, env);
+                    }
+
+                    // `tryCatch(expr, error=function(e){...}, finally={...})`
+                    // — the function form (distinct from the try/catch
+                    // syntax). Eval expr; on a non-control error, call the
+                    // `error=` handler with the message; always run `finally=`.
+                    if fname.as_ref() == "tryCatch" {
+                        let expr = match args.iter().find(|a| a.name.is_none()) {
+                            Some(e) => &e.value,
+                            None => return Ok(RVal::Null),
+                        };
+                        let finally = args.iter().find(|a| a.name.as_deref() == Some("finally")).map(|a| a.value.clone());
+                        let out = match self.eval_in(expr, env) {
+                            Ok(v) => Ok(v),
+                            Err(e) if matches!(e.kind, ErrKind::CtrlReturn(_) | ErrKind::CtrlBreak | ErrKind::CtrlNext | ErrKind::Interrupt) => Err(e),
+                            Err(e) => {
+                                if let Some(h) = args.iter().find(|a| a.name.as_deref() == Some("error")) {
+                                    let handler = self.eval_in(&h.value, env)?;
+                                    self.call_fn(&handler, &[EvalArg { name: None, value: rstr(&e.msg) }], env)
+                                } else { Err(e) }
+                            }
+                        };
+                        if let Some(fe) = finally { let _ = self.eval_in(&fe, env); }
+                        return out;
                     }
 
                     // NSE for `with(data, expr)`: evaluate `expr` in a scope
@@ -2551,7 +2575,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
             e.registry.add_layer(mkpkg("base", PackageTier::Base, vec![
                 ("seq",bi_seq),("rep",bi_rep),("paste",bi_paste),("paste0",bi_paste0),
                 ("which",bi_which),("sort",bi_sort),("rev",bi_rev),("unique",bi_unique),
-            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),("Reduce",bi_reduce),("Filter",bi_filter_fp),("Map",bi_map),("split",bi_split),("stopifnot",bi_stopifnot),("outer",bi_outer),("attr",bi_attr),("attributes",bi_attributes),("structure",bi_structure),("format",bi_format),("%in%",bi_in),("factorial",bi_factorial),("choose",bi_choose),("gamma",bi_gamma),("lgamma",bi_lgamma),("beta",bi_beta),("combn",bi_combn),("mad",bi_mad),("fivenum",bi_fivenum),("numeric",bi_numeric),("integer",bi_integer),("character",bi_character),("logical",bi_logical),("as.matrix",bi_as_matrix),("as.vector",bi_as_vector),("as.list",bi_as_list),("is.function",bi_is_function),("is.list",bi_is_list),("is.vector",bi_is_vector),("is.element",bi_in),
+            ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),("Reduce",bi_reduce),("Filter",bi_filter_fp),("Map",bi_map),("split",bi_split),("stopifnot",bi_stopifnot),("outer",bi_outer),("attr",bi_attr),("attributes",bi_attributes),("structure",bi_structure),("format",bi_format),("%in%",bi_in),("factorial",bi_factorial),("choose",bi_choose),("gamma",bi_gamma),("lgamma",bi_lgamma),("beta",bi_beta),("combn",bi_combn),("mad",bi_mad),("fivenum",bi_fivenum),("numeric",bi_numeric),("integer",bi_integer),("character",bi_character),("logical",bi_logical),("as.matrix",bi_as_matrix),("as.vector",bi_as_vector),("as.list",bi_as_list),("is.function",bi_is_function),("is.list",bi_is_list),("is.vector",bi_is_vector),("is.element",bi_in),("substring",bi_substring),("readLines",bi_read_lines),("writeLines",bi_write_lines),
                 ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
                 ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
                 ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),
