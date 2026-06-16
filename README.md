@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.3.1.</em></p>
+<em>An AI-Assisted Project. v0.3.2.</em></p>
 
 ---
 
@@ -20,9 +20,27 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.3.1 (2026) | Inspired by R, Built on Rust
+Version 0.3.2 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
+
+## What's new in v0.3.2 (June 2026)
+
+A language-completeness + graphics release — **301 built-in functions**
+(up from 216):
+
+- **Graphics:** `pairs`, `pie`, `matplot`, `curve`, plus coordinate-aligned
+  overlays (`text`/`title`/`axis`/`rect`), inline `col`/`cex`/`pch`/`type`,
+  and `pdf`/`png`/`svg` file devices.
+- **~85 base-R functions:** sets (`%in%`, `setdiff`/`union`/`intersect`),
+  functional (`Reduce`/`Filter`/`Map`), control (`switch`/`with`/`tryCatch`),
+  objects (`attr`/`structure`/`inherits`), the full distribution `d/p/q`
+  family, numerical methods (`uniroot`/`integrate`/`optimize`), and more.
+- **Engine fixes:** functional `...` (dots) forwarding, variadic
+  `sum`/`min`/`max`/`prod`, `[[` indexing, `%in%`/`%op%` operators, and a
+  JIT correctness fix.
+
+See `CHANGELOG.md` for the full list.
 
 ## What's new in v0.3.1 (June 2026)
 

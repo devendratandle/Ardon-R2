@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.3.2 (June 2026)
+
+A large language-completeness + graphics release. Function reference grew
+from 216 to 301 built-ins, plus several foundational engine fixes.
+
+### Graphics
+- High-level: `pairs()` (scatterplot matrix), `pie()`, `matplot()`,
+  `curve()` (plots an expression in `x`, `add=TRUE` overlays).
+- Overlays, all coordinate-aligned to the base plot: `text()`, `title()`,
+  `axis()`, `rect()` (and `points`/`lines`/`abline` rewritten to use the
+  device's shared coordinate system instead of a hardcoded transform).
+- Inline graphical params on `plot()`: `col=` (name / vector / palette
+  index), `cex=`, `pch=` (symbol shapes), `type=` (p/l/b/o/h/n), `lwd=`.
+- File devices: `pdf()` (vector via svg2pdf), `png()` (raster), `svg()`,
+  written by `dev.off()`.
+- Fix: frame functions now clear the device at page boundaries — multiple
+  high-level plots (incl. after `par(mfrow=c(1,1))`) no longer overlap.
+
+### Base-R functions
+- Iteration / sets: `seq_len`, `seq_along`, `%in%`, `setdiff`, `union`,
+  `intersect`; list/vector: `unlist`, `setNames`, `append`, `split`,
+  `pmin`, `pmax`, `cut`.
+- Functional: `Reduce`, `Filter`, `Map`; control/scope: `switch`, `with`,
+  `invisible`, `stopifnot`, `tryCatch`.
+- Objects: `attr`, `attributes`, `structure`, `inherits`, `format`,
+  `numeric/integer/character/logical` constructors, `as.matrix/as.vector/
+  as.list`, `is.function/is.list/is.vector/is.element`.
+- Math/stats: `factorial`, `choose`, `gamma`, `lgamma`, `beta`, `combn`,
+  `signif`, `mad`, `fivenum`, `outer`; distributions `dexp/pexp/qexp`,
+  `dbinom/pbinom/qbinom`, `dpois/ppois/qpois`, `dt/pt/qt`, `dchisq/pchisq/
+  qchisq`, `pf/qf`, `rexp`, `density`; numerical `uniroot`, `integrate`,
+  `optimize`; helpers `match.arg`, `ave`, `nargs`, `substring`,
+  `readLines`, `writeLines`.
+
+### Engine fixes (correctness)
+- **`...` (dots) now functional** — captured at the call and forwarded
+  into inner calls (`function(...) sum(...)`, `list(...)`, wrapper
+  functions, named-dots passthrough). Previously evaluated to `NULL`.
+- **Variadic `sum`/`min`/`max`/`prod`** combine all arguments (`sum(1,2,3)`
+  = 6); `mean`/`var`/`sd`/`median` stay single-arg (R semantics).
+- **`[[` indexing read** implemented (`x[[i]]`, `df[["col"]]`,
+  `list[["name"]]` — previously errored); `df[cols]` selects columns;
+  `lapply`/`sapply`/`for` iterate a data.frame's columns.
+- **JIT cache fix** — was keyed by a recyclable closure-body pointer, so
+  short-lived anonymous closures could run the wrong compiled body.
+- Parser: `%in%` and any `%name%` infix operator; soft keywords
+  (`type`/`method`/…) usable as argument names (`plot(x, y, type="l")`).
+
 ## v0.3.1 (June 2026)
 
 GUI polish: full resolution adaptation, native resize affordances, and a
