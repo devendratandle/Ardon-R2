@@ -26,11 +26,36 @@ fn load(bytes: &[u8], name: &str) -> RVal {
     r2d::read_r2d(bytes).unwrap_or_else(|e| panic!("{}.r2d corrupt: {}", name, e.msg))
 }
 
+/// Convert a character column of a data.frame into a factor (sorted unique
+/// levels, R's default), so grouping idioms work — e.g.
+/// `pairs(iris[1:4], col = iris$Species)` colours by group.
+fn factorize_column(v: RVal, col: &str) -> RVal {
+    if let RVal::DataFrame(mut df) = v {
+        for (name, val) in df.columns.iter_mut() {
+            if name.as_ref() == col {
+                if let RVal::Character(cv, _) = val {
+                    let mut levels: Vec<Arc<str>> = Vec::new();
+                    for s in cv.iter().flatten() {
+                        if !levels.iter().any(|l| l.as_ref() == s.as_ref()) { levels.push(s.clone()); }
+                    }
+                    levels.sort();
+                    let codes: Vec<Option<u32>> = cv.iter().map(|o| o.as_ref().and_then(|s|
+                        levels.iter().position(|l| l.as_ref() == s.as_ref()).map(|i| i as u32))).collect();
+                    *val = RVal::Factor(Factor { codes, levels, ordered: false });
+                }
+            }
+        }
+        return RVal::DataFrame(df);
+    }
+    v
+}
+
 /// Fisher's iris dataset — 150 observations, 5 variables
 /// (Sepal.Length, Sepal.Width, Petal.Length, Petal.Width, Species).
+/// `Species` is a factor, as in R.
 pub fn iris() -> RVal {
     static BYTES: &[u8] = include_bytes!("../datasets/iris.r2d");
-    load(BYTES, "iris")
+    factorize_column(load(BYTES, "iris"), "Species")
 }
 
 /// Motor Trend car road tests (1974) — 32 observations, 11 variables.

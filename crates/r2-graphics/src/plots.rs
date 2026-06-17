@@ -99,6 +99,12 @@ pub(crate) fn color_vec(arg: Option<RVal>, default: &str) -> Vec<String> {
             .iter()
             .map(|n| n.map(|n| r_palette(n as i32).to_string()).unwrap_or_else(|| default.to_string()))
             .collect(),
+        // A factor maps its level codes to the palette — so e.g.
+        // `pairs(iris[1:4], col = iris$Species)` colours by group, matching R.
+        Some(RVal::Factor(f)) if !f.codes.is_empty() => f.codes
+            .iter()
+            .map(|&c| c.map(|i| r_palette(i as i32 + 1).to_string()).unwrap_or_else(|| default.to_string()))
+            .collect(),
         _ => vec![default.to_string()],
     }
 }
