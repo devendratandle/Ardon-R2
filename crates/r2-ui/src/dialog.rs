@@ -45,6 +45,8 @@ pub struct Dialog {
     pub cancel_action: String,
     open: bool,
     last_mouse: MousePos,
+    /// Index of the keyboard-focused button (Tab cycles; Enter activates it).
+    focus: usize,
 }
 
 impl Default for Dialog {
@@ -61,11 +63,18 @@ impl Dialog {
             cancel_action: String::new(),
             open: false,
             last_mouse: MousePos { x: 0.0, y: 0.0 },
+            focus: 0,
         }
     }
 
     pub fn is_open(&self) -> bool { self.open }
-    pub fn open(&mut self) { self.open = true; }
+    /// Open the dialog, focusing the default-action button (else the first).
+    pub fn open(&mut self) {
+        self.open = true;
+        self.focus = self.buttons.iter()
+            .position(|b| !self.default_action.is_empty() && b.action == self.default_action)
+            .unwrap_or(0);
+    }
     pub fn close(&mut self) { self.open = false; }
 
     /// Walk this frame's events. Returns `Some(action)` when a button is
@@ -86,13 +95,22 @@ impl Dialog {
                 InputEvent::MouseDown { button: MouseButton::Left, pos } => {
                     for (i, r) in btns.iter().enumerate() {
                         if point_in(*r, pos) {
+                            self.focus = i;
                             fired = Some(self.buttons[i].action.clone());
                         }
                     }
                     // Clicks anywhere else are swallowed (modal) — no action.
                 }
+                // Tab / Shift+Tab cycle keyboard focus across the buttons.
+                InputEvent::Key { code: KeyCode::Tab, mods, pressed: true } => {
+                    let n = self.buttons.len().max(1);
+                    self.focus = if mods.shift { (self.focus + n - 1) % n } else { (self.focus + 1) % n };
+                }
+                // Enter activates the focused button (else the default action).
                 InputEvent::Key { code: KeyCode::Enter, pressed: true, .. } => {
-                    if !self.default_action.is_empty() {
+                    if let Some(b) = self.buttons.get(self.focus) {
+                        fired = Some(b.action.clone());
+                    } else if !self.default_action.is_empty() {
                         fired = Some(self.default_action.clone());
                     }
                 }
@@ -220,11 +238,10 @@ impl Dialog {
         let btns = self.button_rects(panel, renderer, theme);
         for (i, r) in btns.iter().enumerate() {
             let hovered = point_in(*r, self.last_mouse);
-            // Default (Enter) button gets an accent fill; others a faint
-            // raised fill that brightens on hover.
-            let is_default = !self.default_action.is_empty()
-                && self.buttons[i].action == self.default_action;
-            let fill = if is_default {
+            // The keyboard-focused button (Tab/Enter target) gets an accent
+            // fill; others a faint raised fill that brightens on hover.
+            let is_focused = i == self.focus;
+            let fill = if is_focused {
                 if hovered { Color::rgba(70, 130, 180, 235) } else { Color::rgba(70, 130, 180, 200) }
             } else if hovered {
                 Color::rgba(70, 130, 180, 70)
@@ -232,18 +249,20 @@ impl Dialog {
                 Color::rgba(0, 0, 0, 18)
             };
             frame.paint_rect(r.x, r.y, r.w, r.h, fill);
-            // Border.
-            frame.paint_rect(r.x, r.y,             r.w, 1.0, border);
-            frame.paint_rect(r.x, r.y + r.h - 1.0, r.w, 1.0, border);
-            frame.paint_rect(r.x, r.y, 1.0, r.h, border);
-            frame.paint_rect(r.x + r.w - 1.0, r.y, 1.0, r.h, border);
+            // Border — a 2-px focus ring on the focused button.
+            let bw = if is_focused { 2.0 } else { 1.0 };
+            let bcol = if is_focused { Color::rgba(30, 80, 140, 255) } else { border };
+            frame.paint_rect(r.x, r.y,             r.w, bw, bcol);
+            frame.paint_rect(r.x, r.y + r.h - bw,  r.w, bw, bcol);
+            frame.paint_rect(r.x, r.y, bw, r.h, bcol);
+            frame.paint_rect(r.x + r.w - bw, r.y, bw, r.h, bcol);
             // Label, horizontally centered.
             let (cw, _) = renderer.cell_metrics(theme.font_size);
             let label = &self.buttons[i].label;
             let tw = label.chars().count() as f32 * cw;
             let tx = r.x + (r.w - tw) * 0.5;
             let baseline = r.y + r.h * 0.70;
-            let col = if is_default { Color::WHITE } else { theme.menu_text };
+            let col = if is_focused { Color::WHITE } else { theme.menu_text };
             frame.paint_text(renderer, tx, baseline, label, theme.font_size, col);
         }
     }

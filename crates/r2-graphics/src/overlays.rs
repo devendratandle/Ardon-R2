@@ -289,23 +289,31 @@ pub fn bi_legend(a: &[EvalArg]) -> Result<RVal, R2Err> {
         _ => vec!["black".into(), "red".into(), "blue".into(), "green".into()],
     };
 
-    let (lx, ly) = match pos.as_str() {
-        "topleft" => (70.0, 45.0),
-        "topright" => (420.0, 45.0),
-        "bottomleft" => (70.0, 330.0),
-        "bottomright" => (420.0, 330.0),
-        _ => (420.0, 45.0),
+    // Size the box to its content and sit it FLUSH in the requested corner
+    // of the device (relative to the actual canvas), so it doesn't float over
+    // the middle of a panel. Opaque white background keeps it readable.
+    let (w, h) = with_device(|d| (d.width, d.height));
+    let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(6);
+    let row_h = 18.0;
+    let box_w = 28.0 + longest as f64 * 7.0;
+    let box_h = labels.len() as f64 * row_h + 12.0;
+    let m = 8.0; // margin from the canvas edge
+    let (bx, by) = match pos.as_str() {
+        "topleft"     => (m, m),
+        "bottomleft"  => (m, (h - box_h - m).max(m)),
+        "bottomright" => ((w - box_w - m).max(m), (h - box_h - m).max(m)),
+        _             => ((w - box_w - m).max(m), m), // topright (default)
     };
 
     let mut elems = format!(
-        r#"<rect x="{:.0}" y="{:.0}" width="140" height="{}" fill="white" stroke="black" stroke-width="0.5"/>"#,
-        lx - 5.0, ly - 15.0, labels.len() * 20 + 10
+        r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="white" stroke="black" stroke-width="1"/>"#,
+        bx, by, box_w, box_h
     );
     for (i, label) in labels.iter().enumerate() {
         let c = colors.get(i).map(|s| s.as_str()).unwrap_or("black");
-        let yp = ly + i as f64 * 20.0;
-        elems.push_str(&format!(r#"<rect x="{:.0}" y="{:.0}" width="12" height="12" fill="{}"/>"#, lx, yp - 9.0, c));
-        elems.push_str(&format!(r#"<text x="{:.0}" y="{:.0}" font-size="11">{}</text>"#, lx + 18.0, yp, label));
+        let row_y = by + 6.0 + i as f64 * row_h;
+        elems.push_str(&format!(r#"<rect x="{:.1}" y="{:.1}" width="12" height="12" fill="{}"/>"#, bx + 6.0, row_y + 2.0, c));
+        elems.push_str(&format!(r#"<text x="{:.1}" y="{:.1}" font-family="Arial, Helvetica, sans-serif" font-size="11px" fill="black">{}</text>"#, bx + 24.0, row_y + 12.0, escape_xml(label)));
     }
     append_svg(&elems)?;
     let _ = save_to_file("plot.svg");
