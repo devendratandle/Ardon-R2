@@ -21,3 +21,6 @@ usvg      = { version = "0.45", default-features = false, features = ["text", "s
 fontdb    = "0.23"
 # svg2pdf = pure-Rust vector SVG → PDF, tracks usvg 0.45. Powers pdf().
 svg2pdf   = "0.13"
+# pdf-writer = low-level PDF assembly; used to combine per-page SVG chunks
+# from svg2pdf into a single MULTI-page PDF (one page per plot.new()).
+pdf-writer = "0.12"

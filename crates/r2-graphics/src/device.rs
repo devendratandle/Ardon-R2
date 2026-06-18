@@ -236,6 +236,10 @@ pub struct PlotDevice {
     /// For a *file device* (`pdf()`/`png()`/`svg()`): where `dev.off()`
     /// writes. `None` for an interactive/screen device.
     pub file_target: Option<FileTarget>,
+    /// Completed pages for a multi-page file device (pdf): each `plot.new()`
+    /// / new high-level plot finishes the current page and starts a new one.
+    /// `dev.off()` writes them all (+ the in-progress page) as one PDF.
+    pub pages: Vec<String>,
 }
 
 /// Destination of a file device — set by `pdf()`/`png()`/`svg()`, written
@@ -258,6 +262,7 @@ impl Default for PlotDevice {
             panel_cursor: 0,
             coords: None,
             file_target: None,
+            pages: Vec::new(),
         }
     }
 }
@@ -511,6 +516,12 @@ pub fn begin_plot() -> (f64, f64, f64, f64) {
         // plot after a grid filled — drawing on top of the previous one,
         // so plots piled up and persisted across runs.)
         if panels <= 1 || dev.panel_cursor % panels == 0 {
+            // On a file device, a cleared frame is a FINISHED page — keep it
+            // so dev.off() can emit a multi-page PDF.
+            if dev.file_target.is_some() && dev.has_plot && !dev.svg_body.is_empty() {
+                let page = dev.full_svg();
+                dev.pages.push(page);
+            }
             dev.svg_body.clear();
         }
         dev.has_plot = true;
@@ -618,18 +629,96 @@ pub fn save_to_png(path: &str, target_w: u32, target_h: u32) -> Result<(), R2Err
         .map_err(|e| R2Err { msg: format!("svg→png: write failed: {}", e), kind: ErrKind::Runtime })
 }
 
-/// Rasterize-free vector PDF of the current plot via `svg2pdf` (pure
-/// Rust). Matches the SVG exactly — resolution-independent, ideal for
-/// papers / LaTeX.
+/// Rasterize-free vector PDF via `svg2pdf` (pure Rust). Matches the
+/// SVG exactly — resolution-independent, ideal for papers / LaTeX.
+///
+/// Emits a **multi-page** PDF: every `plot.new()` / new high-level plot
+/// on a file device finishes the current page (see `begin_plot`), and
+/// `dev.pages` holds the completed pages; the in-progress canvas is the
+/// final page. Each page's SVG is converted to a PDF form XObject via
+/// `svg2pdf::to_chunk`, then `pdf_writer` stitches one Page per XObject.
 pub fn save_to_pdf(path: &str) -> Result<(), R2Err> {
-    let svg = with_device(|d| d.full_svg());
+    // Completed pages + the in-progress canvas as the last page.
+    let pages: Vec<String> = with_device(|d| {
+        let mut p = d.pages.clone();
+        if d.has_plot && !d.svg_body.is_empty() {
+            p.push(d.full_svg());
+        }
+        p
+    });
+    let pages = if pages.is_empty() {
+        // No plotting happened — emit the (blank) canvas as one page.
+        vec![with_device(|d| d.full_svg())]
+    } else {
+        pages
+    };
+
+    use pdf_writer::{Content, Name, Pdf, Rect, Ref};
+    use std::collections::HashMap;
+
     let mut opt = usvg::Options::default();
     opt.fontdb = shared_fontdb();
-    let tree = usvg::Tree::from_str(&svg, &opt)
-        .map_err(|e| R2Err { msg: format!("svg→pdf: parse failed: {}", e), kind: ErrKind::Runtime })?;
-    let pdf = svg2pdf::to_pdf(&tree, svg2pdf::ConversionOptions::default(), svg2pdf::PageOptions::default())
-        .map_err(|e| R2Err { msg: format!("svg→pdf: {}", e), kind: ErrKind::Runtime })?;
-    std::fs::write(path, pdf)
+
+    let mut alloc = Ref::new(1);
+    let catalog_id = alloc.bump();
+    let page_tree_id = alloc.bump();
+
+    // First pass: convert each page SVG → renumbered chunk + per-page refs.
+    struct PageRefs {
+        page_id: Ref,
+        content_id: Ref,
+        svg_id: Ref,
+        chunk: pdf_writer::Chunk,
+        w: f32,
+        h: f32,
+    }
+    let mut built: Vec<PageRefs> = Vec::with_capacity(pages.len());
+    for svg in &pages {
+        let tree = usvg::Tree::from_str(svg, &opt)
+            .map_err(|e| R2Err { msg: format!("svg→pdf: parse failed: {}", e), kind: ErrKind::Runtime })?;
+        let size = tree.size();
+        // svg px are at 96 dpi; PDF points are 72 dpi → ×0.75 keeps the
+        // physical size faithful (a 6in pdf() page stays 6in = 432pt).
+        let (w, h) = (size.width() * 0.75, size.height() * 0.75);
+        let (chunk, svg_ref) = svg2pdf::to_chunk(&tree, svg2pdf::ConversionOptions::default())
+            .map_err(|e| R2Err { msg: format!("svg→pdf: {}", e), kind: ErrKind::Runtime })?;
+        // Renumber the chunk's refs into our global allocator's space.
+        let mut map: HashMap<Ref, Ref> = HashMap::new();
+        let chunk = chunk.renumber(|old| *map.entry(old).or_insert_with(|| alloc.bump()));
+        let svg_id = *map.get(&svg_ref).expect("svg root ref present in chunk");
+        built.push(PageRefs {
+            page_id: alloc.bump(),
+            content_id: alloc.bump(),
+            svg_id,
+            chunk,
+            w,
+            h,
+        });
+    }
+
+    let mut pdf = Pdf::new();
+    pdf.catalog(catalog_id).pages(page_tree_id);
+    pdf.pages(page_tree_id)
+        .kids(built.iter().map(|p| p.page_id))
+        .count(built.len() as i32);
+
+    let svg_name = Name(b"S1");
+    for p in &built {
+        {
+            let mut page = pdf.page(p.page_id);
+            page.media_box(Rect::new(0.0, 0.0, p.w, p.h));
+            page.parent(page_tree_id);
+            page.contents(p.content_id);
+            page.resources().x_objects().pair(svg_name, p.svg_id);
+        } // page dropped → finished
+        // svg2pdf XObjects are drawn in the unit square; scale to the page.
+        let mut content = Content::new();
+        content.transform([p.w, 0.0, 0.0, p.h, 0.0, 0.0]).x_object(svg_name);
+        pdf.stream(p.content_id, &content.finish());
+        pdf.extend(&p.chunk);
+    }
+
+    std::fs::write(path, pdf.finish())
         .map_err(|e| R2Err { msg: format!("svg→pdf: write failed: {}", e), kind: ErrKind::Runtime })
 }
 
