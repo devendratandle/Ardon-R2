@@ -325,7 +325,7 @@ impl Engine {
             ("rpart",bi_rpart),("rf",bi_rf),("gbm",bi_gbm),("cv",bi_cv),("aov",bi_aov),("anova",bi_anova),("cor.test",bi_cor_test),("shapiro.test",bi_shapiro_test),("wilcox.test",bi_wilcox_test),("fisher.test",bi_fisher_test),("weighted.mean",bi_weighted_mean),("IQR",bi_iqr),("confusion.matrix",bi_confusion_matrix),
         ]));
         e.registry.add_layer(mkpkg("graphics", PackageTier::Base, vec![
-            ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),
+            ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),("plot.new",bi_plot_new),("plot.window",bi_plot_window),
             ("save.plot",bi_save_plot),
             ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),("text",bi_text),("title",bi_title),("axis",bi_axis),("rect",bi_rect),
             ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),("pdf",bi_pdf),("png",bi_png),("svg",bi_svg),
@@ -2646,7 +2646,7 @@ fn try_reload_base(e: &mut Engine, name: &str) -> bool {
         }
         "graphics" => {
             e.registry.add_layer(mkpkg("graphics", PackageTier::Base, vec![
-                ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),
+                ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),("plot.new",bi_plot_new),("plot.window",bi_plot_window),
             ("save.plot",bi_save_plot),
                 ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),("text",bi_text),("title",bi_title),("axis",bi_axis),("rect",bi_rect),
                 ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),("pdf",bi_pdf),("png",bi_png),("svg",bi_svg),

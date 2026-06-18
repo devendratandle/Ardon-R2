@@ -129,16 +129,30 @@ pub fn bi_text(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let col = overlay_col(a);
     let cex = argf(a, "cex").unwrap_or(1.0);
     let pos = argi(a, "pos");
+    // adj: horizontal justification (0 = left, 0.5 = centre, 1 = right).
+    let adj = argf(a, "adj");
+    // font: 1 plain, 2 bold, 3 italic, 4 bold+italic.
+    let font_attr = match argi(a, "font") {
+        Some(2) => r#" font-weight="bold""#,
+        Some(3) => r#" font-style="italic""#,
+        Some(4) => r#" font-weight="bold" font-style="italic""#,
+        _ => "",
+    };
     let fs = 12.0 * cex;
     let c = coords();
 
     let mut elems = String::new();
-    let n = x.len().min(y.len()).min(labels.len().max(1));
     for i in 0..x.len().min(y.len()) {
         let label = labels.get(i % labels.len().max(1)).cloned().unwrap_or_default();
         if label.is_empty() && labels.is_empty() { continue; }
         let (mut px, mut py) = c.to_px(x[i], y[i]);
-        let mut anchor = "middle";
+        // `adj` (if given) sets horizontal anchor; else `pos` nudges + anchors.
+        let mut anchor = match adj {
+            Some(a) if a <= 0.25 => "start",
+            Some(a) if a >= 0.75 => "end",
+            Some(_) => "middle",
+            None => "middle",
+        };
         let off = fs * 0.9;
         match pos {
             Some(1) => { py += off; }
@@ -148,10 +162,9 @@ pub fn bi_text(a: &[EvalArg]) -> Result<RVal, R2Err> {
             _ => { py += fs * 0.35; } // vertical-centre the glyph
         }
         elems.push_str(&format!(
-            r#"<text x="{:.1}" y="{:.1}" text-anchor="{}" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{}</text>"#,
-            px, py, anchor, fs, col, escape_xml(&label)));
+            r#"<text x="{:.1}" y="{:.1}" text-anchor="{}" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px"{} fill="{}">{}</text>"#,
+            px, py, anchor, fs, font_attr, col, escape_xml(&label)));
     }
-    let _ = n;
     append_svg(&elems)?;
     let _ = save_to_file("plot.svg");
     Ok(RVal::Null)
@@ -206,6 +219,7 @@ pub fn bi_rect(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let fill = gn(a, "col").map(|v| val_to_str(&v)).unwrap_or_else(|| "none".into());
     let border = gn(a, "border").map(|v| val_to_str(&v))
         .unwrap_or_else(|| with_device(|d| d.params.fg.clone()));
+    let lwd = argf(a, "lwd").unwrap_or(1.0);
     let c = coords();
     let n = xl.len().max(yb.len()).max(xr.len()).max(yt.len());
     let mut elems = String::new();
@@ -215,8 +229,8 @@ pub fn bi_rect(a: &[EvalArg]) -> Result<RVal, R2Err> {
         let (rx, ry) = (x1.min(x2), y1.min(y2));
         let (rw, rh) = ((x1 - x2).abs(), (y1 - y2).abs());
         elems.push_str(&format!(
-            r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="{}" stroke="{}" stroke-width="1"/>"#,
-            rx, ry, rw, rh, fill, border));
+            r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="{}" stroke="{}" stroke-width="{:.1}"/>"#,
+            rx, ry, rw, rh, fill, border, lwd));
     }
     append_svg(&elems)?;
     let _ = save_to_file("plot.svg");

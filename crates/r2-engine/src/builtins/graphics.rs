@@ -103,6 +103,12 @@ pub(crate) fn bi_pie(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 pub(crate) fn bi_matplot(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::plots::bi_matplot(a)
 }
+pub(crate) fn bi_plot_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::plots::bi_plot_new(a)
+}
+pub(crate) fn bi_plot_window(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::plots::bi_plot_window(a)
+}
 
 // ─── Overlays ──────────────────────────────────────────────────────
 

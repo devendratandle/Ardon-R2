@@ -560,6 +560,45 @@ pub fn bi_pairs(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
+/// `plot.new()` — start a fresh, blank plot frame. Sets up an empty device
+/// region (respecting `par(mar)`); subsequent low-level calls (`rect`,
+/// `text`, `lines`, `points`, `axis`) draw into it. Coordinates default to
+/// `[0,1] × [0,1]` until `plot.window()` overrides them.
+pub fn bi_plot_new(_a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let (ox, oy, w, h) = begin_plot();
+    with_device(|d| {
+        let mar = d.params.mar; // [bottom, left, top, right] in "lines"
+        let lp = 14.0;          // ~px per margin line
+        let (ml, mb, mt, mr) = (mar[1] * lp, mar[0] * lp, mar[2] * lp, mar[3] * lp);
+        d.coords = Some(crate::device::PlotCoords {
+            px0: ox + ml, py0: oy + mt,
+            pw: (w - ml - mr).max(1.0), ph: (h - mt - mb).max(1.0),
+            xmin: 0.0, xmax: 1.0, ymin: 0.0, ymax: 1.0,
+        });
+    });
+    Ok(RVal::Null)
+}
+
+/// `plot.window(xlim, ylim)` — set the user coordinate system on the current
+/// (blank) plot, so subsequent low-level drawing uses data coordinates.
+pub fn bi_plot_window(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let reals = |v: RVal| -> Vec<f64> { v.as_reals().ok().map(|r| r.into_iter().flatten().collect()).unwrap_or_default() };
+    let xlim = gn(a, "xlim").map(reals).unwrap_or_else(|| reals(gv(a, 0)));
+    let ylim = gn(a, "ylim").map(reals).unwrap_or_else(|| reals(gv(a, 1)));
+    let (xmin, xmax) = if xlim.len() >= 2 { (xlim[0], xlim[1]) } else { (0.0, 1.0) };
+    let (ymin, ymax) = if ylim.len() >= 2 { (ylim[0], ylim[1]) } else { (0.0, 1.0) };
+    with_device(|d| {
+        match &mut d.coords {
+            Some(c) => { c.xmin = xmin; c.xmax = xmax; c.ymin = ymin; c.ymax = ymax; }
+            None => {
+                let (w, h) = (d.width, d.height);
+                d.coords = Some(crate::device::PlotCoords { px0: 0.0, py0: 0.0, pw: w, ph: h, xmin, xmax, ymin, ymax });
+            }
+        }
+    });
+    Ok(RVal::Null)
+}
+
 /// `pie(x, labels=, col=, main=)` — pie chart of non-negative values.
 /// Slices are proportional to `x`; default colours cycle the R palette.
 pub fn bi_pie(a: &[EvalArg]) -> Result<RVal, R2Err> {
