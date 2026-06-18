@@ -140,45 +140,7 @@ pub(crate) fn split_random_effects(rhs: &Expr) -> (Expr, Vec<Expr>) {
 /// instead of the placeholder `Call: lm(formula)`. Covers symbols,
 /// numeric literals, binary/unary operators, function calls, and
 /// indexing — the subset needed for typical model formulas.
-pub(crate) fn fmt_expr(e: &Expr) -> String {
-    match e {
-        Expr::Symbol(s) => s.to_string(),
-        Expr::NumLit(n) => fmt_num(*n),
-        Expr::IntLit(n) => format!("{}", n),
-        Expr::StrLit(s) => format!("\"{}\"", s),
-        Expr::BoolLit(b) => if *b { "TRUE".into() } else { "FALSE".into() },
-        Expr::NaLit => "NA".into(),
-        Expr::NullLit => "NULL".into(),
-        Expr::Binary { op, lhs, rhs } => {
-            let opstr = match op {
-                BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/",
-                BinOp::Pow => "^", BinOp::Mod => "%%", BinOp::IntDiv => "%/%",
-                BinOp::Eq => "==", BinOp::Ne => "!=", BinOp::Lt => "<", BinOp::Gt => ">",
-                BinOp::Le => "<=", BinOp::Ge => ">=",
-                // Lexer convention: `&` → And, `&&` → AndShort.
-                BinOp::And => "&", BinOp::Or => "|",
-                BinOp::AndShort => "&&", BinOp::OrShort => "||",
-                BinOp::Tilde => "~", BinOp::MatMul => "%*%",
-                BinOp::Colon => ":",
-            };
-            format!("{} {} {}", fmt_expr(lhs), opstr, fmt_expr(rhs))
-        }
-        Expr::Call { func, args } => {
-            let fname = fmt_expr(func);
-            let parts: Vec<String> = args.iter().map(|a| match &a.name {
-                Some(n) => format!("{} = {}", n, fmt_expr(&a.value)),
-                None => fmt_expr(&a.value),
-            }).collect();
-            format!("{}({})", fname, parts.join(", "))
-        }
-        Expr::Dollar { object, field } => format!("{}${}", fmt_expr(object), field),
-        Expr::Index { object, indices } => {
-            let parts: Vec<String> = indices.iter().map(|i| match i {
-                Some(e) => fmt_expr(e),
-                None => String::new(),
-            }).collect();
-            format!("{}[{}]", fmt_expr(object), parts.join(", "))
-        }
-        _ => "<expr>".into(),
-    }
-}
+// `fmt_expr` (the deparser) moved to r2-types as `deparse`, next to `Expr`,
+// so RVal::Lang's Display and the deparse() builtin share one copy.
+// Re-exported here under the old name to keep engine call sites unchanged.
+pub(crate) use r2_types::deparse as fmt_expr;

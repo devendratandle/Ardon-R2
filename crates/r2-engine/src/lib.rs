@@ -64,6 +64,7 @@ use builtins::io::*;
 use builtins::ml::*;
 use builtins::stats::*;
 use builtins::strings::*;
+use builtins::lang::*;
 
 // PackageLayer / PackageTier / FunctionRegistry moved to `registry.rs`.
 mod registry;
@@ -450,6 +451,15 @@ impl Engine {
                                 return self.call_fn(&f, &ea, env);
                             }
                         }
+                    }
+
+                    // quote(e) — return the argument UNEVALUATED as a language
+                    // object (RVal::Lang). The keystone of Phase L.1; like
+                    // curve/with, it must intercept before args are evaluated.
+                    if fname.as_ref() == "quote" {
+                        return Ok(args.first()
+                            .map(|a| RVal::Lang(Arc::new(a.value.clone())))
+                            .unwrap_or(RVal::Null));
                     }
 
                     // NSE for `data.frame(y, x1, x2)` — bare-symbol args become

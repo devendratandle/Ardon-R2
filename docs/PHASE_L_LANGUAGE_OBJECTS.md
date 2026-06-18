@@ -31,7 +31,15 @@ the existing `eval_in`. Everything else is builtins on top.
 
 ## Slices, builtins, and how each is done
 
-### L.1 — round-trip (easy, NO hot-path changes) ~1 session, low risk
+### L.1 — round-trip (easy, NO hot-path changes) ✅ DONE
+Shipped: `RVal::Lang(Arc<Expr>)` added; `fmt_expr` deparser moved to
+r2-types as `pub fn deparse` (shared by `RVal::Lang` Display + the builtin);
+`type_name` → "call". Builtins `eval`/`parse`/`deparse`/`call`/`as.call` in
+`builtins/lang.rs`; `quote` is an NSE intercept in `eval_in`. Verified:
+`deparse(quote(x+1))`→"x + 1", `eval(parse(text="1+1"))`→2, multi-stmt
+parse, `eval(call("sum",1,2,3))`→6, Lang autoprints as deparsed source.
+The new variant broke NO exhaustive matches beyond type_name (the proxy
+estimate was generous). FUNCTIONS.md 301→307.
 - `quote(e)` — NSE intercept in `eval_in` (like existing `with`/`curve`):
   take arg-0 UNEVALUATED, wrap its `Expr` in `Lang`.
 - `eval(l, env)` — plain builtin: `Lang(e) => self.eval_in(&e, env)`.

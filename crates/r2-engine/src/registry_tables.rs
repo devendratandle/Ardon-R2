@@ -47,6 +47,9 @@ pub(crate) fn base_table() -> Vec<(&'static str, BuiltinFn)> {
         ("seq",bi_seq),("rep",bi_rep),("paste",bi_paste),("paste0",bi_paste0),
         ("which",bi_which),("sort",bi_sort),("rev",bi_rev),("unique",bi_unique),
         ("seq_len",bi_seq_len),("seq_along",bi_seq_along),("unlist",bi_unlist),("setNames",bi_set_names),("append",bi_append),("pmin",bi_pmin),("pmax",bi_pmax),("setdiff",bi_setdiff),("union",bi_union),("intersect",bi_intersect),("invisible",bi_invisible),("inherits",bi_inherits),("cut",bi_cut),("signif",bi_signif),("Reduce",bi_reduce),("Filter",bi_filter_fp),("Map",bi_map),("split",bi_split),("stopifnot",bi_stopifnot),("outer",bi_outer),("attr",bi_attr),("attributes",bi_attributes),("structure",bi_structure),("format",bi_format),("%in%",bi_in),("factorial",bi_factorial),("choose",bi_choose),("gamma",bi_gamma),("lgamma",bi_lgamma),("beta",bi_beta),("combn",bi_combn),("mad",bi_mad),("fivenum",bi_fivenum),("numeric",bi_numeric),("integer",bi_integer),("character",bi_character),("logical",bi_logical),("as.matrix",bi_as_matrix),("as.vector",bi_as_vector),("as.list",bi_as_list),("is.function",bi_is_function),("is.list",bi_is_list),("is.vector",bi_is_vector),("is.element",bi_in),("substring",bi_substring),("readLines",bi_read_lines),("writeLines",bi_write_lines),("uniroot",bi_uniroot),("integrate",bi_integrate),("optimize",bi_optimize),("match.arg",bi_match_arg),("ave",bi_ave),("nargs",bi_nargs),
+        // Phase L.1 — first-class language objects (quote is an NSE special
+        // form in eval_in, not registered here).
+        ("eval",bi_eval),("parse",bi_parse),("deparse",bi_deparse),("call",bi_call),("as.call",bi_as_call),
         ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
         ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
         ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),

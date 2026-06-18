@@ -1121,6 +1121,11 @@ pub enum RVal {
     Formula(Formula),
     Closure(Closure),
     BuiltinFn(Arc<str>),
+    /// A quoted, unevaluated expression — R's LANGSXP/EXPRSXP. Produced by
+    /// `quote()`/`parse()`/`body()`; consumed by `eval()`/`deparse()`.
+    /// `Arc<Expr>` is how `Closure` already stores its body, so this is a
+    /// cheap, shareable handle onto the AST. (Phase L.1.)
+    Lang(Arc<Expr>),
 
     // Type system
     TypeDef(TypeDef),
@@ -1266,6 +1271,52 @@ pub fn rbool(b: bool) -> RVal { RVal::Logical(vec![Some(b)].into(), Attrs::defau
 pub fn rna() -> RVal { RVal::Numeric(vec![None].into(), Attrs::default()) }
 pub fn rnums(v: &[f64]) -> RVal { RVal::Numeric(v.iter().map(|x| Some(*x)).collect::<Vec<_>>().into(), Attrs::default()) }
 pub fn rints(v: &[i32]) -> RVal { RVal::Integer(v.iter().map(|x| Some(*x)).collect(), Attrs::default()) }
+
+/// Deparse an `Expr` back into R source text — the inverse of parsing.
+/// Lives here (next to `Expr`) so both `RVal::Lang`'s `Display` and the
+/// engine's `deparse()` builtin share one implementation. (Phase L.1;
+/// formerly `fmt_expr` in r2-engine/formula.rs.)
+pub fn deparse(e: &Expr) -> String {
+    match e {
+        Expr::Symbol(s) => s.to_string(),
+        Expr::NumLit(n) => fmt_num(*n),
+        Expr::IntLit(n) => format!("{}", n),
+        Expr::StrLit(s) => format!("\"{}\"", s),
+        Expr::BoolLit(b) => if *b { "TRUE".into() } else { "FALSE".into() },
+        Expr::NaLit => "NA".into(),
+        Expr::NullLit => "NULL".into(),
+        Expr::Binary { op, lhs, rhs } => {
+            let opstr = match op {
+                BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/",
+                BinOp::Pow => "^", BinOp::Mod => "%%", BinOp::IntDiv => "%/%",
+                BinOp::Eq => "==", BinOp::Ne => "!=", BinOp::Lt => "<", BinOp::Gt => ">",
+                BinOp::Le => "<=", BinOp::Ge => ">=",
+                BinOp::And => "&", BinOp::Or => "|",
+                BinOp::AndShort => "&&", BinOp::OrShort => "||",
+                BinOp::Tilde => "~", BinOp::MatMul => "%*%",
+                BinOp::Colon => ":",
+            };
+            format!("{} {} {}", deparse(lhs), opstr, deparse(rhs))
+        }
+        Expr::Call { func, args } => {
+            let fname = deparse(func);
+            let parts: Vec<String> = args.iter().map(|a| match &a.name {
+                Some(n) => format!("{} = {}", n, deparse(&a.value)),
+                None => deparse(&a.value),
+            }).collect();
+            format!("{}({})", fname, parts.join(", "))
+        }
+        Expr::Dollar { object, field } => format!("{}${}", deparse(object), field),
+        Expr::Index { object, indices } => {
+            let parts: Vec<String> = indices.iter().map(|i| match i {
+                Some(e) => deparse(e),
+                None => String::new(),
+            }).collect();
+            format!("{}[{}]", deparse(object), parts.join(", "))
+        }
+        _ => "<expr>".into(),
+    }
+}
 
 /// Central numeric formatting: 7 decimal places, scientific for extreme values
 pub fn fmt_num(n: f64) -> String {
@@ -1465,6 +1516,8 @@ impl fmt::Display for RVal {
                 }).collect();
                 write!(f, "function({})\n{{\n    <user-defined>\n}}", params.join(", "))
             }
+            // A quoted expression prints as its deparsed source (R's behaviour).
+            RVal::Lang(e) => write!(f, "{}", deparse(e)),
             _ => write!(f, "<{}>", self.type_name()),
         }
     }
@@ -1509,6 +1562,7 @@ impl RVal {
             RVal::DataFrame(..) => "data.frame", RVal::Matrix(..) => "matrix",
             RVal::Factor(..) => "factor", RVal::Tensor(..) => "tensor",
             RVal::Formula(..) => "formula", RVal::Closure(..) => "function",
+            RVal::Lang(..) => "call",
             RVal::BuiltinFn(..) => "builtin", RVal::TypeDef(..) => "type",
             RVal::TypeInstance(..) => "instance", RVal::Null => "NULL",
             RVal::Env(..) => "environment",
