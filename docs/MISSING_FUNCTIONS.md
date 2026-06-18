@@ -59,7 +59,7 @@ DONE since: `match.arg`, `nargs`, `ave`. Still missing (niche):
 |---|---|
 | `formatC`, `prettyNum`, `strrep`, `chartr` | extra string formatting |
 | `by`, `within`, `stack` | df split-apply (need careful NSE/scope handling) |
-| `Sys.setenv`, `match.call` | misc |
+| `Sys.setenv` | misc |
 | `ecdf` | returnable function object |
 | `..1`/`..2` | lexer splits `..N`; use `list(...)[[n]]` for now |
 

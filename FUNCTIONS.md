@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 310 Built-in Functions
+# Ardon-R2 Function Reference — 314 Built-in Functions
 
 ## Core (53)
 ```
@@ -350,7 +350,7 @@ readline(prompt)    Block until stdin line is entered; returns character.
                       invisible(readline("Press Enter to continue..."))
 ```
 
-## Language / Metaprogramming (9)
+## Language / Metaprogramming (13)
 ```
 quote(expr)        Capture an expression unevaluated (a language object)
 eval(expr)         Evaluate a language object (e.g. eval(parse(text=...)))
@@ -361,7 +361,14 @@ as.call(list)      Turn a list (function + args) into a call
 body(f)            Body of a user-defined function (a language object)
 formals(f)         Formal arguments as a named list (defaults or NULL)
 args(f)            Function signature (same formals, NULL body)
+substitute(expr)   Replace a function's params with the caller's expressions
+match.call()       Current call with args matched to formal names
+sys.call()         Current call exactly as written
+bquote(expr)       Quote expr, splicing in any .(x) evaluated inline
 ```
+Note: arguments are evaluated eagerly (no lazy promises), so `substitute`
+captures the caller's expression for labeling/deparse but the argument must
+still be evaluable. See docs/PHASE_L_LANGUAGE_OBJECTS.md.
 
 ## Operators (21)
 ```

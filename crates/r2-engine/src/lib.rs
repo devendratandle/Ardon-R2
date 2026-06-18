@@ -112,6 +112,25 @@ pub struct Engine {
     jit_cache: HashMap<usize, (Arc<Expr>, Option<Arc<dyn JitHandle>>)>,
     /// Master switch — disabled via env `R2_JIT=0`. Default on.
     jit_enabled: bool,
+    /// Call frames for NSE (Phase L.3): pushed ONLY when calling a closure
+    /// whose body uses substitute/match.call/sys.call (see `nse_cache`).
+    /// `substitute`/`match.call`/`sys.call` read the top frame. Empty for
+    /// the overwhelmingly common non-NSE call — zero hot-path cost.
+    nse_stack: Vec<NseFrame>,
+    /// Gate cache: `Arc::as_ptr(&closure.body)` → (retained Arc, uses_nse?).
+    /// The Arc is retained to defeat pointer recycling (same fix as
+    /// `jit_cache`). Computed once per unique closure body.
+    nse_cache: HashMap<usize, (Arc<Expr>, bool)>,
+}
+
+/// One NSE call frame (Phase L.3). Captures the UNEVALUATED call so that
+/// `substitute`/`match.call`/`sys.call` can recover the caller's
+/// expressions — R's eager-model stand-in for promises.
+pub(crate) struct NseFrame {
+    /// The `Expr::Call` that invoked the closure (func + unevaluated args).
+    pub(crate) call: Arc<Expr>,
+    /// The called closure's formals — for R-style arg→param matching.
+    pub(crate) params: Vec<r2_types::Param>,
 }
 
 /// Info about an installed (but not necessarily loaded) package
@@ -220,6 +239,8 @@ impl Engine {
             local_scopes: Vec::new(),
             jit_cache: HashMap::new(),
             jit_enabled: std::env::var("R2_JIT").map(|v| v != "0").unwrap_or(true),
+            nse_stack: Vec::new(),
+            nse_cache: HashMap::new(),
         };
 
         // Built-in package layers. The tables live in `registry_tables`
@@ -460,6 +481,29 @@ impl Engine {
                         return Ok(args.first()
                             .map(|a| RVal::Lang(Arc::new(a.value.clone())))
                             .unwrap_or(RVal::Null));
+                    }
+
+                    // substitute(e) — return e with the current function's
+                    // parameter symbols replaced by the UNEVALUATED expressions
+                    // the caller passed (R's promise stand-in). Outside a
+                    // function, returns e unchanged. (Phase L.3.)
+                    if fname.as_ref() == "substitute" {
+                        let arg = args.first().map(|a| a.value.clone()).unwrap_or(Expr::NullLit);
+                        let result = if let Some(frame) = self.nse_stack.last() {
+                            let map = builtins::lang::match_call_args(&frame.call, &frame.params);
+                            builtins::lang::substitute_expr(&arg, &map)
+                        } else {
+                            arg
+                        };
+                        return Ok(RVal::Lang(Arc::new(result)));
+                    }
+
+                    // bquote(e) — quote e, but splice in any `.(x)` evaluated
+                    // in the current environment (quasiquotation). (Phase L.3.)
+                    if fname.as_ref() == "bquote" {
+                        let arg = args.first().map(|a| a.value.clone()).unwrap_or(Expr::NullLit);
+                        let result = self.bquote_walk(&arg, env)?;
+                        return Ok(RVal::Lang(Arc::new(result)));
                     }
 
                     // NSE for `data.frame(y, x1, x2)` — bare-symbol args become
@@ -835,6 +879,19 @@ impl Engine {
                 // Normal call: evaluate all arguments. `...` in the argument
                 // list splices the caller's captured dots into this call.
                 let f = self.eval_in(func, env)?;
+                // NSE frame (Phase L.3): push the UNEVALUATED call only when
+                // the target closure actually uses substitute/match.call/
+                // sys.call. Gated, so normal closure calls clone nothing.
+                let pushed_nse = match &f {
+                    RVal::Closure(cl) if self.closure_uses_nse(&cl.body) => {
+                        self.nse_stack.push(NseFrame {
+                            call: Arc::new(Expr::Call { func: func.clone(), args: args.to_vec() }),
+                            params: cl.params.clone(),
+                        });
+                        true
+                    }
+                    _ => false,
+                };
                 let mut ea = Vec::new();
                 for a in args {
                     if matches!(a.value, Expr::Dots) {
@@ -842,10 +899,15 @@ impl Engine {
                             for (nm, val) in dots { ea.push(EvalArg { name: nm, value: val }); }
                         }
                     } else {
-                        ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? });
+                        match self.eval_in(&a.value, env) {
+                            Ok(v) => ea.push(EvalArg { name: a.name.clone(), value: v }),
+                            Err(e) => { if pushed_nse { self.nse_stack.pop(); } return Err(e); }
+                        }
                     }
                 }
-                self.call_fn(&f, &ea, env)
+                let result = self.call_fn(&f, &ea, env);
+                if pushed_nse { self.nse_stack.pop(); }
+                result
             }
             Expr::Pipe { lhs, rhs } => {
                 let lv = self.eval_in(lhs, env)?;
@@ -927,6 +989,63 @@ impl Engine {
             Expr::Dots => Ok(self.lookup_dots(env).unwrap_or(RVal::Null)),
             _ => err!(Runtime, "cannot evaluate expression"),
         }
+    }
+
+    /// `bquote` walker: quote `e`, but evaluate any `.(x)` sub-expression in
+    /// `env` and splice its value back in as a literal. (Phase L.3.)
+    fn bquote_walk(&mut self, e: &Expr, env: &EnvRef) -> Result<Expr, R2Err> {
+        // .(x) — the unquote escape.
+        if let Expr::Call { func, args } = e {
+            if matches!(func.as_ref(), Expr::Symbol(s) if s.as_ref() == "." ) && args.len() == 1 {
+                let v = self.eval_in(&args[0].value, env)?;
+                return builtins::lang::value_to_expr(&v);
+            }
+        }
+        Ok(match e {
+            Expr::Binary { op, lhs, rhs } =>
+                Expr::Binary { op: *op, lhs: Box::new(self.bquote_walk(lhs, env)?), rhs: Box::new(self.bquote_walk(rhs, env)?) },
+            Expr::Unary { op, expr } =>
+                Expr::Unary { op: *op, expr: Box::new(self.bquote_walk(expr, env)?) },
+            Expr::Call { func, args } => {
+                let func = Box::new(self.bquote_walk(func, env)?);
+                let mut nargs = Vec::with_capacity(args.len());
+                for a in args { nargs.push(r2_types::CallArg { name: a.name.clone(), value: self.bquote_walk(&a.value, env)? }); }
+                Expr::Call { func, args: nargs }
+            }
+            Expr::Index { object, indices } => {
+                let object = Box::new(self.bquote_walk(object, env)?);
+                let mut idx = Vec::with_capacity(indices.len());
+                for i in indices { idx.push(match i { Some(e) => Some(self.bquote_walk(e, env)?), None => None }); }
+                Expr::Index { object, indices: idx }
+            }
+            Expr::DblIndex { object, index } =>
+                Expr::DblIndex { object: Box::new(self.bquote_walk(object, env)?), index: Box::new(self.bquote_walk(index, env)?) },
+            Expr::Dollar { object, field } =>
+                Expr::Dollar { object: Box::new(self.bquote_walk(object, env)?), field: field.clone() },
+            Expr::Pipe { lhs, rhs } =>
+                Expr::Pipe { lhs: Box::new(self.bquote_walk(lhs, env)?), rhs: Box::new(self.bquote_walk(rhs, env)?) },
+            other => other.clone(),
+        })
+    }
+
+    /// The top NSE frame's (call, params), cloned out — for `match.call()`
+    /// / `sys.call()`. `None` when not inside an NSE-using function.
+    pub(crate) fn current_nse_frame(&self) -> Option<(Arc<Expr>, Vec<r2_types::Param>)> {
+        self.nse_stack.last().map(|f| (f.call.clone(), f.params.clone()))
+    }
+
+    /// Does this closure body use NSE (substitute/match.call/sys.call)?
+    /// Cached by the body's Arc pointer — computed once per unique body,
+    /// then a single HashMap lookup per closure call. Builtin calls never
+    /// reach here, so ordinary arithmetic/aggregation pays nothing.
+    fn closure_uses_nse(&mut self, body: &Arc<Expr>) -> bool {
+        let key = Arc::as_ptr(body) as usize;
+        if let Some((arc, flag)) = self.nse_cache.get(&key) {
+            if Arc::ptr_eq(arc, body) { return *flag; }
+        }
+        let flag = builtins::lang::expr_uses_nse(body);
+        self.nse_cache.insert(key, (body.clone(), flag));
+        flag
     }
 
     pub(crate) fn call_fn(&mut self, func: &RVal, args: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {

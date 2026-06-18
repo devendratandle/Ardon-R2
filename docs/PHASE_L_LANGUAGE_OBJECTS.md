@@ -62,7 +62,26 @@ SEPARATE feature ("replacement functions") that would also unlock
 `names<-`/`dim<-`/`class<-`/`attr<-`/`levels<-` (none currently work as
 `f(x)<-v`). Recommend its own phase, not bolted onto L.2.
 
-### L.3 — NSE + call stack (the hard part) ~1.5–2 sessions, medium-high risk
+### L.3 — NSE + call stack ✅ DONE
+Shipped: `substitute`/`bquote` as NSE intercepts in eval_in; `match.call`/
+`sys.call` as builtins reading the frame. Engine gained `nse_stack:
+Vec<NseFrame{call,params}>` + `nse_cache` (gate keyed by body Arc ptr, like
+jit_cache). Frames pushed ONLY for closures whose body uses NSE
+(`closure_uses_nse` via `expr_uses_nse` walker) — zero cost for normal
+closures, builtin calls skip the check entirely. Helpers `match_call_args`/
+`substitute_expr`/`value_to_expr` in builtins/lang.rs; `bquote_walk` method.
+Verified: substitute label capture, match.call reordering
+(`g(y=5,x=3)`→`g(x=3,y=5)`), sys.call, bquote `.()` splice, no regression.
+FUNCTIONS.md 310→314; removed match.call from MISSING_FUNCTIONS.
+
+**EAGER-EVAL CAVEAT (as designed):** R2 has no lazy promises, so a closure's
+args are evaluated before the body runs. `substitute(x)` returns the
+caller's *expression* (correct), but the argument must still be evaluable —
+`f(a+b)` with a/b unbound errors at the call, where R would not. Covers the
+canonical `deparse(substitute(x))` labeling use. True laziness = the
+separate "promises" phase.
+
+### (original L.3 design notes below) ~1.5–2 sessions, medium-high risk
 R relies on **promises** (lazy unevaluated arg exprs); R2 is **eager**, so the
 original arg expressions are gone by the time a closure runs. Fix = **arg-
 expression capture**: in `call_fn` closure binding, also record each arg's
