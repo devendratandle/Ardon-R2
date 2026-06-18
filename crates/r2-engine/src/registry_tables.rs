@@ -50,6 +50,8 @@ pub(crate) fn base_table() -> Vec<(&'static str, BuiltinFn)> {
         // Phase L.1 — first-class language objects (quote is an NSE special
         // form in eval_in, not registered here).
         ("eval",bi_eval),("parse",bi_parse),("deparse",bi_deparse),("call",bi_call),("as.call",bi_as_call),
+        // Phase L.2 — function introspection (read-only).
+        ("body",bi_body),("formals",bi_formals),("args",bi_args),
         ("abs",bi_abs),("sqrt",bi_sqrt),("round",bi_round),("max",bi_max),("min",bi_min),
         ("nchar",bi_nchar),("toupper",bi_toupper),("tolower",bi_tolower),
         ("substr",bi_substr),("grep",bi_grep),("gsub",bi_gsub),("strsplit",bi_strsplit),

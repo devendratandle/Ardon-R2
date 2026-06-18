@@ -47,10 +47,20 @@ estimate was generous). FUNCTIONS.md 301→307.
 - `parse(text=)` — `r2_parser::Parser::parse(text)` → `Vec<Expr>` → `Lang`/list.
 - `call(name, …)`, `as.call(list)` — build `Lang(Expr::Call{…})`.
 
-### L.2 — function introspection (easy) ~0.5–1 session, low risk
-- `body(f)` — `RVal::Closure(cl) => Lang(cl.body.clone())` (one Arc clone).
-- `formals(f)`, `args(f)` — return `cl.params` as a list/pairlist.
-- `body<-`, `formals<-` — rebuild the `Closure` with a new body/params.
+### L.2 — function introspection ✅ DONE (read-only part)
+Shipped: `body(f)` → `Lang(cl.body.clone())`; `formals(f)` → named list of
+defaults (Lang) or NULL, `...` named "..."; `args(f)` → closure with same
+params + NullLit body. Primitives → NULL. In `builtins/lang.rs`, registered
+in `registry_tables.rs`. Verified: body/formals/args + `eval(body(f))`.
+FUNCTIONS.md 307→310.
+
+**DEFERRED — `body<-` / `formals<-`:** these need **generic replacement-
+function dispatch** (`fname(x,…) <- v` → `x <- \`fname<-\`(x,…,value=v)`),
+which R2 does NOT have — the assignment handler (lib.rs ~331) only does
+Symbol/`[`/`[[`/`$`, else "invalid assignment target". Building that is a
+SEPARATE feature ("replacement functions") that would also unlock
+`names<-`/`dim<-`/`class<-`/`attr<-`/`levels<-` (none currently work as
+`f(x)<-v`). Recommend its own phase, not bolted onto L.2.
 
 ### L.3 — NSE + call stack (the hard part) ~1.5–2 sessions, medium-high risk
 R relies on **promises** (lazy unevaluated arg exprs); R2 is **eager**, so the

@@ -71,6 +71,49 @@ pub(crate) fn bi_parse(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     }
 }
 
+/// `body(f)` — the body of a user-defined function, as a language object.
+/// Built-in primitives have no inspectable body → NULL (R's behaviour).
+pub(crate) fn bi_body(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match gv(a, 0) {
+        RVal::Closure(cl) => Ok(RVal::Lang(cl.body.clone())),
+        RVal::BuiltinFn(_) => Ok(RVal::Null),
+        other => err!(Runtime, "body(): not a function (got '{}')", other.type_name()),
+    }
+}
+
+/// `formals(f)` — the formal arguments as a named list: each element is the
+/// argument's default (a language object) or NULL when it has none. `...`
+/// is named "...". Primitives → NULL.
+pub(crate) fn bi_formals(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match gv(a, 0) {
+        RVal::Closure(cl) => {
+            let items = cl.params.iter().map(|p| {
+                let name = if p.dots { Arc::from("...") } else { p.name.clone() };
+                let val = p.default.as_ref()
+                    .map(|d| RVal::Lang(Arc::new((**d).clone())))
+                    .unwrap_or(RVal::Null);
+                (Some(name), val)
+            }).collect();
+            Ok(RVal::List(items))
+        }
+        RVal::BuiltinFn(_) => Ok(RVal::Null),
+        other => err!(Runtime, "formals(): not a function (got '{}')", other.type_name()),
+    }
+}
+
+/// `args(f)` — a function with the same formals but a NULL body, i.e. the
+/// signature alone (R's behaviour). Non-functions pass through unchanged.
+pub(crate) fn bi_args(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match gv(a, 0) {
+        RVal::Closure(cl) => Ok(RVal::Closure(Closure {
+            params: cl.params.clone(),
+            body: Arc::new(Expr::NullLit),
+            env: cl.env.clone(),
+        })),
+        other => Ok(other),
+    }
+}
+
 /// Convert an evaluated value back into an AST node for call construction.
 /// Phase L.1 supports quoted expressions and scalar literals; richer values
 /// are deferred (they need a literal-RVal AST node).
