@@ -940,40 +940,74 @@ impl Engine {
                 // Symbol-lookup checks first, so the original env still works.
                 let iv = self.eval_in(iter, env)?;
                 let at_top_level = self.local_scopes.is_empty();
-                for item in self.to_items(&iv)? {
+                'each_item: for item in self.to_items(&iv)? {
                     self.scope_insert(var.clone(), item);
-                    let body_env_owned;
-                    let body_env: &EnvRef = if at_top_level {
-                        body_env_owned = self.global_env.clone();
-                        &body_env_owned
+                    if at_top_level {
+                        // Re-snapshot global_env before EACH statement. A single
+                        // per-iteration snapshot made a variable that is both
+                        // ASSIGNED and READ in the same iteration read its stale
+                        // (previous-iteration) value, because a top-level
+                        // assignment replaces the env's Arc and the snapshot
+                        // kept pointing at the old one. Cloning per statement
+                        // makes prior assignments in this iteration visible.
+                        let stmts: &[Expr] = match body.as_ref() {
+                            Expr::Block(s) => s,
+                            single => std::slice::from_ref(single),
+                        };
+                        for stmt in stmts {
+                            let genv = self.global_env.clone();
+                            match self.eval_in(stmt, &genv) {
+                                Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break 'each_item,
+                                Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue 'each_item,
+                                Err(e) => return Err(e),
+                                _ => {}
+                            }
+                        }
                     } else {
-                        env
-                    };
-                    match self.eval_in(body, body_env) {
-                        Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
-                        Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
-                        Err(e) => return Err(e),
-                        _ => {}
+                        match self.eval_in(body, env) {
+                            Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
+                            Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
+                            Err(e) => return Err(e),
+                            _ => {}
+                        }
                     }
                 }
                 Ok(RVal::Null)
             }
             Expr::While { cond, body } => {
-                // Same top-level re-snapshot rule as For.
+                // Same top-level re-snapshot rule as For: re-clone global_env
+                // before the condition AND before each body statement, so an
+                // assigned-then-read variable in one iteration isn't stale.
                 let at_top_level = self.local_scopes.is_empty();
                 loop {
-                    let cond_env_owned;
-                    let cur_env: &EnvRef = if at_top_level {
-                        cond_env_owned = self.global_env.clone();
-                        &cond_env_owned
-                    } else { env };
-                    let c = self.eval_in(cond, cur_env)?;
-                    if !self.truthy(&c)? { break; }
-                    match self.eval_in(body, cur_env) {
-                        Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
-                        Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
-                        Err(e) => return Err(e),
-                        _ => {}
+                    if at_top_level {
+                        let cenv = self.global_env.clone();
+                        let c = self.eval_in(cond, &cenv)?;
+                        if !self.truthy(&c)? { break; }
+                        let stmts: &[Expr] = match body.as_ref() {
+                            Expr::Block(s) => s,
+                            single => std::slice::from_ref(single),
+                        };
+                        let mut do_break = false;
+                        for stmt in stmts {
+                            let genv = self.global_env.clone();
+                            match self.eval_in(stmt, &genv) {
+                                Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => { do_break = true; break; }
+                                Err(R2Err { kind: ErrKind::CtrlNext, .. }) => break, // skip rest, recheck cond
+                                Err(e) => return Err(e),
+                                _ => {}
+                            }
+                        }
+                        if do_break { break; }
+                    } else {
+                        let c = self.eval_in(cond, env)?;
+                        if !self.truthy(&c)? { break; }
+                        match self.eval_in(body, env) {
+                            Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
+                            Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
+                            Err(e) => return Err(e),
+                            _ => {}
+                        }
                     }
                 }
                 Ok(RVal::Null)
