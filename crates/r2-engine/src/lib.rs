@@ -1265,6 +1265,21 @@ impl Engine {
         env.lookup(&key).cloned()
     }
 
+    /// String labels of a value, for character/factor comparisons. Factors
+    /// map codes → level labels; numerics fall back to their printed form
+    /// (so `x == "1"` still works). Used only on the comparison path.
+    fn label_vec(&self, v: &RVal) -> Vec<Option<String>> {
+        match v {
+            RVal::Character(c, _) => c.iter().map(|x| x.as_ref().map(|s| s.to_string())).collect(),
+            RVal::Factor(f) => f.codes.iter()
+                .map(|c| c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string()))).collect(),
+            other => match self.as_reals(other) {
+                Ok(rs) => (0..rs.len()).map(|i| rs[i].map(r2_types::fmt_num)).collect(),
+                Err(_) => Vec::new(),
+            },
+        }
+    }
+
     fn binary_op(&mut self, op: BinOp, lhs: &RVal, rhs: &RVal) -> Result<RVal, R2Err> {
         // Matrix multiply: %*%
         if op == BinOp::MatMul {
@@ -1437,6 +1452,29 @@ impl Engine {
                     }
                 }
             }
+        }
+
+        // String / factor comparisons (== != < > <= >=) compare LABELS,
+        // not numeric codes — so `iris$Species == "setosa"` works. Engaged
+        // only when a side is character/factor; pure-numeric comparisons
+        // still take the fast numeric path below.
+        if matches!(op, BinOp::Eq|BinOp::Ne|BinOp::Lt|BinOp::Gt|BinOp::Le|BinOp::Ge)
+            && (matches!(lhs, RVal::Character(..)|RVal::Factor(..))
+                || matches!(rhs, RVal::Character(..)|RVal::Factor(..)))
+        {
+            let ls = self.label_vec(lhs);
+            let rs = self.label_vec(rhs);
+            let (ll, rl) = (ls.len(), rs.len());
+            if ll == 0 || rl == 0 { return Ok(RVal::Logical(Vec::<Logical>::new().into(), Attrs::default())); }
+            let len = ll.max(rl);
+            let out: Vec<Logical> = (0..len).map(|i| match (&ls[i % ll], &rs[i % rl]) {
+                (Some(a), Some(b)) => Some(match op {
+                    BinOp::Eq => a == b, BinOp::Ne => a != b,
+                    BinOp::Lt => a < b, BinOp::Gt => a > b, BinOp::Le => a <= b, BinOp::Ge => a >= b,
+                    _ => false }),
+                _ => None,
+            }).collect();
+            return Ok(RVal::Logical(out.into(), Attrs::default()));
         }
 
         let l = self.as_reals(lhs)?; let r = self.as_reals(rhs)?;
@@ -1622,8 +1660,8 @@ impl Engine {
         Ok(RVal::Matrix(out))
     }
     fn index_1d(&self, obj: &RVal, idx: &RVal) -> Result<RVal, R2Err> { match idx { RVal::Logical(mask,_) => self.logical_sub(obj,mask), RVal::Factor(f) => { let pos: Vec<Real> = f.codes.iter().map(|&c| c.map(|i| i as f64 + 1.0)).collect(); self.pos_sub(obj, &pos) } _ => { let pos = self.as_reals(idx)?; self.pos_sub(obj,&pos) } } }
-    fn pos_sub(&self, obj: &RVal, pos: &[Real]) -> Result<RVal, R2Err> { match obj { RVal::Numeric(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { if self.mode==ErrorMode::Strict { return err!(Index,"index {} out of bounds (len {})",i,v.len()); } r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Numeric(r.into(), Attrs::default())) } RVal::Character(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1].clone()); } } None => r.push(None), } } Ok(RVal::Character(r, Attrs::default())) } RVal::Integer(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Integer(r.into(), Attrs::default())) } _ => err!(Index,"cannot subset {}",obj.type_name()), } }
-    fn logical_sub(&self, obj: &RVal, mask: &[Logical]) -> Result<RVal, R2Err> { match obj { RVal::Numeric(v,_) => Ok(RVal::Numeric(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(*val) } else { None }).collect(), Attrs::default())), _ => err!(Index,"logical subset not impl for {}",obj.type_name()) } }
+    fn pos_sub(&self, obj: &RVal, pos: &[Real]) -> Result<RVal, R2Err> { match obj { RVal::Numeric(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { if self.mode==ErrorMode::Strict { return err!(Index,"index {} out of bounds (len {})",i,v.len()); } r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Numeric(r.into(), Attrs::default())) } RVal::Character(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1].clone()); } } None => r.push(None), } } Ok(RVal::Character(r, Attrs::default())) } RVal::Integer(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Integer(r.into(), Attrs::default())) } RVal::Logical(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Logical(r.into(), Attrs::default())) } RVal::Factor(fc) => { let mut codes = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>fc.codes.len() { codes.push(None); } else { codes.push(fc.codes[i-1]); } } None => codes.push(None), } } let mut nf = fc.clone(); nf.codes = codes; Ok(RVal::Factor(nf)) } _ => err!(Index,"cannot subset {}",obj.type_name()), } }
+    fn logical_sub(&self, obj: &RVal, mask: &[Logical]) -> Result<RVal, R2Err> { match obj { RVal::Numeric(v,_) => Ok(RVal::Numeric(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(*val) } else { None }).collect(), Attrs::default())), RVal::Integer(v,_) => Ok(RVal::Integer(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(*val) } else { None }).collect(), Attrs::default())), RVal::Character(v,_) => Ok(RVal::Character(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(val.clone()) } else { None }).collect(), Attrs::default())), RVal::Factor(fc) => { let mut nf = fc.clone(); nf.codes = fc.codes.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(c,m)| if *m==Some(true) { Some(*c) } else { None }).collect(); Ok(RVal::Factor(nf)) }, _ => err!(Index,"logical subset not impl for {}",obj.type_name()) } }
     fn index_df(&self, df: &DataFrame, row: &Option<RVal>, col: &Option<RVal>) -> Result<RVal, R2Err> {
         // Determine which rows to keep
         let nrow = df.nrow();
@@ -1680,6 +1718,13 @@ impl Engine {
             RVal::Integer(v, _) => RVal::Integer(rows.iter().map(|&r| v.get(r).copied().unwrap_or(None)).collect(), Attrs::default()),
             RVal::Character(v, _) => RVal::Character(rows.iter().map(|&r| v.get(r).cloned().unwrap_or(None)).collect(), Attrs::default()),
             RVal::Logical(v, _) => RVal::Logical(rows.iter().map(|&r| v.get(r).copied().unwrap_or(None)).collect(), Attrs::default()),
+            // Factor columns must be row-filtered too (else `iris[mask,]`
+            // leaves Species at full length and breaks `~ Species` etc.).
+            RVal::Factor(f) => {
+                let mut nf = f.clone();
+                nf.codes = rows.iter().map(|&r| f.codes.get(r).copied().unwrap_or(None)).collect();
+                RVal::Factor(nf)
+            }
             _ => col.clone(),
         }
     }
