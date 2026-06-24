@@ -334,6 +334,15 @@ pub fn bi_dev_cur(_a: &[EvalArg]) -> Result<RVal, R2Err> {
 /// polls and displays. Idempotent: calling it more than once just
 /// re-opens the browser tab to the same server.
 pub fn bi_dev_view(_a: &[EvalArg]) -> Result<RVal, R2Err> {
+    // Only launch the browser/server in an interactive session. In batch
+    // script mode the process exits immediately after, killing the server
+    // before the browser connects — which just flashes a blank tab. The
+    // interactive REPL is the only caller of `enable_autoview()`, so it is
+    // our "is this an interactive session?" signal.
+    if !crate::device::autoview_enabled() {
+        soutln!("dev.view(): skipped — requires an interactive session (no-op in scripts).");
+        return Ok(RVal::Null);
+    }
     match crate::server::ensure_started() {
         Some(port) => {
             crate::server::open_browser(port);
