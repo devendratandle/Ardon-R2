@@ -43,6 +43,9 @@ Surfaced and fixed by base + data-manip + graphics regression programs:
   those positions (were returning empty); `toString()` added.
 
 ### Language / REPL
+- Separate function/variable namespaces in call position: `c <- c(1,2);
+  c(3,4)` now still calls the builtin `c` (a non-function binding of the
+  same name is skipped). Lets you name variables `c`/`t`/`df`/`data` etc.
 - `repeat { ... }` loops (with `break`/`next`) — were a parse error.
 - REPL continues onto the next line when the parser needs more input
   (`repeat`, `if (x)`, `while (x)`, `function(...)` with the body below),

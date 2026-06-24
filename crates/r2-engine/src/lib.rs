@@ -913,7 +913,9 @@ impl Engine {
                 }
                 // Normal call: evaluate all arguments. `...` in the argument
                 // list splices the caller's captured dots into this call.
-                let f = self.eval_in(func, env)?;
+                // Function-position lookup (R keeps fn/var namespaces apart):
+                // `c <- c(1,2); c(3,4)` still calls the builtin `c`.
+                let f = self.resolve_call_target(func, env)?;
                 // NSE frame (Phase L.3): push the UNEVALUATED call only when
                 // the target closure actually uses substitute/match.call/
                 // sys.call. Gated, so normal closure calls clone nothing.
@@ -947,7 +949,7 @@ impl Engine {
             Expr::Pipe { lhs, rhs } => {
                 let lv = self.eval_in(lhs, env)?;
                 match rhs.as_ref() {
-                    Expr::Call { func, args } => { let f = self.eval_in(func, env)?; let mut ea = vec![EvalArg { name: None, value: lv }]; for a in args { ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? }); } self.call_fn(&f, &ea, env) }
+                    Expr::Call { func, args } => { let f = self.resolve_call_target(func, env)?; let mut ea = vec![EvalArg { name: None, value: lv }]; for a in args { ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? }); } self.call_fn(&f, &ea, env) }
                     _ => err!(Runtime, "|> rhs must be a function call"),
                 }
             }
@@ -1133,6 +1135,33 @@ impl Engine {
     /// / `sys.call()`. `None` when not inside an NSE-using function.
     pub(crate) fn current_nse_frame(&self) -> Option<(Arc<Expr>, Vec<r2_types::Param>)> {
         self.nse_stack.last().map(|f| (f.call.clone(), f.params.clone()))
+    }
+
+    /// Resolve the target of a call. R keeps function and variable lookup
+    /// separate: in call position `name(...)`, a non-function binding named
+    /// `name` is SKIPPED in favour of a function of that name. So
+    /// `c <- c(1,2); c(3,4)` still calls the builtin `c`. For a Symbol we
+    /// prefer the first *callable* binding (closure/builtin) up the scope
+    /// chain, then the builtin registry; otherwise fall back to normal eval
+    /// (which yields the proper "not callable"/"not found" error).
+    fn resolve_call_target(&mut self, func: &Expr, env: &EnvRef) -> Result<RVal, R2Err> {
+        if let Expr::Symbol(name) = func {
+            for scope in self.local_scopes.iter().rev() {
+                if let Some(v) = scope.get(name.as_ref()) {
+                    if matches!(v, RVal::Closure(_) | RVal::BuiltinFn(_)) { return Ok(v.clone()); }
+                }
+            }
+            if let Some(v) = env.lookup(name) {
+                if matches!(v, RVal::Closure(_) | RVal::BuiltinFn(_)) { return Ok(v.clone()); }
+            }
+            if let Some(v) = self.global_env.lookup(name) {
+                if matches!(v, RVal::Closure(_) | RVal::BuiltinFn(_)) { return Ok(v.clone()); }
+            }
+            if self.registry.resolve(name.as_ref()).is_some() {
+                return Ok(RVal::BuiltinFn(name.clone()));
+            }
+        }
+        self.eval_in(func, env)
     }
 
     /// Does this closure body use NSE (substitute/match.call/sys.call)?
