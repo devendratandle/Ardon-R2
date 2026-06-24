@@ -1584,7 +1584,13 @@ impl RVal {
             // `as.numeric(factor)` returns the integer codes (1-based), as in
             // R — needed by manova/aov/etc. to build group design matrices.
             RVal::Factor(f)      => Ok(f.codes.iter().map(|c| c.map(|i| i as f64 + 1.0)).collect()),
-            _ => Err(R2Err {
+            // Exhaustive on purpose (no `_`): adding a new RVal variant must
+            // be a COMPILE error here, not a silent runtime "cannot convert".
+            // That is exactly the gap that let factors slip past for so long.
+            RVal::Character(..) | RVal::Raw(..) | RVal::List(..) | RVal::DataFrame(..)
+            | RVal::Tensor(..) | RVal::Formula(..) | RVal::Closure(..) | RVal::BuiltinFn(..)
+            | RVal::Lang(..) | RVal::TypeDef(..) | RVal::TypeInstance(..) | RVal::Null
+            | RVal::Env(..) => Err(R2Err {
                 msg: format!("cannot convert {} to numeric. If this is a data.frame column, use df$column_name", self.type_name()),
                 kind: ErrKind::Type,
             }),
