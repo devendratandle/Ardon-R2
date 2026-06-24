@@ -28,6 +28,18 @@ reference grew from 301 to 314 built-ins.
   numeric).
 - **Multi-page PDF**: `pdf()` + multiple plots writes one page per plot.
 
+### Base / data-manipulation correctness (test-driven)
+Surfaced and fixed by base + data-manip + graphics regression programs:
+- Added `isTRUE`/`isFALSE`/`identical`/`all.equal`/`diag`; operators usable
+  as functions (`Reduce(\`+\`, x)`).
+- `c()` preserves R's type hierarchy (`c(TRUE,FALSE)` stays logical).
+- `paste`/`paste0` vectorized with recycling/sep/collapse; `substr`
+  vectorized; `sprintf` full format specs.
+- `rev` handles all vector types; `rep(x, length.out=)`; `factor()` sorts
+  levels alphabetically; `as.numeric(list)`/`as.numeric(factor)`.
+- `tapply`/`aggregate` by factor; `table(numeric)` returns the counts
+  vector; `cbind(df, x=)` appends columns; `boxplot(y ~ g, data=)`.
+
 ### Engine hardening / maintainability
 - Single source of truth for built-in registration tables (startup + reload
   can no longer drift; fixed a reload that silently dropped ~16 functions).

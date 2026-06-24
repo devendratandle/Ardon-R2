@@ -1,8 +1,12 @@
-# Ardon-R2 Function Reference — 314 Built-in Functions
+# Ardon-R2 Function Reference — 319 Built-in Functions
 
-## Core (53)
+## Core (58)
 ```
 c(...)              Create vector: c(1,2,3)
+isTRUE(x)/isFALSE(x) Test for a length-1 logical TRUE/FALSE
+identical(a,b)      Exact (type-strict) equality
+all.equal(a,b)      Near-equality (numeric tolerance) — TRUE or a diff message
+diag(x)             Matrix diagonal / diagonal matrix / k×k identity
 length(x)           Length of vector
 print(x)            Print value
 cat(...)            Print without newline
