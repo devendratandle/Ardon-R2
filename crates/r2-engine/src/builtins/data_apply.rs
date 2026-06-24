@@ -193,20 +193,52 @@ pub(crate) fn bi_is_null(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
 }
 
 pub(crate) fn bi_ifelse(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    // ifelse(test, yes, no) — vectorized conditional
+    // ifelse(test, yes, no) — vectorized conditional. The result takes the
+    // type of the chosen branch; R does NOT coerce string branches to
+    // numeric, so `ifelse(x>0, "high", "low")` must stay character.
     let test = e.as_logicals(&gv(a,0))?;
     let yes_val = gv(a,1);
     let no_val = gv(a,2);
+
+    // Character path: if either branch is non-numeric (character/factor),
+    // produce a character vector.
+    if matches!(yes_val, RVal::Character(..)|RVal::Factor(..))
+        || matches!(no_val, RVal::Character(..)|RVal::Factor(..)) {
+        let yes = ifelse_char_vec(&yes_val);
+        let no  = ifelse_char_vec(&no_val);
+        let (yl, nl) = (yes.len().max(1), no.len().max(1));
+        let result: Vec<Character> = test.iter().enumerate().map(|(i, t)| match t {
+            Some(true)  => yes.get(i % yl).cloned().flatten(),
+            Some(false) => no.get(i % nl).cloned().flatten(),
+            None => None,
+        }).collect();
+        return Ok(RVal::Character(result, Attrs::default()));
+    }
+
     let yes = e.as_reals(&yes_val)?;
     let no = e.as_reals(&no_val)?;
+    let (yl, nl) = (yes.len().max(1), no.len().max(1));
     let result: Vec<Real> = test.iter().enumerate().map(|(i, t)| {
         match t {
-            Some(true) => yes.get(i % yes.len()).copied().unwrap_or(None),
-            Some(false) => no.get(i % no.len()).copied().unwrap_or(None),
+            Some(true) => yes.get(i % yl).copied().unwrap_or(None),
+            Some(false) => no.get(i % nl).copied().unwrap_or(None),
             None => None,
         }
     }).collect();
     Ok(RVal::Numeric(result.into(), Attrs::default()))
+}
+
+/// String view of a branch value for `ifelse` (character result path).
+fn ifelse_char_vec(v: &RVal) -> Vec<Character> {
+    match v {
+        RVal::Character(c, _) => c.clone(),
+        RVal::Factor(f) => f.codes.iter()
+            .map(|c| c.and_then(|i| f.levels.get(i as usize).cloned())).collect(),
+        RVal::Logical(l, _) => l.iter().map(|x| x.map(|b| Arc::from(if b { "TRUE" } else { "FALSE" }))).collect(),
+        RVal::Integer(n, _) => n.iter().map(|x| x.map(|i| Arc::from(i.to_string().as_str()))).collect(),
+        RVal::Numeric(n, _) => n.iter().map(|x| x.map(|f| Arc::from(fmt_num(f).as_str()))).collect(),
+        _ => Vec::new(),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

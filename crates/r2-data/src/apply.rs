@@ -326,6 +326,13 @@ fn to_string_vec(v: &RVal) -> Vec<String> {
         RVal::Character(vs, _) => vs.iter().map(|x| x.as_ref().map(|s| s.to_string()).unwrap_or_default()).collect(),
         RVal::Numeric(vs, _) => vs.iter().map(|x| x.map(|n| format!("{}", n)).unwrap_or_default()).collect(),
         RVal::Integer(vs, _) => vs.iter().map(|x| x.map(|n| format!("{}", n)).unwrap_or_default()).collect(),
+        // Factor index is the COMMON tapply/aggregate case (group by a factor
+        // column); map codes → level labels. Without this, the `_` below
+        // returned empty and `tapply(x, factor, FUN)` produced nothing.
+        RVal::Factor(f) => f.codes.iter()
+            .map(|c| c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string())).unwrap_or_default()).collect(),
+        RVal::Logical(vs, _) => vs.iter()
+            .map(|x| x.map(|b| if b { "TRUE" } else { "FALSE" }.to_string()).unwrap_or_default()).collect(),
         _ => vec![],
     }
 }

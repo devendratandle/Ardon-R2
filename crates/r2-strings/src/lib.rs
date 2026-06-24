@@ -337,31 +337,98 @@ pub fn bi_trimws(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 /// `sprintf(fmt, ...)` — subset implementation (see crate docstring).
+/// Scalar f64 from an arg (first element), for numeric sprintf conversions.
+fn sp_num(v: &RVal) -> f64 {
+    match v {
+        RVal::Numeric(n, _) => n.as_vec().first().copied().flatten().unwrap_or(0.0),
+        RVal::Integer(n, _) => n.as_vec().first().copied().flatten().map(|i| i as f64).unwrap_or(0.0),
+        RVal::Logical(l, _) => l.as_vec().first().copied().flatten().map(|b| if b { 1.0 } else { 0.0 }).unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+fn sp_str(v: &RVal) -> String {
+    match v {
+        RVal::Character(c, _) => c.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
+        _ => val_to_str(v),
+    }
+}
+
+/// C-style `sprintf` supporting `%[flags][width][.precision]conv` —
+/// flags `-`/`0`/`+`/space, width, precision, and conversions
+/// d/i/f/e/E/g/x/X/s/%. (Previously only bare `%d/%f/%s/%e` worked, so
+/// `%-12s`, `%.3f`, `%05d` were emitted literally — see test_real_program.)
 pub fn bi_sprintf(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let fmt_str = match &gv(a, 0) {
+    let fmt = match &gv(a, 0) {
         RVal::Character(v, _) => v.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
         _ => return Err(runtime_err("sprintf needs format string")),
     };
-    let mut result = fmt_str;
-    let mut arg_idx = 1;
-    let mut pos = 0;
-    while let Some(pct) = result[pos..].find('%') {
-        let abs_pos = pos + pct;
-        if abs_pos + 1 >= result.len() { break; }
-        let spec = result.as_bytes()[abs_pos + 1] as char;
-        let replacement = match spec {
-            'd' | 'f' | 's' | 'e' => {
-                let v = gv(a, arg_idx);
+    let ch: Vec<char> = fmt.chars().collect();
+    let mut out = String::new();
+    let mut arg_idx = 1usize;
+    let mut i = 0usize;
+    while i < ch.len() {
+        if ch[i] != '%' { out.push(ch[i]); i += 1; continue; }
+        let start = i;
+        i += 1;
+        if i < ch.len() && ch[i] == '%' { out.push('%'); i += 1; continue; }
+        // flags
+        let (mut left, mut zero, mut plus, mut space) = (false, false, false, false);
+        while i < ch.len() {
+            match ch[i] { '-' => left = true, '0' => zero = true, '+' => plus = true, ' ' => space = true, '#' => {}, _ => break }
+            i += 1;
+        }
+        // width
+        let (mut width, mut has_w) = (0usize, false);
+        while i < ch.len() && ch[i].is_ascii_digit() { has_w = true; width = width * 10 + (ch[i] as usize - '0' as usize); i += 1; }
+        // precision
+        let mut prec: Option<usize> = None;
+        if i < ch.len() && ch[i] == '.' {
+            i += 1; let mut p = 0usize;
+            while i < ch.len() && ch[i].is_ascii_digit() { p = p * 10 + (ch[i] as usize - '0' as usize); i += 1; }
+            prec = Some(p);
+        }
+        if i >= ch.len() { out.extend(ch[start..].iter()); break; }
+        let conv = ch[i]; i += 1;
+        let argv = gv(a, arg_idx);
+        let mut body = match conv {
+            'd' | 'i' => {
                 arg_idx += 1;
-                val_to_str(&v)
+                let n = sp_num(&argv).round() as i64;
+                let mut s = n.unsigned_abs().to_string();
+                if let Some(p) = prec { while s.len() < p { s.insert(0, '0'); } }
+                let sign = if n < 0 { "-" } else if plus { "+" } else if space { " " } else { "" };
+                format!("{}{}", sign, s)
             }
-            '%' => { pos = abs_pos + 2; continue; }
-            _ => { pos = abs_pos + 2; continue; }
+            'f' => {
+                arg_idx += 1;
+                let n = sp_num(&argv);
+                let s = format!("{:.*}", prec.unwrap_or(6), n.abs());
+                let sign = if n.is_sign_negative() && n != 0.0 { "-" } else if plus { "+" } else if space { " " } else { "" };
+                format!("{}{}", sign, s)
+            }
+            'e' | 'E' => { arg_idx += 1; let s = format!("{:.*e}", prec.unwrap_or(6), sp_num(&argv)); if conv == 'E' { s.to_uppercase() } else { s } }
+            'g' | 'G' => { arg_idx += 1; format!("{}", sp_num(&argv)) }
+            'x' => { arg_idx += 1; format!("{:x}", sp_num(&argv) as i64) }
+            'X' => { arg_idx += 1; format!("{:X}", sp_num(&argv) as i64) }
+            's' => { arg_idx += 1; let s = sp_str(&argv); match prec { Some(p) => s.chars().take(p).collect(), None => s } }
+            _ => { out.extend(ch[start..i].iter()); continue; } // unknown spec: literal
         };
-        result = format!("{}{}{}", &result[..abs_pos], replacement, &result[abs_pos + 2..]);
-        pos = abs_pos + replacement.len();
+        // width padding
+        let blen = body.chars().count();
+        if has_w && blen < width {
+            let pad = width - blen;
+            if left {
+                body.push_str(&" ".repeat(pad));
+            } else if zero && matches!(conv, 'd' | 'i' | 'f' | 'e' | 'E' | 'g' | 'G' | 'x' | 'X') {
+                let (sign, rest) = if body.starts_with(['-', '+', ' ']) { body.split_at(1) } else { ("", body.as_str()) };
+                body = format!("{}{}{}", sign, "0".repeat(pad), rest);
+            } else {
+                body = format!("{}{}", " ".repeat(pad), body);
+            }
+        }
+        out.push_str(&body);
     }
-    Ok(rstr(&result))
+    Ok(rstr(&out))
 }
 
 // ─────────────────────────────────────────────────────────────────────
