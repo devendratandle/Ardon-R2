@@ -224,14 +224,16 @@ fn repl_main() {
                 for w in engine.drain_warnings() { eprintln!("{}", w); }
                 buffer.clear();
             }
-            Err(_) => {
-                if incomplete(&buffer) {
+            Err(e) => {
+                // Continue on the next line when the input is unfinished:
+                // either unbalanced brackets, OR the parser ran out of input
+                // expecting more (e.g. `repeat`, `if (x)`, `while (x)`,
+                // `function(...)` with the body on the following line).
+                if incomplete(&buffer) || e.msg.contains("Eof") {
                     continuation = true;
                 } else {
-                    if let Err(e) = Parser::parse(&buffer) {
-                        // Rich format with source-line + caret underline.
-                        eprintln!("{}", e.display_with_source(&buffer));
-                    }
+                    // Rich format with source-line + caret underline.
+                    eprintln!("{}", e.display_with_source(&buffer));
                     buffer.clear();
                     continuation = false;
                 }

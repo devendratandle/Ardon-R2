@@ -1179,6 +1179,7 @@ pub enum Expr {
     If { cond: Box<Expr>, then: Box<Expr>, else_: Option<Box<Expr>> },
     For { var: Arc<str>, iter: Box<Expr>, body: Box<Expr> },
     While { cond: Box<Expr>, body: Box<Expr> },
+    Repeat { body: Box<Expr> },
     Match { expr: Box<Expr>, arms: Vec<MatchArm> },
     Block(Vec<Expr>),
 

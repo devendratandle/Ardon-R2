@@ -40,6 +40,12 @@ Surfaced and fixed by base + data-manip + graphics regression programs:
 - `tapply`/`aggregate` by factor; `table(numeric)` returns the counts
   vector; `cbind(df, x=)` appends columns; `boxplot(y ~ g, data=)`.
 
+### Language / REPL
+- `repeat { ... }` loops (with `break`/`next`) — were a parse error.
+- REPL continues onto the next line when the parser needs more input
+  (`repeat`, `if (x)`, `while (x)`, `function(...)` with the body below),
+  not just on unbalanced brackets.
+
 ### Engine hardening / maintainability
 - Single source of truth for built-in registration tables (startup + reload
   can no longer drift; fixed a reload that silently dropped ~16 functions).

@@ -263,6 +263,7 @@ impl Parser {
             Token::If => self.parse_if(),
             Token::For => self.parse_for(),
             Token::While => self.parse_while(),
+            Token::Repeat => { self.advance(); self.skip_nl(); let body = self.parse_expr()?; Ok(Expr::Repeat { body: Box::new(body) }) }
             Token::Match => self.parse_match(),
             Token::Function => self.parse_function(),
             Token::Backslash => self.parse_lambda(),

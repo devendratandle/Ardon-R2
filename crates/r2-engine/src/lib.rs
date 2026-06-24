@@ -1047,6 +1047,38 @@ impl Engine {
                 }
                 Ok(RVal::Null)
             }
+            Expr::Repeat { body } => {
+                // `repeat { ... }` — loop forever until `break` (R semantics).
+                // Same top-level per-statement re-snapshot as For/While.
+                let at_top_level = self.local_scopes.is_empty();
+                loop {
+                    if at_top_level {
+                        let stmts: &[Expr] = match body.as_ref() {
+                            Expr::Block(s) => s,
+                            single => std::slice::from_ref(single),
+                        };
+                        let mut do_break = false;
+                        for stmt in stmts {
+                            let genv = self.global_env.clone();
+                            match self.eval_in(stmt, &genv) {
+                                Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => { do_break = true; break; }
+                                Err(R2Err { kind: ErrKind::CtrlNext, .. }) => break,
+                                Err(e) => return Err(e),
+                                _ => {}
+                            }
+                        }
+                        if do_break { break; }
+                    } else {
+                        match self.eval_in(body, env) {
+                            Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
+                            Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
+                            Err(e) => return Err(e),
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(RVal::Null)
+            }
             Expr::Match { expr: e, arms } => { let val = self.eval_in(e, env)?; for arm in arms { for pat in &arm.patterns { let pv = self.eval_in(pat, env)?; if self.vals_eq(&val, &pv) { return self.eval_in(&arm.body, env); } } } err!(Runtime, "no matching pattern") }
             Expr::FuncDef { params, body } | Expr::Lambda { params, body } => Ok(RVal::Closure(Closure { params: params.clone(), body: Arc::new((**body).clone()), env: env.clone() })),
             Expr::TypeDef { name, fields, parent } => { let td = TypeDef { name: name.clone(), fields: fields.clone(), parent: parent.clone() }; self.types.insert(name.clone(), td.clone()); env_insert(&mut self.global_env, name.clone(), RVal::TypeDef(td.clone())); Ok(RVal::TypeDef(td)) }

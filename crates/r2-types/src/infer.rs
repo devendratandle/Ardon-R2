@@ -222,7 +222,7 @@ pub fn infer_expr(e: &Expr, ctx: &mut TypeCtx) -> IrType {
             match else_ { Some(e) => { let et = infer_expr(e, ctx); IrType { elem: promote_elem(tt.elem, et.elem), shape: promote_shape(&tt.shape, &et.shape) } } None => tt }
         }
 
-        Expr::For { body, .. } | Expr::While { body, .. } => { infer_expr(body, ctx); IrType::null() }
+        Expr::For { body, .. } | Expr::While { body, .. } | Expr::Repeat { body } => { infer_expr(body, ctx); IrType::null() }
 
         Expr::FuncDef { .. } | Expr::Lambda { .. } => IrType { elem: IrElem::Any, shape: IrShape::Function },
 
