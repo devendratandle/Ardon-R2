@@ -39,6 +39,8 @@ Surfaced and fixed by base + data-manip + graphics regression programs:
   levels alphabetically; `as.numeric(list)`/`as.numeric(factor)`.
 - `tapply`/`aggregate` by factor; `table(numeric)` returns the counts
   vector; `cbind(df, x=)` appends columns; `boxplot(y ~ g, data=)`.
+- Negative (exclusion) indexing: `x[-1]`, `A[, -2]`, `df[-1, ]` now drop
+  those positions (were returning empty); `toString()` added.
 
 ### Language / REPL
 - `repeat { ... }` loops (with `break`/`next`) — were a parse error.

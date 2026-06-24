@@ -342,6 +342,22 @@ fn paste_impl(a: &[EvalArg], default_sep: &str) -> Result<RVal, R2Err> {
 pub fn bi_paste(a: &[EvalArg]) -> Result<RVal, R2Err> { paste_impl(a, " ") }
 pub fn bi_paste0(a: &[EvalArg]) -> Result<RVal, R2Err> { paste_impl(a, "") }
 
+/// Flatten any value to element strings (lists/data.frames recurse).
+fn to_string_elems(v: &RVal) -> Vec<String> {
+    match v {
+        RVal::List(items)   => items.iter().flat_map(|(_, x)| to_string_elems(x)).collect(),
+        RVal::DataFrame(df) => df.columns.iter().flat_map(|(_, c)| to_string_elems(c)).collect(),
+        other               => paste_elems(other),
+    }
+}
+
+/// `toString(x, sep=", ")` — collapse x to one comma-separated string;
+/// flattens vectors, lists, and data.frame rows (e.g. `toString(df[i,])`).
+pub fn bi_to_string(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let sep = gn(a, "sep").map(|v| val_to_str(&v)).unwrap_or_else(|| ", ".to_string());
+    Ok(rstr(&to_string_elems(&gv(a, 0)).join(&sep)))
+}
+
 pub fn bi_nchar(a: &[EvalArg]) -> Result<RVal, R2Err> {
     match &gv(a, 0) {
         RVal::Character(v, _) => Ok(RVal::Integer(

@@ -11,6 +11,9 @@ pub(crate) fn bi_paste(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
 pub(crate) fn bi_paste0(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_strings::bi_paste0(a)
 }
+pub(crate) fn bi_to_string(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_strings::bi_to_string(a)
+}
 pub(crate) fn bi_nchar(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_strings::bi_nchar(a)
 }

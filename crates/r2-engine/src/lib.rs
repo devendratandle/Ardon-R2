@@ -1697,30 +1697,34 @@ impl Engine {
             }
         }
     }
+    /// Resolve a numeric subscript to 0-based kept positions. Supports R's
+    /// NEGATIVE (exclusion) indexing: all-negative → keep everything except
+    /// those positions; otherwise positive 1-based selection.
+    fn resolve_subscript(&self, idx: &RVal, n: usize) -> Result<Vec<usize>, R2Err> {
+        let pos = self.as_reals(idx)?;
+        let any_neg = pos.iter().any(|p| matches!(p, Some(v) if *v < 0.0));
+        Ok(if any_neg {
+            let excl: std::collections::HashSet<usize> = pos.iter()
+                .filter_map(|p| p.and_then(|v| { let k = (-v) as usize; if k >= 1 && k <= n { Some(k - 1) } else { None } }))
+                .collect();
+            (0..n).filter(|i| !excl.contains(i)).collect()
+        } else {
+            pos.iter().filter_map(|p| p.and_then(|v| { let i = v as usize; if i >= 1 && i <= n { Some(i - 1) } else { None } })).collect()
+        })
+    }
+
     fn index_matrix(&self, m: &Matrix, row: &Option<RVal>, col: &Option<RVal>) -> Result<RVal, R2Err> {
         // Resolve rows
         let keep_rows: Vec<usize> = match row {
             None => (0..m.nrow).collect(),
             Some(RVal::Logical(mask, _)) => mask.iter().enumerate().filter_map(|(i, b)| if *b == Some(true) { Some(i) } else { None }).collect(),
-            Some(idx) => {
-                let pos = self.as_reals(idx)?;
-                pos.iter().filter_map(|p| p.map(|v| {
-                    let i = v as usize;
-                    if i >= 1 && i <= m.nrow { Some(i - 1) } else { None }
-                }).flatten()).collect()
-            }
+            Some(idx) => self.resolve_subscript(idx, m.nrow)?,
         };
         // Resolve columns
         let keep_cols: Vec<usize> = match col {
             None => (0..m.ncol).collect(),
             Some(RVal::Logical(mask, _)) => mask.iter().enumerate().filter_map(|(j, b)| if *b == Some(true) { Some(j) } else { None }).collect(),
-            Some(idx) => {
-                let pos = self.as_reals(idx)?;
-                pos.iter().filter_map(|p| p.map(|v| {
-                    let j = v as usize;
-                    if j >= 1 && j <= m.ncol { Some(j - 1) } else { None }
-                }).flatten()).collect()
-            }
+            Some(idx) => self.resolve_subscript(idx, m.ncol)?,
         };
         // Single element → scalar Numeric
         if keep_rows.len() == 1 && keep_cols.len() == 1 {
@@ -1760,7 +1764,7 @@ impl Engine {
         }
         Ok(RVal::Matrix(out))
     }
-    fn index_1d(&self, obj: &RVal, idx: &RVal) -> Result<RVal, R2Err> { match idx { RVal::Logical(mask,_) => self.logical_sub(obj,mask), RVal::Factor(f) => { let pos: Vec<Real> = f.codes.iter().map(|&c| c.map(|i| i as f64 + 1.0)).collect(); self.pos_sub(obj, &pos) } _ => { let pos = self.as_reals(idx)?; self.pos_sub(obj,&pos) } } }
+    fn index_1d(&self, obj: &RVal, idx: &RVal) -> Result<RVal, R2Err> { match idx { RVal::Logical(mask,_) => self.logical_sub(obj,mask), RVal::Factor(f) => { let pos: Vec<Real> = f.codes.iter().map(|&c| c.map(|i| i as f64 + 1.0)).collect(); self.pos_sub(obj, &pos) } _ => { let pos = self.as_reals(idx)?; if pos.iter().any(|p| matches!(p, Some(v) if *v < 0.0)) { let keep = self.resolve_subscript(idx, r2_types::rval_length(obj))?; let pos1: Vec<Real> = keep.iter().map(|&i| Some((i+1) as f64)).collect(); self.pos_sub(obj, &pos1) } else { self.pos_sub(obj,&pos) } } } }
     fn pos_sub(&self, obj: &RVal, pos: &[Real]) -> Result<RVal, R2Err> { match obj { RVal::Numeric(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { if self.mode==ErrorMode::Strict { return err!(Index,"index {} out of bounds (len {})",i,v.len()); } r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Numeric(r.into(), Attrs::default())) } RVal::Character(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1].clone()); } } None => r.push(None), } } Ok(RVal::Character(r, Attrs::default())) } RVal::Integer(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Integer(r.into(), Attrs::default())) } RVal::Logical(v,_) => { let mut r = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>v.len() { r.push(None); } else { r.push(v[i-1]); } } None => r.push(None), } } Ok(RVal::Logical(r.into(), Attrs::default())) } RVal::Factor(fc) => { let mut codes = Vec::new(); for p in pos { match p { Some(i) => { let i = *i as usize; if i==0||i>fc.codes.len() { codes.push(None); } else { codes.push(fc.codes[i-1]); } } None => codes.push(None), } } let mut nf = fc.clone(); nf.codes = codes; Ok(RVal::Factor(nf)) } RVal::Single(..)|RVal::Raw(..)|RVal::List(..)|RVal::DataFrame(..)|RVal::Matrix(..)|RVal::Tensor(..)|RVal::Formula(..)|RVal::Closure(..)|RVal::BuiltinFn(..)|RVal::Lang(..)|RVal::TypeDef(..)|RVal::TypeInstance(..)|RVal::Null|RVal::Env(..) => err!(Index,"cannot subset {}",obj.type_name()), } }
     fn logical_sub(&self, obj: &RVal, mask: &[Logical]) -> Result<RVal, R2Err> { match obj { RVal::Numeric(v,_) => Ok(RVal::Numeric(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(*val) } else { None }).collect(), Attrs::default())), RVal::Integer(v,_) => Ok(RVal::Integer(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(*val) } else { None }).collect(), Attrs::default())), RVal::Character(v,_) => Ok(RVal::Character(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(val.clone()) } else { None }).collect(), Attrs::default())), RVal::Logical(v,_) => Ok(RVal::Logical(v.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(val,m)| if *m==Some(true) { Some(*val) } else { None }).collect(), Attrs::default())), RVal::Factor(fc) => { let mut nf = fc.clone(); nf.codes = fc.codes.iter().zip(mask.iter().chain(std::iter::repeat(&None))).filter_map(|(c,m)| if *m==Some(true) { Some(*c) } else { None }).collect(); Ok(RVal::Factor(nf)) }, RVal::Single(..)|RVal::Raw(..)|RVal::List(..)|RVal::DataFrame(..)|RVal::Matrix(..)|RVal::Tensor(..)|RVal::Formula(..)|RVal::Closure(..)|RVal::BuiltinFn(..)|RVal::Lang(..)|RVal::TypeDef(..)|RVal::TypeInstance(..)|RVal::Null|RVal::Env(..) => err!(Index,"logical subset not impl for {}",obj.type_name()) } }
     fn index_df(&self, df: &DataFrame, row: &Option<RVal>, col: &Option<RVal>) -> Result<RVal, R2Err> {
@@ -1771,13 +1775,7 @@ impl Engine {
             Some(RVal::Logical(mask, _)) => {
                 mask.iter().enumerate().filter_map(|(i, m)| if *m == Some(true) { Some(i) } else { None }).collect()
             }
-            Some(idx) => {
-                let positions = self.as_reals(idx)?;
-                positions.iter().filter_map(|p| p.map(|v| {
-                    let i = v as usize;
-                    if i >= 1 && i <= nrow { Some(i - 1) } else { None }
-                }).flatten()).collect()
-            }
+            Some(idx) => self.resolve_subscript(idx, nrow)?,
         };
 
         // Determine which columns to keep
@@ -1789,13 +1787,7 @@ impl Engine {
                     df.columns.iter().position(|(cn, _)| cn.as_ref() == name.as_ref())
                 })).collect()
             }
-            Some(idx) => {
-                let positions = self.as_reals(idx)?;
-                positions.iter().filter_map(|p| p.map(|v| {
-                    let i = v as usize;
-                    if i >= 1 && i <= ncol { Some(i - 1) } else { None }
-                }).flatten()).collect()
-            }
+            Some(idx) => self.resolve_subscript(idx, ncol)?,
         };
 
         // If single column selected, return as vector
