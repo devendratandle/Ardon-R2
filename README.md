@@ -26,7 +26,7 @@ Created by Devendra Tandale | An AI assisted project
 
 ## What's new in v0.3.3 (June 2026)
 
-First-class language objects + a round of correctness fixes — **319
+First-class language objects + a round of correctness fixes — **320
 built-in functions** (up from 301):
 
 - **Metaprogramming (the `language.c` equivalent):** `quote`, `eval`,
