@@ -100,30 +100,29 @@ pub fn bi_tolower(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 pub fn bi_substr(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let s = match &gv(a, 0) {
-        RVal::Character(v, _) => v.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
-        _ => return Err(type_err("substr needs character")),
-    };
+    // VECTORIZED over the input vector (was first-element-only, so
+    // substr(c("apple","Banana"),1,1) wrongly returned just "a").
     let start = match &gv(a, 1) {
         RVal::Numeric(v, _) => v.first().and_then(|x| *x).unwrap_or(1.0) as usize,
         RVal::Integer(v, _) => v.first().and_then(|x| *x).unwrap_or(1) as usize,
         _ => 1,
     };
-    let stop = match &gv(a, 2) {
-        RVal::Numeric(v, _) => v.first().and_then(|x| *x).unwrap_or(1.0) as usize,
-        RVal::Integer(v, _) => v.first().and_then(|x| *x).unwrap_or(1) as usize,
-        _ => s.len(),
+    let stop_opt: Option<usize> = match &gv(a, 2) {
+        RVal::Numeric(v, _) => v.first().and_then(|x| *x).map(|n| n as usize),
+        RVal::Integer(v, _) => v.first().and_then(|x| *x).map(|n| n as usize),
+        _ => None,
     };
-    // R semantics: substr("abcdef", 2, 4) == "bcd" (positions 2..=4
-    // inclusive, 3 chars). The pre-migration engine impl returned 4
-    // chars ("bcde") — an off-by-one bug now corrected at the point
-    // of migration.
-    let take = stop.saturating_sub(start.saturating_sub(1));
-    let result: String = s.chars()
-        .skip(start.saturating_sub(1))
-        .take(take)
-        .collect();
-    Ok(rstr(&result))
+    let v = match &gv(a, 0) {
+        RVal::Character(v, _) => v.clone(),
+        _ => return Err(type_err("substr needs character")),
+    };
+    // R semantics: substr("abcdef", 2, 4) == "bcd" (positions 2..=4 inclusive).
+    let out: Vec<Character> = v.iter().map(|x| x.as_ref().map(|s| {
+        let stop = stop_opt.unwrap_or_else(|| s.chars().count());
+        let take = stop.saturating_sub(start.saturating_sub(1));
+        Arc::from(s.chars().skip(start.saturating_sub(1)).take(take).collect::<String>().as_str())
+    })).collect();
+    Ok(RVal::Character(out, Attrs::default()))
 }
 
 // ─────────────────────────────────────────────────────────────────────

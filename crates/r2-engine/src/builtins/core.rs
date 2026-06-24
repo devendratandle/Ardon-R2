@@ -140,15 +140,24 @@ pub(crate) fn bi_rep(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
         .unwrap_or(1.0) as usize;
     let each = gn(a, "each").and_then(|v| e.scalar_f64(&v).ok().flatten())
         .unwrap_or(1.0) as usize;
-    fn expand<T: Clone>(v: &[T], each: usize, times: usize) -> Vec<T> {
+    // `length.out =` recycles/truncates the result to exactly that length
+    // (R: when given, it wins over `times`).
+    let lengthout = gn(a, "length.out").or_else(|| gn(a, "length_out"))
+        .and_then(|v| e.scalar_f64(&v).ok().flatten()).map(|n| n as usize);
+    fn expand<T: Clone>(v: &[T], each: usize, times: usize, lengthout: Option<usize>) -> Vec<T> {
         let per_pass: Vec<T> = v.iter().flat_map(|x| std::iter::repeat(x.clone()).take(each)).collect();
-        per_pass.iter().cycle().take(per_pass.len() * times).cloned().collect()
+        let full: Vec<T> = per_pass.iter().cycle().take(per_pass.len() * times).cloned().collect();
+        match lengthout {
+            Some(n) if !full.is_empty() => full.iter().cycle().take(n).cloned().collect(),
+            Some(_) => Vec::new(),
+            None => full,
+        }
     }
     match &v {
-        RVal::Numeric(vs, _)   => Ok(RVal::Numeric(expand(vs, each, times).into(), Attrs::default())),
-        RVal::Integer(vs, _)   => Ok(RVal::Integer(expand(vs, each, times).into(), Attrs::default())).into(),
-        RVal::Character(vs, _) => Ok(RVal::Character(expand(vs, each, times), Attrs::default())).into(),
-        RVal::Logical(vs, _)   => Ok(RVal::Logical(expand(vs, each, times).into(), Attrs::default())).into(),
+        RVal::Numeric(vs, _)   => Ok(RVal::Numeric(expand(vs, each, times, lengthout).into(), Attrs::default())),
+        RVal::Integer(vs, _)   => Ok(RVal::Integer(expand(vs, each, times, lengthout).into(), Attrs::default())).into(),
+        RVal::Character(vs, _) => Ok(RVal::Character(expand(vs, each, times, lengthout), Attrs::default())).into(),
+        RVal::Logical(vs, _)   => Ok(RVal::Logical(expand(vs, each, times, lengthout).into(), Attrs::default())).into(),
         _ => err!(Runtime, "rep() not supported for {}", v.type_name()).into(),
     }
 }
@@ -732,6 +741,34 @@ op_fn!(bi_op_add, Add);  op_fn!(bi_op_sub, Sub);  op_fn!(bi_op_mul, Mul);
 op_fn!(bi_op_div, Div);  op_fn!(bi_op_pow, Pow);  op_fn!(bi_op_mod, Mod);
 op_fn!(bi_op_eq, Eq);    op_fn!(bi_op_ne, Ne);    op_fn!(bi_op_lt, Lt);
 op_fn!(bi_op_gt, Gt);    op_fn!(bi_op_le, Le);     op_fn!(bi_op_ge, Ge);
+
+/// `diag(x)` — matrix → its diagonal vector; vector → a diagonal matrix;
+/// a single integer k → the k×k identity matrix (R's overloaded `diag`).
+pub(crate) fn bi_diag(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match &gv(a, 0) {
+        RVal::Matrix(m) => {
+            let n = m.nrow.min(m.ncol);
+            let d: Vec<Real> = (0..n).map(|i| Some(m.get(i, i))).collect();
+            Ok(RVal::Numeric(d.into(), Attrs::default()))
+        }
+        v => {
+            let r = v.as_reals()?;
+            if r.len() == 1 {
+                // diag(k) → k×k identity.
+                let k = r[0].unwrap_or(0.0) as usize;
+                let mut data = vec![0.0; k * k];
+                for i in 0..k { data[i * k + i] = 1.0; }
+                Ok(RVal::Matrix(Matrix::new(data, k, k)))
+            } else {
+                // diag(v) → diagonal matrix with v on the diagonal.
+                let n = r.len();
+                let mut data = vec![0.0; n * n];
+                for i in 0..n { data[i * n + i] = r[i].unwrap_or(0.0); }
+                Ok(RVal::Matrix(Matrix::new(data, n, n)))
+            }
+        }
+    }
+}
 
 /// `isTRUE(x)` / `isFALSE(x)` — TRUE only for a length-1, non-NA logical of
 /// that value. Common in `if (isTRUE(...))` guards and test code.

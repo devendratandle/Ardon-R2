@@ -53,7 +53,7 @@ pub(crate) fn base_table() -> Vec<(&'static str, BuiltinFn)> {
         // Phase L.2 — function introspection (read-only).
         ("body",bi_body),("formals",bi_formals),("args",bi_args),
         // Common base predicates/comparison.
-        ("isTRUE",bi_is_true),("isFALSE",bi_is_false),("identical",bi_identical),("all.equal",bi_all_equal),
+        ("isTRUE",bi_is_true),("isFALSE",bi_is_false),("identical",bi_identical),("all.equal",bi_all_equal),("diag",bi_diag),
         // Operators as functions (for Reduce/Map/do.call).
         ("+",bi_op_add),("-",bi_op_sub),("*",bi_op_mul),("/",bi_op_div),("^",bi_op_pow),("%%",bi_op_mod),
         ("==",bi_op_eq),("!=",bi_op_ne),("<",bi_op_lt),(">",bi_op_gt),("<=",bi_op_le),(">=",bi_op_ge),

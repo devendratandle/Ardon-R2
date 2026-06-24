@@ -52,8 +52,13 @@ pub fn bi_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
             soutln!();
             for (_, v) in &counts { sout!("{:>8}", v); }
             soutln!();
-            // Engine compatibility: numeric path returns scalar count.
-            Ok(RVal::Integer(vec![Some(counts.len() as i32)].into(), Attrs::default()))
+            // Return the named counts vector (like the character path), so
+            // as.numeric(table(x)) / length(table(x)) work — not a scalar.
+            let names: Vec<Arc<str>> = counts.iter().map(|(k, _)| Arc::from(k.as_str())).collect();
+            let vals: Vec<Integer> = counts.iter().map(|(_, v)| Some(*v as i32)).collect();
+            let mut attrs = Attrs::default();
+            attrs.names = Some(names);
+            Ok(RVal::Integer(vals.into(), attrs))
         }
         RVal::Factor(f) => {
             let mut counts: Vec<(String, usize)> = f.levels.iter().map(|l| (l.to_string(), 0)).collect();
