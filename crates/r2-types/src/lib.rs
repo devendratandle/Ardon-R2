@@ -1581,6 +1581,9 @@ impl RVal {
             RVal::Integer(v, _)  => Ok(v.iter().map(|x| x.map(|n| n as f64)).collect()),
             RVal::Logical(v, _)  => Ok(v.iter().map(|x| x.map(|b| if b { 1.0 } else { 0.0 })).collect()),
             RVal::Matrix(m)      => Ok(m.data.iter().map(|x| if x.is_nan() { None } else { Some(*x) }).collect()),
+            // `as.numeric(factor)` returns the integer codes (1-based), as in
+            // R — needed by manova/aov/etc. to build group design matrices.
+            RVal::Factor(f)      => Ok(f.codes.iter().map(|c| c.map(|i| i as f64 + 1.0)).collect()),
             _ => Err(R2Err {
                 msg: format!("cannot convert {} to numeric. If this is a data.frame column, use df$column_name", self.type_name()),
                 kind: ErrKind::Type,
