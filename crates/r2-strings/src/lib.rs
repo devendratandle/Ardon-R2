@@ -303,18 +303,45 @@ pub fn bi_strsplit(a: &[EvalArg]) -> Result<RVal, R2Err> {
 // Construction + length + format
 // ─────────────────────────────────────────────────────────────────────
 
-pub fn bi_paste(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let sep = gn(a, "sep").map(|v| val_to_str(&v)).unwrap_or_else(|| " ".into());
-    let s: Vec<String> = a.iter()
-        .filter(|x| x.name.as_ref().map(|n| n.as_ref()) != Some("sep"))
-        .map(|x| val_to_str(&x.value))
-        .collect();
-    Ok(rstr(&s.join(&sep)))
+/// Element-wise string view of a value, for `paste`'s vectorized model.
+fn paste_elems(v: &RVal) -> Vec<String> {
+    match v {
+        RVal::Character(c, _) => c.iter().map(|x| x.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "NA".into())).collect(),
+        RVal::Numeric(n, _)   => n.as_vec().iter().map(|x| x.map(r2_types::fmt_num).unwrap_or_else(|| "NA".into())).collect(),
+        RVal::Integer(n, _)   => n.as_vec().iter().map(|x| x.map(|i| i.to_string()).unwrap_or_else(|| "NA".into())).collect(),
+        RVal::Logical(l, _)   => l.as_vec().iter().map(|x| x.map(|b| if b { "TRUE" } else { "FALSE" }.to_string()).unwrap_or_else(|| "NA".into())).collect(),
+        RVal::Factor(f)       => f.codes.iter().map(|c| c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string())).unwrap_or_else(|| "NA".into())).collect(),
+        RVal::Null            => Vec::new(),
+        other                 => vec![val_to_str(other)],
+    }
 }
 
-pub fn bi_paste0(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    Ok(rstr(&a.iter().map(|x| val_to_str(&x.value)).collect::<Vec<_>>().join("")))
+/// `paste(..., sep=" ", collapse=NULL)` — R's VECTORIZED concatenation:
+/// arguments are recycled to the longest length and joined element-wise by
+/// `sep`; `collapse` (when not NULL) then joins the result into one string.
+fn paste_impl(a: &[EvalArg], default_sep: &str) -> Result<RVal, R2Err> {
+    let sep = gn(a, "sep").map(|v| val_to_str(&v)).unwrap_or_else(|| default_sep.to_string());
+    let collapse = gn(a, "collapse").filter(|v| !matches!(v, RVal::Null));
+    let cols: Vec<Vec<String>> = a.iter()
+        .filter(|x| !matches!(x.name.as_deref(), Some("sep") | Some("collapse")))
+        .map(|x| paste_elems(&x.value))
+        .filter(|v| !v.is_empty())
+        .collect();
+    if cols.is_empty() {
+        return Ok(match collapse { Some(_) => rstr(""), None => RVal::Character(Vec::new(), Attrs::default()) });
+    }
+    let maxlen = cols.iter().map(|c| c.len()).max().unwrap_or(0);
+    let out: Vec<String> = (0..maxlen).map(|i| {
+        cols.iter().map(|c| c[i % c.len()].as_str()).collect::<Vec<_>>().join(&sep)
+    }).collect();
+    match collapse {
+        Some(cv) => Ok(rstr(&out.join(&val_to_str(&cv)))),
+        None => Ok(RVal::Character(out.iter().map(|s| Some(Arc::from(s.as_str()))).collect(), Attrs::default())),
+    }
 }
+
+pub fn bi_paste(a: &[EvalArg]) -> Result<RVal, R2Err> { paste_impl(a, " ") }
+pub fn bi_paste0(a: &[EvalArg]) -> Result<RVal, R2Err> { paste_impl(a, "") }
 
 pub fn bi_nchar(a: &[EvalArg]) -> Result<RVal, R2Err> {
     match &gv(a, 0) {

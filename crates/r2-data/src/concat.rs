@@ -26,6 +26,31 @@ pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
         }
         return Ok(RVal::Character(s, Attrs::default()));
     }
+    // R's c() type hierarchy: logical < integer < double. Preserve the
+    // narrowest type so `c(TRUE,FALSE)` stays logical (which()/all() need
+    // that) and `c(1L,2L)` stays integer — only widen to double when a
+    // double is actually present.
+    let only_lgl = args.iter().all(|a| matches!(&a.value, RVal::Logical(..) | RVal::Null))
+        && args.iter().any(|a| matches!(&a.value, RVal::Logical(..)));
+    if only_lgl {
+        let mut lg: Vec<Logical> = Vec::new();
+        for a in args { if let RVal::Logical(v, _) = &a.value { lg.extend(v.iter().cloned()); } }
+        return Ok(RVal::Logical(lg.into(), Attrs::default()));
+    }
+    let only_int = args.iter().all(|a| matches!(&a.value, RVal::Integer(..) | RVal::Logical(..) | RVal::Null))
+        && args.iter().any(|a| matches!(&a.value, RVal::Integer(..)));
+    if only_int {
+        let mut ints: Vec<Integer> = Vec::new();
+        for a in args {
+            match &a.value {
+                RVal::Integer(v, _) => ints.extend(v.iter().cloned()),
+                RVal::Logical(v, _) => ints.extend(v.iter().map(|x| x.map(|b| if b { 1 } else { 0 }))),
+                _ => {}
+            }
+        }
+        return Ok(RVal::Integer(ints.into(), Attrs::default()));
+    }
+
     // Numeric path — RVal::as_reals handles Numeric/Integer/Logical/Matrix
     let mut nums: Vec<Real> = Vec::new();
     for a in args {

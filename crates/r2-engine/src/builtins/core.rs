@@ -168,7 +168,14 @@ pub(crate) fn bi_sqrt(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 }
 pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) as i32; let f = 10f64.powi(d); Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| (n*f).round()/f)).collect(), Attrs::default())) }
 pub(crate) fn bi_sort(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let mut n: Vec<f64> = v.into_iter().filter_map(|x| x).collect(); n.sort_by(|a,b| a.partial_cmp(b).unwrap()); Ok(rnums(&n)) }
-pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Numeric(v,_) => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())), _ => err!(Runtime, "rev() works with numeric, integer, or character vectors") } }
+pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) {
+    RVal::Numeric(v,_)   => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())),
+    RVal::Integer(v,_)   => Ok(RVal::Integer(v.iter().rev().cloned().collect(), Attrs::default())),
+    RVal::Character(v,_) => Ok(RVal::Character(v.iter().rev().cloned().collect(), Attrs::default())),
+    RVal::Logical(v,_)   => Ok(RVal::Logical(v.iter().rev().cloned().collect(), Attrs::default())),
+    RVal::List(items)    => Ok(RVal::List(items.iter().rev().cloned().collect())),
+    other => err!(Runtime, "rev() not supported for {}", other.type_name()),
+} }
 // ── Tier-1 base-R usability builtins ───────────────────────────────
 
 /// Format an f64 the way R prints atomic numbers (integers without a
@@ -709,6 +716,74 @@ pub(crate) fn bi_as_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
     })
 }
 pub(crate) fn bi_is_function(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Closure(_)))) }
+
+/// Operators as first-class functions: `` `+` ``, `` `*` ``, … so they can be
+/// passed to `Reduce`/`Map`/`do.call` (idiomatic functional R). Normal
+/// `a + b` still goes through `Expr::Binary`, not the registry, so this
+/// only affects the backtick-quoted / passed-as-value form.
+macro_rules! op_fn {
+    ($name:ident, $op:ident) => {
+        pub(crate) fn $name(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+            e.binary_op(r2_types::BinOp::$op, &gv(a,0), &gv(a,1))
+        }
+    };
+}
+op_fn!(bi_op_add, Add);  op_fn!(bi_op_sub, Sub);  op_fn!(bi_op_mul, Mul);
+op_fn!(bi_op_div, Div);  op_fn!(bi_op_pow, Pow);  op_fn!(bi_op_mod, Mod);
+op_fn!(bi_op_eq, Eq);    op_fn!(bi_op_ne, Ne);    op_fn!(bi_op_lt, Lt);
+op_fn!(bi_op_gt, Gt);    op_fn!(bi_op_le, Le);     op_fn!(bi_op_ge, Ge);
+
+/// `isTRUE(x)` / `isFALSE(x)` — TRUE only for a length-1, non-NA logical of
+/// that value. Common in `if (isTRUE(...))` guards and test code.
+pub(crate) fn bi_is_true(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(rbool(matches!(&gv(a,0), RVal::Logical(v,_) if v.as_vec().len()==1 && v.as_vec()[0]==Some(true))))
+}
+pub(crate) fn bi_is_false(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(rbool(matches!(&gv(a,0), RVal::Logical(v,_) if v.as_vec().len()==1 && v.as_vec()[0]==Some(false))))
+}
+
+/// Structural (type-strict) equality for `identical()`.
+fn rval_identical(a: &RVal, b: &RVal) -> bool {
+    match (a, b) {
+        (RVal::Numeric(x,_),   RVal::Numeric(y,_))   => x.as_vec() == y.as_vec(),
+        (RVal::Integer(x,_),   RVal::Integer(y,_))   => x.as_vec() == y.as_vec(),
+        (RVal::Character(x,_), RVal::Character(y,_)) => x == y,
+        (RVal::Logical(x,_),   RVal::Logical(y,_))   => x.as_vec() == y.as_vec(),
+        (RVal::Null,           RVal::Null)           => true,
+        (RVal::List(x),        RVal::List(y))        =>
+            x.len()==y.len() && x.iter().zip(y).all(|((n1,v1),(n2,v2))| n1==n2 && rval_identical(v1,v2)),
+        _ => false,
+    }
+}
+pub(crate) fn bi_identical(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(rbool(rval_identical(&gv(a,0), &gv(a,1))))
+}
+
+/// `all.equal(x, y, tolerance=)` — near-equality. Returns TRUE within
+/// tolerance (numeric, relative), else a character difference message —
+/// so the idiomatic `isTRUE(all.equal(a, b))` works. Non-numeric falls
+/// back to `identical`.
+pub(crate) fn bi_all_equal(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let x = gv(a,0); let y = gv(a,1);
+    let tol = gn(a, "tolerance").and_then(|v| v.as_reals().ok())
+        .and_then(|r| r.first().copied().flatten()).unwrap_or(1.5e-8);
+    if let (Ok(xr), Ok(yr)) = (x.as_reals(), y.as_reals()) {
+        if xr.len() != yr.len() {
+            return Ok(rstr(&format!("Lengths ({}, {}) differ", xr.len(), yr.len())));
+        }
+        let (mut sumabs, mut sumtarget) = (0.0f64, 0.0f64);
+        for (xi, yi) in xr.iter().zip(yr.iter()) {
+            match (xi, yi) {
+                (Some(xv), Some(yv)) => { sumabs += (xv - yv).abs(); sumtarget += xv.abs(); }
+                (None, None) => {}
+                _ => return Ok(rstr("NA mismatch")),
+            }
+        }
+        let rel = if sumtarget > 0.0 { sumabs / sumtarget } else { sumabs };
+        return Ok(if rel <= tol { rbool(true) } else { rstr(&format!("Mean relative difference: {}", rel)) });
+    }
+    Ok(if rval_identical(&x, &y) { rbool(true) } else { rstr("objects differ") })
+}
 pub(crate) fn bi_is_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::List(_)))) }
 pub(crate) fn bi_is_vector(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(rbool(matches!(gv(a,0), RVal::Numeric(..) | RVal::Integer(..) | RVal::Character(..) | RVal::Logical(..))))
@@ -1049,12 +1124,16 @@ pub(crate) fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
             .map(|x| x.map(|b| Arc::from(if b { "TRUE" } else { "FALSE" }))).collect(),
         other => return err!(Type, "factor() not supported for {}", other.type_name()),
     };
+    // R default: levels are the sorted (alphabetical) unique values — this
+    // determines the integer codes and what `levels()`/`as.numeric()` return.
+    // (Was first-appearance order, which disagreed with R.)
     let mut levels: Vec<Arc<str>> = Vec::new();
+    for x in strs.iter().flatten() {
+        if !levels.iter().any(|l| l == x) { levels.push(x.clone()); }
+    }
+    levels.sort();
     let codes: Vec<Option<u32>> = strs.iter().map(|x| x.as_ref().map(|s| {
-        let idx = levels.iter().position(|l: &Arc<str>| l == s).unwrap_or_else(|| {
-            levels.push(s.clone()); levels.len() - 1
-        });
-        idx as u32
+        levels.iter().position(|l| l == s).unwrap() as u32
     })).collect();
     Ok(RVal::Factor(Factor { codes, levels, ordered: false }))
 }

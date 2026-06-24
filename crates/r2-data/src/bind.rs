@@ -123,26 +123,31 @@ pub fn bi_cbind(a: &[EvalArg]) -> Result<RVal, R2Err> {
         return Err(R2Err { msg: "cbind: needs at least one argument".into(), kind: ErrKind::Runtime });
     }
 
-    if all_dataframes(a) {
-        let mut iter = a.iter();
-        let first = match &iter.next().unwrap().value {
-            RVal::DataFrame(df) => df.clone(),
-            _ => unreachable!(),
-        };
-        let nrow = first.nrow();
-        let mut columns: Vec<(Arc<str>, RVal)> = first.columns;
-        for arg in iter {
-            let df = match &arg.value {
-                RVal::DataFrame(df) => df.clone(),
-                _ => unreachable!(),
-            };
-            if df.nrow() != nrow {
-                return Err(R2Err {
-                    msg: format!("cbind: row count mismatch ({} vs {})", nrow, df.nrow()),
-                    kind: ErrKind::Runtime,
-                });
+    // data.frame path: if ANY argument is a data.frame, the result is a
+    // data.frame — non-df args (vectors) are appended as new columns
+    // (named by their argument name, else V<n>). R's `cbind(df, x=...)`.
+    if a.iter().any(|x| matches!(&x.value, RVal::DataFrame(_))) {
+        let nrow = a.iter().find_map(|x| match &x.value {
+            RVal::DataFrame(d) => Some(d.nrow()), _ => None,
+        }).unwrap_or(0);
+        let mut columns: Vec<(Arc<str>, RVal)> = Vec::new();
+        for arg in a {
+            match &arg.value {
+                RVal::DataFrame(df) => {
+                    if df.nrow() != nrow {
+                        return Err(R2Err {
+                            msg: format!("cbind: row count mismatch ({} vs {})", nrow, df.nrow()),
+                            kind: ErrKind::Runtime,
+                        });
+                    }
+                    columns.extend(df.columns.clone());
+                }
+                other => {
+                    let name = arg.name.clone()
+                        .unwrap_or_else(|| Arc::from(format!("V{}", columns.len() + 1).as_str()));
+                    columns.push((name, other.clone()));
+                }
             }
-            columns.extend(df.columns);
         }
         return Ok(RVal::DataFrame(DataFrame { columns, row_names: None }));
     }

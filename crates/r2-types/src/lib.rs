@@ -1584,10 +1584,23 @@ impl RVal {
             // `as.numeric(factor)` returns the integer codes (1-based), as in
             // R — needed by manova/aov/etc. to build group design matrices.
             RVal::Factor(f)      => Ok(f.codes.iter().map(|c| c.map(|i| i as f64 + 1.0)).collect()),
+            // A list of length-1 numerics flattens to a vector (R's
+            // `as.numeric(list(1,2,3))`, and `as.numeric(tapply(...))`).
+            RVal::List(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for (_, v) in items {
+                    let r = v.as_reals()?;
+                    if r.len() != 1 {
+                        return Err(R2Err { msg: "cannot coerce list with non-scalar elements to numeric".into(), kind: ErrKind::Type });
+                    }
+                    out.push(r[0]);
+                }
+                Ok(out)
+            }
             // Exhaustive on purpose (no `_`): adding a new RVal variant must
             // be a COMPILE error here, not a silent runtime "cannot convert".
             // That is exactly the gap that let factors slip past for so long.
-            RVal::Character(..) | RVal::Raw(..) | RVal::List(..) | RVal::DataFrame(..)
+            RVal::Character(..) | RVal::Raw(..) | RVal::DataFrame(..)
             | RVal::Tensor(..) | RVal::Formula(..) | RVal::Closure(..) | RVal::BuiltinFn(..)
             | RVal::Lang(..) | RVal::TypeDef(..) | RVal::TypeInstance(..) | RVal::Null
             | RVal::Env(..) => Err(R2Err {

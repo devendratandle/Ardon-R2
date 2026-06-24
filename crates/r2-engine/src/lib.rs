@@ -1314,7 +1314,7 @@ impl Engine {
         }
     }
 
-    fn binary_op(&mut self, op: BinOp, lhs: &RVal, rhs: &RVal) -> Result<RVal, R2Err> {
+    pub(crate) fn binary_op(&mut self, op: BinOp, lhs: &RVal, rhs: &RVal) -> Result<RVal, R2Err> {
         // Matrix multiply: %*%
         if op == BinOp::MatMul {
             return match (lhs, rhs) {
