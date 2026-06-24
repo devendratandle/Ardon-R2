@@ -286,16 +286,25 @@ pub fn bi_regexpr(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 pub fn bi_strsplit(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let s = match &gv(a, 0) {
-        RVal::Character(v, _) => v.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
+    // R's strsplit returns a LIST (one character vector per input string).
+    // An empty separator splits into individual characters.
+    let strings: Vec<Character> = match &gv(a, 0) {
+        RVal::Character(v, _) => v.clone(),
         _ => return Err(type_err("strsplit needs character")),
     };
     let split = match &gv(a, 1) {
         RVal::Character(v, _) => v.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_else(|| " ".into()),
         _ => " ".into(),
     };
-    let parts: Vec<Character> = s.split(&split).map(|p| Some(Arc::from(p))).collect();
-    Ok(RVal::Character(parts, Attrs::default()))
+    let items: Vec<(Option<Arc<str>>, RVal)> = strings.iter().map(|s| {
+        let parts: Vec<Character> = match s {
+            Some(st) if split.is_empty() => st.chars().map(|c| Some(Arc::from(c.to_string().as_str()))).collect(),
+            Some(st) => st.split(split.as_str()).map(|p| Some(Arc::from(p))).collect(),
+            None => vec![None],
+        };
+        (None, RVal::Character(parts, Attrs::default()))
+    }).collect();
+    Ok(RVal::List(items))
 }
 
 // ─────────────────────────────────────────────────────────────────────

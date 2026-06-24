@@ -41,6 +41,11 @@ Surfaced and fixed by base + data-manip + graphics regression programs:
   vector; `cbind(df, x=)` appends columns; `boxplot(y ~ g, data=)`.
 - Negative (exclusion) indexing: `x[-1]`, `A[, -2]`, `df[-1, ]` now drop
   those positions (were returning empty); `toString()` added.
+- `as.numeric("153")` / `as.integer("42")` parse numeric strings (NA if
+  not a number). `apply(matrix, MARGIN, FUN)` works on matrices, not just
+  data.frames. `strsplit()` returns a list (R-faithful) and an empty
+  separator splits into individual characters — fixes
+  `as.numeric(strsplit(as.character(n),"")[[1]])` (Armstrong/digit code).
 
 ### Language / REPL
 - Separate function/variable namespaces in call position: `c <- c(1,2);

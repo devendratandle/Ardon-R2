@@ -1003,7 +1003,14 @@ pub(crate) fn bi_format(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 pub(crate) fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Numeric(..)|RVal::Integer(..)))) }
 pub(crate) fn bi_is_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Character(..)))) }
 pub(crate) fn bi_is_lgl(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Logical(..)))) }
-pub(crate) fn bi_as_num(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(RVal::Numeric(e.as_reals(&gv(a,0))?.into(), Attrs::default())) }
+pub(crate) fn bi_as_num(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // as.numeric("153") parses the string (NA if not a number), like R.
+    if let RVal::Character(v, _) = &gv(a,0) {
+        let nums: Vec<Real> = v.iter().map(|x| x.as_ref().and_then(|s| s.trim().parse::<f64>().ok())).collect();
+        return Ok(RVal::Numeric(nums.into(), Attrs::default()));
+    }
+    Ok(RVal::Numeric(e.as_reals(&gv(a,0))?.into(), Attrs::default()))
+}
 /// `as.single(x)` — coerce to f32 single-precision storage (Phase F.7).
 /// Halves memory footprint vs `as.numeric`; arithmetic with `numeric`
 /// promotes back to f64.
@@ -1025,7 +1032,13 @@ pub(crate) fn bi_as_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
         _ => Ok(rstr(&val_to_str(&gv(a,0)))),
     }
 }
-pub(crate) fn bi_as_int(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; Ok(RVal::Integer(v.into_iter().map(|x| x.map(|n| n as i32)).collect(), Attrs::default())) }
+pub(crate) fn bi_as_int(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if let RVal::Character(cv, _) = &gv(a,0) {
+        let ints: Vec<Integer> = cv.iter().map(|x| x.as_ref().and_then(|s| s.trim().parse::<f64>().ok()).map(|n| n as i32)).collect();
+        return Ok(RVal::Integer(ints.into(), Attrs::default()));
+    }
+    let v = e.as_reals(&gv(a,0))?; Ok(RVal::Integer(v.into_iter().map(|x| x.map(|n| n as i32)).collect(), Attrs::default()))
+}
 pub(crate) fn bi_strict(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Strict; soutln!("Mode: strict"); Ok(RVal::Null) }
 pub(crate) fn bi_lenient(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Lenient; soutln!("Mode: lenient"); Ok(RVal::Null) }
 pub(crate) fn bi_df(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let cols: Vec<(Arc<str>, RVal)> = a.iter().enumerate().map(|(i,arg)| { let n = arg.name.clone().unwrap_or_else(|| Arc::from(format!("V{}",i+1).as_str())); (n, arg.value.clone()) }).collect(); Ok(RVal::DataFrame(DataFrame { columns: cols, row_names: None })) }

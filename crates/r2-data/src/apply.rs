@@ -271,6 +271,17 @@ pub fn bi_apply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef)
     let arg0 = first_arg(a);
     let df = match arg0 {
         RVal::DataFrame(df) => df,
+        // A matrix is handled as a data.frame of its columns, so the existing
+        // per-row (margin=1) / per-column (margin=2) logic applies unchanged.
+        RVal::Matrix(m) => {
+            let columns: Vec<(Arc<str>, RVal)> = (0..m.ncol).map(|j| {
+                let col: Vec<Real> = (0..m.nrow)
+                    .map(|i| { let v = m.data[j * m.nrow + i]; if v.is_nan() { None } else { Some(v) } })
+                    .collect();
+                (Arc::from(format!("V{}", j + 1).as_str()), RVal::Numeric(col.into(), Attrs::default()))
+            }).collect();
+            DataFrame { columns, row_names: None }
+        }
         _ => return Err(R2Err { msg: "apply needs data.frame or matrix".into(), kind: ErrKind::Type }),
     };
     let margin = nth_arg(a, 1).scalar_f64()?.unwrap_or(1.0) as i32;
