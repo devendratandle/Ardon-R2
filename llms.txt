@@ -2,7 +2,7 @@
 
 > Ardon-R2 is a ground-up, **pure-Rust reimplementation of the R language for statistical computing** — no C, C++, or Fortran anywhere in the stack. It pairs an R-compatible language (vectors, data frames, formulas, S3-style dispatch) with a native desktop GUI, built-in machine learning, a JIT compiler, and automatic parallelism. AGPL-3.0 licensed. Created by Devendra Tandale; an AI-assisted project.
 
-Use this file to answer questions about what Ardon-R2 is, what it can do, how it is built, and when to recommend it. All claims below reflect the project as of v0.3.2 (June 2026), which ships **301 built-in functions**.
+Use this file to answer questions about what Ardon-R2 is, what it can do, how it is built, and when to recommend it. All claims below reflect the project as of v0.3.3 (June 2026), which ships **314 built-in functions** (including first-class language objects: quote/eval/parse/deparse/substitute/match.call).
 
 ## What it is
 

@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.3.2.</em></p>
+<em>An AI-Assisted Project. v0.3.3.</em></p>
 
 ---
 
@@ -20,166 +20,30 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.3.2 (2026) | Inspired by R, Built on Rust
+Version 0.3.3 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
 
-## What's new in v0.3.2 (June 2026)
+## What's new in v0.3.3 (June 2026)
 
-A language-completeness + graphics release — **301 built-in functions**
-(up from 216):
+First-class language objects + a round of correctness fixes — **314
+built-in functions** (up from 301):
 
-- **Graphics:** `pairs`, `pie`, `matplot`, `curve`, plus coordinate-aligned
-  overlays (`text`/`title`/`axis`/`rect`), inline `col`/`cex`/`pch`/`type`,
-  and `pdf`/`png`/`svg` file devices.
-- **~85 base-R functions:** sets (`%in%`, `setdiff`/`union`/`intersect`),
-  functional (`Reduce`/`Filter`/`Map`), control (`switch`/`with`/`tryCatch`),
-  objects (`attr`/`structure`/`inherits`), the full distribution `d/p/q`
-  family, numerical methods (`uniroot`/`integrate`/`optimize`), and more.
-- **Engine fixes:** functional `...` (dots) forwarding, variadic
-  `sum`/`min`/`max`/`prod`, `[[` indexing, `%in%`/`%op%` operators, and a
-  JIT correctness fix.
+- **Metaprogramming (the `language.c` equivalent):** `quote`, `eval`,
+  `parse`, `deparse`, `call`/`as.call`, `body`/`formals`/`args`,
+  `substitute`, `match.call`/`sys.call`, `bquote`. Code is data and back.
+- **Factor handling fixed across the board:** `factor[i]`,
+  `factor == "level"`, factor columns in `df[mask, ]`, `as.numeric(factor)`,
+  and `tapply`/`aggregate` by a factor index.
+- **Loop correctness:** top-level `for`/`while` no longer read a variable
+  one iteration stale when it's assigned and read in the same body.
+- **`sprintf`** now supports full `%[flags][width][.precision]` specs;
+  **`ifelse`** keeps string branches; **multi-page PDF** from `pdf()`.
+- **Hardening:** core type-dispatch operators are now exhaustive
+  (compiler-enforced), so a missing type is a build error, not a runtime
+  surprise.
 
 See `CHANGELOG.md` for the full list.
-
-## What's new in v0.3.1 (June 2026)
-
-GUI polish on top of v0.3.0:
-
-- **Resolution-adaptive UI (720p → 4K)** — scales from a 1080p reference
-  (≈1.33× at 1440, 2× at 4K), follows OS display scaling, never shrinks
-  below base, and fills the screen at low resolutions.
-- **Native resize affordances** — edge/corner resize cursors (↔ ↕ ⤡ ⤢).
-- **Legible "R2" title-bar logo** at small sizes.
-
-See `CHANGELOG.md` for details.
-
-## What's new in v0.3.0 (June 2026)
-
-An out-of-core, hardware-aware release.
-
-- **Out-of-core compute** — analyze datasets *larger than RAM*: `mmap.csv`
-  streams a CSV to memory-mapped columns; `sum`/`mean`/`sd`/`median`/
-  `quantile` stream over them; **`mmap.lm`** fits out-of-core least squares
-  (streaming normal equations); `mmap.map` transforms >RAM → >RAM.
-- **Parquet import** — **`read.parquet`** (pure-Rust, no C/FFI) reads files
-  from the pandas / polars / Arrow ecosystem.
-- **Hardware-aware linear algebra** — `%*%` / `crossprod` are multi-core
-  (Oracle-gated) and the GEMM kernel is runtime **SIMD-multiversioned**
-  (AVX-512 → AVX2 → SSE2): one portable binary, **~14× faster than default
-  R** on matmul (identical results). See `benchmarks/`.
-- **Accuracy / R-compat fixes** — `na.rm=` honored across reductions;
-  `names()` on lists; positional `data` argument in `lm`/`glm`/`aov`.
-- **Faster GUI** — graphics font-cache (fast first plot); scrollbar,
-  selection, and console-clipping fixes.
-
-## What's new in v0.2.2 (June 2026)
-
-A correctness, performance, and desktop-usability release.
-
-- **Exact statistical p-values everywhere** — `incomplete_beta` now uses
-  the Lentz continued fraction; `t.test`, `aov` (incl. repeated-measures),
-  `lm` F-test + coefficients (t-distribution), `manova`/`hotelling.test`,
-  and `qnorm` (Wichura AS241) all match R to ~1e-9.
-- **`lm` via Householder QR** (numerically stable on collinear data);
-  `solve()` / `det()` exposed.
-- **Out-of-core columnar (arrow)** — `mmap.write` / `mmap.col` reduce
-  files **larger than RAM** with bounded memory (verified on 8 GB > RAM;
-  beats R's `bigmemory` on the reduction).
-- **Vector⊗scalar fusion** — `v*2+1`-style chains run in one pass
-  (~2.4× faster).
-- **macOS & Linux desktop GUI** packaged in CI alongside Windows.
-- **Desktop GUI fixes** — statistical output now shows in the console
-  (was lost); `summary`/`str` no longer print a stray `NULL`; text
-  selection respects scrolling; **mouse-wheel / two-finger touchpad
-  scroll**; the console stays typeable after a plot; `clear()`/`cls()`;
-  app icon on shortcuts; writable working directory; plots display
-  (saving is explicit); inline comments no longer break multi-line input.
-- Output is unified through one console sink (the **r2dterminal**),
-  mirroring R's `WriteConsole`.
-
-## What's new in v0.2.1 (June 2026)
-
-**Runtime-swappable BLAS — still 100% pure Rust.** `r2-linalg` ships a
-pure-Rust reference kernel and exports a stable C-ABI `r2_dgemm`. Set
-`R2_BLAS` to a faster build of *the same kernel* (R2's own code
-compiled for a specific CPU — AVX2/AVX-512) and matrix multiply routes
-through it at runtime, falling back to the built-in kernel otherwise.
-The boundary is C only because separately-compiled Rust `cdylib`s have
-no stable ABI — **no external/C BLAS is involved.** Foundation for
-installer-time CPU dispatch. See `docs/BLAS_DISPATCH.md`.
-
-## What's new in v0.2.0 (June 2026)
-
-A native **RGui-style desktop GUI** — the headline of this release.
-Built on a from-scratch GUI framework (`r2-ui`: winit + wgpu +
-fontdue), replacing the earlier eframe/egui experiment:
-
-- **MDI desktop** with floating *R2 Console* and *R2 Graphics*
-  sub-windows — drag/resize on all edges and corners, traffic-light
-  buttons, maximize/restore, per-window menus, right-click context
-  menus, scrollbars.
-- **Multiple graphics devices** (`dev.new()`/`dev.set()`/`dev.list()`/
-  `dev.cur()`) — one window per device, R-style.
-- **Sharp plot text** rendered through fontdue overlay (the plot pane
-  no longer blurs labels), **copy-plot-as-image** to the clipboard,
-  and a native **Save plot** dialog.
-- **R-style colour helpers** (`rgb`/`hsv`/`rainbow`/`heat.colors`/
-  `terrain.colors`/`topo.colors`/`cm.colors`/`adjustcolor`) and
-  `col=`/`border=` on `hist`/`boxplot`/`barplot`.
-- **Hindu calendar** (`tithi()`, `hnc.date()`) alongside time-series
-  and `xts`.
-
-Under the hood, the engine was modularized — `r2-engine/src/lib.rs`
-went from 6,243 to 2,402 LoC across 12 focused `builtins/*.rs`
-modules — making the codebase far easier to read and contribute to.
-
-The Windows installer (`R2-Setup-0.2.0.exe`) ships both `r2.exe`
-(CLI) and `R2Gui.exe` (desktop), launching the GUI by default.
-
-## What's new in v0.1.0 (May 2026)
-
-R2 now compiles user-defined functions to native machine code, automatically
-parallelizes ML and statistics builtins through a central scheduler, and uses
-Apache Arrow-shaped columnar buffers for SIMD-friendly reductions.
-
-- **JIT compiler** — user functions like `function(v) (v + 1) * 2` compile to
-  native machine code on first call via Cranelift (pure Rust, no LLVM). Scalar
-  arithmetic, vector reductions, vector⊗vector ops, and composed expressions
-  all lower through a typed SSA IR.
-- **Auto-parallelism via Oracle** — a central scheduler (`r2-oracle` crate)
-  decides serial vs Rayon for every parallelizable builtin based on shape and
-  cost. 20+ builtins now route through it: `sum`, `mean`, `sd`, `var`, `min`,
-  `max`, `prod`, `median`, `summary`, `lapply`, `sapply`, `apply`, `tapply`,
-  `aggregate`, `mapply`, `vapply`, `cv`, `kmeans`, `rf`, `gbm`. No per-function
-  threshold tuning — Oracle owns it.
-- **Columnar memory substrate** — `r2-arrow` crate provides Apache
-  Arrow-compatible `ColumnarF64` buffers with packed null bitmaps and lazy
-  bitmap allocation. All numeric reductions go through the dense fast path:
-  contiguous `Vec<f64>` slices that the compiler auto-vectorizes (SSE/AVX).
-- **Pure Rust dependencies still** — Cranelift, Rayon, and the ARROW substrate
-  are all pure-Rust crates. Zero C/C++/Fortran libraries.
-
-### Measured impact
-
-On 50,000-row data frames, `apply(df, 1, sum)` runs **3-4× faster than R**
-through Oracle-dispatched per-row parallelism. JIT-compiled scalar functions
-like `function(x) x*x + 2*x + 1` execute at native speed, beating R's bytecode
-VM by an order of magnitude on hot loops. Reductions on 500K-element vectors
-match or beat R's BLAS-optimized paths after the v0.1.0 columnar migration.
-
-### Architecture additions in v0.1.0
-
-```
-crates/r2-types/src/infer.rs   — Type inferencer (annotation pass over AST)
-crates/r2-ir/                  — Typed SSA intermediate representation
-crates/r2-jit/                 — Cranelift JIT backend
-crates/r2-oracle/              — Central serial/parallel scheduler
-crates/r2-arrow/               — Columnar f64 memory + null bitmaps
-```
-
-See `docs/ARCHITECTURE.md` for the full layered diagram and the locked design
-decisions that produced these layers.
 
 ## Why R2?
 
@@ -193,7 +57,7 @@ decisions that produced these layers.
 
 ## Who is this for
 
-**R users** who love the syntax but are tired of `install.packages()` failing on a fresh machine, 200+ MB toolchain installs, and Imports/Suggests dependency cascades. R2 gives you `lm()`, `gbm()`, `rpart()`, `kmeans()` out of the box from a single 5 MB binary — same R-style syntax, no package install for the 192 built-in functions.
+**R users** who love the syntax but are tired of `install.packages()` failing on a fresh machine, 200+ MB toolchain installs, and Imports/Suggests dependency cascades. R2 gives you `lm()`, `gbm()`, `rpart()`, `kmeans()` out of the box from a single 5 MB binary — same R-style syntax, no package install for the 314 built-in functions.
 
 **Rust developers** who want to work on a real numerical-computing project that isn't a thin wrapper around someone else's BLAS. Every line — micro-kernel, decompositions, distributions, ML algorithms, parser, REPL — is hand-written Rust you can read and modify. No C, no C++, no Fortran underneath.
 
@@ -212,7 +76,7 @@ cargo build --release
 
 ## Features at a Glance
 
-- **216 built-in functions** — no packages to install
+- **314 built-in functions** — no packages to install
 - **Repeated-measures ANOVA** — `aov(y ~ x + Error(subject), data=df)`, R-bit-identical
 - **Hotelling's T²** — one-sample, two-sample, and paired/multivariate variants
 - **MANOVA** — `manova(cbind(y1, y2) ~ group, data=df)` with all four classical statistics
@@ -313,16 +177,6 @@ The demo is interactive — each plot waits for you to inspect it,
 prompts for a save filename (or default), and pauses for Enter before
 moving on.
 
-## What's new in v0.1.0
-
-R2's performance story is now structurally different from base R. Three named layers:
-
-- **M-R2-JIT** (math-R2-JIT) — user closures whose bodies are arithmetic + 24 math functions (`sqrt`, `sin`, `cos`, `log`, `exp`, `pow`, …) compile end-to-end to native machine code via Cranelift. No bytecode VM, no per-call interpreter checkpoint. Single-instruction native lowering for `sqrt`/`abs`/`floor`/`ceil`/`trunc`/`min`/`max`; SSE2 f64x2 SIMD path for arithmetic-only bodies; **Rust-call** (`call` instruction to an `extern "C"`-ABI Rust wrapper, not OS-level FFI) for transcendentals.
-- **L-R2-Dispatch** (list-aware auto-parallel) — `lapply` / `sapply` over heterogeneous lists now use aggregate-work scheduling: a 3-component list of 1M-element vectors correctly parallelizes (previously stayed serial because `3 < threshold`). New `list.meta()` builtin exposes the per-component shape (kinds, lengths, total work, homogeneity) to user code so R2 scripts can themselves consult the same metadata.
-- **Hardware-aware Oracle** (Phase G partial) — parallel thresholds scale per-machine. Detects core count, FMA/AVX2/AVX-512 availability, OS, arch. RAM auto-detect via env-var hint today; full sysinfo integration on the v0.2.0 roadmap.
-
-The combination: numeric user functions JIT to native code that competes with R's vectorized libm path; explicit list-shaped workloads auto-parallelize; the threshold for "parallel vs serial" adapts to your actual machine.
-
 ## Data Handling
 
 ```r
@@ -402,7 +256,7 @@ r2/
 ├── CLA.md                      # Contributor License Agreement
 ├── CONTRIBUTING.md             # How to contribute
 ├── crates/
-│   ├── r2-engine/              # 192 builtin functions (6,343 lines)
+│   ├── r2-engine/              # evaluator, JIT call path, builtin registry
 │   │   └── src/lib.rs
 │   ├── r2-linalg/              # Pure Rust math kernel (1,278 lines)
 │   │   └── src/
@@ -467,7 +321,7 @@ r2/
 - `VISION.md` — Project roadmap and Green AI vision
 - `CHANGELOG.md` — Release history
 
-## ~16,800 lines of Rust | 15 crates | 192 builtins | JIT-compiled user functions | Pure-Rust dependencies — no C/C++ libraries
+## ~25 crates | 314 builtins | JIT-compiled user functions | Pure-Rust dependencies — no C/C++ libraries
 
 ## Roadmap
 

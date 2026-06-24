@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.3.3 (June 2026)
+
+First-class language objects (Phase L — R's `language.c` equivalent) plus a
+round of correctness fixes surfaced by real-program testing. Function
+reference grew from 301 to 314 built-ins.
+
+### Language objects / metaprogramming (Phase L)
+- New `RVal::Lang` type (a quoted, unevaluated expression).
+- `quote`, `eval`, `parse`, `deparse`, `call`, `as.call` — code↔data round-trip.
+- `body`, `formals`, `args` — function introspection.
+- `substitute`, `match.call`, `sys.call`, `bquote` — non-standard evaluation,
+  gated so non-NSE closures pay no cost. (Eager-eval caveat: no lazy
+  promises — the captured argument must still be evaluable; documented.)
+
+### Factor handling (fixed across the board)
+- `factor[i]` subsetting; `factor == "level"` comparison (compares labels);
+  factor columns are now row-filtered by `df[mask, ]`; `as.numeric(factor)`
+  returns 1-based codes; `tapply`/`aggregate` group correctly by a factor.
+
+### Correctness fixes
+- **Top-level `for`/`while` loops** no longer read a variable one iteration
+  stale when it is both assigned and read in the same body.
+- **`sprintf`** supports full `%[flags][width][.precision]conv` specs
+  (`%-12s`, `%.3f`, `%05d`, d/i/f/e/E/g/x/X/s).
+- **`ifelse`** keeps the branch type (string branches no longer coerced to
+  numeric).
+- **Multi-page PDF**: `pdf()` + multiple plots writes one page per plot.
+
+### Engine hardening / maintainability
+- Single source of truth for built-in registration tables (startup + reload
+  can no longer drift; fixed a reload that silently dropped ~16 functions).
+- Package machinery extracted to `packages.rs`.
+- Core type-dispatch operators (`as_reals`, subsetting, df row-filter) are
+  now exhaustive — a new value type is a **compile** error, not a silent
+  runtime gap (the root cause of the factor bugs above).
+- `dev.view()` is a no-op in non-interactive/script mode (no stray browser
+  tabs in batch runs); REPL line reader accepts LF as well as CR.
+
 ## v0.3.2 (June 2026)
 
 A large language-completeness + graphics release. Function reference grew
