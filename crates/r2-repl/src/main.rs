@@ -321,7 +321,7 @@ fn read_line_with_history(prompt: &str, history: &[String]) -> Option<String> {
     loop {
         let ch = win_getch();
         match ch {
-            13 => { println!(); return Some(line); }           // Enter
+            13 | 10 => { println!(); return Some(line); }        // Enter (CR or LF)
             3 => { println!("^C"); return Some(String::new()); } // Ctrl+C
             4 if line.is_empty() => { println!(); return None; } // Ctrl+D
             8 | 127 => {                                        // Backspace
