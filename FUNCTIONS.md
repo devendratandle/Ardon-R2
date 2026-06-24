@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 319 Built-in Functions
+# Ardon-R2 Function Reference — 320 Built-in Functions
 
 ## Core (58)
 ```
@@ -229,10 +229,11 @@ intersect(x,y)      Set intersection
 ave(x,g,FUN=)       Group-wise statistic broadcast back over x
 ```
 
-## String Functions (17)
+## String Functions (18)
 ```
 paste(...,sep)      Concatenate with separator
 paste0(...)         Concatenate without separator
+toString(x,sep)     Collapse x to one comma-separated string
 grep(pat,x)         Find pattern (indices)
 grepl(pat,x)        Find pattern (logical)
 gsub(pat,rep,x)     Replace all matches

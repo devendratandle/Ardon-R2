@@ -57,7 +57,7 @@ See `CHANGELOG.md` for the full list.
 
 ## Who is this for
 
-**R users** who love the syntax but are tired of `install.packages()` failing on a fresh machine, 200+ MB toolchain installs, and Imports/Suggests dependency cascades. R2 gives you `lm()`, `gbm()`, `rpart()`, `kmeans()` out of the box from a single 5 MB binary — same R-style syntax, no package install for the 319 built-in functions.
+**R users** who love the syntax but are tired of `install.packages()` failing on a fresh machine, 200+ MB toolchain installs, and Imports/Suggests dependency cascades. R2 gives you `lm()`, `gbm()`, `rpart()`, `kmeans()` out of the box from a single 5 MB binary — same R-style syntax, no package install for the 320 built-in functions.
 
 **Rust developers** who want to work on a real numerical-computing project that isn't a thin wrapper around someone else's BLAS. Every line — micro-kernel, decompositions, distributions, ML algorithms, parser, REPL — is hand-written Rust you can read and modify. No C, no C++, no Fortran underneath.
 
@@ -76,7 +76,7 @@ cargo build --release
 
 ## Features at a Glance
 
-- **319 built-in functions** — no packages to install
+- **320 built-in functions** — no packages to install
 - **Repeated-measures ANOVA** — `aov(y ~ x + Error(subject), data=df)`, R-bit-identical
 - **Hotelling's T²** — one-sample, two-sample, and paired/multivariate variants
 - **MANOVA** — `manova(cbind(y1, y2) ~ group, data=df)` with all four classical statistics
@@ -321,7 +321,7 @@ r2/
 - `VISION.md` — Project roadmap and Green AI vision
 - `CHANGELOG.md` — Release history
 
-## ~25 crates | 319 builtins | JIT-compiled user functions | Pure-Rust dependencies — no C/C++ libraries
+## ~25 crates | 320 builtins | JIT-compiled user functions | Pure-Rust dependencies — no C/C++ libraries
 
 ## Roadmap
 
