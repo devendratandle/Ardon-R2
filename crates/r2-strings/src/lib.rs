@@ -753,12 +753,16 @@ mod tests {
 
     #[test]
     fn strsplit_splits_on_separator() {
+        // R's strsplit returns a LIST (one character vector per input string).
         let r = bi_strsplit(&[evarg(ch("a,b,c")), evarg(ch(","))]).unwrap();
         match r {
-            RVal::Character(v, _) => {
-                let got: Vec<&str> = v.iter().filter_map(|x| x.as_deref()).collect();
-                assert_eq!(got, vec!["a", "b", "c"]);
-            }
+            RVal::List(items) => match &items[0].1 {
+                RVal::Character(v, _) => {
+                    let got: Vec<&str> = v.iter().filter_map(|x| x.as_deref()).collect();
+                    assert_eq!(got, vec!["a", "b", "c"]);
+                }
+                _ => panic!(),
+            },
             _ => panic!(),
         }
     }
