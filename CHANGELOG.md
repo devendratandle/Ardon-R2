@@ -48,6 +48,9 @@ Surfaced and fixed by base + data-manip + graphics regression programs:
   `as.numeric(strsplit(as.character(n),"")[[1]])` (Armstrong/digit code).
 
 ### Language / REPL
+- Replacement functions: `names(x) <- ...`, `colnames(df) <- ...`,
+  `rownames(df) <- ...` now work (`fname(x,…) <- v` desugars to
+  `x <- \`fname<-\`(x,…,value=v)`) — were "invalid assignment target".
 - Separate function/variable namespaces in call position: `c <- c(1,2);
   c(3,4)` now still calls the builtin `c` (a non-function binding of the
   same name is skipped). Lets you name variables `c`/`t`/`df`/`data` etc.

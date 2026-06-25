@@ -387,6 +387,30 @@ impl Engine {
                             Ok(val)
                         } else { err!(Runtime, "invalid $ assignment target") }
                     }
+                    // Replacement function: `fname(obj, ...) <- value`
+                    // desugars to `obj <- \`fname<-\`(obj, ..., value=value)`.
+                    // Enables names(x)<-, colnames(df)<-, rownames(df)<-, etc.
+                    Expr::Call { func, args } => {
+                        if let (Expr::Symbol(fname), Some(first)) = (func.as_ref(), args.first()) {
+                            let setter = format!("{}<-", fname);
+                            if let Some((f, _)) = self.registry.resolve(&setter) {
+                                let obj_val = self.eval_in(&first.value, env)?;
+                                let mut ea = vec![EvalArg { name: None, value: obj_val }];
+                                for extra in &args[1..] {
+                                    ea.push(EvalArg { name: extra.name.clone(), value: self.eval_in(&extra.value, env)? });
+                                }
+                                ea.push(EvalArg { name: Some(Arc::from("value")), value: val.clone() });
+                                let new_obj = f(self, &ea, env)?;
+                                if let Expr::Symbol(objname) = &first.value {
+                                    self.scope_insert(objname.clone(), new_obj);
+                                    return Ok(val);
+                                }
+                                return err!(Runtime, "replacement target must be a variable");
+                            }
+                            return err!(Runtime, "could not find function \"{}\"", setter);
+                        }
+                        err!(Runtime, "invalid assignment target")
+                    }
                     _ => err!(Runtime, "invalid assignment target"),
                 }
             }

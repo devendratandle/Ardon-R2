@@ -742,6 +742,48 @@ op_fn!(bi_op_div, Div);  op_fn!(bi_op_pow, Pow);  op_fn!(bi_op_mod, Mod);
 op_fn!(bi_op_eq, Eq);    op_fn!(bi_op_ne, Ne);    op_fn!(bi_op_lt, Lt);
 op_fn!(bi_op_gt, Gt);    op_fn!(bi_op_le, Le);     op_fn!(bi_op_ge, Ge);
 
+/// Read the `value =` argument of a replacement function as a name vector.
+fn setter_names(a: &[EvalArg]) -> Vec<Arc<str>> {
+    let val = gn(a, "value").or_else(|| a.iter().filter(|x| x.name.is_none()).nth(1).map(|x| x.value.clone()));
+    match val {
+        Some(RVal::Character(v, _)) => v.into_iter().map(|x| x.unwrap_or_else(|| Arc::from("NA"))).collect(),
+        Some(other) => crate::val_to_str(&other).split(' ').map(|s| Arc::from(s)).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// `names(x) <- value` — set names on a vector/list/data.frame.
+pub(crate) fn bi_names_set(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let names = setter_names(a);
+    Ok(match gv(a, 0) {
+        RVal::DataFrame(mut df) => { for (i, c) in df.columns.iter_mut().enumerate() { if let Some(nm) = names.get(i) { c.0 = nm.clone(); } } RVal::DataFrame(df) }
+        RVal::List(mut items) => { for (i, it) in items.iter_mut().enumerate() { it.0 = names.get(i).cloned(); } RVal::List(items) }
+        RVal::Numeric(v, mut at)   => { at.names = Some(names); RVal::Numeric(v, at) }
+        RVal::Integer(v, mut at)   => { at.names = Some(names); RVal::Integer(v, at) }
+        RVal::Character(v, mut at) => { at.names = Some(names); RVal::Character(v, at) }
+        RVal::Logical(v, mut at)   => { at.names = Some(names); RVal::Logical(v, at) }
+        other => other,
+    })
+}
+/// `colnames(x) <- value` — rename data.frame / matrix columns.
+pub(crate) fn bi_colnames_set(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let names = setter_names(a);
+    Ok(match gv(a, 0) {
+        RVal::DataFrame(mut df) => { for (i, c) in df.columns.iter_mut().enumerate() { if let Some(nm) = names.get(i) { c.0 = nm.clone(); } } RVal::DataFrame(df) }
+        RVal::Matrix(mut m) => { m.col_names = Some(names); RVal::Matrix(m) }
+        other => other,
+    })
+}
+/// `rownames(x) <- value` — set data.frame / matrix row names.
+pub(crate) fn bi_rownames_set(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let names = setter_names(a);
+    Ok(match gv(a, 0) {
+        RVal::DataFrame(mut df) => { df.row_names = Some(names); RVal::DataFrame(df) }
+        RVal::Matrix(mut m) => { m.row_names = Some(names); RVal::Matrix(m) }
+        other => other,
+    })
+}
+
 /// `diag(x)` — matrix → its diagonal vector; vector → a diagonal matrix;
 /// a single integer k → the k×k identity matrix (R's overloaded `diag`).
 pub(crate) fn bi_diag(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
@@ -1198,6 +1240,13 @@ pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
                 items.iter().map(|(n,_)| Some(n.clone().unwrap_or_else(|| std::sync::Arc::from("")))).collect(),
                 Attrs::default(),
             ))
+        }
+        // Atomic vectors carry names in their Attrs (set via `names(v)<-`).
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Character(_, at) | RVal::Logical(_, at) => {
+            match &at.names {
+                Some(ns) => Ok(RVal::Character(ns.iter().map(|n| Some(n.clone())).collect(), Attrs::default())),
+                None => Ok(RVal::Null),
+            }
         }
         _ => Ok(RVal::Null),
     }
