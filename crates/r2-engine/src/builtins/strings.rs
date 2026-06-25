@@ -14,6 +14,12 @@ pub(crate) fn bi_paste0(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 pub(crate) fn bi_to_string(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_strings::bi_to_string(a)
 }
+pub(crate) fn bi_gregexpr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_strings::bi_gregexpr(a)
+}
+pub(crate) fn bi_regmatches(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_strings::bi_regmatches(a)
+}
 pub(crate) fn bi_nchar(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_strings::bi_nchar(a)
 }

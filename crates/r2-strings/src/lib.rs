@@ -285,6 +285,92 @@ pub fn bi_regexpr(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
+/// All literal (non-regex) matches of `pat` in `s` as (byte-start, byte-len).
+fn literal_all(pat: &str, s: &str) -> Vec<(usize, usize)> {
+    if pat.is_empty() { return Vec::new(); }
+    let mut out = Vec::new();
+    let mut start = 0;
+    while let Some(p) = s[start..].find(pat) {
+        let abs = start + p;
+        out.push((abs, pat.len()));
+        start = abs + pat.len();
+    }
+    out
+}
+
+/// `gregexpr(pattern, text)` — ALL match positions per element. Returns a
+/// list; each element is an integer vector of 1-based start positions with a
+/// `match.length` attribute (or -1 when there is no match). Pairs with
+/// `regmatches()` to extract the matched substrings.
+pub fn bi_gregexpr(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let pattern = match &gv(a, 0) {
+        RVal::Character(v, _) => v.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
+        _ => return Err(type_err("gregexpr() needs a pattern")),
+    };
+    let fixed = fixed_arg(a);
+    let re = compile_pattern(&pattern, fixed);
+    let texts: Vec<Character> = match &gv(a, 1) {
+        RVal::Character(v, _) => v.clone(),
+        _ => return Err(type_err("gregexpr() needs character")),
+    };
+    let items: Vec<(Option<Arc<str>>, RVal)> = texts.iter().map(|t| {
+        let matches: Vec<(usize, usize)> = match t {
+            Some(s) => {
+                #[cfg(feature = "regex")]
+                { match &re { Some(re) => re.find_iter(s).map(|m| (m.start(), m.end() - m.start())).collect(), None => literal_all(&pattern, s) } }
+                #[cfg(not(feature = "regex"))]
+                { let _ = &re; literal_all(&pattern, s) }
+            }
+            None => Vec::new(),
+        };
+        let (pos, len): (Vec<Integer>, Vec<Integer>) = if matches.is_empty() {
+            (vec![Some(-1)], vec![Some(-1)])
+        } else {
+            (matches.iter().map(|(st, _)| Some((*st + 1) as i32)).collect(),
+             matches.iter().map(|(_, l)| Some(*l as i32)).collect())
+        };
+        let mut at = Attrs::default();
+        at.custom.insert(Arc::from("match.length"), RVal::Integer(len.into(), Attrs::default()));
+        (None, RVal::Integer(pos.into(), at))
+    }).collect();
+    Ok(RVal::List(items))
+}
+
+/// `regmatches(text, m)` — extract the substrings matched by a `gregexpr`
+/// result (a list of integer-position vectors with `match.length`).
+pub fn bi_regmatches(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let texts: Vec<Character> = match &gv(a, 0) {
+        RVal::Character(v, _) => v.clone(),
+        _ => return Err(type_err("regmatches() needs character text")),
+    };
+    match &gv(a, 1) {
+        RVal::List(mlist) => {
+            let out: Vec<(Option<Arc<str>>, RVal)> = texts.iter().enumerate().map(|(i, t)| {
+                let s = t.as_ref().map(|x| x.to_string()).unwrap_or_default();
+                let parts: Vec<Character> = match mlist.get(i).map(|(_, v)| v) {
+                    Some(RVal::Integer(pos, at)) => {
+                        let lens: Vec<Integer> = match at.custom.get("match.length") {
+                            Some(RVal::Integer(l, _)) => l.as_vec().clone(),
+                            _ => Vec::new(),
+                        };
+                        pos.as_vec().iter().enumerate().filter_map(|(j, p)| {
+                            let p = (*p)?;
+                            if p < 1 { return None; }
+                            let st = (p - 1) as usize;
+                            let len = lens.get(j).and_then(|x| *x).unwrap_or(0).max(0) as usize;
+                            Some(Some(Arc::from(s.get(st..st + len).unwrap_or(""))))
+                        }).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                (None, RVal::Character(parts, Attrs::default()))
+            }).collect();
+            Ok(RVal::List(out))
+        }
+        _ => Err(type_err("regmatches(): second argument must be a gregexpr result")),
+    }
+}
+
 pub fn bi_strsplit(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // R's strsplit returns a LIST (one character vector per input string).
     // An empty separator splits into individual characters.
