@@ -86,7 +86,7 @@ pub(crate) fn expr_uses_nse(e: &Expr) -> bool {
         }
         Expr::Unary { expr, .. } => expr_uses_nse(expr),
         Expr::Binary { lhs, rhs, .. } => expr_uses_nse(lhs) || expr_uses_nse(rhs),
-        Expr::Assign { target, value } => expr_uses_nse(target) || expr_uses_nse(value),
+        Expr::Assign { target, value, .. } => expr_uses_nse(target) || expr_uses_nse(value),
         Expr::Index { object, indices } =>
             expr_uses_nse(object) || indices.iter().flatten().any(expr_uses_nse),
         Expr::DblIndex { object, index } => expr_uses_nse(object) || expr_uses_nse(index),
