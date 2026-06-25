@@ -148,7 +148,9 @@ impl Lexer {
         let mut s = String::new();
         while let Some(c) = self.peek() { if c.is_ascii_alphanumeric() || c == '.' || c == '_' { s.push(c); self.advance(); } else { break; } }
         match s.as_str() {
-            "TRUE" | "T" => Token::True, "FALSE" | "F" => Token::False,
+            // Only TRUE/FALSE are reserved literals; T/F are ordinary
+            // identifiers bound to TRUE/FALSE by default but reassignable (R).
+            "TRUE" => Token::True, "FALSE" => Token::False,
             "NULL" => Token::Null, "NA" => Token::Na, "Inf" => Token::Inf, "NaN" => Token::NaN,
             "if" => Token::If, "else" => Token::Else, "for" => Token::For, "in" => Token::In,
             "while" => Token::While, "repeat" => Token::Repeat, "function" => Token::Function,

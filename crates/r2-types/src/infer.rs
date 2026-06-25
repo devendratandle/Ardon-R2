@@ -187,7 +187,7 @@ pub fn infer_expr(e: &Expr, ctx: &mut TypeCtx) -> IrType {
             }
         }
 
-        Expr::Assign { target, value } => {
+        Expr::Assign { target, value, .. } => {
             let vt = infer_expr(value, ctx);
             if let Expr::Symbol(name) = target.as_ref() {
                 ctx.bind(name.clone(), vt.clone());
@@ -302,6 +302,7 @@ mod tests {
             Expr::Assign {
                 target: Box::new(Expr::Symbol(Arc::from("x"))),
                 value:  Box::new(Expr::NumLit(3.14)),
+                superassign: false,
             },
             Expr::Symbol(Arc::from("x")),
         ];

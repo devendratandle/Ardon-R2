@@ -133,6 +133,32 @@ pub(crate) struct NseFrame {
     pub(crate) params: Vec<r2_types::Param>,
 }
 
+/// Does this expression define or return a closure anywhere? Used to keep
+/// the numeric JIT away from functions that build/return functions (which it
+/// cannot represent). Conservative: also true for inline `function(...)`
+/// passed to sapply/Reduce/etc. — those aren't numeric hot loops either.
+fn body_defines_closure(e: &Expr) -> bool {
+    match e {
+        Expr::FuncDef { .. } | Expr::Lambda { .. } => true,
+        Expr::Block(s) => s.iter().any(body_defines_closure),
+        Expr::Binary { lhs, rhs, .. } => body_defines_closure(lhs) || body_defines_closure(rhs),
+        Expr::Unary { expr, .. } => body_defines_closure(expr),
+        Expr::Assign { target, value, .. } => body_defines_closure(target) || body_defines_closure(value),
+        Expr::Call { func, args } => body_defines_closure(func) || args.iter().any(|a| body_defines_closure(&a.value)),
+        Expr::If { cond, then, else_ } =>
+            body_defines_closure(cond) || body_defines_closure(then) || else_.as_deref().is_some_and(body_defines_closure),
+        Expr::For { iter, body, .. } => body_defines_closure(iter) || body_defines_closure(body),
+        Expr::While { cond, body } => body_defines_closure(cond) || body_defines_closure(body),
+        Expr::Repeat { body } => body_defines_closure(body),
+        Expr::Return(e) => body_defines_closure(e),
+        Expr::Index { object, indices } => body_defines_closure(object) || indices.iter().flatten().any(body_defines_closure),
+        Expr::DblIndex { object, index } => body_defines_closure(object) || body_defines_closure(index),
+        Expr::Dollar { object, .. } => body_defines_closure(object),
+        Expr::Pipe { lhs, rhs } => body_defines_closure(lhs) || body_defines_closure(rhs),
+        _ => false,
+    }
+}
+
 /// Info about an installed (but not necessarily loaded) package
 #[derive(Clone, Debug)]
 pub struct InstalledPkgInfo {
@@ -347,16 +373,24 @@ impl Engine {
                 // ..1, ..2, … — the N-th element of the captured `...`.
                 else if let Some(v) = name.strip_prefix("..").and_then(|s| s.parse::<usize>().ok())
                     .and_then(|n| match self.lookup_dots(env) { Some(RVal::List(d)) => d.get(n.wrapping_sub(1)).map(|(_, v)| v.clone()), _ => None }) { Ok(v) }
+                // T / F default to TRUE / FALSE when not bound (R semantics).
+                else if name.as_ref() == "T" { Ok(rbool(true)) }
+                else if name.as_ref() == "F" { Ok(rbool(false)) }
                 else { err!(Runtime, "object '{}' not found", name) }
             }
-            Expr::Assign { target, value } => {
+            Expr::Assign { target, value, superassign } => {
                 let val = self.eval_in(value, env)?;
                 match target.as_ref() {
                     Expr::Symbol(name) => {
-                        if matches!(name.as_ref(), "TRUE"|"FALSE"|"T"|"F") { return err!(Runtime, "cannot assign to reserved keyword '{}'", name); }
-                        self.scope_insert(name.clone(), val.clone());
+                        if matches!(name.as_ref(), "TRUE"|"FALSE") { return err!(Runtime, "cannot assign to the reserved constant '{}'", name); }
+                        if *superassign { self.super_assign(name.clone(), val.clone()); }
+                        else { self.scope_insert(name.clone(), val.clone()); }
                         Ok(val)
                     }
+                    // Literals are not valid targets (e.g. `1 <- x`).
+                    Expr::NumLit(_) | Expr::IntLit(_) | Expr::StrLit(_) | Expr::BoolLit(_)
+                    | Expr::NullLit | Expr::NaLit =>
+                        err!(Runtime, "cannot assign to a literal value"),
                     Expr::Index { object, indices } => {
                         if let Expr::Symbol(name) = object.as_ref() {
                             let mut obj = self.eval_in(object, env)?;
@@ -445,7 +479,7 @@ impl Engine {
                 // NSE: library(stats), detach(stats), require(stats) accept bare symbols
                 // Convert bare symbol to string without evaluating it
                 if let Expr::Symbol(fname) = func.as_ref() {
-                    if matches!(fname.as_ref(), "library" | "detach" | "require" | "data" | "help" | "rm") {
+                    if matches!(fname.as_ref(), "library" | "detach" | "require" | "data" | "help") {
                         let f = self.eval_in(func, env)?;
                         let mut ea = Vec::new();
                         for (i, a) in args.iter().enumerate() {
@@ -505,6 +539,32 @@ impl Engine {
                         return Ok(args.first()
                             .map(|a| RVal::Lang(Arc::new(a.value.clone())))
                             .unwrap_or(RVal::Null));
+                    }
+
+                    // rm(x, y, ...) / rm("x") / rm(list=c("a","b")) — NSE:
+                    // take the UNEVALUATED symbol/string names and delete the
+                    // bindings (was single-character-string only).
+                    if fname.as_ref() == "rm" {
+                        let mut to_remove: Vec<Arc<str>> = Vec::new();
+                        for arg in args {
+                            if arg.name.as_deref() == Some("list") {
+                                if let Ok(RVal::Character(v, _)) = self.eval_in(&arg.value, env) {
+                                    for x in v.into_iter().flatten() { to_remove.push(x); }
+                                }
+                                continue;
+                            }
+                            match &arg.value {
+                                Expr::Symbol(s) => to_remove.push(s.clone()),
+                                Expr::StrLit(s) => to_remove.push(Arc::from(s.as_str())),
+                                _ => {}
+                            }
+                        }
+                        for nm in &to_remove {
+                            for scope in self.local_scopes.iter_mut() { scope.remove(nm.as_ref()); }
+                            let g = Arc::make_mut(&mut self.global_env);
+                            g.bindings.remove(nm.as_ref());
+                        }
+                        return Ok(RVal::Null);
                     }
 
                     // substitute(e) — return e with the current function's
@@ -1237,7 +1297,12 @@ impl Engine {
                         // (guards against a recycled pointer).
                         Some((body, slot)) if Arc::ptr_eq(body, &cl.body) => slot.clone(),
                         _ => {
-                            let h = r2_jit::try_compile_closure(cl);
+                            // Never JIT a function whose body defines/returns a
+                            // closure — the IR has no representation for it and
+                            // would mis-compile it to a numeric (silent wrong
+                            // result). Such functions aren't numeric hot loops
+                            // anyway. Computed once per body, then cached.
+                            let h = if body_defines_closure(&cl.body) { None } else { r2_jit::try_compile_closure(cl) };
                             self.jit_cache.insert(key, (cl.body.clone(), h.clone()));
                             h
                         }
@@ -1902,6 +1967,21 @@ impl Engine {
         } else {
             env_insert(&mut self.global_env, name, val);
         }
+    }
+
+    /// `<<-` superassignment: update the variable in the nearest ENCLOSING
+    /// local scope that already has it (skipping the current frame), else
+    /// assign it in the global environment. (R's `<<-` semantics.)
+    fn super_assign(&mut self, name: Arc<str>, val: RVal) {
+        let top = self.local_scopes.len();
+        // Enclosing frames are everything below the current (top) one.
+        for idx in (0..top.saturating_sub(1)).rev() {
+            if self.local_scopes[idx].contains_key(name.as_ref()) {
+                self.local_scopes[idx].insert(name, val);
+                return;
+            }
+        }
+        env_insert(&mut self.global_env, name, val);
     }
 
     /// Resolve a formula term: bare symbol → column in data.frame, else evaluate normally

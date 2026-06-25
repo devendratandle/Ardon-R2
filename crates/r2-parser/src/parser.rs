@@ -86,21 +86,22 @@ impl Parser {
         self.skip_nl();
         match self.peek() {
             Token::Arrow | Token::SuperArrow => {
+                let is_super = matches!(self.peek(), Token::SuperArrow);
                 self.advance(); self.skip_nl();
                 let rhs = self.parse_assign()?;
-                Ok(Expr::Assign { target: Box::new(lhs), value: Box::new(rhs) })
+                Ok(Expr::Assign { target: Box::new(lhs), value: Box::new(rhs), superassign: is_super })
             }
             Token::Equals => {
                 // = is assignment at top level / statement context
                 // Inside call args it's handled by parse_call_args before we get here
                 self.advance(); self.skip_nl();
                 let rhs = self.parse_assign()?;
-                Ok(Expr::Assign { target: Box::new(lhs), value: Box::new(rhs) })
+                Ok(Expr::Assign { target: Box::new(lhs), value: Box::new(rhs), superassign: false })
             }
             Token::RightArrow => {
                 self.advance(); self.skip_nl();
                 let rhs = self.parse_assign()?;
-                Ok(Expr::Assign { target: Box::new(rhs), value: Box::new(lhs) })
+                Ok(Expr::Assign { target: Box::new(rhs), value: Box::new(lhs), superassign: false })
             }
             _ => Ok(lhs),
         }

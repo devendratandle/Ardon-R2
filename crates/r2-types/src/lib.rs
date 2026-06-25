@@ -1158,8 +1158,9 @@ pub enum Expr {
     Unary { op: UnOp, expr: Box<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
 
-    // Assignment
-    Assign { target: Box<Expr>, value: Box<Expr> },
+    // Assignment. `superassign` = true for `<<-` (assign in an enclosing /
+    // global scope instead of the current one).
+    Assign { target: Box<Expr>, value: Box<Expr>, superassign: bool },
 
     // Function call
     Call { func: Box<Expr>, args: Vec<CallArg> },

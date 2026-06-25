@@ -48,6 +48,16 @@ Surfaced and fixed by base + data-manip + graphics regression programs:
   `as.numeric(strsplit(as.character(n),"")[[1]])` (Armstrong/digit code).
 
 ### Language / REPL
+- **JIT correctness:** a function that returns/defines a closure (e.g.
+  `function() function(z) z*2`) was mis-compiled by the numeric JIT to a
+  numeric (silent wrong result); the JIT now skips closure-defining bodies.
+- `rm(x, y)` / `rm("x")` / `rm(list=c("a","b"))` — removes multiple
+  bindings by unevaluated name (was single character-string only).
+- `T` / `F` are reassignable identifiers defaulting to TRUE/FALSE (R); only
+  `TRUE`/`FALSE` are reserved.
+- `<<-` works at top level; the closure/counter pattern (`<<-` writing to an
+  enclosing function's variable) needs **mutable environments** — a future
+  phase (R2 currently snapshots captured environments).
 - Replacement functions: `names(x) <- ...`, `colnames(df) <- ...`,
   `rownames(df) <- ...` now work (`fname(x,…) <- v` desugars to
   `x <- \`fname<-\`(x,…,value=v)`) — were "invalid assignment target".

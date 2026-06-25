@@ -260,7 +260,7 @@ impl IrBuilder {
                 dst
             }
 
-            Expr::Assign { target, value } => {
+            Expr::Assign { target, value, .. } => {
                 let v = self.lower(value);
                 if let Expr::Symbol(name) = target.as_ref() {
                     self.locals.insert(name.clone(), v);
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn lower_assignment_and_use() {
         let prog = vec![
-            Expr::Assign { target: Box::new(expr_sym("x")), value: Box::new(expr_num(5.0)) },
+            Expr::Assign { target: Box::new(expr_sym("x")), value: Box::new(expr_num(5.0)), superassign: false },
             expr_add(expr_sym("x"), expr_num(2.0)),
         ];
         let f = lower_program(&prog, "use_x");
