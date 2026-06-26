@@ -65,6 +65,7 @@ use builtins::ml::*;
 use builtins::stats::*;
 use builtins::strings::*;
 use builtins::lang::*;
+use builtins::coerce::*;
 
 // PackageLayer / PackageTier / FunctionRegistry moved to `registry.rs`.
 mod registry;

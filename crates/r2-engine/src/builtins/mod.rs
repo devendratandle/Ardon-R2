@@ -23,3 +23,4 @@ pub(crate) mod ml;
 pub(crate) mod stats;
 pub(crate) mod strings;
 pub(crate) mod lang;
+pub(crate) mod coerce;
