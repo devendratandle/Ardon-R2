@@ -35,6 +35,49 @@ fn scalar_f64_of(v: &r2_types::RVal) -> Option<f64> {
 /// involves upgrading Cranelift to a version with aarch64 PLT support.
 pub const JIT_SUPPORTED: bool = cfg!(target_arch = "x86_64");
 
+/// Allowlist: is every node in `e` a construct that `r2_ir`'s lowering
+/// represents *faithfully*? The lowering's catch-all arm silently turns
+/// unhandled expressions (notably `for`, `repeat`, `match`, `tryCatch`,
+/// `break`/`next`) into a no-op `Null` const — which would make the JIT
+/// emit code that quietly skips them and returns a wrong scalar (e.g. a
+/// `for`-loop accumulator returning its init value). Rather than denylist
+/// the silently-dropped constructs (fragile as the AST grows), we only
+/// admit bodies built entirely from the faithfully-lowered set; anything
+/// else returns `false` and `try_compile_closure` falls back to the
+/// interpreter, which handles every construct correctly.
+///
+/// Note: `Call`/`Index`/`StrLit` etc. that the scalar codegen can't emit
+/// still fail *loudly* (the compile returns `Err` and we fall back) — they
+/// don't need gating here. This gate exists only for the constructs that
+/// would otherwise compile to silently-wrong code.
+pub(crate) fn body_is_jit_lowerable(e: &r2_types::Expr) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
+        Unary { expr, .. } => body_is_jit_lowerable(expr),
+        Binary { lhs, rhs, .. } => body_is_jit_lowerable(lhs) && body_is_jit_lowerable(rhs),
+        Assign { value, .. } => body_is_jit_lowerable(value),
+        Call { func, args } => {
+            body_is_jit_lowerable(func)
+                && args.iter().all(|a| body_is_jit_lowerable(&a.value))
+        }
+        If { cond, then, else_ } => {
+            body_is_jit_lowerable(cond)
+                && body_is_jit_lowerable(then)
+                && else_.as_ref().map_or(true, |e| body_is_jit_lowerable(e))
+        }
+        While { cond, body } => body_is_jit_lowerable(cond) && body_is_jit_lowerable(body),
+        Block(stmts) => stmts.iter().all(body_is_jit_lowerable),
+        Return(v) => body_is_jit_lowerable(v),
+        Pipe { lhs, rhs } => body_is_jit_lowerable(lhs) && body_is_jit_lowerable(rhs),
+        // For / Repeat / Match / TryCatch / Break / Next / FuncDef / Lambda /
+        // Index / DblIndex / Dollar / Namespace / StrLit / FStringLit / Dots /
+        // TypeDef / MethodDef — not faithfully lowered (or not scalar-numeric):
+        // reject so the engine uses the interpreter.
+        _ => false,
+    }
+}
+
 pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn r2_types::JitHandle>> {
     // Phase R.M — gate the JIT on supported architectures. On aarch64 the
     // engine falls back to the interpreter; statistical outputs are
@@ -87,6 +130,12 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
     } else {
         body_ref = cl.body.as_ref();
     }
+
+    // Eligibility gate: bail (→ interpreter) if the body contains any
+    // construct the IR lowering silently drops (for/repeat/match/...).
+    // Without this, e.g. `function(n){ s<-0; for(k in 1:n) s<-s+k; s }`
+    // would JIT-compile with the loop elided and return `s`'s init value.
+    if !body_is_jit_lowerable(body_ref) { return None; }
 
     // Phase C.3 — vector reduction pattern: `function(v) sum(v)` etc.
     if cl.params.len() == 1 {

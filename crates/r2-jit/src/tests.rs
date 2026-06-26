@@ -726,3 +726,83 @@
         let r = unsafe { handle.try_call_vec1(input.as_ptr(), input.len() as i64) };
         assert_eq!(r, Some(30.0));
     }
+
+    // ── Regression: for-loop accumulator must NOT JIT-compile ──────────
+    //
+    // `r2_ir`'s lowering has no `Expr::For` arm; the catch-all silently
+    // lowers `for` to a no-op `Null`, so a JIT-compiled body would skip
+    // the loop and return the accumulator's init value (0). The
+    // `body_is_jit_lowerable` gate rejects such bodies so the engine falls
+    // back to the interpreter. See closure.rs.
+
+    #[test]
+    fn body_lowerable_admits_arithmetic_and_branches() {
+        // { s <- 0 ; if (n > 1) n*n else 0 }  — all faithfully-lowered.
+        let body = Expr::Block(vec![
+            Expr::Assign {
+                target: Box::new(sym("s")),
+                value: Box::new(num(0.0)),
+                superassign: false,
+            },
+            Expr::If {
+                cond: Box::new(Expr::Binary { op: BinOp::Gt, lhs: Box::new(sym("n")), rhs: Box::new(num(1.0)) }),
+                then: Box::new(Expr::Binary { op: BinOp::Mul, lhs: Box::new(sym("n")), rhs: Box::new(sym("n")) }),
+                else_: Some(Box::new(num(0.0))),
+            },
+        ]);
+        assert!(body_is_jit_lowerable(&body));
+        // while-loop body is faithfully lowered too.
+        let wbody = Expr::While {
+            cond: Box::new(Expr::Binary { op: BinOp::Lt, lhs: Box::new(sym("k")), rhs: Box::new(sym("n")) }),
+            body: Box::new(Expr::Block(vec![])),
+        };
+        assert!(body_is_jit_lowerable(&wbody));
+    }
+
+    #[test]
+    fn body_lowerable_rejects_for_and_repeat() {
+        // for (k in 1:n) s <- s + k
+        let for_body = Expr::For {
+            var: Arc::from("k"),
+            iter: Box::new(Expr::Binary { op: BinOp::Colon, lhs: Box::new(num(1.0)), rhs: Box::new(sym("n")) }),
+            body: Box::new(Expr::Assign {
+                target: Box::new(sym("s")),
+                value: Box::new(Expr::Binary { op: BinOp::Add, lhs: Box::new(sym("s")), rhs: Box::new(sym("k")) }),
+                superassign: false,
+            }),
+        };
+        assert!(!body_is_jit_lowerable(&for_body));
+        // …and when nested inside a Block (the real closure shape).
+        let block = Expr::Block(vec![
+            Expr::Assign { target: Box::new(sym("s")), value: Box::new(num(0.0)), superassign: false },
+            for_body,
+            sym("s"),
+        ]);
+        assert!(!body_is_jit_lowerable(&block));
+        assert!(!body_is_jit_lowerable(&Expr::Repeat { body: Box::new(Expr::Block(vec![])) }));
+    }
+
+    #[test]
+    fn for_loop_accumulator_closure_is_not_jit_compiled() {
+        // function(n) { s <- 0; for (k in 1:n) s <- s + k; s }
+        let body = Expr::Block(vec![
+            Expr::Assign { target: Box::new(sym("s")), value: Box::new(num(0.0)), superassign: false },
+            Expr::For {
+                var: Arc::from("k"),
+                iter: Box::new(Expr::Binary { op: BinOp::Colon, lhs: Box::new(num(1.0)), rhs: Box::new(sym("n")) }),
+                body: Box::new(Expr::Assign {
+                    target: Box::new(sym("s")),
+                    value: Box::new(Expr::Binary { op: BinOp::Add, lhs: Box::new(sym("s")), rhs: Box::new(sym("k")) }),
+                    superassign: false,
+                }),
+            },
+            sym("s"),
+        ]);
+        let cl = Closure {
+            params: vec![Param { name: Arc::from("n"), default: None, dots: false }],
+            body: Arc::new(body),
+            env: Env::new_global(),
+        };
+        // Must decline → engine uses the interpreter (which is correct).
+        assert!(try_compile_closure(&cl).is_none());
+    }
