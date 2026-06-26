@@ -6,7 +6,6 @@
 #![allow(clippy::all)]
 use std::sync::Arc;
 use std::collections::HashMap;
-use rayon::prelude::*;
 use r2_types::*;
 use crate::{Engine, NseFrame, val_to_str, env_insert, body_defines_closure};
 use crate::builtins;

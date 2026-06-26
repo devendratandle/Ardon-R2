@@ -17,7 +17,7 @@
 //! Plus `fmt_expr` — a small deparser that turns an `Expr` back into
 //! a source-like string for `$call` fields on fitted-model results.
 
-use r2_types::{BinOp, Expr, fmt_num};
+use r2_types::{BinOp, Expr};
 
 // ─── Error(...) term splitter ───────────────────────────────────────
 

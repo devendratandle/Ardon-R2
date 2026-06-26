@@ -2,7 +2,6 @@
 //! and the label vector for string/factor comparison. Extracted from
 //! lib.rs as a second `impl Engine` block (same crate, same exe).
 
-use std::sync::Arc;
 use r2_types::*;
 use crate::Engine;
 use crate::err;
