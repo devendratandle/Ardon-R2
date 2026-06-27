@@ -189,25 +189,28 @@ summary(iris)
 
 ## Benchmarks — R vs R2 (Windows 11, single workstation)
 
-Reproduce on your own machine: see `bench/r_vs_r2/RUN_THIS.md`. Numbers below are R2 v0.1.0 vs CRAN R 4.5.3 (default reference Rblas), wall-clock seconds, warm-cache. **Independent reproduction by the project author on 2026-05-17 against this exact tag.**
+Reproduce on your own machine: see `bench/r_vs_r2/RUN_THIS.md`. Numbers below are **R2 v0.3.4 vs CRAN R 4.5.3** (default reference Rblas), elapsed seconds, warm-cache, one 6-core AVX2 workstation, measured **2026-06-27**.
 
 | Operation | R | R2 | Ratio | Notes |
 |---|---:|---:|---:|---|
-| **Linear model** (lm 1e5 × 5 cols) | 0.050 | **0.016** | 🏆 **R2 3.0× faster** | F.3 columnar + JIT |
-| **Sum + mean** (1e7) | 0.050 | **0.018** | 🏆 **R2 2.7× faster** | Columnar-native reductions |
-| **Sort** (1e6 doubles) | 0.080 | **0.065** | 🏆 **R2 1.2× faster** | |
-| **sapply iris × 30 reps** | 0.010 | **0.001** | 🏆 **R2 ~10× faster** | R near timer resolution |
-| Matrix multiply (500×500) | 0.040 | 0.040 | tie | Cache-blocked DGEMM, 8×4 micro-kernel |
-| K-means (1e5 × 10, k=5) | 0.440 | 0.458 | tie | |
-| Element-wise add (1e7) | 0.030 | 0.123 | R 4.1× | Memory-bandwidth bound; deeper fusion = v0.2.0 |
-| SVD (200×100) | 0.010 | 0.014 | R 1.4× | Both fast; R near timer resolution |
+| **Matrix multiply** (1024×1024) | 0.650 | **0.030** | 🏆 **R2 22× faster** | Multiversioned AVX2 DGEMM + Oracle multicore |
+| **Matrix multiply** (500×500) | 0.050 | **0.013** | 🏆 **R2 3.9× faster** | |
+| **sapply iris × 30 reps** | 0.010 | **0.0004** | 🏆 **R2 ~25× faster** | R near timer resolution |
+| **Linear model** (lm 1e5 × 2 cols) | 0.030 | **0.013** | 🏆 **R2 2.3× faster** | F.3 columnar + JIT |
+| **Sort** (1e6 doubles) | 0.100 | **0.064** | 🏆 **R2 1.6× faster** | |
+| **Sum + mean** (1e7) | 0.030 | **0.018** | 🏆 **R2 1.6× faster** | Columnar-native reductions |
+| K-means (1e5 × 10, k=5) | 0.440 | 0.427 | tie | |
+| SVD (200×100) | ~0.000 | 0.011 | R (timer res.) | Both sub-15 ms |
+| Element-wise add (1e7) | 0.040 | 0.145 | R 3.6× | Memory-bandwidth bound; `Vec<Option>↔Columnar` conversion |
 
-**Headline: across 13 measured workloads (8 standard + 5 math-JIT), R2 wins 7, R wins 4, 2 ties. R2's biggest wins: `sin²+cos²` at 5.5× faster, `sapply×30` at ~10× faster, `lm` at 3× faster, `sum_mean` at 2.7× faster. R's wins are on single-op memory-bandwidth-bound loops where its hand-tuned libm path has slightly tighter per-call memory footprint.**
+**Headline: R2's strongest wins are matrix multiply (22× on 1024² against R's reference BLAS), fused math-JIT loops (`sin²+cos²` at 5×), and the apply family (`sapply` ~25×). R wins on single memory-bandwidth-bound passes (element-wise add) and sub-15 ms ops that sit at R's timer resolution. Results below ~15 ms are run-to-run noisy — read them as "comparable," not precise ratios.**
+
+**Accuracy:** on deterministic statistical workloads (descriptives, `lm`, `glm`, Welch `t.test`, `aov`, SVD, eigen, `cor`), R2 v0.3.4 matches R 4.5.3 to **~7 significant figures** — e.g. `lm` β = `37.22727 / −3.877831 / −0.0317729`, R² `0.8267855`, F `69.21121`; eigenvalues `6, 3, 1` exact; `cor` `0.8717538`. (Run `bench/r_vs_r2/accuracy.{R,r2}`.)
 
 **Reproducibility caveats:**
 
 - R's matrix-multiply speed depends entirely on which BLAS it's linked against. Default CRAN R on Windows ships reference Rblas (the slow netlib BLAS). R linked against OpenBLAS or Intel MKL will reverse the matmul result. R2's edge holds against the default; tuned BLAS wins.
-- Element-wise add (1e7) is the one workload where R2 is still meaningfully slower (4.2×). The gap is in the `Vec<Option<f64>> ↔ ColumnarF64` legacy conversion; closing it requires further F.3 native-columnar migration of the value type. Tracked in `KNOWN_LIMITATIONS.md`.
+- Element-wise add (1e7) is the one workload where R2 is still meaningfully slower (3.6×). The gap is in the `Vec<Option<f64>> ↔ ColumnarF64` legacy conversion; closing it requires further F.3 native-columnar migration of the value type. Tracked in `KNOWN_LIMITATIONS.md`.
 - Built-in ML (GBM, Random Forest, decision tree, KNN, naive Bayes, k-means) is available directly in base R2 — no package install. R needs CRAN packages (`gbm`, `randomForest`, `rpart`, `e1071`) for the equivalents.
 
 Run the side-by-side suite yourself:
@@ -225,11 +228,11 @@ The **M-R2-JIT** path compiles user functions whose bodies are pure scalar arith
 
 | Closure body | R | R2 | Ratio |
 |---|---:|---:|---:|
-| `sqrt(x*x + 1)` | 0.006s | 0.015s | R 2.5× (memory-bandwidth bound) |
-| `log(exp(x))` | 0.047s | **0.027s** | 🏆 **R2 1.7×** (chained extern calls fuse) |
-| `sin(x)² + cos(x)²` | 0.199s | **0.036s** | 🏆 **R2 5.5×** (4 calls + ops in one loop) |
-| `sqrt(x² + y²)` | 0.008s | 0.022s | R 2.7× (Phase C.7 closed it from 7.3×) |
-| `\|sin(x)\| + \|cos(x)\|` | 0.070s | **0.026s** | 🏆 **R2 2.7×** |
+| `sqrt(x*x + 1)` | 0.006s | 0.014s | R 2.2× (memory-bandwidth bound) |
+| `log(exp(x))` | 0.048s | **0.029s** | 🏆 **R2 1.7×** (chained extern calls fuse) |
+| `sin(x)² + cos(x)²` | 0.184s | **0.037s** | 🏆 **R2 5.0×** (4 calls + ops in one loop) |
+| `sqrt(x² + y²)` | 0.008s | 0.022s | R 2.8× (Phase C.7 closed it from 7.3×) |
+| `\|sin(x)\| + \|cos(x)\|` | 0.073s | **0.027s** | 🏆 **R2 2.7×** |
 
 All on 1e6-element vectors, single workstation. R2 wins whenever the function fuses multiple math operations (the JIT generates one tight loop with all ops inline); R wins on single-call sqrt where memory bandwidth dominates and its libm SIMD path has slightly tighter per-call memory footprint. Reproduce with `pwsh bench\r_vs_r2\run.ps1` and inspect `math_jit.R` / `math_jit.r2`.
 
