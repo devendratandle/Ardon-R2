@@ -564,17 +564,30 @@ pub(crate) fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
             .map(|x| x.map(|b| Arc::from(if b { "TRUE" } else { "FALSE" }))).collect(),
         other => return err!(Type, "factor() not supported for {}", other.type_name()),
     };
-    // R default: levels are the sorted (alphabetical) unique values — this
-    // determines the integer codes and what `levels()`/`as.numeric()` return.
-    // (Was first-appearance order, which disagreed with R.)
-    let mut levels: Vec<Arc<str>> = Vec::new();
-    for x in strs.iter().flatten() {
-        if !levels.iter().any(|l| l == x) { levels.push(x.clone()); }
-    }
-    levels.sort();
-    let codes: Vec<Option<u32>> = strs.iter().map(|x| x.as_ref().map(|s| {
-        levels.iter().position(|l| l == s).unwrap() as u32
-    })).collect();
+    // An explicit `levels = c(...)` argument wins and fixes both the set
+    // and the order (so the integer codes follow it). Without it, R's
+    // default is the sorted (alphabetical) unique values.
+    let levels: Vec<Arc<str>> = match a.iter().find(|x| x.name.as_deref() == Some("levels")) {
+        Some(lv) => match &lv.value {
+            RVal::Character(v, _) => v.iter().flatten().cloned().collect(),
+            RVal::Numeric(v, _) => v.iter().flatten().map(|n| Arc::from(fmt_num(*n).as_str())).collect(),
+            RVal::Integer(v, _) => v.iter().flatten().map(|n| Arc::from(format!("{}", n).as_str())).collect(),
+            RVal::Logical(v, _) => v.iter().flatten().map(|b| Arc::from(if *b { "TRUE" } else { "FALSE" })).collect(),
+            _ => Vec::new(),
+        },
+        None => {
+            let mut levels: Vec<Arc<str>> = Vec::new();
+            for x in strs.iter().flatten() {
+                if !levels.iter().any(|l| l == x) { levels.push(x.clone()); }
+            }
+            levels.sort();
+            levels
+        }
+    };
+    // Values not present in `levels` (or NA) get code `None`, matching R.
+    let codes: Vec<Option<u32>> = strs.iter().map(|x| {
+        x.as_ref().and_then(|s| levels.iter().position(|l| l == s).map(|p| p as u32))
+    }).collect();
     Ok(RVal::Factor(Factor { codes, levels, ordered: false }))
 }
 pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
