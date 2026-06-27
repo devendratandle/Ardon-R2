@@ -28,27 +28,55 @@ fn arg_named(a: &[EvalArg], name: &str) -> Option<RVal> {
     a.iter().find(|x| x.name.as_ref().map(|n| n.as_ref()) == Some(name)).map(|x| x.value.clone())
 }
 
-// First positional (unnamed) argument. Use this when the user might pass
-// the parameter either positionally OR by name — e.g. `rnorm(100)` vs
-// `rnorm(n = 100, mean = 10)`. With plain `first(a)`, a named argument
-// passed first ate the positional slot and produced wrong results.
-#[inline]
-fn first_positional(a: &[EvalArg]) -> RVal {
-    a.iter()
-        .find(|x| x.name.is_none())
-        .map(|x| x.value.clone())
-        .unwrap_or(RVal::Null)
+/// R-style positional/named argument matcher for the distribution
+/// builtins. Formals are resolved in declaration order: a formal takes its
+/// named argument if one was supplied, otherwise the next not-yet-consumed
+/// unnamed (positional) argument. This matches R for both
+/// `rnorm(100, 10, 3)` and `rnorm(n = 100, sd = 3)` call styles — the old
+/// code read `mean`/`sd`/`min`/`max`/etc. by name only, silently dropping
+/// positionally-passed values (`rnorm(n, 10, 3)` came out standard-normal).
+struct ArgMatcher<'a> {
+    args: &'a [EvalArg],
+    /// How many unnamed (positional) args have been consumed so far.
+    pos: usize,
 }
 
-// Resolve `n` for distribution builtins R-style: named `n=` wins, else
-// the first positional argument.
-#[inline]
-fn resolve_n(a: &[EvalArg], default: usize) -> Result<usize, R2Err> {
-    if let Some(v) = arg_named(a, "n") {
-        if let Some(x) = v.scalar_f64()? { return Ok(x as usize); }
+impl<'a> ArgMatcher<'a> {
+    fn new(args: &'a [EvalArg]) -> Self {
+        Self { args, pos: 0 }
     }
-    if let Some(x) = first_positional(a).scalar_f64()? { return Ok(x as usize); }
-    Ok(default)
+
+    /// Resolve formal `name`: a matching named argument wins; otherwise the
+    /// next unconsumed positional argument is taken (and the cursor advances).
+    fn get(&mut self, name: &str) -> Option<RVal> {
+        if let Some(v) = arg_named(self.args, name) {
+            return Some(v);
+        }
+        let mut seen = 0usize;
+        let mut found = None;
+        for x in self.args {
+            if x.name.is_none() {
+                if seen == self.pos {
+                    found = Some(x.value.clone());
+                    break;
+                }
+                seen += 1;
+            }
+        }
+        self.pos += 1;
+        found
+    }
+
+    fn get_f64(&mut self, name: &str, default: f64) -> f64 {
+        self.get(name).and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(default)
+    }
+
+    fn get_usize(&mut self, name: &str, default: usize) -> usize {
+        self.get(name)
+            .and_then(|v| v.scalar_f64().ok().flatten())
+            .map(|x| x as usize)
+            .unwrap_or(default)
+    }
 }
 
 const MAX_ALLOC_BYTES: usize = 500_000_000;
@@ -99,9 +127,10 @@ pub fn parallel_random(seed: &mut u64) -> f64 {
 // ── Random-variate builtins ─────────────────────────────────────────
 
 pub fn bi_rnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let n = resolve_n(a, 1)?;
-    let mean = arg_named(a, "mean").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(0.0);
-    let sd = arg_named(a, "sd").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(1.0);
+    let mut m = ArgMatcher::new(a);
+    let n = m.get_usize("n", 1);
+    let mean = m.get_f64("mean", 0.0);
+    let sd = m.get_f64("sd", 1.0);
     check_alloc(n, 8)?;
     // F.3 native-columnar path: rnorm produces no NAs, so build the
     // dense `Vec<f64>` directly and wrap via `Reals::from_dense_f64`.
@@ -119,9 +148,10 @@ pub fn bi_rnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 pub fn bi_runif(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let n = resolve_n(a, 1)?;
-    let min = arg_named(a, "min").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(0.0);
-    let max = arg_named(a, "max").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(1.0);
+    let mut m = ArgMatcher::new(a);
+    let n = m.get_usize("n", 1);
+    let min = m.get_f64("min", 0.0);
+    let max = m.get_f64("max", 1.0);
     check_alloc(n, 8)?;
     // F.3 native-columnar path: see bi_rnorm.
     let mut results: Vec<f64> = Vec::with_capacity(n);
@@ -133,8 +163,9 @@ pub fn bi_runif(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 pub fn bi_rexp(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let n = resolve_n(a, 1)?;
-    let rate = arg_named(a, "rate").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(1.0);
+    let mut m = ArgMatcher::new(a);
+    let n = m.get_usize("n", 1);
+    let rate = m.get_f64("rate", 1.0);
     check_alloc(n, 8)?;
     let mut results: Vec<f64> = Vec::with_capacity(n);
     for _ in 0..n {
@@ -167,9 +198,10 @@ pub fn bi_sample(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 pub fn bi_rbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let n = resolve_n(a, 1)?;
-    let size = arg_named(a, "size").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(1.0) as usize;
-    let prob = arg_named(a, "prob").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(0.5);
+    let mut m = ArgMatcher::new(a);
+    let n = m.get_usize("n", 1);
+    let size = m.get_usize("size", 1);
+    let prob = m.get_f64("prob", 0.5);
     let mut results: Vec<Integer> = Vec::with_capacity(n);
     for _ in 0..n {
         let mut successes = 0i32;
@@ -182,8 +214,9 @@ pub fn bi_rbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 pub fn bi_rpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let n = resolve_n(a, 1)?;
-    let lambda = arg_named(a, "lambda").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(1.0);
+    let mut m = ArgMatcher::new(a);
+    let n = m.get_usize("n", 1);
+    let lambda = m.get_f64("lambda", 1.0);
     let mut results: Vec<Integer> = Vec::with_capacity(n);
     for _ in 0..n {
         // Knuth's algorithm. Acceptable for small-to-moderate lambda
