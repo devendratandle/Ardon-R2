@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings or they break on Linux
+# (bash errors on a `\r` in the shebang / commands), regardless of a
+# contributor's core.autocrlf setting.
+*.sh text eol=lf
