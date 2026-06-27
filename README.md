@@ -196,7 +196,7 @@ statistical accuracy. R trades back on single memory-bandwidth-bound passes.
 
 Full benchmark tables, the accuracy comparison, the math-JIT breakdown, and
 reproducibility notes live in **[PERFORMANCE.md](PERFORMANCE.md)**. Reproduce
-with `pwsh bench\r_vs_r2\run.ps1` (or `bash bench/r_vs_r2/run.sh`).
+with `pwsh benchmarksmparison\run.ps1` (or `bash benchmarks/comparison/run.sh`).
 
 ## Project Structure
 
@@ -278,7 +278,7 @@ r2/
 - `VISION.md` — Project roadmap and Green AI vision
 - `docs/ARCHITECTURE.md` — compiler / runtime / IR / JIT design
 - `INSTALL_LINUX.md` — Linux install guide (CLI + GUI)
-- `benchmarks/`, `bench/r_vs_r2/` — runnable benchmark harnesses
+- `benchmarks/`, `benchmarks/comparison/` — runnable benchmark harnesses
 - `samples/` — example programs you can run with `r2 <file>`
 
 ## ~25 crates | 400+ builtins | JIT-compiled user functions | Pure-Rust dependencies — no C/C++ libraries

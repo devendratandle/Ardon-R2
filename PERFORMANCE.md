@@ -1,7 +1,7 @@
 # Performance — Ardon-R2 vs R
 
 Head-to-head timing and numerical-accuracy comparison of Ardon-R2 against
-CRAN R. Reproduce on your own machine: see `bench/r_vs_r2/RUN_THIS.md`.
+CRAN R. Reproduce on your own machine: see `benchmarks/comparison/RUN_THIS.md`.
 
 Numbers below are **R2 v0.3.4 vs CRAN R 4.5.3** (default reference Rblas),
 elapsed seconds, warm-cache, one 6-core AVX2 workstation (no AVX-512),
@@ -34,7 +34,7 @@ On deterministic statistical workloads (descriptives, `lm`, `glm`, Welch
 `t.test`, `aov`, SVD, eigen, `cor`), R2 v0.3.4 matches R 4.5.3 to **~7
 significant figures** — e.g. `lm` β = `37.22727 / −3.877831 / −0.0317729`,
 R² `0.8267855`, F `69.21121`; eigenvalues `6, 3, 1` exact; `cor`
-`0.8717538`. Run `bench/r_vs_r2/accuracy.{R,r2}` to reproduce.
+`0.8717538`. Run `benchmarks/comparison/accuracy.{R,r2}` to reproduce.
 
 ## Math-JIT comparison (user closures compiled to native)
 
@@ -56,7 +56,7 @@ All on 1e6-element vectors, single workstation. R2 wins whenever the
 function fuses multiple math operations (the JIT generates one tight loop
 with all ops inline); R wins on single-call sqrt where memory bandwidth
 dominates and its libm SIMD path has slightly tighter per-call memory
-footprint. Reproduce with `pwsh bench\r_vs_r2\run.ps1` and inspect
+footprint. Reproduce with `pwsh benchmarksmparison\run.ps1` and inspect
 `math_jit.R` / `math_jit.r2`.
 
 ## Reproducibility caveats
@@ -78,10 +78,10 @@ footprint. Reproduce with `pwsh bench\r_vs_r2\run.ps1` and inspect
 
 ```sh
 cargo build --release
-pwsh bench\r_vs_r2\run.ps1     # Windows — produces a comparison table
-bash bench/r_vs_r2/run.sh      # Linux / macOS
+pwsh benchmarksmparison\run.ps1     # Windows — produces a comparison table
+bash benchmarks/comparison/run.sh      # Linux / macOS
 ```
 
-See `bench/r_vs_r2/README.md` for what's tested and how to interpret the
+See `benchmarks/comparison/README.md` for what's tested and how to interpret the
 deltas, and `benchmarks/README.md` for the matmul / crossprod / sum / lm
 micro-suite.
