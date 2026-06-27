@@ -178,3 +178,10 @@ __pycache__/
 
 # Local archive of removed ARCHITECTURE phase narrative (also in git history)
 code-history/
+
+# Plot-output artifacts from test/demo runs (regenerated; not source)
+/*.svg
+crates/*/*.svg
+*.png
+!assets/**
+!screenshots/**
