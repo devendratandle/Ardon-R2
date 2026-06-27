@@ -2,11 +2,22 @@
 
 ## v0.3.4 (June 2026)
 
-A JIT correctness fix, a Linux installer for the CLI and GUI, and an
-internal refactor that breaks the largest source files into focused
-modules (no behaviour change).
+JIT and accuracy correctness fixes, a Linux installer for the CLI and GUI,
+a graph gallery + showcase, and an internal refactor that breaks the largest
+source files into focused modules (no behaviour change).
 
 ### Fixed
+- **`factor(x, levels = c(...))` now honours the explicit levels.** It was
+  ignored — `factor()` always sorted the unique values alphabetically, so
+  the level order and integer codes were wrong (e.g.
+  `factor(c("lo","hi"), levels = c("lo","mid","hi"))` came out with levels
+  `hi`/`lo`). An explicit `levels=` now fixes the set and order (values
+  outside it become `NA`, matching R); the sorted-unique default is unchanged.
+- **Random generators honour positional parameters.** `rnorm`/`runif`/`rexp`/
+  `rbinom`/`rpois` read their distribution parameters by name only, so
+  `rnorm(n, 10, 3)` silently dropped the mean/sd and returned a standard
+  normal. They now resolve parameters R-style (named wins, else positional),
+  so `rnorm(n, 10, 3)`, `runif(n, 5, 15)`, etc. match R.
 - **JIT `for`-loop accumulators.** A `for` loop inside a JIT-eligible
   function body — e.g. `function(n){ s <- 0; for (k in 1:n) s <- s + k; s }`
   — was silently mis-compiled: the loop was dropped and the function
