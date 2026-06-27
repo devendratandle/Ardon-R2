@@ -9,7 +9,8 @@
 
 ## 1. Purpose of this document
 
-R2 v0.1.0 ships a working tree-walking interpreter (~10K lines, 192 builtins).
+R2 v0.3.4 ships a working tree-walking interpreter (~48K lines, 400+ builtins)
+with a Cranelift JIT for eligible user functions.
 The next several versions transform R2 into a **compiled, scheduled, columnar
 runtime** without rewriting the working interpreter. This file is the
 single source of truth for that transformation — its layers, their status,
@@ -64,7 +65,7 @@ locked unless this file is changed.
 
 ---
 
-## 3. Layer status (as of v0.1.0)
+## 3. Layer status (as of v0.3.4)
 
 | Layer | Component | Status | Where it lives |
 |---|---|---|---|

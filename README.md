@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.3.3.</em></p>
+<em>An AI-Assisted Project. v0.3.4.</em></p>
 
 ---
 
@@ -20,30 +20,20 @@ R2 takes R's best ideas — vectorized operations, formula syntax, data frames �
 
 ```
 R2 — Statistical Computing, Reimagined
-Version 0.3.3 (2026) | Inspired by R, Built on Rust
+Version 0.3.4 (2026) | Inspired by R, Built on Rust
 Created by Devendra Tandale | An AI assisted project
 ```
 
-## What's new in v0.3.3 (June 2026)
+## What's new in v0.3.4 (June 2026)
 
-First-class language objects + a round of correctness fixes — **320
-built-in functions** (up from 301):
+A JIT correctness fix for `for`-loop accumulators inside functions, a Linux
+installer for the CLI and GUI, and an internal refactor that breaks the
+largest source files into focused modules (no behaviour change). The
+previous release (v0.3.3) added first-class language objects (the
+`language.c` equivalent: `quote`/`eval`/`substitute`/`bquote`/…).
 
-- **Metaprogramming (the `language.c` equivalent):** `quote`, `eval`,
-  `parse`, `deparse`, `call`/`as.call`, `body`/`formals`/`args`,
-  `substitute`, `match.call`/`sys.call`, `bquote`. Code is data and back.
-- **Factor handling fixed across the board:** `factor[i]`,
-  `factor == "level"`, factor columns in `df[mask, ]`, `as.numeric(factor)`,
-  and `tapply`/`aggregate` by a factor index.
-- **Loop correctness:** top-level `for`/`while` no longer read a variable
-  one iteration stale when it's assigned and read in the same body.
-- **`sprintf`** now supports full `%[flags][width][.precision]` specs;
-  **`ifelse`** keeps string branches; **multi-page PDF** from `pdf()`.
-- **Hardening:** core type-dispatch operators are now exhaustive
-  (compiler-enforced), so a missing type is a build error, not a runtime
-  surprise.
-
-See `CHANGELOG.md` for the full list.
+**Full per-release history lives in [CHANGELOG.md](CHANGELOG.md)** — this
+README stays version-light on purpose.
 
 ## Why R2?
 
@@ -317,70 +307,24 @@ r2/
 
 - `?topic` or `??topic` — Quick help in REPL
 - `help()` — List all help topics
-- `FUNCTIONS.md` — Complete function reference (192 functions)
+- `FUNCTIONS.md` — Complete function reference (400+ functions)
 - `VISION.md` — Project roadmap and Green AI vision
 - `CHANGELOG.md` — Release history
 
-## ~25 crates | 320 builtins | JIT-compiled user functions | Pure-Rust dependencies — no C/C++ libraries
+## ~25 crates | 400+ builtins | JIT-compiled user functions | Pure-Rust dependencies — no C/C++ libraries
 
 ## Roadmap
 
-### v0.0.9 — Foundation (shipped 2026-04)
-- [x] Core language (vectors, data frames, formulas)
-- [x] Statistics (lm, glm, t.test, aov, shapiro.test, cor.test)
-- [x] Machine learning (12 algorithms, all built-in)
-- [x] Math kernel (BLAS, decompositions, SVD, eigenvalues)
-- [x] Data handling (CSV, filter, select, mutate, arrange)
-- [x] .Internal() bridge (users write functions in R2 syntax)
-- [x] Random Forest parallelism (Rayon)
+Shipped releases are recorded in **[CHANGELOG.md](CHANGELOG.md)**; the
+forward plan and design direction live in **[VISION.md](VISION.md)** and
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
-### v0.1.0 — First stable release (shipped 2026-05) ✅
-- [x] Type inferencer (column-shaped IR types)
-- [x] R2-IR (typed SSA, columnar)
-- [x] Cranelift JIT — user functions compile to native code:
-      scalar, vector reductions, vector maps, composed expressions,
-      **branchy multi-block IR (Phase C.5)**, 3-arg ternary ABI for
-      `ifelse`-shape closures
-- [x] Oracle scheduler — central serial/Rayon dispatch
-- [x] **F.3/F.6 storage migration**: `RVal::Numeric/Integer/Logical`
-      carry lazy `Arc<ColumnarT>` caches. Packed-bit `ColumnarBool`
-      (~64× memory reduction)
-- [x] **F.4 binary columnar kernels** + **F.5 mmap-backed reader**
-- [x] **R.11/R.12 engine migrations**: lm/glm/aov data path to
-      r2-stats; RNG family consolidated. Engine: 7282 → 4860 lines (-33%)
-- [x] **Full thin SVD** with U + Vᵀ (`dgesvd_full`); Householder + QR
-      eigendecomp (`dsyev_full`); `prcomp()$rotation` is real
-- [x] **R-style hypothesis tests**: Welch–Satterthwaite df, formula
-      syntax, paired tests, exact hypergeometric Fisher
-- [x] **RFC 4180 CSV** state-machine parser; `regex-lite` regex engine
-- [x] **NA-aware `&` / `|`** elementwise (was a silent all-zero bug)
-- [x] **NSE for subset/transform**, `$call` capture for fitted models
-- [x] **Phase K.5 MulAdd** + **Phase K.6 strided reduction**
-- [x] 233 tests passing, clean build
-
-### v0.2.0 — Ergonomics & ecosystem (next)
-- [ ] PNG/PDF graphics backends (`png`, `pdf` devices alongside `svg`)
-- [ ] Multi-key merge + outer joins (`all.x`, `all.y`, `by.x`, `by.y`)
-- [ ] More datasets: ToothGrowth, ChickWeight, CO2
-- [ ] `Reduce` / `Filter` / `Map` apply-family
-- [ ] `sprintf` width/precision specifiers
-- [ ] Engine warning cleanup + per-function rustdoc audit
-- [ ] Lentz CF for incomplete-beta (LAPACK-grade t-CDF / F-CDF)
-
-### v1.0 — Stability release
-- [ ] Community bug fixes; comprehensive test suite
-- [ ] Documentation polish; book-format reference
-- [ ] More statistical tests (Mann-Whitney, Kruskal-Wallis, Friedman, …)
-- [ ] Rich `summary(rpart)` with CP table + variable importance
-
-### v2.0 — Phase G hardware awareness
-- [ ] `r2_oracle::hw` — detect cores, CPU features, cache sizes
-- [ ] Parametric threshold tables (`parallel_threshold(op, hw)`)
-- [ ] `r2-bench` crate for per-machine calibration refinement
-- [ ] GPU dispatcher (wgpu) integrated with Oracle
-- [ ] Distributed RAM shards
-- [ ] Independent companion libraries (general-purpose Rust AI / stats
-      frameworks; design captured privately, public after R2 traction)
+In brief: the v0.x line has built out the core language, statistics, ML,
+the columnar storage substrate, the Cranelift JIT for user functions, and
+first-class language objects. Next on the horizon are richer graphics
+back-ends, more statistical tests, and hardware-aware scheduling (Phase G:
+CPU-feature detection, GPU dispatch). This is an evolving project — the
+living docs above are the source of truth, not a frozen checklist.
 
 ## How to contribute
 
