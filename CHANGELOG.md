@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.3.4 (June 2026)
+
+A JIT correctness fix, a Linux installer for the CLI and GUI, and an
+internal refactor that breaks the largest source files into focused
+modules (no behaviour change).
+
+### Fixed
+- **JIT `for`-loop accumulators.** A `for` loop inside a JIT-eligible
+  function body — e.g. `function(n){ s <- 0; for (k in 1:n) s <- s + k; s }`
+  — was silently mis-compiled: the loop was dropped and the function
+  returned the accumulator's initial value (`h(100)` gave `0` instead of
+  `5050`). The numeric JIT now declines any closure whose body contains a
+  construct its IR lowering doesn't faithfully represent (`for`, `repeat`,
+  `match`, `tryCatch`, `break`, `next`) and falls back to the interpreter,
+  which evaluates them correctly. `while` loops and the vectorised/SIMD
+  paths were unaffected. Found via real-program testing; present since the
+  closure-JIT path first shipped. (Counted-loop `for (v in a:b)` JIT
+  lowering is tracked as a future optimisation.)
+
+### Added
+- **Linux install guide + one-shot installer** (`INSTALL_LINUX.md`,
+  `scripts/install-linux.sh`) for both the CLI (`r2`) and GUI (`R2Gui`) on
+  Mint / Ubuntu / Debian — prebuilt download or build-from-source, with GUI
+  library setup, PATH install, and an application-menu entry.
+
+### Internal (behaviour-neutral)
+- **Large-file refactor.** The biggest source files were split into
+  cohesive modules — identical compiled output, far easier to navigate:
+  r2-engine (`eval`/`ops`/`indexing`/`assign`/`fusion` + `builtins/coerce`),
+  r2-kernel (one module per op family), r2-jit (per compilation stage:
+  `error`/`handle`/`compiler`/`codegen`/`lower`/`externs`/`closure`),
+  r2-types (`error`/`columnar`/`matrix`/`tensor`/`expr`), r2-arrow
+  (`mmap_impl`/`dtypes`), and r2-stats (`time` split into ts/xts/tsanalysis;
+  `htest` into a directory module). Verified by the full regression suite
+  plus each crate's unit tests.
+- Documentation: README trimmed of the stale per-version roadmap (now
+  points to CHANGELOG / VISION / ARCHITECTURE); function-count references
+  reconciled across docs.
+
 ## v0.3.3 (June 2026)
 
 First-class language objects (Phase L — R's `language.c` equivalent) plus a
