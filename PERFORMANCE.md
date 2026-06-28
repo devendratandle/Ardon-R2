@@ -56,7 +56,7 @@ All on 1e6-element vectors, single workstation. R2 wins whenever the
 function fuses multiple math operations (the JIT generates one tight loop
 with all ops inline); R wins on single-call sqrt where memory bandwidth
 dominates and its libm SIMD path has slightly tighter per-call memory
-footprint. Reproduce with `pwsh benchmarksmparison\run.ps1` and inspect
+footprint. Reproduce with `pwsh benchmarks/comparison/run.ps1` and inspect
 `math_jit.R` / `math_jit.r2`.
 
 ## Reproducibility caveats
@@ -78,7 +78,7 @@ footprint. Reproduce with `pwsh benchmarksmparison\run.ps1` and inspect
 
 ```sh
 cargo build --release
-pwsh benchmarksmparison\run.ps1     # Windows — produces a comparison table
+pwsh benchmarks/comparison/run.ps1     # Windows: produces a comparison table
 bash benchmarks/comparison/run.sh      # Linux / macOS
 ```
 
