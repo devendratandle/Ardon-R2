@@ -1,7 +1,7 @@
 # Unified install.packages() smoke test.
 
 cat("\n--- A: install from local directory ---\n")
-install.packages("mymath", path = "samples/example-r2-package")
+install.packages("mymath", path = "samples/packages/example-r2-package")
 library("mymath")
 print(add_one(41))
 print(double_it(21))
