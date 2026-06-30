@@ -1,7 +1,13 @@
 # R2 Graphics — Pending Work
 
-**Last revised:** during v0.1.9 build (post-R2-UI refactor).
+**Last revised:** v0.3.4 (graph-gallery review).
 **Status:** what shipped vs. what's deferred to the next session(s).
+**Note (v0.3.4):** item **A is DONE** — `bi_hist` / `bi_boxplot` / `bi_barplot`
+now all call `render_chrome` + `render_axis_ticks` with the full `LabelOpts`,
+so `sub` / `cex.*` / `font.*` / `col.*` / `las` are honoured on every plot
+type (verified via `samples/graph_gallery.r2`). Remaining open: boxplot /
+barplot **per-bar fill `col=`** (boxes render black even when `col=c(...)`
+is given), plus items B–G below.
 
 This file exists so we don't lose track of the graphics features the
 user explicitly asked for. Don't ship v0.2 / v0.3 without crossing
@@ -38,19 +44,19 @@ Shared helpers in the same file:
 
 ## ⏳ Deferred to next sessions
 
-### A. Wire the same chrome into the other plot functions
+### A. Wire the same chrome into the other plot functions ✅ DONE (v0.3.4)
 
-`bi_plot` was migrated to `render_chrome` / `render_axis_ticks`. Still
-emitting the **old** label code (no `sub` / `cex.*` / `font.*` /
-`col.*` / `las`):
+- [x] `bi_hist`     — uses `LabelOpts::from_args` + `render_chrome` + `render_axis_ticks`
+- [x] `bi_boxplot`  — same
+- [x] `bi_barplot`  — same
+- [x] `bi_lines` / `bi_points` / `bi_abline` — respect device `col`/`lty`/`lwd`/`cex`
 
-- [ ] `bi_hist`     (`crates/r2-graphics/src/plots.rs`)
-- [ ] `bi_boxplot`  (same file)
-- [ ] `bi_barplot`  (same file)
-- [ ] `bi_lines`, `bi_points`, `bi_abline` (overlays — `crates/r2-graphics/src/overlays.rs`) — these don't draw labels but should respect the device-level `col`/`lty`/`lwd`/`cex` updates already in `PlotParams`.
-
-Pattern to follow for each function: read args, call `LabelOpts::from_args(a)`,
-build a `PanelRect`, call `render_chrome(...)` + `render_axis_ticks(...)`.
+So `sub` / `cex.*` / `font.*` / `col.*` / `las` are now honoured on every
+plot type. **Residual gap:** `bi_boxplot` / `bi_barplot` ignore a per-element
+**fill `col=`** — boxes/bars render black even when `col=c("…","…")` is
+supplied (only the chrome text colours use `col.*`). Fixing this means
+threading the fill colour vector into the box/bar SVG rect emit. Small, but
+open.
 
 ### B. Default labels from variable names (R-faithful)
 
