@@ -30,6 +30,16 @@ source files into focused modules (no behaviour change).
   closure-JIT path first shipped. (Counted-loop `for (v in a:b)` JIT
   lowering is tracked as a future optimisation.)
 
+### Performance
+- **Element-wise arithmetic is now zero-copy on the columnar path (Phase
+  F.3).** `a + b` (and `-`/`*`/`/`) on numeric vectors was ~3.6× slower than
+  R because the fast-path guard called `.len()` — which materialised the
+  boxed `Vec<Option<f64>>` — and the columnar kernel branched on the op
+  per element. The guard now uses `len_fast()` (no materialisation) and the
+  kernel hoists the op match out of the loop (auto-vectorised). Result:
+  `a + b` on 1e7 went 1.59s → 0.32s for 10 reps; R2 now slightly **beats** R
+  on element-wise add, the one workload it used to lose.
+
 ### Added
 - **Linux install guide + one-shot installer** (`INSTALL_LINUX.md`,
   `scripts/install-linux.sh`) for both the CLI (`r2`) and GUI (`R2Gui`) on

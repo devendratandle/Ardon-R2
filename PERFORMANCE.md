@@ -19,14 +19,14 @@ measured **2026-06-27**.
 | **Sum + mean** (1e7) | 0.030 | **0.018** | 🏆 **R2 1.6× faster** | Columnar-native reductions |
 | K-means (1e5 × 10, k=5) | 0.440 | 0.427 | tie | |
 | SVD (200×100) | ~0.000 | 0.011 | R (timer res.) | Both sub-15 ms |
-| Element-wise add (1e7) | 0.040 | 0.145 | R 3.6× | Memory-bandwidth bound; `Vec<Option>↔Columnar` conversion |
+| Element-wise add (1e7) | 0.041 | **0.032** | 🏆 **R2 1.3× faster** | Zero-copy columnar path (v0.3.4); 10-rep avg |
 
 **Headline:** R2's strongest wins are matrix multiply (22× on 1024² against
 R's reference BLAS), fused math-JIT loops (`sin²+cos²` at 5×), and the apply
-family (`sapply` ~25×). R wins on single memory-bandwidth-bound passes
-(element-wise add) and sub-15 ms ops that sit at R's timer resolution.
-Results below ~15 ms are run-to-run noisy — read them as "comparable," not
-precise ratios.
+family (`sapply` ~25×). As of v0.3.4 element-wise arithmetic is also a win
+(the columnar path stays zero-copy). R still edges ahead on a few sub-15 ms
+ops that sit at its timer resolution. Results below ~15 ms are run-to-run
+noisy — read them as "comparable," not precise ratios.
 
 ## Accuracy
 
@@ -65,10 +65,12 @@ footprint. Reproduce with `pwsh benchmarks/comparison/run.ps1` and inspect
   against. Default CRAN R on Windows ships reference Rblas (the slow netlib
   BLAS). R linked against OpenBLAS or Intel MKL will reverse the matmul
   result. R2's edge holds against the default; tuned BLAS wins.
-- Element-wise add (1e7) is the one workload where R2 is still meaningfully
-  slower (3.6×). The gap is in the `Vec<Option<f64>> ↔ ColumnarF64` legacy
-  conversion; closing it requires further F.3 native-columnar migration of
-  the value type. Tracked in `docs/KNOWN_LIMITATIONS.md`.
+- Element-wise add was R2's one meaningful loss (~3.6× in earlier releases),
+  caused by a `Vec<Option<f64>> ↔ ColumnarF64` round-trip on the arithmetic
+  path. **Fixed in v0.3.4** (Phase F.3): the fast-path guard no longer
+  materialises the boxed form, and the columnar kernel hoists the op match
+  out of the loop so each op auto-vectorises — `a + b` is now zero-copy and
+  at parity with (slightly faster than) R.
 - Built-in ML (GBM, Random Forest, decision tree, KNN, naive Bayes,
   k-means) is available directly in base R2 — no package install. R needs
   CRAN packages (`gbm`, `randomForest`, `rpart`, `e1071`) for the

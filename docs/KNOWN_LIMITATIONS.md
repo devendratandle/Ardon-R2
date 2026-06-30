@@ -390,12 +390,14 @@ correctly at ~5 GB peak RSS; the multi-accumulator sum beats R's
   Phase F.3 storage migration (numeric storage = `ColumnarF64` natively)
   is what would make *everything* zero-copy / mmap-friendly.
 
-### Element-wise arithmetic — vector⊗scalar fusion ✅ (v0.2.2), residual repack
+### Element-wise arithmetic — vector⊗scalar fusion ✅ (v0.2.2), repack ✅ (v0.3.4)
 
-`v*2+1`-style chains now fuse into a single pass (≈2.4× faster). The
-remaining gap vs R is the `Option<f64> → dense f64` repack on the base
-vector (each `RVal::Numeric` lazily repacks to columnar); the Phase F.3
-storage migration removes it.
+`v*2+1`-style chains fuse into a single pass (≈2.4× faster). The residual
+`Option<f64> → dense f64` repack that once made `a + b` ~3.6× slower than R
+is **fixed in v0.3.4**: the columnar fast-path guard no longer materialises
+the boxed form (it uses `len_fast()`), and the columnar binary kernel hoists
+the op match out of the loop so each op auto-vectorises. `a + b` is now
+zero-copy and at parity with / slightly faster than R.
 
 ## Data (`r2-data`)
 
