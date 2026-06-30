@@ -466,12 +466,24 @@ impl ColumnarF64 {
         }
         let n = self.len;
 
-        // Dense × dense fast path — tight loop, SIMD-friendly.
+        // Dense × dense fast path. The op match is hoisted OUT of the loop
+        // so each branch is a tight, branch-free, bounds-check-free
+        // `zip().map().collect()` the compiler can auto-vectorize (SSE/AVX).
+        // A per-element `apply_scalar(op, …)` match inside the loop, plus
+        // `Vec::push` capacity bookkeeping, both defeated vectorization and
+        // left `a + b` ~3–4× slower than R. (`Pow`/`Mod` call libm and
+        // don't vectorize — that's inherent.)
         if self.is_dense() && other.is_dense() {
             let a = self.values();
             let b = other.values();
-            let mut out = Vec::with_capacity(n);
-            for i in 0..n { out.push(apply_scalar(op, a[i], b[i])); }
+            let out: Vec<f64> = match op {
+                ArrowBinaryOp::Add => a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect(),
+                ArrowBinaryOp::Sub => a.iter().zip(b.iter()).map(|(&x, &y)| x - y).collect(),
+                ArrowBinaryOp::Mul => a.iter().zip(b.iter()).map(|(&x, &y)| x * y).collect(),
+                ArrowBinaryOp::Div => a.iter().zip(b.iter()).map(|(&x, &y)| x / y).collect(),
+                ArrowBinaryOp::Pow => a.iter().zip(b.iter()).map(|(&x, &y)| x.powf(y)).collect(),
+                ArrowBinaryOp::Mod => a.iter().zip(b.iter()).map(|(&x, &y)| x % y).collect(),
+            };
             return Ok(ColumnarF64::from_vec(out));
         }
 
@@ -508,11 +520,16 @@ impl ColumnarF64 {
         let n = self.len;
         if self.is_dense() {
             let a = self.values();
-            // map().collect() over an ExactSizeIterator pre-allocates and
-            // lets the compiler auto-vectorize the loop — `push` in a
-            // counted loop does per-element length/capacity bookkeeping
-            // that inhibits SIMD.
-            let out: Vec<f64> = a.iter().map(|&x| apply_scalar(op, x, scalar)).collect();
+            // Hoist the op match out of the loop (see `binary`) so each
+            // branch is a vectorizable `map().collect()`.
+            let out: Vec<f64> = match op {
+                ArrowBinaryOp::Add => a.iter().map(|&x| x + scalar).collect(),
+                ArrowBinaryOp::Sub => a.iter().map(|&x| x - scalar).collect(),
+                ArrowBinaryOp::Mul => a.iter().map(|&x| x * scalar).collect(),
+                ArrowBinaryOp::Div => a.iter().map(|&x| x / scalar).collect(),
+                ArrowBinaryOp::Pow => a.iter().map(|&x| x.powf(scalar)).collect(),
+                ArrowBinaryOp::Mod => a.iter().map(|&x| x % scalar).collect(),
+            };
             return ColumnarF64::from_vec(out);
         }
         let bits = self.valid_bits.as_ref().unwrap();

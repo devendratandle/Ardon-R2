@@ -144,7 +144,11 @@ impl Engine {
         // columnar setup cost dominates and the slow path is faster.
         if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Mod) {
             if let (RVal::Numeric(a, _), RVal::Numeric(b, _)) = (lhs, rhs) {
-                if a.len() == b.len() && a.len() >= 64 {
+                // Use `len_fast()` (reads whichever form is cached) — calling
+                // `.len()` here would Deref → materialise the boxed
+                // `Vec<Option<f64>>`, the exact O(n) round-trip this columnar
+                // path exists to avoid for `rnorm`/`seq`-style dense inputs.
+                if a.len_fast() == b.len_fast() && a.len_fast() >= 64 {
                     use r2_arrow::ArrowBinaryOp;
                     let arrow_op = match op {
                         BinOp::Add => ArrowBinaryOp::Add,
@@ -170,7 +174,7 @@ impl Engine {
                 // Scalar-vector recycling: vector OP scalar via binary_scalar.
                 // Only safe when the scalar is not NA — propagate-NA path
                 // falls back to the slow path below.
-                if b.len() == 1 && a.len() >= 64 {
+                if b.len_fast() == 1 && a.len_fast() >= 64 {
                     if let Some(s) = b[0] {
                         use r2_arrow::ArrowBinaryOp;
                         let arrow_op = match op {
