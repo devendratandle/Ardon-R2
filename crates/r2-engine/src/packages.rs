@@ -297,6 +297,8 @@ fn load_r2pkg_layout(e: &mut Engine, name: &str, pkg_root: &std::path::Path) -> 
         .map_err(|pe| R2Err { msg: format!("error parsing package '{}': {}", name, pe), kind: ErrKind::Runtime })?;
 
     let before: Vec<Arc<str>> = e.global_env.bindings.keys().cloned().collect();
+    let methods_before: std::collections::HashSet<(Arc<str>, Arc<str>)> =
+        e.methods.keys().cloned().collect();
     let env = e.global_env.clone();
     for stmt in &stmts {
         if let Err(err) = e.eval_in(stmt, &env) {
@@ -309,25 +311,41 @@ fn load_r2pkg_layout(e: &mut Engine, name: &str, pkg_root: &std::path::Path) -> 
     // Determine exports: prefer the manifest's package_exports list if non-empty,
     // otherwise fall back to "every new closure" so authors don't have to maintain
     // the list while iterating.
+    // Methods this package defined (name set) — methods live in `e.methods`
+    // keyed by (method_name, type_name), not in `global_env`.
+    let new_method_names: std::collections::HashSet<String> = e.methods.keys()
+        .filter(|k| !methods_before.contains(*k))
+        .map(|(m, _)| m.to_string())
+        .collect();
     let mut exports: Vec<String> = Vec::new();
     if !manifest.exports.is_empty() {
         for ex in &manifest.exports {
             let key: Arc<str> = Arc::from(ex.as_str());
-            if matches!(e.global_env.bindings.get(&key), Some(RVal::Closure(_))) {
+            // A package may export functions (Closure), types (TypeDef), or
+            // methods (registered in e.methods).
+            let is_fn_or_type = matches!(
+                e.global_env.bindings.get(&key),
+                Some(RVal::Closure(_)) | Some(RVal::TypeDef(_))
+            );
+            if is_fn_or_type || new_method_names.contains(ex) {
                 exports.push(ex.clone());
             } else {
                 eprintln!("Warning: package '{}' exports '{}' but it was not defined in any R/ file", name, ex);
             }
         }
     } else {
+        // Auto-export: every new function/type binding, plus every method.
         for (fname, fval) in &e.global_env.bindings {
-            if !before.contains(fname) && matches!(fval, RVal::Closure(_)) {
+            if !before.contains(fname) && matches!(fval, RVal::Closure(_) | RVal::TypeDef(_)) {
                 exports.push(fname.to_string());
             }
         }
+        for m in &new_method_names {
+            if !exports.contains(m) { exports.push(m.clone()); }
+        }
     }
     if exports.is_empty() {
-        return err!(Runtime, "package '{}' defines no exported functions", name);
+        return err!(Runtime, "package '{}' defines no exported functions, types, or methods", name);
     }
     for ex in &exports {
         if e.registry.is_core(ex) {

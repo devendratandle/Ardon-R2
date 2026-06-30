@@ -325,13 +325,20 @@ impl Engine {
 
         let result = self.registry.remove_layer(name)?;
 
-        // For addon packages: remove their functions from global env
+        // For addon packages: remove their functions + types from global env
         let mut binding = self.global_env.clone();
         let g = Arc::make_mut(&mut binding);
         for fname in &exports {
             g.bindings.remove(fname.as_str());
         }
         self.global_env = Arc::new(g.clone());
+
+        // Drop any types and methods the package contributed, so a detached
+        // package leaves no type/method dispatch behind.
+        for ex in &exports {
+            self.types.remove(ex.as_str());
+        }
+        self.methods.retain(|(mname, _), _| !exports.iter().any(|x| x.as_str() == mname.as_ref()));
 
         Ok(result)
     }

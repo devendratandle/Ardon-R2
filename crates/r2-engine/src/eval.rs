@@ -674,7 +674,32 @@ impl Engine {
                 // list splices the caller's captured dots into this call.
                 // Function-position lookup (R keeps fn/var namespaces apart):
                 // `c <- c(1,2); c(3,4)` still calls the builtin `c`.
-                let f = self.resolve_call_target(func, env)?;
+                let f = match self.resolve_call_target(func, env) {
+                    Ok(f) => f,
+                    Err(not_found) => {
+                        // Method-dispatch fallback: `m(obj, …)` where `obj` is a
+                        // typed instance and `method m(x: Type) …` is defined.
+                        if let Expr::Symbol(name) = func.as_ref() {
+                            let has_method = self.methods.keys().any(|(mn, _)| mn.as_ref() == name.as_ref());
+                            if has_method && !args.is_empty() {
+                                let mut ea = Vec::new();
+                                for a in args {
+                                    if matches!(a.value, Expr::Dots) {
+                                        if let Some(RVal::List(dots)) = self.lookup_dots(env) {
+                                            for (nm, val) in dots { ea.push(EvalArg { name: nm, value: val }); }
+                                        }
+                                    } else {
+                                        ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? });
+                                    }
+                                }
+                                if let Some(cl) = self.method_as_closure(name.as_ref(), &ea) {
+                                    return self.call_fn(&RVal::Closure(cl), &ea, env);
+                                }
+                            }
+                        }
+                        return Err(not_found);
+                    }
+                };
                 // NSE frame (Phase L.3): push the UNEVALUATED call only when
                 // the target closure actually uses substitute/match.call/
                 // sys.call. Gated, so normal closure calls clone nothing.
@@ -923,6 +948,33 @@ impl Engine {
         self.eval_in(func, env)
     }
 
+    /// Method dispatch: if `name` is a `method name(x: Type) …` defined for
+    /// the first argument's type (or an ancestor type via `extends`), build
+    /// a synthetic closure (param = the object, then the method's extra
+    /// params) so the normal closure-call machinery binds and runs the body.
+    /// Returns `None` if the first arg isn't a typed instance or no method
+    /// matches — the caller then falls back to its "object not found" error.
+    fn method_as_closure(&self, name: &str, ea: &[EvalArg]) -> Option<Closure> {
+        let inst = match ea.first().map(|a| &a.value) {
+            Some(RVal::TypeInstance(i)) => i,
+            _ => return None,
+        };
+        let mut tname = Some(inst.type_name.clone());
+        while let Some(t) = tname {
+            if let Some(m) = self.methods.get(&(Arc::from(name), t.clone())) {
+                let mut params = vec![Param { name: m.param_name.clone(), default: None, dots: false }];
+                params.extend(m.extra_params.iter().cloned());
+                return Some(Closure {
+                    params,
+                    body: Arc::new((*m.body).clone()),
+                    env: self.global_env.clone(),
+                });
+            }
+            tname = self.types.get(&t).and_then(|td| td.parent.clone());
+        }
+        None
+    }
+
     /// Does this closure body use NSE (substitute/match.call/sys.call)?
     /// Cached by the body's Arc pointer — computed once per unique body,
     /// then a single HashMap lookup per closure call. Builtin calls never
@@ -1142,7 +1194,33 @@ impl Engine {
                 self.local_scopes.pop();
                 result
             }
-            RVal::TypeDef(td) => { let mut fields = HashMap::new(); for (i, fd) in td.fields.iter().enumerate() { let v = self.get_arg(args, i, &fd.name).or_else(|| fd.default.clone()).unwrap_or(RVal::Null); fields.insert(fd.name.clone(), v); } Ok(RVal::TypeInstance(TypeInstance { type_name: td.name.clone(), fields })) }
+            RVal::TypeDef(td) => {
+                // Gather fields parent-first along the `extends` chain so an
+                // inheriting type's constructor accepts and stores inherited
+                // fields (not just its own). Positional args fill them in
+                // declaration order: ancestors first, then this type's fields.
+                let mut chain: Vec<Arc<str>> = Vec::new();
+                let mut cur = td.parent.clone();
+                while let Some(p) = cur {
+                    match self.types.get(&p) {
+                        Some(ptd) => { chain.push(p.clone()); cur = ptd.parent.clone(); }
+                        None => break,
+                    }
+                }
+                let mut ordered: Vec<(Arc<str>, Option<RVal>)> = Vec::new();
+                for anc in chain.iter().rev() {
+                    if let Some(ptd) = self.types.get(anc) {
+                        for fd in &ptd.fields { ordered.push((fd.name.clone(), fd.default.clone())); }
+                    }
+                }
+                for fd in &td.fields { ordered.push((fd.name.clone(), fd.default.clone())); }
+                let mut fields = HashMap::new();
+                for (i, (fname, fdefault)) in ordered.iter().enumerate() {
+                    let v = self.get_arg(args, i, fname).or_else(|| fdefault.clone()).unwrap_or(RVal::Null);
+                    fields.insert(fname.clone(), v);
+                }
+                Ok(RVal::TypeInstance(TypeInstance { type_name: td.name.clone(), fields }))
+            }
             _ => err!(Runtime, "not callable as a function. Check spelling or use help() to find the right function name"),
         }
     }
