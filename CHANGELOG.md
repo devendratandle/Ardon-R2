@@ -24,6 +24,17 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
   slightly faster than, R. This was R2's one remaining slower-than-R workload.
 
 **Added**
+- **Type methods & inheritance.** `method name(x: Type) …` now actually
+  dispatches — `name(obj)` runs the method registered for `obj`'s type,
+  including methods inherited via `type B extends A`. Inheriting types also
+  inherit their parent's fields. (Previously `method` parsed but calling it
+  gave "object not found".)
+- **Addon packages can export types and methods**, not just functions —
+  `library()` of a `type`+`method` package works, and `detach()` cleans them
+  up.
+- **Date rendering.** `format(d, fmt)` / `strftime` / `as.character()` print
+  `Date`/`POSIXct` as calendar strings (not the raw day/second count),
+  `c()` keeps the date class, and `class()` reports `"Date"`.
 - Linux install guide and one-shot installer for the CLI and GUI
   (`INSTALL_LINUX.md`, `scripts/install-linux.sh`).
 

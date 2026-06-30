@@ -79,16 +79,15 @@ to address each**. This lists *open* gaps only — resolved items move to
 
 ## Packages / extensibility
 
-- **Addon packages — script packages work; registry + type-method exports
-  pending.** `install.packages(name, path=…)` installs pure-R2-script
-  packages from a local dir, a `.zip`, or a GitHub `user/repo`, and
-  `library()`/`require()`/`detach()`/`uninstall()` work (verified end to end
-  with the `mymath` example). **Open:** (1) `install.packages(name)` with no
-  `path` (the online package registry isn't live); (2) packages export
-  *functions* today — exporting R2 **types and methods** from a package
-  isn't verified/wired; (3) optional-domain Cargo feature flags for a
-  smaller minimal build. v0.4.0. Dynamic compiled (`.dll`) packages only if
-  there's real demand (v1.0+).
+- **Addon packages — script packages work (functions, types & methods);
+  online registry pending.** `install.packages(name, path=…)` installs
+  pure-R2-script packages from a local dir, a `.zip`, or a GitHub
+  `user/repo`; `library()`/`require()`/`detach()`/`uninstall()` work; and a
+  package may export **functions, types, and methods** (verified end to end).
+  **Open:** (1) `install.packages(name)` with no `path` — the online package
+  registry isn't live; (2) optional-domain Cargo feature flags for a smaller
+  minimal build. v0.4.0. Dynamic compiled (`.dll`) packages only if there's
+  real demand (v1.0+).
 
 ## Platform
 
