@@ -104,8 +104,23 @@ pub fn bi_abline(a: &[EvalArg]) -> Result<RVal, R2Err> {
         format!(r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="{:.1}"{}/>"#,
                 px, y1, px, y2, col, lwd, dash)
     } else {
-        let intercept = argf(a, "a").or_else(|| gv(a, 0).scalar_f64().ok().flatten()).unwrap_or(0.0);
-        let slope     = argf(a, "b").or_else(|| gv(a, 1).scalar_f64().ok().flatten()).unwrap_or(1.0);
+        // abline(lm(y ~ x)) — pull intercept (coef[0]) and slope (coef[1])
+        // from a fitted model object. Without this the model arg falls
+        // through to the (0, 1) defaults and draws a 45° y=x line.
+        let from_model = if let RVal::TypeInstance(inst) = gv(a, 0) {
+            inst.fields.get("coefficients")
+                .and_then(|v| v.as_reals().ok())
+                .map(|r| r.into_iter().flatten().collect::<Vec<f64>>())
+                .filter(|c| c.len() >= 2)
+                .map(|c| (c[0], c[1]))
+        } else { None };
+        let (intercept, slope) = match from_model {
+            Some(ab) => ab,
+            None => (
+                argf(a, "a").or_else(|| gv(a, 0).scalar_f64().ok().flatten()).unwrap_or(0.0),
+                argf(a, "b").or_else(|| gv(a, 1).scalar_f64().ok().flatten()).unwrap_or(1.0),
+            ),
+        };
         // Draw across the visible x-range at the data y = a + b*x.
         let (x1, y1) = c.to_px(c.xmin, intercept + slope * c.xmin);
         let (x2, y2) = c.to_px(c.xmax, intercept + slope * c.xmax);

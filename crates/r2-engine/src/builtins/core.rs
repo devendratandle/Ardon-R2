@@ -127,7 +127,28 @@ pub(crate) fn bi_class(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
     Ok(RVal::Character(names.iter().map(|s| Some(Arc::from(s.as_str()))).collect(), Attrs::default()))
 }
 pub(crate) fn bi_is_na(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())), _ => Ok(rbool(false)) } }
-pub(crate) fn bi_seq(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let from = e.scalar_f64(&gv(a,0))?.unwrap_or(1.0); let to = e.scalar_f64(&gv(a,1))?.unwrap_or(1.0); let by = gn(a,"by").and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(if from<=to {1.0} else {-1.0}); let mut r = Vec::new(); let mut c = from; if by>0.0 { while c<=to+1e-10 { r.push(Some(c)); c+=by; } } else if by<0.0 { while c>=to-1e-10 { r.push(Some(c)); c+=by; } } Ok(RVal::Numeric(r.into(), Attrs::default())) }
+pub(crate) fn bi_seq(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let from = e.scalar_f64(&gv(a,0))?.unwrap_or(1.0);
+    let to = e.scalar_f64(&gv(a,1))?.unwrap_or(1.0);
+    // `length.out =` wins when supplied: exactly n evenly spaced points from
+    // `from` to `to` (R semantics). Previously ignored, so `seq(0, 2*pi,
+    // length.out=100)` fell back to by=1 and returned only 7 points.
+    let lengthout = gn(a,"length.out").or_else(|| gn(a,"length_out"))
+        .and_then(|v| e.scalar_f64(&v).ok().flatten()).map(|n| n as usize);
+    if let Some(n) = lengthout {
+        let r: Vec<Option<f64>> = match n {
+            0 => Vec::new(),
+            1 => vec![Some(from)],
+            _ => { let step = (to - from) / (n as f64 - 1.0);
+                   (0..n).map(|i| Some(from + step * i as f64)).collect() }
+        };
+        return Ok(RVal::Numeric(r.into(), Attrs::default()));
+    }
+    let by = gn(a,"by").and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(if from<=to {1.0} else {-1.0});
+    let mut r = Vec::new(); let mut c = from;
+    if by>0.0 { while c<=to+1e-10 { r.push(Some(c)); c+=by; } } else if by<0.0 { while c>=to-1e-10 { r.push(Some(c)); c+=by; } }
+    Ok(RVal::Numeric(r.into(), Attrs::default()))
+}
 pub(crate) fn bi_rep(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a, 0);
     // `times = ` (default 1) and `each = ` (default 1). Both supported,

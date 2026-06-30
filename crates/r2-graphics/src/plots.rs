@@ -72,6 +72,44 @@ impl LabelOpts {
 fn num(v: RVal) -> Option<f64> { v.as_reals().ok()?.into_iter().next()? }
 fn int(v: RVal) -> Option<i32> { v.as_reals().ok()?.into_iter().next()?.map(|x| x as i32) }
 
+/// Resolve a plot's pixel margins `(ml, mr, mt, mb)`. Precedence (R-faithful):
+///   1. a per-call `mar = c(bottom, left, top, right)` argument (in "lines"),
+///   2. else `par(mar=)` if the user changed it from R's default,
+///   3. else the plot's own tuned pixel default.
+/// `mar` lines are scaled to pixels at ~14 px/line (matches `bi_plot_new`).
+pub(crate) fn resolve_margins(a: &[EvalArg], default_px: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    const LP: f64 = 14.0;
+    const RDEF: [f64; 4] = [5.1, 4.1, 4.1, 2.1]; // R's par("mar") default (b,l,t,r)
+    // (b, l, t, r) lines → (ml, mr, mt, mb) px.
+    let to_px = |m: [f64; 4]| (m[1] * LP, m[3] * LP, m[2] * LP, m[0] * LP);
+    if let Some(v) = gn(a, "mar") {
+        let m: Vec<f64> = v.as_reals().ok().map(|r| r.into_iter().flatten().collect()).unwrap_or_default();
+        if m.len() >= 4 { return to_px([m[0], m[1], m[2], m[3]]); }
+    }
+    let par_mar = with_device(|d| d.params.mar);
+    if (0..4).any(|i| (par_mar[i] - RDEF[i]).abs() > 1e-6) {
+        return to_px(par_mar);
+    }
+    default_px
+}
+
+/// Render a category label under an x-axis tick at `cx`, honoring `las`
+/// (matches R): `las` 0/1 → horizontal & centred (the default); 2/3 →
+/// rotated 90° (vertical), for long/many category names. `axis_y` is the
+/// pixel y of the axis baseline the labels hang below.
+pub(crate) fn cat_x_label(cx: f64, axis_y: f64, las: i32, col: &str, fs: f64, text: &str) -> String {
+    let t = escape_xml(text);
+    if matches!(las, 2 | 3) {
+        let ty = axis_y + 12.0;
+        format!(r#"<text x="{:.1}" y="{:.1}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.0}px" fill="{}" transform="rotate(-90,{:.1},{:.1})">{}</text>"#,
+                cx, ty, fs, col, cx, ty, t)
+    } else {
+        let ty = axis_y + 16.0;
+        format!(r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.0}px" fill="{}">{}</text>"#,
+                cx, ty, fs, col, t)
+    }
+}
+
 /// R's default colour palette (1-based). `col=2` → red, etc. Index 0 /
 /// out-of-range wraps like R's `palette()` recycling.
 pub(crate) fn r_palette(i: i32) -> &'static str {
@@ -229,6 +267,16 @@ pub(crate) fn render_axis_ticks(p: &PanelRect,
                                 xmin: f64, _xmax: f64, ymin: f64, _ymax: f64,
                                 xrange: f64, yrange: f64,
                                 o: &LabelOpts) -> String {
+    render_axis_ticks_ex(p, xmin, _xmax, ymin, _ymax, xrange, yrange, o, true)
+}
+
+/// As `render_axis_ticks`, but `draw_x=false` suppresses the numeric x-axis
+/// ticks — used by categorical plots (barplot, boxplot) that draw their own
+/// category names along the x-axis and must not overlay a numeric scale.
+pub(crate) fn render_axis_ticks_ex(p: &PanelRect,
+                                xmin: f64, _xmax: f64, ymin: f64, _ymax: f64,
+                                xrange: f64, yrange: f64,
+                                o: &LabelOpts, draw_x: bool) -> String {
     let mut s = String::new();
     let fs = 9.0 * o.cex_axis;
     // x-axis tick rotation: las=0 or 1 horizontal, las=2 or 3 vertical.
@@ -243,12 +291,12 @@ pub(crate) fn render_axis_ticks(p: &PanelRect,
         // x-axis tick label below the panel.
         let tx = px;
         let ty = p.oy + p.mt + p.ph + 14.0;
-        if x_rot {
+        if draw_x && x_rot {
             s.push_str(&format!(
                 r#"<text x="{:.0}" y="{}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}" transform="rotate(-90,{:.0},{})">{}</text>"#,
                 tx, ty, fs, o.col_axis, tx, ty, fmt_tick(xv, xrange)
             ));
-        } else {
+        } else if draw_x {
             s.push_str(&format!(
                 r#"<text x="{:.0}" y="{}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{}</text>"#,
                 tx, ty, fs, o.col_axis, fmt_tick(xv, xrange)
@@ -318,7 +366,7 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let ptype  = gn(a, "type").map(|v| val_to_str(&v)).unwrap_or_else(|| "p".into());
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = (60.0, 20.0, 36.0, 40.0);
+    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 40.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
 
@@ -506,9 +554,24 @@ pub fn bi_pairs(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // returns its (x, y, w, h); with no mfrow active that's the full canvas.
     let (ox, oy, w, h) = begin_plot();
 
-    let top = if main.is_empty() { 8.0 } else { 28.0 };
-    let cell_w = w / n as f64;
-    let cell_h = (h - top) / n as f64;
+    // Per-variable data range, computed once: the x-axis of column j and the
+    // y-axis of row i both use variable k's range (xr guarded against zero).
+    let rng: Vec<(f64, f64, f64)> = cols.iter().map(|c| {
+        let (lo, hi) = minmax(c);
+        let r = if (hi - lo).abs() < 1e-10 { 1.0 } else { hi - lo };
+        (lo, hi, r)
+    }).collect();
+
+    // Reserve outer margins for the edge tick labels (R's oma equivalent):
+    // left/bottom always carry ticks; top/right carry the alternating ones.
+    let title_h = if main.is_empty() { 4.0 } else { 24.0 };
+    let (oml, omr, omt, omb) = (34.0, 30.0, 16.0, 22.0);
+    let gx = ox + oml;
+    let gy = oy + title_h + omt;
+    let gw = (w - oml - omr).max(1.0);
+    let gh = (h - title_h - omt - omb).max(1.0);
+    let cell_w = gw / n as f64;
+    let cell_h = gh / n as f64;
     let pad = 6.0;
 
     let mut frag = String::new();
@@ -518,10 +581,16 @@ pub fn bi_pairs(a: &[EvalArg]) -> Result<RVal, R2Err> {
             ox + w / 2.0, oy + 18.0, escape_xml(&main)));
     }
 
+    // Inner plotting region of a cell (cell minus padding minus a 4px inset).
+    let in_x = |j: usize| gx + j as f64 * cell_w + pad + 4.0;
+    let in_w = (cell_w - 2.0 * pad - 8.0).max(1.0);
+    let in_y = |i: usize| gy + i as f64 * cell_h + pad + 4.0;
+    let in_h = (cell_h - 2.0 * pad - 8.0).max(1.0);
+
     for i in 0..n {            // row → y variable
         for j in 0..n {        // col → x variable
-            let cx0 = ox + j as f64 * cell_w + pad;
-            let cy0 = oy + top + i as f64 * cell_h + pad;
+            let cx0 = gx + j as f64 * cell_w + pad;
+            let cy0 = gy + i as f64 * cell_h + pad;
             let cwd = cell_w - 2.0 * pad;
             let chd = cell_h - 2.0 * pad;
             // Cell border.
@@ -534,22 +603,57 @@ pub fn bi_pairs(a: &[EvalArg]) -> Result<RVal, R2Err> {
                     r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13px" font-weight="bold" fill="black">{}</text>"#,
                     cx0 + cwd / 2.0, cy0 + chd / 2.0 + 4.0, escape_xml(&names[i])));
             } else {
+                let (xmin, _, xr) = rng[j];
+                let (ymin, _, yr) = rng[i];
                 let xs = &cols[j];
                 let ys = &cols[i];
-                let (xmin, xmax) = minmax(xs);
-                let (ymin, ymax) = minmax(ys);
-                let xr = if (xmax - xmin).abs() < 1e-10 { 1.0 } else { xmax - xmin };
-                let yr = if (ymax - ymin).abs() < 1e-10 { 1.0 } else { ymax - ymin };
-                let (inx, iny) = (cx0 + 4.0, cy0 + 4.0);
-                let (inw, inh) = (cwd - 8.0, chd - 8.0);
+                let (inx, iny) = (in_x(j), in_y(i));
                 let m = xs.len().min(ys.len());
                 for k in 0..m {
-                    let px = inx + (xs[k] - xmin) / xr * inw;
-                    let py = iny + inh - (ys[k] - ymin) / yr * inh;
+                    let px = inx + (xs[k] - xmin) / xr * in_w;
+                    let py = iny + in_h - (ys[k] - ymin) / yr * in_h;
                     let c = &point_cols[k % point_cols.len()];
                     frag.push_str(&point_symbol(px, py, 2.0 * cex, pch, c));
                 }
             }
+        }
+    }
+
+    // Outer-edge tick labels, alternating sides so each variable's scale is
+    // drawn exactly once (R-faithful): column j → bottom if even, top if odd;
+    // row i → left if even, right if odd. Three ticks per axis (min/mid/max).
+    // Honor the shared graphical params (par() + per-call) like every other
+    // plot: col.axis / cex.axis colour & size the ticks, las rotates them
+    // (x on las 2/3, y on las 0/3 — same rule as render_axis_ticks).
+    let opts = LabelOpts::from_args(a);
+    let fss = 8.0 * opts.cex_axis;
+    let col = opts.col_axis.clone();
+    let (x_rot, y_rot) = (matches!(opts.las, 2 | 3), matches!(opts.las, 0 | 3));
+    let mut tick = |x: f64, y: f64, anchor: &str, rot: bool, txt: &str| {
+        let t = escape_xml(txt);
+        let xform = if rot { format!(r#" transform="rotate(-90,{:.1},{:.1})""#, x, y) } else { String::new() };
+        frag.push_str(&format!(
+            r#"<text x="{:.1}" y="{:.1}" text-anchor="{}" font-family="Arial, Helvetica, sans-serif" font-size="{:.0}px" fill="{}"{}>{}</text>"#,
+            x, y, anchor, fss, col, xform, t));
+    };
+    for j in 0..n {                       // x-axis ticks for column j
+        let (xmin, _, xr) = rng[j];
+        let on_top = j % 2 == 1;
+        let ty = if on_top { gy - 5.0 } else { gy + gh + 11.0 };
+        let anchor = if x_rot { "end" } else { "middle" };
+        for f in [0.0_f64, 0.5, 1.0] {
+            let px = in_x(j) + f * in_w;
+            tick(px, ty, anchor, x_rot, &fmt_tick(xmin + f * xr, xr));
+        }
+    }
+    for i in 0..n {                       // y-axis ticks for row i
+        let (ymin, _, yr) = rng[i];
+        let on_right = i % 2 == 1;
+        let anchor = if y_rot { "middle" } else if on_right { "start" } else { "end" };
+        let tx = if on_right { gx + gw + 4.0 } else { gx - 4.0 };
+        for f in [0.0_f64, 0.5, 1.0] {
+            let py = in_y(i) + in_h - f * in_h + 3.0;
+            tick(tx, py, anchor, y_rot, &fmt_tick(ymin + f * yr, yr));
         }
     }
 
@@ -744,7 +848,7 @@ pub fn bi_matplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let xrange = xmax - xmin; let yrange = ymax - ymin;
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = (60.0, 20.0, 36.0, 40.0);
+    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 40.0));
     let pw = w - ml - mr; let ph = h - mt - mb;
     with_device(|d| d.coords = Some(crate::device::PlotCoords {
         px0: ox + ml, py0: oy + mt, pw, ph, xmin, xmax, ymin, ymax,
@@ -838,7 +942,7 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // mb tightened from 50 to 40: the new xlab placement (right
     // below tick labels) no longer needs the extra 10 px margin
     // and the plot region gets that height back.
-    let (ml, mr, mt, mb) = (60.0, 20.0, 36.0, 40.0);
+    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 40.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
 
@@ -914,7 +1018,7 @@ pub fn bi_boxplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = (60.0, 30.0, 36.0, 50.0);
+    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 30.0, 36.0, 50.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
 
@@ -965,19 +1069,16 @@ pub fn bi_boxplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
         let by = map_y(q3); let bh = map_y(q1) - by;
         frag.push_str(&format!(r#"<rect x="{:.0}" y="{:.0}" width="{:.0}" height="{:.0}" fill="{}" stroke="{}"/>"#, cx - bw / 2.0, by, bw, bh, col_box, col_border));
         frag.push_str(&format!(r#"<line x1="{:.0}" y1="{:.0}" x2="{:.0}" y2="{:.0}" stroke="{}" stroke-width="2"/>"#, cx - bw / 2.0, map_y(median), cx + bw / 2.0, map_y(median), col_med));
-        // Group name beneath the box.
-        let label_y = oy + h - 8.0;
-        frag.push_str(&format!(
-            r#"<text x="{:.0}" y="{:.0}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10px" fill="{}">{}</text>"#,
-            cx, label_y, opts.col_axis, escape_xml(name)
-        ));
+        // Group name beneath the box, honoring `las` (horizontal default,
+        // vertical for las=2/3) like R.
+        frag.push_str(&cat_x_label(cx, oy + mt + ph, opts.las, &opts.col_axis, 10.0, name));
     }
 
     // Shared chrome — title / subtitle / xlab / ylab + y-axis ticks.
     // No x-axis ticks (group names already drawn above).
     let panel = PanelRect { ox, oy, w, h, ml, mt, pw, ph };
     frag.push_str(&render_chrome(&panel, &title, &sub, &xlab, &ylab, &opts));
-    frag.push_str(&render_axis_ticks(&panel, 0.0, ng, all_min, all_max, ng.max(1.0), range, &opts));
+    frag.push_str(&render_axis_ticks_ex(&panel, 0.0, ng, all_min, all_max, ng.max(1.0), range, &opts, false));
 
     with_device(|d| d.svg_body.push_str(&frag));
     crate::device::finish_plot("boxplot.svg");
@@ -1015,7 +1116,7 @@ pub fn bi_barplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let col_border = gn(a, "border").map(|v| val_to_str(&v)).unwrap_or_else(|| "black".into());
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = (60.0, 20.0, 36.0, 60.0);
+    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 60.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
     let raw_max = heights.iter().cloned().fold(0.0f64, f64::max);
@@ -1043,20 +1144,16 @@ pub fn bi_barplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
         ));
         let label = labels.get(i).map(|s| s.as_str()).unwrap_or("");
         if !label.is_empty() {
-            frag.push_str(&format!(
-                r#"<text x="{:.0}" y="{:.0}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10px" fill="{}" transform="rotate(-30,{:.0},{:.0})">{}</text>"#,
-                bx + bw / 2.0, oy + h - mb + 16.0, opts.col_axis,
-                bx + bw / 2.0, oy + h - mb + 16.0, escape_xml(label)
-            ));
+            frag.push_str(&cat_x_label(bx + bw / 2.0, oy + mt + ph, opts.las, &opts.col_axis, 10.0, label));
         }
     }
 
     // Shared chrome — title, subtitle, xlab, ylab, y-axis ticks.
     let panel = PanelRect { ox, oy, w, h, ml, mt, pw, ph };
     frag.push_str(&render_chrome(&panel, &title, &sub, &xlab, &ylab, &opts));
-    frag.push_str(&render_axis_ticks(&panel, 0.0, heights.len() as f64,
+    frag.push_str(&render_axis_ticks_ex(&panel, 0.0, heights.len() as f64,
                                      0.0, max_h, heights.len().max(1) as f64,
-                                     max_h.max(1.0), &opts));
+                                     max_h.max(1.0), &opts, false));
 
     with_device(|d| d.svg_body.push_str(&frag));
     crate::device::finish_plot("barplot.svg");
