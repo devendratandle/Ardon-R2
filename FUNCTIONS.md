@@ -155,6 +155,25 @@ rexp(n, rate)                    Exponential random variates
 density(x)                       Gaussian kernel density estimate (list $x/$y)
 ```
 
+## Dates & Time Series (24)
+```
+as.Date(s)         Parse a date string → Date (days since 1970-01-01)
+as.POSIXct(s)      Parse a date-time string → POSIXct (seconds since epoch)
+format(d, fmt)     Render a Date/POSIXct, e.g. format(d,"%Y/%m/%d"); strftime alias
+strftime(d, fmt)   Same as format() for dates
+Sys.Date()         Current date;  Sys.time()  current date-time
+difftime(a,b)      Difference between two dates (Date − Date also works)
+ts(x, start=, frequency=)  Build a regular time series
+frequency(x) / start(x) / end(x) / cycle(x) / time(x) / window(x)  ts accessors
+acf(x, lag.max) / pacf(x, lag.max)   Auto- / partial-autocorrelation
+diff(x, lag=, differences=)          Lagged differences
+decompose(x)       Classical additive/multiplicative decomposition
+lag(x, k)          Shift a series; is.ts(x) / is.regular(x) / periodicity(x)
+xts(x, order.by=)  Irregular time series; index(x) / coredata(x) / is.xts(x)
+first(x) / last(x) / na.locf(x)      xts head/tail / forward-fill NAs
+to.daily/to.weekly/to.monthly/to.quarterly/to.yearly(x)   Period aggregation
+```
+
 ## Machine Learning (12)
 ```
 rpart(y~.,data)         Decision tree (CART)
@@ -286,7 +305,7 @@ writeLines(text,con=) Write a character vector as lines (file or console)
 
 ## Graphics (23)
 ```
-plot(x,y)         Scatter/line plot; col=/cex=/pch=/type=/lwd= inline params
+plot(x,y)         Scatter/line plot; inline params col=/cex=/pch=/type=/lwd=/las=
 hist(x)           Histogram
 boxplot(x)        Box-and-whisker
 barplot(x)        Bar chart
@@ -305,10 +324,13 @@ legend(...)       Add legend
 pdf(file,w,h)     Open a vector-PDF file device (dev.off() writes it)
 png(file,w,h)     Open a raster-PNG file device
 svg(file,w,h)     Open a vector-SVG file device
-par(...)          Get or set graphical parameters
+par(...)          Get or set graphical parameters. Supported:
+                  col, bg, fg (colours); cex (scale); lwd, lty (lines);
+                  pch (point symbol); las (axis-label rotation: 0/1/2/3);
+                  mar, oma (margins); mfrow/mfcol (multi-panel grid); new.
                   par() — return all current params as a named list
                   par("col") — return single param
-                  par(col="red", lwd=2) — set; returns previous values
+                  par(col="red", lwd=2, las=2) — set; returns previous values
                   par(mfrow=c(2,2)) — enable 2x2 multi-panel layout
                   par(mfcol=c(2,3)) — column-major multi-panel layout
                   oldpar <- par(cex=1.5); par(oldpar)  # save/restore
