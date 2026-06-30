@@ -34,128 +34,20 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use r2_console::{ConsoleBuffer, LineKind, OutputSink, SubmitAction};
+use r2_console::{ConsoleBuffer, SubmitAction};
 use r2_engine::Engine;
-use r2_parser::Parser;
 use r2_ui::{
-    auto_scroll_offset, Cell, CellGridState, Color, ContextItem, ContextMenu,
+    auto_scroll_offset, Cell, CellGridState, Color,
     Dialog, DialogButton,
-    menu_bar_height, GraphPanel, GridPos, InputField, MdiHost, MenuBarState, MenuBuilder, R2Ui,
+    menu_bar_height, GraphPanel, GridPos, InputField, MdiHost, R2Ui,
     Rect, Selection, Theme, WindowId,
 };
 
-// ─── Output sink — engine writes through this, lands in ConsoleBuffer
-//
-// Matches R's internal architecture (Rinterface.h ptr_R_WriteConsole):
-// the engine talks to an abstraction, the frontend installs the
-// concrete impl. The CLI installs StdoutSink; we install this.
-
-struct GuiSink {
-    buf: Arc<Mutex<ConsoleBuffer>>,
-}
-
-impl OutputSink for GuiSink {
-    fn write_output(&mut self, text: &str) {
-        if let Ok(mut b) = self.buf.lock() { b.push_output(text); }
-    }
-    fn write_error(&mut self, text: &str) {
-        if let Ok(mut b) = self.buf.lock() { b.push_error(text); }
-    }
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────
-
-fn line_color(theme: &Theme, kind: LineKind) -> Color {
-    match kind {
-        LineKind::Input | LineKind::Continuation => theme.console_input,
-        LineKind::Output                          => theme.console_output,
-        LineKind::Error                           => theme.console_error,
-        LineKind::Banner                          => theme.console_banner,
-    }
-}
-
-fn rows_from_buffer(buf: &ConsoleBuffer, theme: &Theme) -> Vec<Vec<Cell>> {
-    buf.transcript().iter()
-        .map(|cl| {
-            let col = line_color(theme, cl.kind);
-            cl.text.chars().map(|c| Cell::plain(c, col)).collect()
-        })
-        .collect()
-}
-
-/// Capture the engine's current SVG plot, if any. Returns `None` when
-/// no plot has been produced.
-fn take_engine_svg() -> Option<String> {
-    if !r2_graphics::device::current_has_plot() { return None; }
-    let svg = r2_graphics::device::with_device(|d| d.full_svg());
-    if svg.is_empty() { None } else { Some(svg) }
-}
-
-/// Drive one user-submitted source string through the engine — parse
-/// each top-level statement, evaluate it, apply R's auto-print rule
-/// (silent for assignments / control flow / side-effect calls), short-
-/// circuit on q() / quit() by setting `quit_requested`.
-fn run_source(
-    src: &str,
-    engine: &mut Engine,
-    buffer: &Arc<Mutex<ConsoleBuffer>>,
-    quit_requested: &Rc<RefCell<bool>>,
-) {
-    let stmts = match Parser::parse(src) {
-        Ok(v)  => v,
-        Err(e) => {
-            buffer.lock().unwrap().push_error(&format!("Parse error: {}", e));
-            return;
-        }
-    };
-    for stmt in stmts {
-        if r2_console::is_quit_call(&stmt) {
-            *quit_requested.borrow_mut() = true;
-            return;
-        }
-        match engine.eval(&stmt) {
-            Ok(val) => {
-                // Unified auto-print rule (shared with the CLI) — silent
-                // set + NULL-invisibility, so both consoles behave identically.
-                if r2_console::should_autoprint(&stmt, &val) {
-                    buffer.lock().unwrap().push_output(&format!("{}", val));
-                }
-            }
-            Err(err) => {
-                buffer.lock().unwrap().push_error(&format!("Error: {:?}", err));
-            }
-        }
-    }
-}
+mod menus;
+mod support;
+use support::*;
 
 // ─── Main ─────────────────────────────────────────────────────────
-
-/// Pick a writable default working directory (R convention): R2_HOME
-/// override, else OneDrive/Windows Documents, else $HOME. Mirrors the
-/// CLI's `pick_user_home`.
-fn pick_user_home() -> Option<std::path::PathBuf> {
-    if let Ok(custom) = std::env::var("R2_HOME") {
-        let p = std::path::PathBuf::from(custom);
-        if p.is_dir() { return Some(p); }
-    }
-    if let Ok(od) = std::env::var("OneDrive") {
-        let p = std::path::PathBuf::from(&od).join("Documents");
-        if p.is_dir() { return Some(p); }
-    }
-    if let Ok(user) = std::env::var("USERPROFILE") {
-        let od = std::path::PathBuf::from(&user).join("OneDrive").join("Documents");
-        if od.is_dir() { return Some(od); }
-        let docs = std::path::PathBuf::from(user).join("Documents");
-        if docs.is_dir() { return Some(docs); }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let docs = std::path::PathBuf::from(&home).join("Documents");
-        if docs.is_dir() { return Some(docs); }
-        let h = std::path::PathBuf::from(home);
-        if h.is_dir() { return Some(h); }
-    }
-    None
-}
 
 fn main() -> Result<(), String> {
     // Working directory: launched from the Start Menu, the GUI's cwd is
@@ -246,65 +138,12 @@ fn main() -> Result<(), String> {
     let quit_dialog     = Rc::new(RefCell::new(Dialog::new()));
     let settings_dialog = Rc::new(RefCell::new(Dialog::new()));
 
-    // ── Menu bars ──────────────────────────────────────────────────
-    // Each sub-window owns its own menu set. The one currently
-    // displayed depends on which window is topmost — paint / event
-    // dispatch picks the right state every frame. Action strings
-    // share a namespace so the central match in `on_frame` doesn't
-    // care which menu fired the event.
-
-    // Console menu — focused on REPL workflow.
-    let mut mb_con = MenuBuilder::new();
-    mb_con.top("File")
-        .item("Clear console", "",       "file.clear")
-        .item("Quit",          "Ctrl+Q", "file.quit");
-    mb_con.top("Edit")
-        .item("Copy",          "Ctrl+C", "edit.copy")
-        .item("Paste",         "Ctrl+V", "edit.paste")
-        .item("Select all",    "Ctrl+A", "edit.select_all")
-        .item("Settings…",     "",       "edit.settings");
-    mb_con.top("Windows")
-        .item("Show Console",  "", "win.console")
-        .item("Show Graphics", "", "win.graphics");
-    mb_con.top("Help")
-        .item("About Ardon-R2", "", "help.about");
-    let menu_console = Rc::new(RefCell::new(MenuBarState::new(mb_con.bar)));
-
-    // Graphics menu — viewer-only. No Paste (a plot pane is output,
-    // not an editor). Save/Copy are the meaningful actions.
-    let mut mb_grf = MenuBuilder::new();
-    mb_grf.top("File")
-        .item("Save plot as SVG…", "Ctrl+S", "file.save_plot")
-        .item("Save plot as PNG…", "",       "file.save_plot_png")
-        .item("Copy plot as image","",       "file.copy_plot_image")
-        .item("Copy plot SVG",     "",       "file.copy_plot")
-        .item("Quit",              "Ctrl+Q", "file.quit");
-    mb_grf.top("Windows")
-        .item("Show Console",      "",       "win.console")
-        .item("Show Graphics",     "",       "win.graphics");
-    mb_grf.top("Help")
-        .item("About Ardon-R2",    "",       "help.about");
-    let menu_graphics = Rc::new(RefCell::new(MenuBarState::new(mb_grf.bar)));
-
-    // ── Right-click context menus ──────────────────────────────────
-    // Each sub-window owns one. Triggered on right-click inside the
-    // window's content rect; paints LAST so it floats above
-    // everything. Actions reuse the same dispatch table as the
-    // top menu bar — one place to add a feature, two ways to reach it.
-    let ctx_console = Rc::new(RefCell::new(ContextMenu::new(vec![
-        ContextItem::new("Copy",       "edit.copy"),
-        ContextItem::new("Paste",      "edit.paste"),
-        ContextItem::new("Select all", "edit.select_all"),
-        ContextItem::separator(),
-        ContextItem::new("Clear console", "file.clear"),
-    ])));
-    let ctx_graphics = Rc::new(RefCell::new(ContextMenu::new(vec![
-        ContextItem::new("Save plot as SVG…",   "file.save_plot"),
-        ContextItem::new("Save plot as PNG…",   "file.save_plot_png"),
-        ContextItem::separator(),
-        ContextItem::new("Copy plot as image",  "file.copy_plot_image"),
-        ContextItem::new("Copy plot SVG",       "file.copy_plot"),
-    ])));
+    // ── Menus (built in menus.rs) — action strings share one namespace
+    // with the central dispatch in the frame closure below.
+    let menu_console  = menus::console_menu();
+    let menu_graphics = menus::graphics_menu();
+    let ctx_console   = menus::console_context();
+    let ctx_graphics  = menus::graphics_context();
 
     // Title-bar logo — decoded + resampled to a small square at startup.
     // The actual atlas upload happens on the first frame (we need a
