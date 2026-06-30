@@ -6,7 +6,7 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
-## v0.3.4 (June 2026)
+## v0.3.6 (June 2026)
 
 **Fixed**
 - `factor(x, levels = c(...))` now honours the given levels (set and order);
