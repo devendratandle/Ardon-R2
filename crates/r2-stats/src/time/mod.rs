@@ -255,7 +255,11 @@ pub fn bi_format_time(a: &[EvalArg]) -> Result<RVal, R2Err> {
         RVal::Numeric(_, attrs) => attrs.class.as_deref(),
         _ => None,
     };
-    let fmt = named(a, "format").and_then(as_str);
+    // Format string: named `format=` wins, else the second positional arg
+    // (R-style `format(d, "%Y-%m-%d")` / `strftime(d, "%H:%M")`).
+    let fmt = named(a, "format")
+        .or_else(|| a.iter().filter(|x| x.name.is_none()).nth(1).map(|x| &x.value))
+        .and_then(as_str);
     match (v, cls) {
         (RVal::Numeric(days, _), Some("Date")) => {
             let fmt = fmt.unwrap_or_else(|| "%Y-%m-%d".into());

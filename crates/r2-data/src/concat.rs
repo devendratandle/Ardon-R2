@@ -56,7 +56,22 @@ pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
     for a in args {
         nums.extend(a.value.as_reals()?);
     }
-    Ok(RVal::Numeric(nums.into(), Attrs::default()))
+    // Preserve a shared Date/POSIXct class so `c(d1, d2)` stays a Date
+    // (R dispatches to c.Date/c.POSIXct). Only when EVERY argument carries
+    // the same date class — mixed/absent classes drop it, as R does.
+    let shared_class: Option<Arc<str>> = {
+        let first = match &args.first().map(|a| &a.value) {
+            Some(RVal::Numeric(_, at)) => at.class.as_deref(),
+            _ => None,
+        };
+        match first {
+            Some(c) if matches!(c, "Date" | "POSIXct" | "POSIXt")
+                && args.iter().all(|a| matches!(&a.value, RVal::Numeric(_, at) if at.class.as_deref() == Some(c)))
+                => Some(Arc::from(c)),
+            _ => None,
+        }
+    };
+    Ok(RVal::Numeric(nums.into(), Attrs { class: shared_class, ..Default::default() }))
 }
 
 #[cfg(test)]

@@ -379,6 +379,14 @@ pub(crate) fn bi_structure(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 }
 pub(crate) fn bi_format(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
+    // S3-style dispatch: a Date / POSIXct value formats through the date
+    // formatter (R's format.Date / format.POSIXct), so `format(d, "%Y-%m-%d")`
+    // renders the calendar date instead of the raw day/second count.
+    if let Some(at) = attrs_of(&v) {
+        if matches!(at.class.as_deref(), Some("Date") | Some("POSIXct") | Some("POSIXt")) {
+            return r2_stats::time::bi_format_time(a);
+        }
+    }
     let nsmall = gn(a,"nsmall").and_then(|x| e.scalar_f64(&x).ok().flatten()).unwrap_or(0.0) as usize;
     let out: Vec<Option<Arc<str>>> = match &v {
         RVal::Numeric(nv, _) => nv.iter().copied().map(|o| o.map(|x| {
@@ -413,6 +421,12 @@ pub(crate) fn bi_is_single(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     Ok(rbool(matches!(gv(a,0), RVal::Single(..))))
 }
 pub(crate) fn bi_as_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // A Date / POSIXct stringifies to its formatted calendar form, like R.
+    if let Some(at) = attrs_of(&gv(a,0)) {
+        if matches!(at.class.as_deref(), Some("Date") | Some("POSIXct") | Some("POSIXt")) {
+            return r2_stats::time::bi_format_time(a);
+        }
+    }
     match &gv(a,0) {
         RVal::Character(v, _) => Ok(RVal::Character(v.clone(), Attrs::default())),
         RVal::Numeric(v, _) => Ok(RVal::Character(v.iter().map(|x| x.map(|n| Arc::from(fmt_num(n).as_str()))).collect(), Attrs::default())),

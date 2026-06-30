@@ -105,7 +105,7 @@ pub(crate) fn base_table() -> Vec<(&'static str, BuiltinFn)> {
         ("rowSums",bi_rowSums),("colSums",bi_colSums),("rowMeans",bi_rowMeans),("colMeans",bi_colMeans),
         ("set.seed",bi_set_seed),("Sys.sleep",bi_Sys_sleep),("readline",bi_readline),
         ("as.Date",bi_as_date),("as.POSIXct",bi_as_posixct),("format.Date",bi_format_time),
-        ("format.POSIXct",bi_format_time),("Sys.Date",bi_sys_date),("Sys.time",bi_sys_time),
+        ("format.POSIXct",bi_format_time),("strftime",bi_format_time),("Sys.Date",bi_sys_date),("Sys.time",bi_sys_time),
         ("difftime",bi_difftime),
         ("ts",bi_ts),("tsp",bi_tsp),("start",bi_ts_start),("end",bi_ts_end),
         ("frequency",bi_frequency),("deltat",bi_deltat),("time",bi_time_idx),
