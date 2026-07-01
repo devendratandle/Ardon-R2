@@ -111,7 +111,7 @@ impl Engine {
     /// Resolve a numeric subscript to 0-based kept positions. Supports R's
     /// NEGATIVE (exclusion) indexing: all-negative → keep everything except
     /// those positions; otherwise positive 1-based selection.
-    fn resolve_subscript(&self, idx: &RVal, n: usize) -> Result<Vec<usize>, R2Err> {
+    pub(crate) fn resolve_subscript(&self, idx: &RVal, n: usize) -> Result<Vec<usize>, R2Err> {
         let pos = self.as_reals(idx)?;
         let any_neg = pos.iter().any(|p| matches!(p, Some(v) if *v < 0.0));
         Ok(if any_neg {

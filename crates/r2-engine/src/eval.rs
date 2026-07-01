@@ -74,6 +74,12 @@ impl Engine {
                                     let idx = self.eval_in(idx_expr, env)?;
                                     self.assign_index(&mut obj, &idx, &val)?;
                                 }
+                            } else if indices.len() == 2 {
+                                // Matrix `m[i, j] <- v` / `m[i, ] <- v` / `m[, j] <- v`.
+                                // An empty subscript (None) selects the whole axis.
+                                let ri = match &indices[0] { Some(e) => Some(self.eval_in(e, env)?), None => None };
+                                let ci = match &indices[1] { Some(e) => Some(self.eval_in(e, env)?), None => None };
+                                self.assign_matrix_index(&mut obj, ri.as_ref(), ci.as_ref(), &val)?;
                             }
                             self.scope_insert(name.clone(), obj.clone());
                             Ok(val)

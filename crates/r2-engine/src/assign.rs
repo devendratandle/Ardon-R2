@@ -59,6 +59,37 @@ impl Engine {
         }
     }
 
+    /// `m[rows, cols] <- v` — matrix element/row/column assignment. An
+    /// empty subscript (`None`) selects the whole axis. Values recycle
+    /// column-major over the selected submatrix (R semantics).
+    pub(crate) fn assign_matrix_index(&mut self, obj: &mut RVal, row: Option<&RVal>, col: Option<&RVal>, val: &RVal) -> Result<(), R2Err> {
+        let new_vals = self.as_reals(val)?;
+        let sel = |axis: Option<&RVal>, n: usize, this: &Self| -> Result<Vec<usize>, R2Err> {
+            match axis {
+                None => Ok((0..n).collect()),
+                Some(RVal::Logical(mask, _)) => Ok(mask.iter().enumerate()
+                    .filter_map(|(i, b)| if *b == Some(true) { Some(i) } else { None }).collect()),
+                Some(idx) => this.resolve_subscript(idx, n),
+            }
+        };
+        if let RVal::Matrix(m) = obj {
+            let keep_rows = sel(row, m.nrow, self)?;
+            let keep_cols = sel(col, m.ncol, self)?;
+            if new_vals.is_empty() { return err!(Runtime, "replacement has length zero"); }
+            let mut k = 0usize;
+            for &j in &keep_cols {
+                for &i in &keep_rows {
+                    let v = new_vals[k % new_vals.len()];
+                    m.data[j * m.nrow + i] = v.unwrap_or(f64::NAN);
+                    k += 1;
+                }
+            }
+            Ok(())
+        } else {
+            err!(Runtime, "two-subscript assignment not supported for {}", obj.type_name())
+        }
+    }
+
     pub(crate) fn assign_dbl_index(&mut self, obj: &mut RVal, idx: &RVal, val: &RVal) -> Result<(), R2Err> {
         match obj {
             RVal::List(items) => {
