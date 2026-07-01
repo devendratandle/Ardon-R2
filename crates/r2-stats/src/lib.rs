@@ -52,6 +52,7 @@ pub mod rng;
 pub mod multivariate;
 pub mod mixed;
 pub mod time;
+pub mod plssem;
 
 // Re-export numerical helpers for engine-side callers (model summaries
 // like lm/glm still print inline using these).
