@@ -243,6 +243,35 @@ Why native builtins still exist: the standard dynamic-language pattern is
 hot kernels (`lm`, `plssem`, …) stay native builtins; J.4 is what lets
 *third-party source* libraries reach the same class without engine edits.
 
+### Phase P — parallel `apply` for library code (the *other* speed lever)
+
+Profiling `r2sem` (source library) vs `plssem` (native builtin), both release,
+showed a ~25× gap that splits **~equally** into two independent factors:
+**~6× serial-vs-parallel bootstrap** and **~4× interpreted-vs-compiled per fit**.
+The JIT (Phase J) attacks the ~4×. Phase P attacks the ~6× — **separately, and
+at much lower risk**, because it's parallelism, not codegen.
+
+**Deliver:** an `mclapply`/`par.sapply(x, f)` builtin that runs an R2 closure
+over the elements of `x` across cores (Rayon lives in `r2-kernel`; this exposes
+it to *library code*). Libraries call it for embarrassingly-parallel work —
+bootstrap, permutation tests, cross-validation, Monte-Carlo — which is
+ubiquitous in statistics.
+
+**Why it's tractable + safe:** the hot types are already `Arc`-based (`RVal`,
+`EnvRef`), closure calls create child envs copy-on-write, and the output sink is
+thread-local — so each worker evaluates in an isolated context sharing the
+registry + global env read-only via `Arc`. No shared mutation ⇒ no data race
+⇒ no *silent-wrong-math* class (unlike JIT codegen); any bug surfaces as a
+crash/incorrect result caught by tests. Scope: **pure** map closures (no `<<-`
+to shared state), matching R's `parallel::` worker isolation.
+
+**Impact:** ~6× for *any* embarrassingly-parallel library, as pure modular
+source. `r2sem`: 0.80 s → ~0.13 s (~66× vs cSEM). Composes with the JIT later —
+a `par.sapply` of a JIT-compiled closure runs parallel **and** native.
+
+**Recommended order:** **P before J.3/J.4** — bigger single win, lower risk,
+broadly applicable, and independent of the delicate codegen work.
+
 > Release history → `CHANGELOG.md`. Archived phase narrative →
 > `code-history/`.
 
