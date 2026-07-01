@@ -185,3 +185,4 @@ crates/*/*.svg
 *.png
 !assets/**
 !screenshots/**
+samples/plssem_data.csv

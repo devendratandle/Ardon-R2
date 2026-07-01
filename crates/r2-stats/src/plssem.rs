@@ -228,33 +228,227 @@ pub fn fit_pls(data: &[f64], n: usize, model: &PlsModel, max_iter: usize, tol: f
 /// Bootstrap the structural path coefficients: `reps` resamples with
 /// replacement, refit, collect each path coefficient. Returns, per
 /// endogenous construct, a Vec over predecessors of the bootstrap
-/// distribution (Vec<f64> of length = admissible reps). Serial here;
-/// the engine layer parallelizes across reps with Rayon.
+/// distribution (`Vec<f64>` of length `reps`).
+///
+/// Runs the reps **in parallel** across cores (`r2_kernel::par_for_rayon`):
+/// each resample is independent, and each gets its own RNG seeded from the
+/// rep index, so there is no shared mutable state — the embarrassingly
+/// parallel structure that lets this beat interpreted-R bootstrapping.
 pub fn bootstrap_paths(
     data: &[f64], n: usize, model: &PlsModel, reps: usize, seed: u64,
 ) -> Vec<Vec<Vec<f64>>> {
     let c = model.n_constructs();
     let ncol = data.len() / n;
-    let mut out: Vec<Vec<Vec<f64>>> = model.structural.iter()
-        .map(|p| vec![Vec::with_capacity(reps); p.len()])
-        .collect();
-    let mut rng = seed;
-    let mut next = || { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (rng >> 33) as usize };
-    let mut resampled = vec![0.0; ncol * n];
-    for _ in 0..reps {
-        // resample rows with replacement
+
+    // Parallel map: rep → that resample's path coefficients (per construct).
+    let per_rep: Vec<Vec<Vec<f64>>> = r2_kernel::par_for_rayon(reps, |rep| {
+        let mut rng = seed
+            .wrapping_add((rep as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .wrapping_add(1);
+        let mut next = || {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (rng >> 33) as usize
+        };
+        let mut resampled = vec![0.0; ncol * n];
         for i in 0..n {
             let src = next() % n;
             for col in 0..ncol { resampled[col * n + i] = data[col * n + src]; }
         }
-        let fit = fit_pls(&resampled, n, model, 100, 1e-7);
+        fit_pls(&resampled, n, model, 100, 1e-7).paths
+    });
+
+    // Transpose [rep][construct][path] → [construct][path][rep].
+    let mut out: Vec<Vec<Vec<f64>>> = model.structural.iter()
+        .map(|p| vec![Vec::with_capacity(reps); p.len()])
+        .collect();
+    for rep_paths in &per_rep {
         for j in 0..c {
-            for (idx, &b) in fit.paths[j].iter().enumerate() {
+            for (idx, &b) in rep_paths[j].iter().enumerate() {
                 out[j][idx].push(b);
             }
         }
     }
     out
+}
+
+// ── Engine builtin: plssem(data, .model=, .R=, .seed=) ────────────────
+//
+// cSEM-style model syntax:
+//   Construct =~ Ind1 + Ind2 + ...     (reflective measurement, Mode A)
+//   Endo      ~  Pred1 + Pred2 + ...   (structural path)
+// `csem()` is registered as an alias.
+
+use r2_types::{Attrs, ErrKind, EvalArg, RVal, R2Err, TypeInstance};
+use std::sync::Arc;
+
+fn e_gv(a: &[EvalArg], i: usize) -> RVal { a.get(i).map(|x| x.value.clone()).unwrap_or(RVal::Null) }
+fn e_gn(a: &[EvalArg], name: &str) -> Option<RVal> {
+    a.iter().find(|x| x.name.as_deref() == Some(name)).map(|x| x.value.clone())
+}
+fn e_str(v: &RVal) -> Option<String> {
+    match v { RVal::Character(c, _) => c.first().and_then(|x| x.as_ref().map(|s| s.to_string())), _ => None }
+}
+fn e_num(v: &RVal) -> Option<f64> { v.as_reals().ok().and_then(|r| r.into_iter().flatten().next()) }
+fn rnums(v: &[f64]) -> RVal { RVal::Numeric(v.iter().map(|x| Some(*x)).collect(), Attrs::default()) }
+fn rchars(v: &[String]) -> RVal { RVal::Character(v.iter().map(|s| Some(Arc::from(s.as_str()))).collect(), Attrs::default()) }
+fn err(m: &str) -> R2Err { R2Err { msg: m.to_string(), kind: ErrKind::Runtime } }
+
+/// Parse cSEM-style syntax → (construct names in measurement order,
+/// indicators per construct, structural (endogenous, predecessors) pairs).
+fn parse_model(model: &str) -> Result<(Vec<String>, Vec<Vec<String>>, Vec<(String, Vec<String>)>), R2Err> {
+    let mut cnames = Vec::new();
+    let mut inds = Vec::new();
+    let mut structural = Vec::new();
+    for raw in model.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let split = |rhs: &str| -> Vec<String> {
+            rhs.split('+').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        };
+        if let Some(p) = line.find("=~") {
+            cnames.push(line[..p].trim().to_string());
+            inds.push(split(&line[p + 2..]));
+        } else if let Some(p) = line.find('~') {
+            structural.push((line[..p].trim().to_string(), split(&line[p + 1..])));
+        }
+    }
+    if cnames.is_empty() { return Err(err("plssem: model has no measurement (=~) equations")); }
+    Ok((cnames, inds, structural))
+}
+
+fn sample_sd(v: &[f64]) -> f64 {
+    if v.len() < 2 { return 0.0; }
+    let m = v.iter().sum::<f64>() / v.len() as f64;
+    (v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (v.len() as f64 - 1.0)).sqrt()
+}
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() { return f64::NAN; }
+    let idx = ((sorted.len() as f64 - 1.0) * q).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+pub fn bi_plssem(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    // Arguments (accept cSEM-style dotted names and plain positional).
+    let data_rv = e_gn(a, ".data").or_else(|| e_gn(a, "data")).unwrap_or_else(|| e_gv(a, 0));
+    let df = match &data_rv {
+        RVal::DataFrame(df) => df.clone(),
+        _ => return Err(err("plssem: .data must be a data frame")),
+    };
+    let model_rv = e_gn(a, ".model").or_else(|| e_gn(a, "model")).unwrap_or_else(|| e_gv(a, 1));
+    let model_str = e_str(&model_rv).ok_or_else(|| err("plssem: .model must be a string"))?;
+    let reps = e_gn(a, ".R").or_else(|| e_gn(a, "R")).and_then(|v| e_num(&v)).map(|x| x as usize).unwrap_or(200);
+    let seed = e_gn(a, ".seed").and_then(|v| e_num(&v)).map(|x| x as u64).unwrap_or(1);
+
+    let (cnames, inds, struct_pairs) = parse_model(&model_str)?;
+    let cpos = |name: &str| cnames.iter().position(|c| c == name);
+
+    // Column name → Option<f64> data.
+    let coldata = |name: &str| -> Option<Vec<Option<f64>>> {
+        df.columns.iter().find(|(n, _)| n.as_ref() == name)
+            .and_then(|(_, v)| v.as_reals().ok())
+    };
+
+    // Assemble used indicator columns (block order) + complete-case filter.
+    let mut used_cols: Vec<Vec<Option<f64>>> = Vec::new();
+    let mut blocks: Vec<Vec<usize>> = Vec::new();
+    let mut ind_names: Vec<Vec<String>> = Vec::new();
+    for block in &inds {
+        let mut idxs = Vec::new();
+        for name in block {
+            let col = coldata(name).ok_or_else(|| err(&format!("plssem: indicator '{name}' not found in data")))?;
+            idxs.push(used_cols.len());
+            used_cols.push(col);
+        }
+        blocks.push(idxs);
+        ind_names.push(block.clone());
+    }
+    let n_raw = used_cols.first().map(|c| c.len()).unwrap_or(0);
+    let keep: Vec<usize> = (0..n_raw)
+        .filter(|&i| used_cols.iter().all(|c| c.get(i).map(|o| o.is_some()).unwrap_or(false)))
+        .collect();
+    let n = keep.len();
+    if n < 10 { return Err(err("plssem: fewer than 10 complete cases")); }
+
+    // Flat column-major matrix over complete cases.
+    let ncol = used_cols.len();
+    let mut data = vec![0.0f64; ncol * n];
+    for (c, col) in used_cols.iter().enumerate() {
+        for (r, &row) in keep.iter().enumerate() {
+            data[c * n + r] = col[row].unwrap();
+        }
+    }
+
+    // Structural predecessors per construct.
+    let mut structural = vec![Vec::new(); cnames.len()];
+    for (endo, preds) in &struct_pairs {
+        let j = cpos(endo).ok_or_else(|| err(&format!("plssem: construct '{endo}' has no measurement model")))?;
+        for p in preds {
+            let k = cpos(p).ok_or_else(|| err(&format!("plssem: predictor '{p}' has no measurement model")))?;
+            structural[j].push(k);
+        }
+    }
+    let model = PlsModel { blocks, structural };
+
+    // Fit + parallel bootstrap.
+    let t0 = std::time::Instant::now();
+    let fit = fit_pls(&data, n, &model, 300, 1e-8);
+    let boot = if reps > 0 { bootstrap_paths(&data, n, &model, reps, seed) } else { Vec::new() };
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    // Report + collect result vectors.
+    soutln!("");
+    soutln!("PLS-SEM (plssem) — Mode A, path-weighting");
+    soutln!("  n = {n} complete cases | bootstrap reps = {reps} | iterations = {} | {:.3}s",
+        fit.iters, elapsed);
+    soutln!("");
+    soutln!("Structural paths:");
+    soutln!("  {:<26} {:>9} {:>9} {:>8} {:>20}", "Path", "Estimate", "Std.Err", "t", "95% CI (percentile)");
+    let mut labels = Vec::new();
+    let mut est = Vec::new();
+    let mut se = Vec::new();
+    let mut tval = Vec::new();
+    let mut ci_lo = Vec::new();
+    let mut ci_hi = Vec::new();
+    for j in 0..cnames.len() {
+        for (k, &pred) in model.structural[j].iter().enumerate() {
+            let coef = fit.paths[j][k];
+            let (s, lo, hi) = if !boot.is_empty() {
+                let mut d = boot[j][k].clone();
+                d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                (sample_sd(&d), percentile(&d, 0.025), percentile(&d, 0.975))
+            } else { (f64::NAN, f64::NAN, f64::NAN) };
+            let t = if s > 1e-12 { coef / s } else { f64::NAN };
+            let label = format!("{} -> {}", cnames[pred], cnames[j]);
+            soutln!("  {:<26} {:>9.3} {:>9.3} {:>8.2}   [{:>6.3}, {:>6.3}]",
+                label, coef, s, t, lo, hi);
+            labels.push(label); est.push(coef); se.push(s); tval.push(t); ci_lo.push(lo); ci_hi.push(hi);
+        }
+    }
+    soutln!("");
+    let mut r2_lab = Vec::new();
+    let mut r2_val = Vec::new();
+    for j in 0..cnames.len() {
+        if !model.structural[j].is_empty() { r2_lab.push(cnames[j].clone()); r2_val.push(fit.r2[j]); }
+    }
+    let r2_line: Vec<String> = r2_lab.iter().zip(&r2_val).map(|(l, v)| format!("{l} = {v:.3}")).collect();
+    soutln!("R² (endogenous): {}", r2_line.join("   "));
+    soutln!("");
+
+    let mut fields = std::collections::HashMap::new();
+    fields.insert(Arc::from("path_labels"), rchars(&labels));
+    fields.insert(Arc::from("path_coef"), rnums(&est));
+    fields.insert(Arc::from("path_se"), rnums(&se));
+    fields.insert(Arc::from("path_t"), rnums(&tval));
+    fields.insert(Arc::from("ci_lower"), rnums(&ci_lo));
+    fields.insert(Arc::from("ci_upper"), rnums(&ci_hi));
+    fields.insert(Arc::from("r2_labels"), rchars(&r2_lab));
+    fields.insert(Arc::from("r2"), rnums(&r2_val));
+    fields.insert(Arc::from("n"), RVal::Integer(vec![Some(n as i32)].into(), Attrs::default()));
+    fields.insert(Arc::from("reps"), RVal::Integer(vec![Some(reps as i32)].into(), Attrs::default()));
+    fields.insert(Arc::from("iterations"), RVal::Integer(vec![Some(fit.iters as i32)].into(), Attrs::default()));
+    fields.insert(Arc::from("elapsed"), RVal::Numeric(vec![Some(elapsed)].into(), Attrs::default()));
+    let _ = ind_names;
+    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("plssem"), fields }))
 }
 
 #[cfg(test)]

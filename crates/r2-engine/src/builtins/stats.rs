@@ -144,6 +144,9 @@ pub(crate) fn bi_density(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
 pub(crate) fn bi_lm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_stats::models::bi_lm(a)
 }
+pub(crate) fn bi_plssem(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_stats::plssem::bi_plssem(a)
+}
 pub(crate) fn bi_t_test(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_stats::htest::bi_t_test(a)
 }
