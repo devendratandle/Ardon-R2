@@ -373,6 +373,104 @@ impl IrBuilder {
                 dst
             }
 
+            // Phase J.1 — counted loop `for(v in a:b) body`. Builds a real
+            // loop with loop-carried phi nodes at the header for the induction
+            // variable AND every accumulator assigned in the body (found via
+            // collect_assigned). Non-counted iterables fall back (const Null;
+            // the JIT allowlist only admits the a:b form so this can't
+            // silently miscompile).
+            Expr::For { var, iter, body } => {
+                if let Expr::Binary { op: BinOp::Colon, lhs, rhs } = iter.as_ref() {
+                    let real_ty = IrType::scalar(infer::IrElem::Real);
+                    let bool_ty = IrType::scalar(infer::IrElem::Bool);
+                    let a = self.lower(lhs);
+                    let b = self.lower(rhs);
+
+                    // Direction: step = +1 if a<=b else -1, so the loop matches
+                    // R's `a:b` in BOTH directions (1:0 → 1,0). Computed once
+                    // via a preheader if/phi.
+                    let up = self.new_vreg(bool_ty.clone());
+                    self.emit(IrInst::Binary { dst: up, op: BinOp::Le, lhs: a, rhs: b, ty: bool_ty.clone() });
+                    let pos_b = self.new_block();
+                    let neg_b = self.new_block();
+                    let cont_b = self.new_block();
+                    self.terminate(IrTerm::Branch { cond: up, then_blk: pos_b, else_blk: neg_b });
+                    self.current = pos_b;
+                    let sp = self.const_inst(IrConst::Real(1.0), real_ty.clone());
+                    self.terminate(IrTerm::Jump(cont_b));
+                    self.current = neg_b;
+                    let sn = self.const_inst(IrConst::Real(-1.0), real_ty.clone());
+                    self.terminate(IrTerm::Jump(cont_b));
+                    self.current = cont_b;
+                    let step = self.new_vreg(real_ty.clone());
+                    self.emit(IrInst::Phi { dst: step, sources: vec![(pos_b, sp), (neg_b, sn)], ty: real_ty.clone() });
+                    let pre_end = self.current; // cont_b — the loop preheader
+
+                    // Loop-carried accumulators: assigned in the body AND
+                    // already live before the loop. (var handled separately.)
+                    let assigned = collect_assigned(body);
+                    let carried: Vec<(Arc<str>, VReg)> = assigned.iter()
+                        .filter(|nm| nm.as_ref() != var.as_ref())
+                        .filter_map(|nm| self.locals.get(nm).map(|v| (nm.clone(), *v)))
+                        .collect();
+
+                    let header = self.new_block();
+                    let body_b = self.new_block();
+                    let exit = self.new_block();
+                    self.terminate(IrTerm::Jump(header));
+
+                    // Header — allocate phi VRegs (sources filled after the
+                    // body), then the loop condition `(v - b) * step <= 0`.
+                    self.current = header;
+                    let ind_phi = self.new_vreg(real_ty.clone());
+                    self.locals.insert(var.clone(), ind_phi);
+                    let mut cphi: Vec<(VReg, VReg, IrType)> = Vec::new();
+                    for (nm, entry) in &carried {
+                        let ty = self.vreg_types[entry.0 as usize].clone();
+                        let phi = self.new_vreg(ty.clone());
+                        self.locals.insert(nm.clone(), phi);
+                        cphi.push((phi, *entry, ty));
+                    }
+                    let diff = self.new_vreg(real_ty.clone());
+                    self.emit(IrInst::Binary { dst: diff, op: BinOp::Sub, lhs: ind_phi, rhs: b, ty: real_ty.clone() });
+                    let prod = self.new_vreg(real_ty.clone());
+                    self.emit(IrInst::Binary { dst: prod, op: BinOp::Mul, lhs: diff, rhs: step, ty: real_ty.clone() });
+                    let zero = self.const_inst(IrConst::Real(0.0), real_ty.clone());
+                    let cond = self.new_vreg(bool_ty.clone());
+                    self.emit(IrInst::Binary { dst: cond, op: BinOp::Le, lhs: prod, rhs: zero, ty: bool_ty });
+                    self.terminate(IrTerm::Branch { cond, then_blk: body_b, else_blk: exit });
+
+                    // Body — lower it, then advance the induction variable.
+                    self.current = body_b;
+                    let _ = self.lower(body);
+                    let v_next = self.new_vreg(real_ty.clone());
+                    self.emit(IrInst::Binary { dst: v_next, op: BinOp::Add, lhs: ind_phi, rhs: step, ty: real_ty.clone() });
+                    let body_end = self.current;
+                    let carried_end: Vec<VReg> = carried.iter().map(|(nm, _)| self.locals[nm]).collect();
+                    self.terminate(IrTerm::Jump(header)); // back-edge
+
+                    // Prepend the now-complete phis to the header (codegen
+                    // reserves block params from leading Phi insts).
+                    let mut phis: Vec<IrInst> = Vec::new();
+                    phis.push(IrInst::Phi { dst: ind_phi, sources: vec![(pre_end, a), (body_end, v_next)], ty: real_ty });
+                    for (i, (phi, entry, ty)) in cphi.iter().enumerate() {
+                        phis.push(IrInst::Phi { dst: *phi, sources: vec![(pre_end, *entry), (body_end, carried_end[i])], ty: ty.clone() });
+                    }
+                    let hb = self.block_mut(header);
+                    for (i, p) in phis.into_iter().enumerate() { hb.insts.insert(i, p); }
+
+                    // Exit — post-loop value of each carried var is its header
+                    // phi (the value present when the loop fell through).
+                    self.current = exit;
+                    for ((nm, _), (phi, _, _)) in carried.iter().zip(cphi.iter()) {
+                        self.locals.insert(nm.clone(), *phi);
+                    }
+                    self.const_inst(IrConst::Null, IrType::null())
+                } else {
+                    self.const_inst(IrConst::Null, IrType::null())
+                }
+            }
+
             // Things deferred to later phases.
             _ => self.const_inst(IrConst::Null, IrType::null()),
         }
@@ -444,6 +542,36 @@ use std::collections::HashSet;
 /// or by an assignment within the body. `params` lists the names that
 /// the immediate function introduces (and should therefore not be
 /// counted as free).
+/// Names assigned (via `<-`) anywhere in `e`. Used to find loop-carried
+/// variables that need a header phi in counted-loop lowering (Phase J.1).
+pub fn collect_assigned(e: &Expr) -> HashSet<Arc<str>> {
+    let mut out = HashSet::new();
+    collect_assigned_walk(e, &mut out);
+    out
+}
+
+fn collect_assigned_walk(e: &Expr, out: &mut HashSet<Arc<str>>) {
+    match e {
+        Expr::Assign { target, value, .. } => {
+            if let Expr::Symbol(name) = target.as_ref() { out.insert(name.clone()); }
+            collect_assigned_walk(value, out);
+        }
+        Expr::Block(xs) => for x in xs { collect_assigned_walk(x, out); },
+        Expr::If { cond, then, else_ } => {
+            collect_assigned_walk(cond, out); collect_assigned_walk(then, out);
+            if let Some(x) = else_ { collect_assigned_walk(x, out); }
+        }
+        Expr::While { cond, body } => { collect_assigned_walk(cond, out); collect_assigned_walk(body, out); }
+        Expr::For { iter, body, .. } => { collect_assigned_walk(iter, out); collect_assigned_walk(body, out); }
+        Expr::Binary { lhs, rhs, .. } => { collect_assigned_walk(lhs, out); collect_assigned_walk(rhs, out); }
+        Expr::Unary { expr, .. } => collect_assigned_walk(expr, out),
+        Expr::Call { args, .. } => for a in args { collect_assigned_walk(&a.value, out); },
+        Expr::Return(v) => collect_assigned_walk(v, out),
+        Expr::Pipe { lhs, rhs } => { collect_assigned_walk(lhs, out); collect_assigned_walk(rhs, out); }
+        _ => {}
+    }
+}
+
 pub fn collect_free_vars(body: &Expr, params: &[Arc<str>]) -> HashSet<Arc<str>> {
     let mut free: HashSet<Arc<str>> = HashSet::new();
     let mut bound: HashSet<Arc<str>> = params.iter().cloned().collect();

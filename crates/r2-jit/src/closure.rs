@@ -67,6 +67,10 @@ pub(crate) fn body_is_jit_lowerable(e: &r2_types::Expr) -> bool {
                 && else_.as_ref().map_or(true, |e| body_is_jit_lowerable(e))
         }
         While { cond, body } => body_is_jit_lowerable(cond) && body_is_jit_lowerable(body),
+        // Phase J.1: counted `for(v in a:b)` only — the IR lowers exactly
+        // this form (with loop-carried phis); other iterables fall back.
+        For { iter, body, .. } => matches!(iter.as_ref(), Binary { op: r2_types::BinOp::Colon, .. })
+            && body_is_jit_lowerable(iter) && body_is_jit_lowerable(body),
         Block(stmts) => stmts.iter().all(body_is_jit_lowerable),
         Return(v) => body_is_jit_lowerable(v),
         Pipe { lhs, rhs } => body_is_jit_lowerable(lhs) && body_is_jit_lowerable(rhs),

@@ -760,9 +760,9 @@
     }
 
     #[test]
-    fn body_lowerable_rejects_for_and_repeat() {
-        // for (k in 1:n) s <- s + k
-        let for_body = Expr::For {
+    fn body_lowerable_admits_counted_for_rejects_others() {
+        // Phase J.1: counted for(k in 1:n) is now JIT-lowerable.
+        let counted = Expr::For {
             var: Arc::from("k"),
             iter: Box::new(Expr::Binary { op: BinOp::Colon, lhs: Box::new(num(1.0)), rhs: Box::new(sym("n")) }),
             body: Box::new(Expr::Assign {
@@ -771,38 +771,57 @@
                 superassign: false,
             }),
         };
-        assert!(!body_is_jit_lowerable(&for_body));
-        // …and when nested inside a Block (the real closure shape).
-        let block = Expr::Block(vec![
-            Expr::Assign { target: Box::new(sym("s")), value: Box::new(num(0.0)), superassign: false },
-            for_body,
-            sym("s"),
-        ]);
-        assert!(!body_is_jit_lowerable(&block));
+        assert!(body_is_jit_lowerable(&counted));
+        // A non-counted for(x in v) is not lowered → still rejected.
+        let noncounted = Expr::For { var: Arc::from("x"), iter: Box::new(sym("v")), body: Box::new(sym("x")) };
+        assert!(!body_is_jit_lowerable(&noncounted));
+        // repeat{} still rejects.
         assert!(!body_is_jit_lowerable(&Expr::Repeat { body: Box::new(Expr::Block(vec![])) }));
     }
 
     #[test]
-    fn for_loop_accumulator_closure_is_not_jit_compiled() {
-        // function(n) { s <- 0; for (k in 1:n) s <- s + k; s }
-        let body = Expr::Block(vec![
-            Expr::Assign { target: Box::new(sym("s")), value: Box::new(num(0.0)), superassign: false },
-            Expr::For {
-                var: Arc::from("k"),
-                iter: Box::new(Expr::Binary { op: BinOp::Colon, lhs: Box::new(num(1.0)), rhs: Box::new(sym("n")) }),
-                body: Box::new(Expr::Assign {
-                    target: Box::new(sym("s")),
-                    value: Box::new(Expr::Binary { op: BinOp::Add, lhs: Box::new(sym("s")), rhs: Box::new(sym("k")) }),
-                    superassign: false,
-                }),
-            },
-            sym("s"),
-        ]);
-        let cl = Closure {
-            params: vec![Param { name: Arc::from("n"), default: None, dots: false }],
-            body: Arc::new(body),
-            env: Env::new_global(),
+    fn jit_for_loop_accumulators_are_correct() {
+        // function(n){ s <- init; for (k in 1:n) s <- <upd>; s }
+        let mkfn = |init: f64, upd: Expr| -> Closure {
+            Closure {
+                params: vec![Param { name: Arc::from("n"), default: None, dots: false }],
+                body: Arc::new(Expr::Block(vec![
+                    Expr::Assign { target: Box::new(sym("s")), value: Box::new(num(init)), superassign: false },
+                    Expr::For {
+                        var: Arc::from("k"),
+                        iter: Box::new(Expr::Binary { op: BinOp::Colon, lhs: Box::new(num(1.0)), rhs: Box::new(sym("n")) }),
+                        body: Box::new(Expr::Assign { target: Box::new(sym("s")), value: Box::new(upd), superassign: false }),
+                    },
+                    sym("s"),
+                ])),
+                env: Env::new_global(),
+            }
         };
-        // Must decline → engine uses the interpreter (which is correct).
-        assert!(try_compile_closure(&cl).is_none());
+        // 1-param closures compile as VectorMap (per-element); call each `n`
+        // via the appropriate convention and read the scalar result back.
+        let call = |h: &std::sync::Arc<dyn r2_types::JitHandle>, n: f64| -> f64 {
+            match h.kind() {
+                r2_types::JitKind::Scalar => h.try_call_real(&[n]).unwrap(),
+                r2_types::JitKind::VectorMap => {
+                    let inp = vec![n]; let mut o = vec![0.0];
+                    assert!(unsafe { h.try_call_vec_map(inp.as_ptr(), o.as_mut_ptr(), 1) });
+                    o[0]
+                }
+                other => panic!("unexpected kind {:?}", other),
+            }
+        };
+        // sum 1..n
+        let h = try_compile_closure(&mkfn(0.0, add(sym("s"), sym("k")))).expect("for-sum should JIT");
+        assert_eq!(call(&h, 100.0), 5050.0);
+        assert_eq!(call(&h, 5.0), 15.0);
+        assert_eq!(call(&h, 1.0), 1.0);
+        // R semantics: 1:0 == c(1,0) → iterate k=1,0 → s = 1 (matches interpreter)
+        assert_eq!(call(&h, 0.0), 1.0);
+        // product / factorial
+        let hp = try_compile_closure(&mkfn(1.0, mul(sym("s"), sym("k")))).expect("for-product should JIT");
+        assert_eq!(call(&hp, 5.0), 120.0);
+        assert_eq!(call(&hp, 1.0), 1.0);
+        // sum of squares
+        let hs = try_compile_closure(&mkfn(0.0, add(sym("s"), mul(sym("k"), sym("k"))))).expect("for-sumsq should JIT");
+        assert_eq!(call(&hs, 10.0), 385.0);
     }
