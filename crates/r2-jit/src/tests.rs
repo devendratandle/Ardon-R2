@@ -142,6 +142,33 @@
     }
 
     #[test]
+    fn jit_index_loop_map_over_vector() {
+        // function(x){ y <- x; for(i in 1:length(x)) y[i] <- x[i]*x[i]; y } → VectorMap
+        let idx = |nm: &str, i: &str| Expr::Index { object: Box::new(sym(nm)), indices: vec![Some(sym(i))] };
+        let lenx = Expr::Call { func: Box::new(sym("length")), args: vec![CallArg { name: None, value: sym("x") }] };
+        let store = Expr::Assign {
+            target: Box::new(idx("y", "i")),
+            value: Box::new(mul(idx("x", "i"), idx("x", "i"))),
+            superassign: false,
+        };
+        let cl = Closure {
+            params: vec![Param { name: Arc::from("x"), default: None, dots: false }],
+            body: Arc::new(Expr::Block(vec![
+                Expr::Assign { target: Box::new(sym("y")), value: Box::new(sym("x")), superassign: false },
+                Expr::For { var: Arc::from("i"), iter: Box::new(Expr::Binary { op: BinOp::Colon, lhs: Box::new(num(1.0)), rhs: Box::new(lenx) }), body: Box::new(store) },
+                sym("y"),
+            ])),
+            env: Env::new_global(),
+        };
+        let h = try_compile_closure(&cl).expect("index-map should JIT");
+        assert_eq!(h.kind(), r2_types::JitKind::VectorMap);
+        let data: Vec<f64> = vec![2.0, 3.0, 4.0];
+        let mut out: Vec<f64> = vec![0.0; 3];
+        assert!(unsafe { h.try_call_vec_map(data.as_ptr(), out.as_mut_ptr(), 3) });
+        assert_eq!(out, vec![4.0, 9.0, 16.0]);
+    }
+
+    #[test]
     fn jit_index_loop_fold_over_vector() {
         // Phase J.2: function(x){ n<-length(x); s<-init; for(i in 1:n) s<-s OP <c(x[i])>; s }
         // recognized as a map-reduce over x (x[i] → element).

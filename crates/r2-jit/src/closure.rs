@@ -202,6 +202,61 @@ pub(crate) fn recognize_index_reduction(body: &r2_types::Expr, v: &str) -> Optio
     Some((mapped, reduce_op))
 }
 
+/// Phase J.2 brick 2 — recognize an index-loop *map* over a vector param:
+/// `function(x){ [n<-length(x);] y <- <alloc>; for(i in 1:len) y[i] <- f(x[i]); y }`.
+/// Returns the per-element map body (`x[i]` → `x`), or `None` (→ fall back).
+pub(crate) fn recognize_index_map(body: &r2_types::Expr, x: &str) -> Option<r2_types::Expr> {
+    use r2_types::Expr::*;
+    let stmts = match body { Block(s) => s, _ => return None };
+    let mut len_var: Option<String> = None;
+    let mut out_var: Option<String> = None;
+    let mut for_stmt: Option<&r2_types::Expr> = None;
+    let mut trailing: Option<String> = None;
+    for st in stmts {
+        match st {
+            Assign { target, value, .. } => {
+                let nm = match target.as_ref() { Symbol(n) => n.to_string(), _ => return None };
+                match value.as_ref() {
+                    Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
+                        && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==x) => { len_var = Some(nm); }
+                    _ => { if out_var.is_some() { return None; } out_var = Some(nm); } // exactly one output alloc
+                }
+            }
+            For { .. } => for_stmt = Some(st),
+            Symbol(nm) => trailing = Some(nm.to_string()),
+            _ => return None,
+        }
+    }
+    let out = out_var?;
+    if trailing.as_deref() != Some(out.as_str()) { return None; }
+    let (ivar, iter, fbody) = match for_stmt? { For { var, iter, body } => (var, iter, body), _ => return None };
+    let len_expr = match iter.as_ref() {
+        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
+            if matches!(lhs.as_ref(), NumLit(v) if *v==1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
+        _ => return None,
+    };
+    let len_ok = match len_expr {
+        Symbol(nm) => len_var.as_deref() == Some(nm.as_ref()),
+        Call { func, args } => matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
+            && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==x),
+        _ => false,
+    };
+    if !len_ok { return None; }
+    // Loop body must be `y[i] <- f(x[i])`.
+    let (t, val) = match fbody.as_ref() { Assign { target, value, .. } => (target, value), _ => return None };
+    match t.as_ref() {
+        Index { object, indices } if indices.len()==1
+            && matches!(object.as_ref(), Symbol(o) if o.as_ref()==out)
+            && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref()==ivar.as_ref()) => {}
+        _ => return None,
+    }
+    if !has_index_vi(val, x, ivar.as_ref()) { return None; }
+    let mapped = subst_vi(val, x, ivar.as_ref());
+    if mentions(&mapped, ivar.as_ref()) || mentions(&mapped, &out) { return None; }
+    if let Some(lv) = &len_var { if mentions(&mapped, lv) { return None; } }
+    Some(mapped)
+}
+
 pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn r2_types::JitHandle>> {
     // Phase R.M — gate the JIT on supported architectures. On aarch64 the
     // engine falls back to the interpreter; statistical outputs are
@@ -267,6 +322,17 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
                 let mut inner_ir = r2_ir::lower_function("__map_reduce_inner__", params, &mapped);
                 inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
                 if let Ok(c) = JitCompiler::compile_vector_map_reduce(&inner_ir, reduce_op) {
+                    return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
+                }
+            }
+        }
+        // Brick 2: index-loop map `for(i in 1:len) y[i] <- f(x[i]); y` → VectorMap.
+        if let Some(mapped) = recognize_index_map(body_ref, &cl.params[0].name) {
+            if body_is_jit_lowerable(&mapped) {
+                let params = vec![(cl.params[0].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real))];
+                let mut inner_ir = r2_ir::lower_function("__index_map_inner__", params, &mapped);
+                inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
+                if let Ok(c) = JitCompiler::compile_vector_map_generic(&inner_ir) {
                     return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
                 }
             }
