@@ -25,6 +25,16 @@ env:
   # Cranelift JIT can be slow to compile in debug. Release-mode CI is
   # closer to how users will actually build the project.
   CARGO_INCREMENTAL: 0
+  # CI builds --release for realistic JIT behaviour, but the *shipped*
+  # profile's fat LTO + single codegen unit makes a whole-workspace
+  # build+test far too slow — on a cache miss (e.g. after a version bump
+  # changes Cargo.lock) it overran the 30-min budget and the job was
+  # cancelled ("operation was canceled"). Override to no-LTO + parallel
+  # codegen for CI only: keeps opt-level 3 (fast JIT at runtime) but cuts
+  # compile time sharply. The real release binaries (release.yml, a
+  # separate workflow) still build with the full fat-LTO profile.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
 jobs:
   build-and-test:

@@ -463,6 +463,7 @@ enum ButtonHover { Min, Max, Close }
 /// click behavior (start a button press, drag-move, or drag-resize).
 #[derive(Debug, Clone, Copy)]
 enum HitZone {
+    #[allow(dead_code)] // matched as a no-op zone; not currently produced
     None,
     Button(ButtonHover),
     TitleBar,

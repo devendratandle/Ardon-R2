@@ -279,6 +279,8 @@ pub(crate) fn render_axis_ticks_ex(p: &PanelRect,
                                 o: &LabelOpts, draw_x: bool) -> String {
     let mut s = String::new();
     let fs = 9.0 * o.cex_axis;
+    // font.axis: 2/4 → bold tick labels (matches R's par(font.axis=)).
+    let fw = if matches!(o.font_axis, 2 | 4) { r#" font-weight="bold""# } else { "" };
     // x-axis tick rotation: las=0 or 1 horizontal, las=2 or 3 vertical.
     let x_rot = matches!(o.las, 2 | 3);
     let y_rot = matches!(o.las, 0 | 3);
@@ -293,13 +295,13 @@ pub(crate) fn render_axis_ticks_ex(p: &PanelRect,
         let ty = p.oy + p.mt + p.ph + 14.0;
         if draw_x && x_rot {
             s.push_str(&format!(
-                r#"<text x="{:.0}" y="{}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}" transform="rotate(-90,{:.0},{})">{}</text>"#,
-                tx, ty, fs, o.col_axis, tx, ty, fmt_tick(xv, xrange)
+                r#"<text x="{:.0}" y="{}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px"{} fill="{}" transform="rotate(-90,{:.0},{})">{}</text>"#,
+                tx, ty, fs, fw, o.col_axis, tx, ty, fmt_tick(xv, xrange)
             ));
         } else if draw_x {
             s.push_str(&format!(
-                r#"<text x="{:.0}" y="{}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{}</text>"#,
-                tx, ty, fs, o.col_axis, fmt_tick(xv, xrange)
+                r#"<text x="{:.0}" y="{}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px"{} fill="{}">{}</text>"#,
+                tx, ty, fs, fw, o.col_axis, fmt_tick(xv, xrange)
             ));
         }
         // y-axis tick label to the left of the panel.
@@ -307,13 +309,13 @@ pub(crate) fn render_axis_ticks_ex(p: &PanelRect,
         let ly = py + 3.0;
         if y_rot {
             s.push_str(&format!(
-                r#"<text x="{}" y="{:.0}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}" transform="rotate(-90,{},{:.0})">{}</text>"#,
-                lx, ly, fs, o.col_axis, lx, ly, fmt_tick(yv, yrange)
+                r#"<text x="{}" y="{:.0}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px"{} fill="{}" transform="rotate(-90,{},{:.0})">{}</text>"#,
+                lx, ly, fs, fw, o.col_axis, lx, ly, fmt_tick(yv, yrange)
             ));
         } else {
             s.push_str(&format!(
-                r#"<text x="{}" y="{:.0}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px" fill="{}">{}</text>"#,
-                lx, ly, fs, o.col_axis, fmt_tick(yv, yrange)
+                r#"<text x="{}" y="{:.0}" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-size="{:.1}px"{} fill="{}">{}</text>"#,
+                lx, ly, fs, fw, o.col_axis, fmt_tick(yv, yrange)
             ));
         }
     }

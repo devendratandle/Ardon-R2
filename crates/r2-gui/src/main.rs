@@ -194,7 +194,6 @@ fn main() -> Result<(), String> {
     // SVG cache key — re-rasterize the GraphPanel only when the engine
     // produces new SVG content. Comparing string length is cheap and
     // catches every plot-mutation we currently emit.
-    let last_svg_len = Rc::new(RefCell::new(0usize));
 
     R2Ui::app("Ardon-R2")
         .theme(theme.clone())
@@ -215,7 +214,6 @@ fn main() -> Result<(), String> {
             let hscroll       = hscroll.clone();
             let frame_counter = frame_counter.clone();
             let did_layout    = did_layout.clone();
-            let last_svg_len  = last_svg_len.clone();
             let quit_requested = quit_requested.clone();
             let quit_dialog    = quit_dialog.clone();
             let settings_dialog = settings_dialog.clone();

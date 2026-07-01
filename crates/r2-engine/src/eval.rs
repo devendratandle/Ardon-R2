@@ -874,7 +874,6 @@ impl Engine {
             Expr::Break => Err(R2Err { msg: String::new(), kind: ErrKind::CtrlBreak }),
             Expr::Next => Err(R2Err { msg: String::new(), kind: ErrKind::CtrlNext }),
             Expr::Dots => Ok(self.lookup_dots(env).unwrap_or(RVal::Null)),
-            _ => err!(Runtime, "cannot evaluate expression"),
         }
     }
 

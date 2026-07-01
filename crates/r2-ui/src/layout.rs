@@ -14,6 +14,7 @@ pub enum Layout {
 
 /// Builder used inside `R2Ui::app(...).mdi(|mdi| { ... })`.
 pub struct LayoutBuilder {
+    #[allow(dead_code)] // reserved builder surface; not read yet
     pub(crate) windows: Vec<Window>,
 }
 

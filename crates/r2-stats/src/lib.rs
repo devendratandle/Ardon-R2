@@ -148,16 +148,6 @@ fn coerce_reals(arg: &RVal) -> Result<Vec<Real>, R2Err> {
     }
 }
 
-fn first_arg(args: &[EvalArg]) -> RVal {
-    args.first().map(|a| a.value.clone()).unwrap_or(RVal::Null)
-}
-
-/// The data argument of a reduction — the first arg that isn't the
-/// `na.rm=` flag (so `mean(na.rm=TRUE, x)` also finds `x`).
-fn data_arg(args: &[EvalArg]) -> Option<&EvalArg> {
-    args.iter().find(|a| a.name.as_deref() != Some("na.rm"))
-}
-
 /// Whether `na.rm=TRUE` (or `=T`, or a non-zero numeric) was passed.
 fn na_rm_flag(args: &[EvalArg]) -> bool {
     args.iter()
