@@ -229,14 +229,14 @@ ever matters. Near-native for *iterative* libraries (bootstrap, MCMC,
 optimisation loops) arrives around J.4. Feasible as a long-horizon effort
 because Cranelift (the backend — the hard part) already exists.
 
-| Phase | Adds | Unlocks |
-|---|---|---|
-| **J.1** | counted `for(v in a:b)` lowering (real loop-carried phi); more builtins as intrinsics | numeric-kernel functions JIT |
-| **J.2** | type inference + specialization; compile *unboxed* (`f64`, not `RVal`); guards + deopt | typed numeric code at native speed, safely |
-| **J.3** | unboxed vectors / matrices / list access inside compiled code | data plumbing stops boxing |
-| **J.4** | inline hot user + builtin calls into the loop | kills per-call dispatch → **iterative source libraries go near-native** |
-| **J.5** | profile-driven tiered dispatch + on-stack replacement | automatic, safe hot/cold tiering |
-| **J.6** | (optional) trace-based JIT across call boundaries | PyPy-class; the last ~2× |
+| Phase | Adds | Unlocks | Status |
+|---|---|---|---|
+| **J.1** | counted `for(v in a:b)` lowering (real loop-carried phi for induction var + accumulators; ±1 step so ascending & R's descending `a:b` both match the interpreter) | scalar-arithmetic, **math-intrinsic**, and **nested** loops JIT (verified ~4000× on 1e7 iters) | ✅ **shipped** |
+| **J.2** | **unboxed vector element access in loops** — lower `Index{v,i}` (currently an opaque `__index__` intrinsic → falls back) to real Cranelift indexed loads/stores; pass vector params as pointers (ABI already exists for `Vector1ToScalar` reductions); infer `v: vector`. First target: `for(i in 1:n) s <- s + v[i]` (today: times out, interpreted). | index-driven numeric kernels JIT | ← **next** |
+| **J.3** | matrices / list access unboxed inside compiled code; guards + deopt for speculated types | data plumbing stops boxing | |
+| **J.4** | inline hot user + builtin calls into the loop | kills per-call dispatch → **iterative source libraries (r2sem) go near-native** | |
+| **J.5** | profile-driven tiered dispatch + on-stack replacement | automatic, safe hot/cold tiering | |
+| **J.6** | (optional) trace-based JIT across call boundaries | PyPy-class; the last ~2× | |
 
 Why native builtins still exist: the standard dynamic-language pattern is
 *interpreter/JIT for breadth + native kernels for the hot 5%*. First-party
