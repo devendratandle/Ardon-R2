@@ -221,7 +221,11 @@ impl Engine {
             types: self.types.clone(),
             methods: self.methods.clone(),
             warnings: Vec::new(),
-            local_scopes: Vec::new(),
+            // Carry the caller's lexical scope stack (a cheap clone; RVals are
+            // Arc-backed) so a mapped closure can still see enclosing-function
+            // locals — e.g. a nested `fit_once` defined in the calling
+            // function. Owned per worker ⇒ no shared mutation, no race.
+            local_scopes: self.local_scopes.clone(),
             jit_cache: HashMap::new(),
             jit_enabled: self.jit_enabled,
             nse_stack: Vec::new(),
@@ -990,9 +994,17 @@ pub(crate) fn bi_mclapply(e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
         (0..n_el).map(|i| run_i(&mut e.fork_worker(), i)).collect()
     } else {
         let eng: &Engine = &*e;
-        (0..n_el).into_par_iter()
-            .map_init(|| eng.fork_worker(), |worker, i| run_i(worker, i))
-            .collect()
+        // R2's tree-walking interpreter recurses deeply; give workers a big
+        // stack (Rayon's default ~2 MB overflows on nested library calls).
+        let pool = rayon::ThreadPoolBuilder::new()
+            .stack_size(64 * 1024 * 1024)
+            .build()
+            .map_err(|err| R2Err { msg: format!("mclapply: thread pool: {err}"), kind: ErrKind::Runtime })?;
+        pool.install(|| {
+            (0..n_el).into_par_iter()
+                .map_init(|| eng.fork_worker(), |worker, i| run_i(worker, i))
+                .collect()
+        })
     };
 
     let mut out = Vec::with_capacity(results.len());
