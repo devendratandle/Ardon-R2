@@ -104,8 +104,25 @@ pub fn current_seed() -> u64 { SEED_STATE.load(Ordering::Relaxed) }
 pub fn set_seed(v: u64) { SEED_STATE.store(v, Ordering::Relaxed) }
 
 /// Advance the global seed atomically (CAS loop) and return a uniform
-/// f64 in `[0, 1)`. Thread-safe.
+thread_local! {
+    /// Phase P — per-worker RNG stream. When `Some`, `next_random()` advances
+    /// this thread-local seed instead of the shared atomic, giving parallel
+    /// workers independent, reproducible streams (seeded per task in
+    /// `mclapply`). `None` = use the global stream (the normal serial case).
+    static WORKER_SEED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Install (or clear) the current thread's per-worker RNG stream (Phase P).
+pub fn set_worker_seed(s: Option<u64>) { WORKER_SEED.with(|c| c.set(s)); }
+
+/// f64 in `[0, 1)`. Thread-safe. Uses the per-worker stream if one is set
+/// (parallel apply), else the shared atomic (serial).
 pub fn next_random() -> f64 {
+    if let Some(s) = WORKER_SEED.with(|c| c.get()) {
+        let new = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        WORKER_SEED.with(|c| c.set(Some(new)));
+        return (new >> 11) as f64 / (1u64 << 53) as f64;
+    }
     let mut old = SEED_STATE.load(Ordering::Relaxed);
     loop {
         let new = old.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);

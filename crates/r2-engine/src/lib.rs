@@ -971,21 +971,60 @@ pub(crate) fn bi_mclapply(e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
         _ => return err!(Runtime, "mclapply: x must be a vector or list"),
     };
 
-    // Serial for trivially small inputs (thread overhead not worth it).
-    let run_one = |worker: &mut Engine, elem: &RVal| -> Result<RVal, R2Err> {
+    // Per-element RNG stream (Phase P): seed derived from the element index
+    // and the current global seed, so `sample()`/`rnorm()` inside FUN are
+    // independent per task AND reproducible regardless of core count (better
+    // than R's default parallel RNG). set.seed() controls the base.
+    let base = r2_stats::rng::current_seed();
+    let seed_for = |i: usize| base ^ ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(i as u64 + 1));
+    let run_i = |worker: &mut Engine, i: usize| -> Result<RVal, R2Err> {
+        r2_stats::rng::set_worker_seed(Some(seed_for(i)));
         let genv = worker.global_env.clone();
-        worker.call_fn(&f, &[EvalArg { name: None, value: elem.clone() }], &genv)
+        let out = worker.call_fn(&f, &[EvalArg { name: None, value: elems[i].clone() }], &genv);
+        r2_stats::rng::set_worker_seed(None);
+        out
     };
-    let results: Vec<Result<RVal, R2Err>> = if elems.len() < 4 {
-        elems.iter().map(|el| run_one(&mut e.fork_worker(), el)).collect()
+    let n_el = elems.len();
+    // Serial for trivially small inputs (thread overhead not worth it).
+    let results: Vec<Result<RVal, R2Err>> = if n_el < 4 {
+        (0..n_el).map(|i| run_i(&mut e.fork_worker(), i)).collect()
     } else {
         let eng: &Engine = &*e;
-        elems.par_iter()
-            .map_init(|| eng.fork_worker(), |worker, el| run_one(worker, el))
+        (0..n_el).into_par_iter()
+            .map_init(|| eng.fork_worker(), |worker, i| run_i(worker, i))
             .collect()
     };
 
     let mut out = Vec::with_capacity(results.len());
     for r in results { out.push((None, r?)); }
     Ok(RVal::List(out))
+}
+
+/// Phase P — `par.sapply(x, FUN)`: like `mclapply` but simplifies the result
+/// (all length-1 numeric → vector; all equal-length numeric → a matrix with
+/// one column per element; otherwise the list).
+pub(crate) fn bi_par_sapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let items = match bi_mclapply(e, a, env)? {
+        RVal::List(it) => it,
+        other => return Ok(other),
+    };
+    if items.is_empty() { return Ok(RVal::List(items)); }
+    // Try to read every result as a dense numeric vector of equal length.
+    let cols: Option<Vec<Vec<f64>>> = items.iter()
+        .map(|(_, v)| v.as_reals().ok().map(|r| r.into_iter().flatten().collect::<Vec<f64>>()))
+        .collect();
+    if let Some(cols) = cols {
+        let len = cols[0].len();
+        if len >= 1 && cols.iter().all(|c| c.len() == len) {
+            if len == 1 {
+                let flat: Vec<Real> = cols.iter().map(|c| Some(c[0])).collect();
+                return Ok(RVal::Numeric(flat.into(), Attrs::default()));
+            }
+            // column-major matrix: len rows × items cols
+            let mut data = Vec::with_capacity(len * cols.len());
+            for c in &cols { data.extend_from_slice(c); }
+            return Ok(RVal::Matrix(r2_types::Matrix::new(data, len, cols.len())));
+        }
+    }
+    Ok(RVal::List(items))
 }
