@@ -6,7 +6,7 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
-## v0.3.6 (June 2026)
+## v0.3.6 (July 2026)
 
 **Fixed**
 - `factor(x, levels = c(...))` now honours the given levels (set and order);
@@ -17,6 +17,21 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
   parameters before and returned defaults.
 - JIT no longer mis-runs a `for`-loop accumulator inside a function
   (`function(n){ s<-0; for(k in 1:n) s<-s+k; s }` now returns the sum, not 0).
+- `abline(lm(y ~ x))` draws the actual fitted line (intercept/slope read from
+  the model) instead of a 45° `y = x` line.
+- `seq(from, to, length.out = n)` returns exactly `n` evenly spaced points;
+  previously `length.out` was ignored and it fell back to `by = 1`
+  (`seq(0, 2*pi, length.out = 100)` gave 7 points, which broke `matplot` curves).
+- `pairs()` draws axis tick labels on the matrix's outer edges (alternating
+  sides); `barplot`/`boxplot` no longer overlay numeric ticks on the
+  categorical x-axis.
+
+**Graphics**
+- Shared graphical parameters now behave like R's `par()` across **every**
+  plot type (`plot`/`hist`/`matplot`/`barplot`/`boxplot`/`pairs`): `las`
+  (axis-label rotation 0/1/2/3), `col.axis`/`cex.axis`, and per-call `mar=`
+  or `par(mar=)` margins — each with a tuned default. Category labels on
+  bar/box plots rotate with `las` (horizontal default, vertical on `las=2/3`).
 
 **Performance**
 - Element-wise arithmetic (`a + b`, `-`, `*`, `/`) on numeric vectors is now

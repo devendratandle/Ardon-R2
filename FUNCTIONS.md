@@ -315,7 +315,8 @@ pie(x)            Pie chart
 curve(expr,from,to) Plot a function/expression in x (add=TRUE to overlay)
 lines(x,y)        Add a line (data coords; errors if no plot is open)
 points(x,y)       Add points (data coords; col/pch/cex)
-abline(a,b)       Add reference line (also abline(h=) / abline(v=))
+abline(a,b)       Add reference line: intercept/slope, abline(h=)/abline(v=),
+                  or abline(lm(y~x)) to draw a fitted regression line
 text(x,y,labels)  Add text labels at data coordinates (pos=)
 title(main=,...)  Add main/sub/xlab/ylab to the current plot
 axis(side,at=)    Draw an axis (side 1=bottom,2=left,3=top,4=right)

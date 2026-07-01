@@ -108,7 +108,8 @@ Not yet wired:
 
 ### G. Plot types not yet implemented
 
-- [ ] `pairs()` — scatter matrix.
+- [x] `pairs()` — scatter matrix (v0.3.2; outer-edge axis tick labels +
+       shared `las`/`col.axis`/`cex.axis` params added in v0.3.6).
 - [ ] `image()` — heatmap.
 - [ ] `contour()` — contour plot.
 - [ ] `persp()` — 3D surface.
@@ -144,6 +145,7 @@ plot(1:10, (1:10)^2,
      las = 1)                          # horizontal y-axis labels
 ```
 
-Everything in that call respected. The same args on `hist()` /
-`boxplot()` / `barplot()` are accepted (R passes-through) but only
-`main`/`xlab`/`ylab` are honored until item **A** above lands.
+Everything in that call respected. As of v0.3.6 the same graphical params
+(`las`, `col.axis`/`cex.axis`, `mar`/`par(mar)`, and the title/label family)
+are honored on `hist()` / `boxplot()` / `barplot()` / `matplot()` / `pairs()`
+too, not just `plot()` — item **A** has landed.
