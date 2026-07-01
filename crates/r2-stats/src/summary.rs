@@ -3,7 +3,32 @@
 //! `cov`, `quantile`, `range`, `which.min`, `which.max`, `cumsum`,
 //! `cumprod`, `cummax`, `cummin`, `diff`. Pure builtins.
 
-use r2_types::{Attrs, ErrKind, EvalArg, R2Err, RVal, Real};
+use r2_types::{Attrs, ErrKind, EvalArg, Matrix, R2Err, RVal, Real};
+
+/// `cor(X)` for a matrix — the p×p Pearson correlation matrix (column-major).
+fn cor_matrix(m: &Matrix) -> RVal {
+    let (n, p) = (m.nrow, m.ncol);
+    let nf = n as f64;
+    let mut means = vec![0.0f64; p];
+    let mut sds = vec![0.0f64; p];
+    for j in 0..p {
+        let col = &m.data[j * n..j * n + n];
+        let mean = col.iter().sum::<f64>() / nf;
+        let var = col.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (nf - 1.0);
+        means[j] = mean; sds[j] = var.sqrt();
+    }
+    let mut out = vec![0.0f64; p * p];
+    for i in 0..p {
+        for j in i..p {
+            let ci = &m.data[i * n..i * n + n];
+            let cj = &m.data[j * n..j * n + n];
+            let cov = ci.iter().zip(cj).map(|(x, y)| (x - means[i]) * (y - means[j])).sum::<f64>() / (nf - 1.0);
+            let r = if sds[i] == 0.0 || sds[j] == 0.0 { f64::NAN } else { cov / (sds[i] * sds[j]) };
+            out[j * p + i] = r; out[i * p + j] = r;
+        }
+    }
+    RVal::Matrix(Matrix::new(out, p, p))
+}
 
 #[inline]
 fn first(a: &[EvalArg]) -> RVal { a.first().map(|x| x.value.clone()).unwrap_or(RVal::Null) }
@@ -25,6 +50,10 @@ fn rint(n: i32) -> RVal { RVal::Integer(vec![Some(n)].into(), Attrs::default()) 
 // ─────────────────────────────────────────────────────────────────────
 
 pub fn bi_cor(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    // cor(X) on a matrix with no second arg → p×p correlation matrix.
+    if let RVal::Matrix(m) = first(a) {
+        if matches!(nth(a, 1), RVal::Null) { return Ok(cor_matrix(&m)); }
+    }
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
     let pairs: Vec<(f64, f64)> = x.iter().zip(y.iter())

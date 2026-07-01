@@ -294,6 +294,14 @@ pub(crate) fn bi_colMeans(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
             }
             Ok(rnums(&results))
         }
+        RVal::Matrix(m) => {
+            let nrow = m.nrow;
+            let results: Vec<f64> = (0..m.ncol).map(|j| {
+                let s: f64 = (0..nrow).map(|i| m.data[j * nrow + i]).sum();
+                s / nrow as f64
+            }).collect();
+            Ok(rnums(&results))
+        }
         _ => err!(Runtime, "colMeans needs data.frame or matrix"),
     }
 }
