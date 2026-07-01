@@ -142,6 +142,42 @@
     }
 
     #[test]
+    fn jit_index_loop_fold_over_vector() {
+        // Phase J.2: function(x){ n<-length(x); s<-init; for(i in 1:n) s<-s OP <c(x[i])>; s }
+        // recognized as a map-reduce over x (x[i] → element).
+        let assign = |nm: &str, val: Expr| Expr::Assign { target: Box::new(sym(nm)), value: Box::new(val), superassign: false };
+        let idx = |nm: &str, i: &str| Expr::Index { object: Box::new(sym(nm)), indices: vec![Some(sym(i))] };
+        let mkfn = |init: f64, upd: Expr| Closure {
+            params: vec![Param { name: Arc::from("x"), default: None, dots: false }],
+            body: Arc::new(Expr::Block(vec![
+                assign("n", Expr::Call { func: Box::new(sym("length")), args: vec![CallArg { name: None, value: sym("x") }] }),
+                assign("s", num(init)),
+                Expr::For {
+                    var: Arc::from("i"),
+                    iter: Box::new(Expr::Binary { op: BinOp::Colon, lhs: Box::new(num(1.0)), rhs: Box::new(sym("n")) }),
+                    body: Box::new(assign("s", upd)),
+                },
+                sym("s"),
+            ])),
+            env: Env::new_global(),
+        };
+        let data: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        // sum: s <- s + x[i]  → 15
+        let h = try_compile_closure(&mkfn(0.0, add(sym("s"), idx("x", "i")))).expect("index-sum should JIT");
+        assert_eq!(h.kind(), r2_types::JitKind::Vector1ToScalar);
+        assert_eq!(unsafe { h.try_call_vec1(data.as_ptr(), data.len() as i64) }, Some(15.0));
+        // sum of squares: s <- s + x[i]*x[i]  → 55
+        let hq = try_compile_closure(&mkfn(0.0, add(sym("s"), mul(idx("x", "i"), idx("x", "i"))))).expect("index-sumsq should JIT");
+        assert_eq!(unsafe { hq.try_call_vec1(data.as_ptr(), data.len() as i64) }, Some(55.0));
+        // product: s <- s * x[i]  → 120
+        let hp = try_compile_closure(&mkfn(1.0, mul(sym("s"), idx("x", "i")))).expect("index-prod should JIT");
+        assert_eq!(unsafe { hp.try_call_vec1(data.as_ptr(), data.len() as i64) }, Some(120.0));
+        // Non-fold (uses the index, not x[i]) must NOT take this path:
+        // function(x){ s<-0; for(i in 1:length(x)) s<-s+i; s } — recognizer returns None.
+        assert!(recognize_index_reduction(mkfn(0.0, add(sym("s"), sym("i"))).body.as_ref(), "x").is_none());
+    }
+
+    #[test]
     fn try_compile_closure_vector_mean() {
         let body = Expr::Call {
             func: Box::new(sym("mean")),

@@ -232,7 +232,7 @@ because Cranelift (the backend — the hard part) already exists.
 | Phase | Adds | Unlocks | Status |
 |---|---|---|---|
 | **J.1** | counted `for(v in a:b)` lowering (real loop-carried phi for induction var + accumulators; ±1 step so ascending & R's descending `a:b` both match the interpreter) | scalar-arithmetic, **math-intrinsic**, and **nested** loops JIT (verified ~4000× on 1e7 iters) | ✅ **shipped** |
-| **J.2** | **unboxed vector element access in loops** — lower `Index{v,i}` (currently an opaque `__index__` intrinsic → falls back) to real Cranelift indexed loads/stores; pass vector params as pointers (ABI already exists for `Vector1ToScalar` reductions); infer `v: vector`. First target: `for(i in 1:n) s <- s + v[i]` (today: times out, interpreted). | index-driven numeric kernels JIT | ← **next** |
+| **J.2** | unboxed vector element access in loops. **First brick shipped:** index-loop *folds* `for(i in 1:length(v)) s <- s <+/*> f(v[i])` are recognized and routed to the tested fused map-reduce codegen (`v[i]`→element) — `sum(v[i])` over 1e6 went from *timeout* to 0.024 s, correct. **Remaining:** general `Index{v,i}` loads/stores (e.g. `y[i] <- f(x[i])`, two-vector loops) need real Cranelift indexed-load codegen + a vector-param pointer ABI beyond the reduction shape. | index-driven numeric kernels JIT | ◐ **in progress** |
 | **J.3** | matrices / list access unboxed inside compiled code; guards + deopt for speculated types | data plumbing stops boxing | |
 | **J.4** | inline hot user + builtin calls into the loop | kills per-call dispatch → **iterative source libraries (r2sem) go near-native** | |
 | **J.5** | profile-driven tiered dispatch + on-stack replacement | automatic, safe hot/cold tiering | |

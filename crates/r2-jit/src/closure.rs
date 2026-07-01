@@ -82,6 +82,126 @@ pub(crate) fn body_is_jit_lowerable(e: &r2_types::Expr) -> bool {
     }
 }
 
+/// Replace every `v[i]` (`Index{Symbol(v), Symbol(i)}`) with `Symbol(v)` so a
+/// per-iteration contribution becomes a map body over the element. Recurses
+/// through arithmetic / unary / calls (the map-body-eligible shapes).
+fn subst_vi(e: &r2_types::Expr, v: &str, i: &str) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    match e {
+        Index { object, indices } => {
+            if indices.len() == 1 {
+                if let (Symbol(o), Some(Symbol(ix))) = (object.as_ref(), &indices[0]) {
+                    if o.as_ref() == v && ix.as_ref() == i { return Symbol(o.clone()); }
+                }
+            }
+            Index { object: Box::new(subst_vi(object, v, i)), indices: indices.clone() }
+        }
+        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(subst_vi(lhs, v, i)), rhs: Box::new(subst_vi(rhs, v, i)) },
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(subst_vi(expr, v, i)) },
+        Call { func, args } => Call {
+            func: func.clone(),
+            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: subst_vi(&a.value, v, i) }).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Does `e` mention the bare symbol `name` anywhere?
+fn mentions(e: &r2_types::Expr, name: &str) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        Symbol(s) => s.as_ref() == name,
+        Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
+        Unary { expr, .. } => mentions(expr, name),
+        Call { func, args } => mentions(func, name) || args.iter().any(|a| mentions(&a.value, name)),
+        Index { object, indices } => mentions(object, name) || indices.iter().flatten().any(|x| mentions(x, name)),
+        _ => false,
+    }
+}
+
+/// Does `e` contain the exact indexed load `v[i]`?
+fn has_index_vi(e: &r2_types::Expr, v: &str, i: &str) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        Index { object, indices } => {
+            (indices.len() == 1 && matches!(object.as_ref(), Symbol(o) if o.as_ref()==v)
+                && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref()==i))
+                || has_index_vi(object, v, i)
+                || indices.iter().flatten().any(|x| has_index_vi(x, v, i))
+        }
+        Binary { lhs, rhs, .. } => has_index_vi(lhs, v, i) || has_index_vi(rhs, v, i),
+        Unary { expr, .. } => has_index_vi(expr, v, i),
+        Call { args, .. } => args.iter().any(|a| has_index_vi(&a.value, v, i)),
+        _ => false,
+    }
+}
+
+/// Phase J.2 — recognize an index-loop fold over a vector param:
+/// `function(v){ [n <- length(v);] s <- init; for(i in 1:<len>) s <- s <+/*> f(v[i]); s }`.
+/// Returns the per-element map body (with `v[i]` → `v`) and the reduce op, or
+/// `None` if the body isn't exactly this shape (→ fall back to interpreter).
+pub(crate) fn recognize_index_reduction(body: &r2_types::Expr, v: &str) -> Option<(r2_types::Expr, FusedReduceOp)> {
+    use r2_types::Expr::*;
+    let stmts = match body { Block(s) => s, _ => return None };
+    let mut len_var: Option<String> = None;
+    let mut acc: Option<String> = None;
+    let mut init: Option<f64> = None;
+    let mut for_stmt: Option<&r2_types::Expr> = None;
+    let mut trailing: Option<String> = None;
+    for st in stmts {
+        match st {
+            Assign { target, value, .. } => {
+                let nm = match target.as_ref() { Symbol(n) => n.to_string(), _ => return None };
+                match value.as_ref() {
+                    Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
+                        && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==v) => { len_var = Some(nm); }
+                    NumLit(x) => { acc = Some(nm); init = Some(*x); }
+                    IntLit(x) => { acc = Some(nm); init = Some(*x as f64); }
+                    _ => return None,
+                }
+            }
+            For { .. } => for_stmt = Some(st),
+            Symbol(nm) => trailing = Some(nm.to_string()),
+            _ => return None,
+        }
+    }
+    let acc = acc?; let init = init?;
+    if trailing.as_deref() != Some(acc.as_str()) { return None; }
+    let (ivar, iter, fbody) = match for_stmt? { For { var, iter, body } => (var, iter, body), _ => return None };
+    let len_expr = match iter.as_ref() {
+        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
+            if matches!(lhs.as_ref(), NumLit(x) if *x==1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
+        _ => return None,
+    };
+    let len_ok = match len_expr {
+        Symbol(nm) => len_var.as_deref() == Some(nm.as_ref()),
+        Call { func, args } => matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
+            && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==v),
+        _ => false,
+    };
+    if !len_ok { return None; }
+    let (t, val) = match fbody.as_ref() { Assign { target, value, .. } => (target, value), _ => return None };
+    if !matches!(t.as_ref(), Symbol(nm) if nm.as_ref()==acc) { return None; }
+    let (op, contrib) = match val.as_ref() {
+        Binary { op, lhs, rhs } => {
+            if matches!(lhs.as_ref(), Symbol(nm) if nm.as_ref()==acc) { (*op, rhs.as_ref()) }
+            else if matches!(rhs.as_ref(), Symbol(nm) if nm.as_ref()==acc) { (*op, lhs.as_ref()) }
+            else { return None; }
+        }
+        _ => return None,
+    };
+    let reduce_op = match op {
+        r2_types::BinOp::Add if init == 0.0 => FusedReduceOp::Sum,
+        r2_types::BinOp::Mul if init == 1.0 => FusedReduceOp::Prod,
+        _ => return None,
+    };
+    if !has_index_vi(contrib, v, ivar.as_ref()) { return None; } // must actually fold v
+    let mapped = subst_vi(contrib, v, ivar.as_ref());
+    // Reject if the element body still references the loop index or accumulator.
+    if mentions(&mapped, ivar.as_ref()) || mentions(&mapped, &acc) { return None; }
+    Some((mapped, reduce_op))
+}
+
 pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn r2_types::JitHandle>> {
     // Phase R.M — gate the JIT on supported architectures. On aarch64 the
     // engine falls back to the interpreter; statistical outputs are
@@ -133,6 +253,24 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
         }
     } else {
         body_ref = cl.body.as_ref();
+    }
+
+    // Phase J.2 — index-loop fold over a vector param:
+    //   function(v){ [n<-length(v);] s<-init; for(i in 1:len) s<-s <+/*> f(v[i]); s }
+    // Recognized as a map-reduce over v (v[i] → element), reusing the tested
+    // fused map-reduce codegen — no new indexed-load codegen. Runs BEFORE the
+    // allowlist gate, which would otherwise reject the `Index` in the body.
+    if cl.params.len() == 1 {
+        if let Some((mapped, reduce_op)) = recognize_index_reduction(body_ref, &cl.params[0].name) {
+            if body_is_jit_lowerable(&mapped) {
+                let params = vec![(cl.params[0].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real))];
+                let mut inner_ir = r2_ir::lower_function("__map_reduce_inner__", params, &mapped);
+                inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
+                if let Ok(c) = JitCompiler::compile_vector_map_reduce(&inner_ir, reduce_op) {
+                    return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
+                }
+            }
+        }
     }
 
     // Eligibility gate: bail (→ interpreter) if the body contains any
