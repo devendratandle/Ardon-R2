@@ -71,7 +71,7 @@ pub(crate) fn base_table() -> Vec<(&'static str, BuiltinFn)> {
         ("cummax",bi_cummax),("cummin",bi_cummin),
         ("filter",bi_filter),("select",bi_select),("arrange",bi_arrange),("mutate",bi_mutate),
         ("factor",bi_factor),("names",bi_names),("nrow",bi_nrow),("ncol",bi_ncol),
-        ("table",bi_table),("sapply",bi_sapply),("lapply",bi_lapply),("mapply",bi_mapply),("vapply",bi_vapply),
+        ("table",bi_table),("sapply",bi_sapply),("lapply",bi_lapply),("mapply",bi_mapply),("vapply",bi_vapply),("mclapply",bi_mclapply),("par.lapply",bi_mclapply),
         // data manipulation
         ("rbind",bi_rbind),("cbind",bi_cbind),("merge",bi_merge),
         // NA handling

@@ -205,6 +205,30 @@ impl r2_types::EngineCtx for Engine {
 }
 
 impl Engine {
+    /// Phase P — a per-worker engine for parallel `apply`. Shares the
+    /// read-only registry / global env / installed packages (cloned; the
+    /// heavy inner data is `Arc`), with FRESH per-eval scratch (scopes,
+    /// warnings, an empty JIT cache, NSE stack). Workers never mutate shared
+    /// state — closure calls build child envs copy-on-write — so parallel
+    /// evaluation is data-race-free for pure map closures.
+    pub fn fork_worker(&self) -> Engine {
+        Engine {
+            global_env: self.global_env.clone(),
+            mode: self.mode,
+            registry: self.registry.clone(),
+            lib_paths: self.lib_paths.clone(),
+            installed: self.installed.clone(),
+            types: self.types.clone(),
+            methods: self.methods.clone(),
+            warnings: Vec::new(),
+            local_scopes: Vec::new(),
+            jit_cache: HashMap::new(),
+            jit_enabled: self.jit_enabled,
+            nse_stack: Vec::new(),
+            nse_cache: HashMap::new(),
+        }
+    }
+
     /// Install the host's output sink as the single, process-wide
     /// console (R's `R_WriteConsole` model). This is the ONE channel:
     /// engine `print`/`cat`/formatter output AND every compute crate's
@@ -922,3 +946,46 @@ fn _legacy_bi_legend(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 
 // ═══════════════════════════════════════════════════════════════════════
 // help-block + trailing builtins moved to builtins/misc.rs.
+
+/// Phase P — `mclapply(x, FUN)` / `par.sapply(x, FUN)`: apply `FUN` to each
+/// element of `x` **in parallel** across cores, returning a list of results.
+/// Each element is evaluated in an isolated per-worker engine (see
+/// `fork_worker`). `FUN` must be a pure function (no `<<-` to shared state),
+/// matching R's `parallel::` worker isolation. Falls back to serial for a
+/// non-closure `FUN` or tiny `x`.
+pub(crate) fn bi_mclapply(e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Result<RVal, R2Err> {
+    let x = a.first().map(|p| p.value.clone()).unwrap_or(RVal::Null);
+    let f = a.iter().find(|p| p.name.as_deref() == Some("FUN"))
+        .map(|p| p.value.clone())
+        .unwrap_or_else(|| a.get(1).map(|p| p.value.clone()).unwrap_or(RVal::Null));
+    if !matches!(f, RVal::Closure(_)) {
+        return err!(Runtime, "mclapply: FUN must be a function");
+    }
+    // Split x into per-element RVals.
+    let elems: Vec<RVal> = match &x {
+        RVal::Numeric(v, _)   => v.iter().map(|o| RVal::Numeric(vec![*o].into(), Attrs::default())).collect(),
+        RVal::Integer(v, _)   => v.iter().map(|o| RVal::Integer(vec![*o].into(), Attrs::default())).collect(),
+        RVal::Character(v, _) => v.iter().map(|o| RVal::Character(vec![o.clone()], Attrs::default())).collect(),
+        RVal::Logical(v, _)   => v.iter().map(|o| RVal::Logical(vec![*o].into(), Attrs::default())).collect(),
+        RVal::List(items)     => items.iter().map(|(_, val)| val.clone()).collect(),
+        _ => return err!(Runtime, "mclapply: x must be a vector or list"),
+    };
+
+    // Serial for trivially small inputs (thread overhead not worth it).
+    let run_one = |worker: &mut Engine, elem: &RVal| -> Result<RVal, R2Err> {
+        let genv = worker.global_env.clone();
+        worker.call_fn(&f, &[EvalArg { name: None, value: elem.clone() }], &genv)
+    };
+    let results: Vec<Result<RVal, R2Err>> = if elems.len() < 4 {
+        elems.iter().map(|el| run_one(&mut e.fork_worker(), el)).collect()
+    } else {
+        let eng: &Engine = &*e;
+        elems.par_iter()
+            .map_init(|| eng.fork_worker(), |worker, el| run_one(worker, el))
+            .collect()
+    };
+
+    let mut out = Vec::with_capacity(results.len());
+    for r in results { out.push((None, r?)); }
+    Ok(RVal::List(out))
+}

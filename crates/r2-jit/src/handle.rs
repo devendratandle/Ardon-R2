@@ -12,6 +12,14 @@ pub struct CompiledFn {
     pub(crate) _module: JITModule,
 }
 
+// SAFETY (Phase P): `ptr` points at finalized, immutable, reentrant native
+// code; `_module` owns that executable memory read-only after
+// `finalize_definitions` and is never mutated afterwards. Calling the compiled
+// function from multiple threads is data-race-free (pure arithmetic, no shared
+// mutable state). We only ever *call* through a shared `&self`, never mutate.
+unsafe impl Send for CompiledFn {}
+unsafe impl Sync for CompiledFn {}
+
 impl std::fmt::Debug for CompiledFn {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "CompiledFn {{ kind: {:?}, arity: {}, ptr: {:p} }}", self.kind, self.arity, self.ptr)

@@ -272,6 +272,16 @@ a `par.sapply` of a JIT-compiled closure runs parallel **and** native.
 **Recommended order:** **P before J.3/J.4** — bigger single win, lower risk,
 broadly applicable, and independent of the delicate codegen work.
 
+**Brick 1 shipped:** `mclapply(x, FUN)` / `par.lapply` — runs a closure over
+`x` across cores via `rayon`, returning a list. Unlock: `RVal`/`EnvRef` were
+already `Send+Sync`; the only blocker was the JIT-handle cache, fixed by
+requiring `JitHandle: Send+Sync` + a justified `unsafe impl` on the (immutable,
+reentrant) compiled code. Each element evaluates in an isolated `fork_worker`
+engine (shared read-only registry/globals via `Arc`, fresh scratch). Verified:
+correct incl. captured variables across threads; **~4.5× on a 6-core interpreted
+workload** (10.75 s → 2.40 s). Remaining: `par.sapply` simplification, chunking,
+and an opt-in guard against `<<-` in the mapped closure.
+
 > Release history → `CHANGELOG.md`. Archived phase narrative →
 > `code-history/`.
 

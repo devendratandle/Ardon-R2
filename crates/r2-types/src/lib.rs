@@ -174,7 +174,13 @@ pub enum JitKind {
 /// Object-safe handle to a JIT-compiled function. Lives in r2-jit (and any
 /// future backends); declared here so `r2-engine` can hold one without a
 /// direct dependency on `r2-jit`.
-pub trait JitHandle: std::fmt::Debug {
+// `Send + Sync`: a JIT handle wraps immutable, reentrant native code (a raw
+// function pointer kept alive by an owned module). Sharing it across threads
+// for *calling* is safe — the code is read-only after finalize and has no
+// shared mutable state. Required so `Engine` (which caches handles) can be
+// used by parallel workers (Phase P). The concrete impl asserts this via
+// `unsafe impl Send + Sync` with the same justification.
+pub trait JitHandle: std::fmt::Debug + Send + Sync {
     /// Specialization shape — engine uses this to pick the right call method.
     fn kind(&self) -> JitKind;
     /// Number of formal parameters (in source units, not ABI slots).

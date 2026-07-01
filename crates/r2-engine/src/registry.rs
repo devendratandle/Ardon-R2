@@ -34,6 +34,7 @@ pub enum PackageTier {
     Addon,
 }
 
+#[derive(Clone)]
 pub struct FunctionRegistry {
     /// pub(crate) so the Engine eval loop in `lib.rs` can iterate
     /// layers directly. External crates use the methods.
