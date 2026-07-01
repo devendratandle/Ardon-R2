@@ -213,6 +213,36 @@ is complete.
 
 Pluggable accelerators behind the kernel/Oracle boundary.
 
+### Phase J — Type-specializing JIT (the "fastest **and** safest" bet)
+
+**Goal:** make *modular, pure-R2 source libraries* run at near-native speed
+without an unsafe escape hatch. R forces a choice — fast (unsafe C
+extensions) *or* safe (slow pure-R). R2's JIT compiles R2's **checked**
+semantics to native via Cranelift, so speed and safety are not traded off.
+Every phase keeps a hard invariant: **guards check assumptions on entry and
+deopt to the interpreter on violation — the JIT never emits unsafe code.**
+
+Chosen direction: **expand the JIT; skip a bytecode VM** (tiered model =
+AST-interpret cold code → JIT hot code directly). A bytecode tier (~2–3×
+baseline uplift, R-proven) is optional and only built if cold-code startup
+ever matters. Near-native for *iterative* libraries (bootstrap, MCMC,
+optimisation loops) arrives around J.4. Feasible as a long-horizon effort
+because Cranelift (the backend — the hard part) already exists.
+
+| Phase | Adds | Unlocks |
+|---|---|---|
+| **J.1** | counted `for(v in a:b)` lowering (real loop-carried phi); more builtins as intrinsics | numeric-kernel functions JIT |
+| **J.2** | type inference + specialization; compile *unboxed* (`f64`, not `RVal`); guards + deopt | typed numeric code at native speed, safely |
+| **J.3** | unboxed vectors / matrices / list access inside compiled code | data plumbing stops boxing |
+| **J.4** | inline hot user + builtin calls into the loop | kills per-call dispatch → **iterative source libraries go near-native** |
+| **J.5** | profile-driven tiered dispatch + on-stack replacement | automatic, safe hot/cold tiering |
+| **J.6** | (optional) trace-based JIT across call boundaries | PyPy-class; the last ~2× |
+
+Why native builtins still exist: the standard dynamic-language pattern is
+*interpreter/JIT for breadth + native kernels for the hot 5%*. First-party
+hot kernels (`lm`, `plssem`, …) stay native builtins; J.4 is what lets
+*third-party source* libraries reach the same class without engine edits.
+
 > Release history → `CHANGELOG.md`. Archived phase narrative →
 > `code-history/`.
 
