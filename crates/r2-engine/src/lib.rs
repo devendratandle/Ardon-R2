@@ -953,13 +953,44 @@ fn _legacy_bi_legend(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 /// JIT). The developer feedback loop for writing fast R2 libraries. (J.5
 /// groundwork / execution explainability.)
 pub(crate) fn bi_explain(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Result<RVal, R2Err> {
-    match a.first().map(|p| &p.value) {
-        Some(RVal::Closure(cl)) => {
-            let verdict = r2_jit::explain_closure(cl);
-            Ok(RVal::Character(vec![Some(Arc::from(verdict.as_str()))], Attrs::default()))
-        }
-        _ => err!(Runtime, "explain: argument must be a function"),
+    let v = match a.first().map(|p| &p.value) {
+        Some(v) => v,
+        None => return err!(Runtime, "explain: needs an argument (a function or data)"),
+    };
+    // A function → JIT execution plan.
+    if let RVal::Closure(cl) = v {
+        let verdict = r2_jit::explain_closure(cl);
+        return Ok(RVal::Character(vec![Some(Arc::from(verdict.as_str()))], Attrs::default()));
     }
+    // Data → size + architecture + how the Oracle will dispatch work on it.
+    let hw = r2_oracle::hw();
+    let (n, shape, mm): (usize, String, Option<(usize, usize)>) = match v {
+        RVal::Matrix(m) => (m.nrow * m.ncol, format!("matrix {}x{}", m.nrow, m.ncol), Some((m.nrow, m.ncol))),
+        RVal::DataFrame(df) => (df.nrow() * df.columns.len(), format!("data.frame {}x{}", df.nrow(), df.columns.len()), None),
+        RVal::Numeric(x, _) => (x.len(), format!("numeric vector, length {}", x.len()), None),
+        RVal::Integer(x, _) => (x.len(), format!("integer vector, length {}", x.len()), None),
+        RVal::Logical(x, _) => (x.len(), format!("logical vector, length {}", x.len()), None),
+        RVal::Character(x, _) => (x.len(), format!("character vector, length {}", x.len()), None),
+        RVal::List(x) => (x.len(), format!("list, {} elements", x.len()), None),
+        other => (1, other.type_name().to_string(), None),
+    };
+    let method = |op| if r2_oracle::dispatch(op, r2_oracle::Shape::n(n)) == r2_oracle::Backend::Rayon {
+        format!("PARALLEL ({} cores)", hw.cores)
+    } else { "serial".to_string() };
+    let simd = if hw.has_avx512 { " +AVX-512" } else if hw.has_avx2 { " +AVX2" } else if hw.has_fma { " +FMA" } else { "" };
+    let mut s = String::new();
+    s.push_str(&format!("data:     {shape}  (~{} KB in memory)\n", (n * 8) / 1024 + 1));
+    s.push_str(&format!("hardware: {} / {}, {} cores{simd}\n", hw.arch, hw.os, hw.cores));
+    s.push_str(&format!("method — reductions (sum/mean/sd):   {}\n", method(r2_oracle::Op::Reduction)));
+    s.push_str(&format!("method — element-wise (a+b, f(x)):   {}\n", method(r2_oracle::Op::PerElementMap)));
+    if let Some((nr, nc)) = mm {
+        let mmb = if r2_oracle::dispatch(r2_oracle::Op::MatMul, r2_oracle::Shape::nmk(nr, nc, nc)) == r2_oracle::Backend::Rayon {
+            format!("PARALLEL ({} cores)", hw.cores)
+        } else { "serial".to_string() };
+        s.push_str(&format!("method — matrix multiply:            {mmb}\n"));
+    }
+    s.push_str("(parallel ≈ that many cores faster than serial; the Oracle picks per data size)");
+    Ok(RVal::Character(vec![Some(Arc::from(s.as_str()))], Attrs::default()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
