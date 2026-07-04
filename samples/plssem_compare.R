@@ -4,7 +4,8 @@
 # Compares cSEM's PLS-SEM estimates + wall-clock against R2's plssem().
 library(cSEM)
 
-d <- read.csv("samples/plssem_data.csv", row.names = 1)
+# R2's write.csv omits R's leading row-names column, so read plain.
+d <- read.csv("samples/plssem_data.csv")
 
 model <- "
   Anxiety    ~ Stress

@@ -319,6 +319,180 @@ pub(crate) fn compile_map_reduce_inner(
     Ok(CompiledFn { ptr, arity: 1, kind: r2_types::JitKind::Vector1ToScalar, _module: module })
 }
 
+/// Phase J.2 — fused BINARY map-reduce: `reduce(f(a[i], b[i]))` over two
+/// same-length vectors → scalar (e.g. `sum(x*w)` dot product). Signature
+/// `(a_ptr, b_ptr, len) -> f64`. Mirrors `compile_map_reduce_inner` exactly
+/// but loads from two pointers and binds two inner params per iteration.
+pub(crate) fn compile_binary_map_reduce_inner(
+    body_ir: &IrFunc,
+    reduce_op: FusedReduceOp,
+) -> JitResult<CompiledFn> {
+    if body_ir.blocks.is_empty() {
+        return Err(JitError::Unsupported("empty IR body".into()));
+    }
+    if body_ir.params.len() != 2 {
+        return Err(JitError::Unsupported("binary map-reduce expects 2 inner params".into()));
+    }
+    let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+        .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
+    register_math_symbols(&mut jit_builder);
+    let mut module = JITModule::new(jit_builder);
+    let math_ids = declare_math_imports(&mut module)?;
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64)); // a_ptr
+    sig.params.push(AbiParam::new(types::I64)); // b_ptr
+    sig.params.push(AbiParam::new(types::I64)); // len
+    sig.returns.push(AbiParam::new(types::F64));
+
+    let func_id = module
+        .declare_function("__jit_binary_map_reduce", Linkage::Export, &sig)
+        .map_err(|e| JitError::CraneliftError(format!("declare: {:?}", e)))?;
+
+    let mut ctx = module.make_context();
+    ctx.func.signature = sig;
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let math_refs: HashMap<&'static str, cranelift::prelude::codegen::ir::FuncRef> =
+            math_ids.iter().map(|(k, id)| (*k, module.declare_func_in_func(*id, &mut bcx.func))).collect();
+        let math_refs_opt: MathRefs<'_> = Some(&math_refs);
+
+        let entry  = bcx.create_block();
+        let header = bcx.create_block();
+        let load_b = bcx.create_block();
+        let exit   = bcx.create_block();
+        bcx.append_block_param(header, types::I64);
+        bcx.append_block_param(header, types::F64);
+        bcx.append_block_param(load_b, types::I64);
+        bcx.append_block_param(load_b, types::F64);
+        bcx.append_block_param(exit,   types::F64);
+
+        let identity = match reduce_op { FusedReduceOp::Sum => 0.0, FusedReduceOp::Prod => 1.0 };
+
+        let mut block_map: HashMap<u32, Block> = HashMap::new();
+        let mut phi_info: HashMap<u32, PhiInfo> = HashMap::new();
+        for blk in &body_ir.blocks {
+            let cl = bcx.create_block();
+            block_map.insert(blk.id.0, cl);
+            bcx.append_block_param(cl, types::I64);
+            bcx.append_block_param(cl, types::F64);
+            let mut info = PhiInfo { dst_regs: Vec::new(), sources_per_phi: Vec::new() };
+            for inst in &blk.insts {
+                if let IrInst::Phi { dst, sources, .. } = inst {
+                    bcx.append_block_param(cl, types::F64);
+                    info.dst_regs.push(*dst);
+                    let map: HashMap<u32, VReg> = sources.iter().map(|(b, v)| (b.0, *v)).collect();
+                    info.sources_per_phi.push(map);
+                } else { break; }
+            }
+            phi_info.insert(blk.id.0, info);
+        }
+        let ir_entry_cl = *block_map.get(&body_ir.entry.0).ok_or(JitError::UndefinedBlock(body_ir.entry))?;
+        bcx.append_block_param(ir_entry_cl, types::F64); // a[i]
+        bcx.append_block_param(ir_entry_cl, types::F64); // b[i]
+
+        bcx.append_block_params_for_function_params(entry);
+        bcx.switch_to_block(entry);
+        let entry_params: Vec<Value> = bcx.block_params(entry).to_vec();
+        let a_ptr = entry_params[0];
+        let b_ptr = entry_params[1];
+        let len   = entry_params[2];
+        let zero_i = bcx.ins().iconst(types::I64, 0);
+        let id_v = bcx.ins().f64const(identity);
+        bcx.ins().jump(header, &[zero_i, id_v]);
+
+        bcx.switch_to_block(header);
+        let i_h = bcx.block_params(header)[0];
+        let acc_h = bcx.block_params(header)[1];
+        let lt = bcx.ins().icmp(IntCC::SignedLessThan, i_h, len);
+        bcx.ins().brif(lt, load_b, &[i_h, acc_h], exit, &[acc_h]);
+
+        bcx.switch_to_block(load_b);
+        let i_l = bcx.block_params(load_b)[0];
+        let acc_l = bcx.block_params(load_b)[1];
+        let eight = bcx.ins().iconst(types::I64, 8);
+        let off = bcx.ins().imul(i_l, eight);
+        let mflags = MemFlags::trusted();
+        let a_addr = bcx.ins().iadd(a_ptr, off);
+        let a_elem = bcx.ins().load(types::F64, mflags, a_addr, 0);
+        let b_addr = bcx.ins().iadd(b_ptr, off);
+        let b_elem = bcx.ins().load(types::F64, mflags, b_addr, 0);
+        bcx.ins().jump(ir_entry_cl, &[i_l, acc_l, a_elem, b_elem]);
+
+        let mut env: HashMap<u32, Value> = HashMap::new();
+        for blk in &body_ir.blocks {
+            let cl = block_map[&blk.id.0];
+            bcx.switch_to_block(cl);
+            let cl_params: Vec<Value> = bcx.block_params(cl).to_vec();
+            let i_here = cl_params[0];
+            let acc_here = cl_params[1];
+            let phi_count = phi_info[&blk.id.0].dst_regs.len();
+            for (k, dst) in phi_info[&blk.id.0].dst_regs.iter().enumerate() {
+                env.insert(dst.0, cl_params[2 + k]);
+            }
+            if blk.id == body_ir.entry {
+                let a_e = cl_params[2 + phi_count];
+                let b_e = cl_params[2 + phi_count + 1];
+                env.insert(body_ir.params[0].2.0, a_e);
+                env.insert(body_ir.params[1].2.0, b_e);
+            }
+            for inst in blk.insts.iter().skip(phi_count) {
+                let v = lower_inst(&mut bcx, inst, &env, math_refs_opt)?;
+                env.insert(inst.dst().0, v);
+            }
+            match &blk.term {
+                IrTerm::Return(Some(reg)) => {
+                    let v = *env.get(&reg.0).ok_or(JitError::UndefinedVReg(*reg))?;
+                    let new_acc = match reduce_op {
+                        FusedReduceOp::Sum => bcx.ins().fadd(acc_here, v),
+                        FusedReduceOp::Prod => bcx.ins().fmul(acc_here, v),
+                    };
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let next_i = bcx.ins().iadd(i_here, one);
+                    bcx.ins().jump(header, &[next_i, new_acc]);
+                }
+                IrTerm::Return(None) => {
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let next_i = bcx.ins().iadd(i_here, one);
+                    bcx.ins().jump(header, &[next_i, acc_here]);
+                }
+                IrTerm::Jump(target) => {
+                    let target_cl = *block_map.get(&target.0).ok_or(JitError::UndefinedBlock(*target))?;
+                    let mut args = vec![i_here, acc_here];
+                    args.extend(phi_args(&blk.id, target, &phi_info, &env)?);
+                    bcx.ins().jump(target_cl, &args);
+                }
+                IrTerm::Branch { cond, then_blk, else_blk } => {
+                    let c = *env.get(&cond.0).ok_or(JitError::UndefinedVReg(*cond))?;
+                    let zero = bcx.ins().f64const(0.0);
+                    let cond_b = bcx.ins().fcmp(FloatCC::NotEqual, c, zero);
+                    let then_cl = *block_map.get(&then_blk.0).ok_or(JitError::UndefinedBlock(*then_blk))?;
+                    let else_cl = *block_map.get(&else_blk.0).ok_or(JitError::UndefinedBlock(*else_blk))?;
+                    let mut then_args = vec![i_here, acc_here];
+                    then_args.extend(phi_args(&blk.id, then_blk, &phi_info, &env)?);
+                    let mut else_args = vec![i_here, acc_here];
+                    else_args.extend(phi_args(&blk.id, else_blk, &phi_info, &env)?);
+                    bcx.ins().brif(cond_b, then_cl, &then_args, else_cl, &else_args);
+                }
+                IrTerm::Unreachable => { bcx.ins().trap(TrapCode::UnreachableCodeReached); }
+            }
+        }
+
+        bcx.switch_to_block(exit);
+        let final_acc = bcx.block_params(exit)[0];
+        bcx.ins().return_(&[final_acc]);
+        bcx.seal_all_blocks();
+        bcx.finalize();
+    }
+
+    module.define_function(func_id, &mut ctx).map_err(|e| JitError::CraneliftError(format!("define: {:?}", e)))?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().map_err(|e| JitError::CraneliftError(format!("finalize: {:?}", e)))?;
+    let ptr = module.get_finalized_function(func_id);
+    Ok(CompiledFn { ptr, arity: 2, kind: r2_types::JitKind::Vector2ToScalar, _module: module })
+}
+
 /// Shared codegen for SIMD f64x2 N-input vector maps. Emits a SIMD loop
 /// with stride 2 over the bulk + a scalar remainder loop for the tail.
 pub(crate) fn compile_vector_n_simd_map(

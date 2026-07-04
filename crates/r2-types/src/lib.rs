@@ -158,6 +158,10 @@ pub enum JitKind {
     Scalar,
     /// `(*const f64, i64) -> f64` — one f64 vector in, one scalar out.
     Vector1ToScalar,
+    /// `(*const f64, *const f64, i64) -> f64` — TWO same-length f64 vectors in,
+    /// one scalar out. Fused binary map-reduce, e.g. `sum(x*w)` (dot product).
+    /// Phase J.2.
+    Vector2ToScalar,
     /// `(*const f64, *mut f64, i64) -> ()` — element-wise vector → vector.
     /// Caller pre-allocates the output buffer of the same length.
     VectorMap,
@@ -191,6 +195,9 @@ pub trait JitHandle: std::fmt::Debug + Send + Sync {
     /// Vector1ToScalar. SAFETY contract: `ptr` must point to `len` valid f64s.
     /// Default impl returns None so existing impls compile unchanged.
     unsafe fn try_call_vec1(&self, _ptr: *const f64, _len: i64) -> Option<f64> { None }
+    /// Vector2ToScalar dispatch (Phase J.2) — fused binary map-reduce.
+    /// SAFETY: `a_ptr`/`b_ptr` must each reference `len` valid f64s.
+    unsafe fn try_call_vec2(&self, _a_ptr: *const f64, _b_ptr: *const f64, _len: i64) -> Option<f64> { None }
     /// VectorMap dispatch (Phase C.4). SAFETY: `in_ptr` and `out_ptr` must
     /// each point to `len` valid f64s; out_ptr is written to.
     unsafe fn try_call_vec_map(&self, _in_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }

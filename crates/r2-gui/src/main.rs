@@ -130,6 +130,10 @@ fn main() -> Result<(), String> {
         r2_ui::Scrollbar::new(r2_ui::ScrollOrientation::Vertical)));
     let hscroll = Rc::new(RefCell::new(
         r2_ui::Scrollbar::new(r2_ui::ScrollOrientation::Horizontal)));
+    // Previous frame's input text — lets us tell "user typed" from "user
+    // scrolled". Horizontal cursor-follow only runs on a typing change, so
+    // a manual drag of the bottom scrollbar isn't snapped back every frame.
+    let last_input = Rc::new(RefCell::new(String::new()));
     let input      = Rc::new(RefCell::new(InputField::new()));
     let quit_requested = Rc::new(RefCell::new(false));
     // Modal dialogs (R-style): quit confirmation ("Save workspace image?")
@@ -212,6 +216,7 @@ fn main() -> Result<(), String> {
             let ctx_graphics  = ctx_graphics.clone();
             let vscroll       = vscroll.clone();
             let hscroll       = hscroll.clone();
+            let last_input    = last_input.clone();
             let frame_counter = frame_counter.clone();
             let did_layout    = did_layout.clone();
             let quit_requested = quit_requested.clone();
@@ -846,7 +851,17 @@ fn main() -> Result<(), String> {
                         //     enough to reveal it (text scrolls under the bar);
                         //   • cursor still left of the view but beyond the
                         //     default frame → follow it so it stays on screen.
-                        if visible_cols > 0 {
+                        // Only follow the cursor when the user actually TYPED
+                        // this frame (input text changed). Otherwise leave
+                        // scroll_x alone so a manual drag / wheel of the bottom
+                        // bar sticks instead of snapping back to 0 every frame.
+                        let typed = {
+                            let mut li = last_input.borrow_mut();
+                            let changed = *li != input_ref.current;
+                            if changed { *li = input_ref.current.clone(); }
+                            changed
+                        };
+                        if typed && visible_cols > 0 {
                             let mut gs = grid_state.borrow_mut();
                             if cursor_col_in_row < visible_cols {
                                 gs.scroll_x = 0;

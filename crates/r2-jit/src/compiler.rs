@@ -393,6 +393,15 @@ impl JitCompiler {
         compile_map_reduce_inner(body_ir, reduce_op)
     }
 
+    /// Phase J.2 — fused binary map-reduce `reduce(f(a[i], b[i]))` (e.g.
+    /// `sum(x*w)`). Inner body has two scalar params (the two elements).
+    pub fn compile_vector_binary_map_reduce(
+        body_ir: &IrFunc,
+        reduce_op: FusedReduceOp,
+    ) -> JitResult<CompiledFn> {
+        compile_binary_map_reduce_inner(body_ir, reduce_op)
+    }
+
     /// Phase C.8 — **SIMD f64x2 vectorized 1-arg vector map.**
     ///
     /// When the IR body is "SIMD-clean" (single block, only arithmetic +

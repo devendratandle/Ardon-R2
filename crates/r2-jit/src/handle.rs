@@ -49,6 +49,12 @@ impl r2_types::JitHandle for CompiledFn {
         Some(f(ptr, len))
     }
 
+    unsafe fn try_call_vec2(&self, a_ptr: *const f64, b_ptr: *const f64, len: i64) -> Option<f64> {
+        if self.kind != r2_types::JitKind::Vector2ToScalar { return None; }
+        let f: extern "C" fn(*const f64, *const f64, i64) -> f64 = std::mem::transmute(self.ptr);
+        Some(f(a_ptr, b_ptr, len))
+    }
+
     unsafe fn try_call_vec_map(&self, in_ptr: *const f64, out_ptr: *mut f64, len: i64) -> bool {
         if self.kind != r2_types::JitKind::VectorMap { return false; }
         let f: extern "C" fn(*const f64, *mut f64, i64) = std::mem::transmute(self.ptr);

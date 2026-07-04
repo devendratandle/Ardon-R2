@@ -142,6 +142,30 @@
     }
 
     #[test]
+    fn jit_binary_map_reduce_dot_product() {
+        // function(x, w) sum(x*w) → Vector2ToScalar (dot product)
+        let mk = |fname: &str, inner: Expr| Closure {
+            params: vec![
+                Param { name: Arc::from("x"), default: None, dots: false },
+                Param { name: Arc::from("w"), default: None, dots: false },
+            ],
+            body: Arc::new(Expr::Call { func: Box::new(sym(fname)), args: vec![CallArg { name: None, value: inner }] }),
+            env: Env::new_global(),
+        };
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        let h = try_compile_closure(&mk("sum", mul(sym("x"), sym("w")))).expect("dot product should JIT");
+        assert_eq!(h.kind(), r2_types::JitKind::Vector2ToScalar);
+        assert_eq!(unsafe { h.try_call_vec2(a.as_ptr(), b.as_ptr(), 3) }, Some(32.0)); // 4+10+18
+        // sum(x*w + 1) → 35
+        let h1 = try_compile_closure(&mk("sum", add(mul(sym("x"), sym("w")), num(1.0)))).expect("JIT");
+        assert_eq!(unsafe { h1.try_call_vec2(a.as_ptr(), b.as_ptr(), 3) }, Some(35.0));
+        // prod(x+w) → 5*7*9 = 315
+        let hp = try_compile_closure(&mk("prod", add(sym("x"), sym("w")))).expect("JIT");
+        assert_eq!(unsafe { hp.try_call_vec2(a.as_ptr(), b.as_ptr(), 3) }, Some(315.0));
+    }
+
+    #[test]
     fn jit_index_loop_map_over_vector() {
         // function(x){ y <- x; for(i in 1:length(x)) y[i] <- x[i]*x[i]; y } → VectorMap
         let idx = |nm: &str, i: &str| Expr::Index { object: Box::new(sym(nm)), indices: vec![Some(sym(i))] };

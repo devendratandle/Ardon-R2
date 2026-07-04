@@ -1075,6 +1075,23 @@ impl Engine {
                                     }
                                 }
                             }
+                            r2_types::JitKind::Vector2ToScalar => {
+                                // Phase J.2 — fused binary map-reduce (e.g. sum(x*w)).
+                                if args.len() == 2 {
+                                    if let (RVal::Numeric(a, _), RVal::Numeric(b, _)) = (&args[0].value, &args[1].value) {
+                                        if a.len() == b.len() && !a.is_empty() {
+                                            let a_col = a.columnar();
+                                            let b_col = b.columnar();
+                                            let a_vals = a_col.values();
+                                            let b_vals = b_col.values();
+                                            let out = unsafe { h.try_call_vec2(a_vals.as_ptr(), b_vals.as_ptr(), a.len() as i64) };
+                                            if let Some(val) = out {
+                                                return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             r2_types::JitKind::VectorBinaryMap => {
                                 // Two equal-length vectors → output preserves AND-of-bitmaps.
                                 if args.len() == 2 {

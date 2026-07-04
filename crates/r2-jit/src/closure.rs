@@ -449,6 +449,29 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
         }
     }
 
+    // Phase J.2 — binary map-reduce: function(x, w) sum(f(x,w)) / prod(...).
+    // e.g. dot product `function(x, w) sum(x*w)`. The inner `f` is a per-element
+    // function of both vectors → fused (a[i], b[i]) → accumulate loop.
+    if cl.params.len() == 2 {
+        if let r2_types::Expr::Call { func, args } = body_ref {
+            if let r2_types::Expr::Symbol(fname) = func.as_ref() {
+                if matches!(fname.as_ref(), "sum" | "prod") && args.len() == 1
+                    && body_is_jit_lowerable(&args[0].value) {
+                    let reduce_op = if fname.as_ref() == "sum" { FusedReduceOp::Sum } else { FusedReduceOp::Prod };
+                    let params = vec![
+                        (cl.params[0].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)),
+                        (cl.params[1].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)),
+                    ];
+                    let mut inner_ir = r2_ir::lower_function("__binary_map_reduce_inner__", params, &args[0].value);
+                    inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
+                    if let Ok(c) = JitCompiler::compile_vector_binary_map_reduce(&inner_ir, reduce_op) {
+                        return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
+                    }
+                }
+            }
+        }
+    }
+
     // Phase C.4-full — vector ⊗ vector element-wise: function(a, b) a OP b
     if cl.params.len() == 2 {
         if let r2_types::Expr::Binary { op, lhs, rhs } = body_ref {
