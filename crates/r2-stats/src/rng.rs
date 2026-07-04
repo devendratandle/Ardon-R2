@@ -103,7 +103,6 @@ pub fn current_seed() -> u64 { SEED_STATE.load(Ordering::Relaxed) }
 /// Set the global seed. Used by `bi_set_seed` and by tests.
 pub fn set_seed(v: u64) { SEED_STATE.store(v, Ordering::Relaxed) }
 
-/// Advance the global seed atomically (CAS loop) and return a uniform
 thread_local! {
     /// Phase P — per-worker RNG stream. When `Some`, `next_random()` advances
     /// this thread-local seed instead of the shared atomic, giving parallel

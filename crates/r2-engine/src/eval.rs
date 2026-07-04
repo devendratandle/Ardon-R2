@@ -1072,6 +1072,16 @@ impl Engine {
                                         if let Some(val) = out {
                                             return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
                                         }
+                                    } else if let RVal::Matrix(m) = &args[0].value {
+                                        // J.3 — a matrix's column-major buffer IS a dense f64
+                                        // vector for whole-array reductions (sum(m), sum(m*m), …).
+                                        // NaN stands in for NA and propagates correctly.
+                                        if !m.data.is_empty() {
+                                            let out = unsafe { h.try_call_vec1(m.data.as_ptr(), m.data.len() as i64) };
+                                            if let Some(val) = out {
+                                                return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1085,6 +1095,15 @@ impl Engine {
                                             let a_vals = a_col.values();
                                             let b_vals = b_col.values();
                                             let out = unsafe { h.try_call_vec2(a_vals.as_ptr(), b_vals.as_ptr(), a.len() as i64) };
+                                            if let Some(val) = out {
+                                                return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
+                                            }
+                                        }
+                                    } else if let (RVal::Matrix(a), RVal::Matrix(b)) = (&args[0].value, &args[1].value) {
+                                        // J.3 — two same-shaped matrices' flat buffers (e.g. the
+                                        // Frobenius inner product sum(A*B) over equal-dim matrices).
+                                        if a.data.len() == b.data.len() && !a.data.is_empty() {
+                                            let out = unsafe { h.try_call_vec2(a.data.as_ptr(), b.data.as_ptr(), a.data.len() as i64) };
                                             if let Some(val) = out {
                                                 return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
                                             }
@@ -1108,6 +1127,19 @@ impl Engine {
                                                 let b_bits = b_col.valid_bits();
                                                 let result = combine_binary_output(&out_buf, a_bits, b_bits);
                                                 return Ok(RVal::Numeric(result.into(), Attrs::default()));
+                                            }
+                                        }
+                                    } else if let (RVal::Matrix(a), RVal::Matrix(b)) = (&args[0].value, &args[1].value) {
+                                        // J.3 — element-wise op over two same-shaped matrices
+                                        // (e.g. A + B, A * B). Result keeps A's dim + dimnames.
+                                        if a.data.len() == b.data.len() && a.nrow == b.nrow && !a.data.is_empty() {
+                                            let mut out_buf: Vec<f64> = vec![0.0; a.data.len()];
+                                            let ok = unsafe { h.try_call_vec_binary(a.data.as_ptr(), b.data.as_ptr(), out_buf.as_mut_ptr(), a.data.len() as i64) };
+                                            if ok {
+                                                return Ok(RVal::Matrix(r2_types::Matrix {
+                                                    data: out_buf, nrow: a.nrow, ncol: a.ncol,
+                                                    col_names: a.col_names.clone(), row_names: a.row_names.clone(),
+                                                }));
                                             }
                                         }
                                     }
@@ -1149,6 +1181,19 @@ impl Engine {
                                             let bits = col.valid_bits();
                                             let result = combine_unary_output(&out_buf, bits);
                                             return Ok(RVal::Numeric(result.into(), Attrs::default()));
+                                        }
+                                    } else if let RVal::Matrix(m) = &args[0].value {
+                                        // J.3 — element-wise map over a matrix (e.g. sqrt(m), m*m).
+                                        // R keeps dim + dimnames; NaN carries NA through the buffer.
+                                        if !m.data.is_empty() {
+                                            let mut out_buf: Vec<f64> = vec![0.0; m.data.len()];
+                                            let ok = unsafe { h.try_call_vec_map(m.data.as_ptr(), out_buf.as_mut_ptr(), m.data.len() as i64) };
+                                            if ok {
+                                                return Ok(RVal::Matrix(r2_types::Matrix {
+                                                    data: out_buf, nrow: m.nrow, ncol: m.ncol,
+                                                    col_names: m.col_names.clone(), row_names: m.row_names.clone(),
+                                                }));
+                                            }
                                         }
                                     }
                                 }
