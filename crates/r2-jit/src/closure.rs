@@ -257,6 +257,173 @@ pub(crate) fn recognize_index_map(body: &r2_types::Expr, x: &str) -> Option<r2_t
     Some(mapped)
 }
 
+/// Phase J.3 — is `e` built entirely from constructs the indexed-load codegen
+/// lowers faithfully? Like `body_is_jit_lowerable`, but additionally admits
+/// `v[ivar]` where `v` is one of the vector params `vecs` and the index is
+/// *exactly* the loop induction variable `ivar` (guaranteeing an in-bounds
+/// load over `1:length(v)` — no bounds check needed). Indexed *stores* (an
+/// `Index` assignment target) are rejected: this brick is load-only, scalar
+/// return.
+fn body_is_indexed_lowerable(e: &r2_types::Expr, vecs: &[std::sync::Arc<str>], ivar: &str) -> bool {
+    use r2_types::Expr::*;
+    let is_vec = |o: &r2_types::Expr| matches!(o, Symbol(s) if vecs.iter().any(|v| v.as_ref() == s.as_ref()));
+    match e {
+        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
+        Unary { expr, .. } => body_is_indexed_lowerable(expr, vecs, ivar),
+        Binary { lhs, rhs, .. } => body_is_indexed_lowerable(lhs, vecs, ivar) && body_is_indexed_lowerable(rhs, vecs, ivar),
+        // Assign only to a scalar symbol (accumulator/temp); no indexed stores.
+        Assign { target, value, .. } => matches!(target.as_ref(), Symbol(_))
+            && body_is_indexed_lowerable(value, vecs, ivar),
+        Call { func, args } => body_is_indexed_lowerable(func, vecs, ivar)
+            && args.iter().all(|a| body_is_indexed_lowerable(&a.value, vecs, ivar)),
+        // Require an explicit `else`: an if-without-else that assigns the
+        // accumulator lowers its missing branch to Null(=0.0), which would
+        // silently zero the accumulator when the condition is false. The
+        // interpreter handles such bodies correctly, so decline (→ fallback).
+        If { cond, then, else_ } => else_.is_some()
+            && body_is_indexed_lowerable(cond, vecs, ivar)
+            && body_is_indexed_lowerable(then, vecs, ivar)
+            && else_.as_ref().map_or(true, |e| body_is_indexed_lowerable(e, vecs, ivar)),
+        While { cond, body } => body_is_indexed_lowerable(cond, vecs, ivar) && body_is_indexed_lowerable(body, vecs, ivar),
+        For { iter, body, .. } => matches!(iter.as_ref(), Binary { op: r2_types::BinOp::Colon, .. })
+            && body_is_indexed_lowerable(iter, vecs, ivar) && body_is_indexed_lowerable(body, vecs, ivar),
+        Block(stmts) => stmts.iter().all(|s| body_is_indexed_lowerable(s, vecs, ivar)),
+        Return(v) => body_is_indexed_lowerable(v, vecs, ivar),
+        Pipe { lhs, rhs } => body_is_indexed_lowerable(lhs, vecs, ivar) && body_is_indexed_lowerable(rhs, vecs, ivar),
+        // The one new admission: v[ivar] on a vector param.
+        Index { object, indices } => indices.len() == 1
+            && is_vec(object.as_ref())
+            && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref() == ivar),
+        _ => false,
+    }
+}
+
+/// Replace every `length(v)` (v ∈ `vecs`) with `Symbol(newsym)`. Used to turn
+/// the loop bound / any `length` use into a reference to the fused `len` param.
+fn rewrite_length(e: &r2_types::Expr, vecs: &[std::sync::Arc<str>], newsym: &std::sync::Arc<str>) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    match e {
+        Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "length")
+            && args.len() == 1
+            && matches!(&args[0].value, Symbol(a) if vecs.iter().any(|v| v.as_ref() == a.as_ref())) => {
+            Symbol(newsym.clone())
+        }
+        Binary { op, lhs, rhs } => Binary { op: *op,
+            lhs: Box::new(rewrite_length(lhs, vecs, newsym)), rhs: Box::new(rewrite_length(rhs, vecs, newsym)) },
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(rewrite_length(expr, vecs, newsym)) },
+        Assign { target, value, superassign } => Assign { target: target.clone(),
+            value: Box::new(rewrite_length(value, vecs, newsym)), superassign: *superassign },
+        Call { func, args } => Call { func: func.clone(),
+            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: rewrite_length(&a.value, vecs, newsym) }).collect() },
+        If { cond, then, else_ } => If { cond: Box::new(rewrite_length(cond, vecs, newsym)),
+            then: Box::new(rewrite_length(then, vecs, newsym)),
+            else_: else_.as_ref().map(|e| Box::new(rewrite_length(e, vecs, newsym))) },
+        While { cond, body } => While { cond: Box::new(rewrite_length(cond, vecs, newsym)), body: Box::new(rewrite_length(body, vecs, newsym)) },
+        For { var, iter, body } => For { var: var.clone(),
+            iter: Box::new(rewrite_length(iter, vecs, newsym)), body: Box::new(rewrite_length(body, vecs, newsym)) },
+        Block(stmts) => Block(stmts.iter().map(|s| rewrite_length(s, vecs, newsym)).collect()),
+        Return(v) => Return(Box::new(rewrite_length(v, vecs, newsym))),
+        Index { object, indices } => Index {
+            object: Box::new(rewrite_length(object, vecs, newsym)),
+            indices: indices.iter().map(|ix| ix.as_ref().map(|x| rewrite_length(x, vecs, newsym))).collect() },
+        other => other.clone(),
+    }
+}
+
+/// Walk `e`, collecting a reference to every `For` node. Used to require the
+/// body contains exactly one counted loop (so the induction var is unambiguous).
+fn collect_fors<'a>(e: &'a r2_types::Expr, out: &mut Vec<&'a r2_types::Expr>) {
+    use r2_types::Expr::*;
+    match e {
+        For { body, iter, .. } => { out.push(e); collect_fors(iter, out); collect_fors(body, out); }
+        Binary { lhs, rhs, .. } => { collect_fors(lhs, out); collect_fors(rhs, out); }
+        Unary { expr, .. } => collect_fors(expr, out),
+        Assign { value, .. } => collect_fors(value, out),
+        Call { args, .. } => for a in args { collect_fors(&a.value, out); },
+        If { cond, then, else_ } => { collect_fors(cond, out); collect_fors(then, out); if let Some(x) = else_ { collect_fors(x, out); } }
+        While { cond, body } => { collect_fors(cond, out); collect_fors(body, out); }
+        Block(s) => for x in s { collect_fors(x, out); },
+        Return(v) => collect_fors(v, out),
+        Pipe { lhs, rhs } => { collect_fors(lhs, out); collect_fors(rhs, out); }
+        _ => {}
+    }
+}
+
+/// Does `e` contain any `v[..]` index on one of `vecs`?
+fn has_any_vec_index(e: &r2_types::Expr, vecs: &[std::sync::Arc<str>]) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        Index { object, indices } => matches!(object.as_ref(), Symbol(o) if vecs.iter().any(|v| v.as_ref()==o.as_ref()))
+            || has_any_vec_index(object, vecs) || indices.iter().flatten().any(|x| has_any_vec_index(x, vecs)),
+        Binary { lhs, rhs, .. } => has_any_vec_index(lhs, vecs) || has_any_vec_index(rhs, vecs),
+        Unary { expr, .. } => has_any_vec_index(expr, vecs),
+        Assign { value, .. } => has_any_vec_index(value, vecs),
+        Call { args, .. } => args.iter().any(|a| has_any_vec_index(&a.value, vecs)),
+        If { cond, then, else_ } => has_any_vec_index(cond, vecs) || has_any_vec_index(then, vecs) || else_.as_ref().map_or(false,|e| has_any_vec_index(e, vecs)),
+        While { cond, body } => has_any_vec_index(cond, vecs) || has_any_vec_index(body, vecs),
+        For { body, .. } => has_any_vec_index(body, vecs),
+        Block(s) => s.iter().any(|x| has_any_vec_index(x, vecs)),
+        Return(v) => has_any_vec_index(v, vecs),
+        Pipe { lhs, rhs } => has_any_vec_index(lhs, vecs) || has_any_vec_index(rhs, vecs),
+        _ => false,
+    }
+}
+
+/// Phase J.3 — recognize a general scalar-returning loop with real indexed
+/// loads over the (1 or 2) vector params:
+///   `function(x[, w]) { <scalar inits>; for(i in 1:length(x)) <body with x[i]/w[i]>; result }`
+/// Unlike the fold/map recognizers this admits arbitrary indexed-lowerable loop
+/// bodies (multi-statement, conditionals, scalar recurrences) as long as every
+/// `v[i]` uses the bare loop var (in-bounds) and the loop bound is `length` of a
+/// param. Returns the length-rewritten body + the vector param names in order.
+pub(crate) fn recognize_indexed_scalar_loop(
+    body: &r2_types::Expr,
+    params: &[std::sync::Arc<str>],
+) -> Option<(r2_types::Expr, Vec<std::sync::Arc<str>>)> {
+    use r2_types::Expr::*;
+    let stmts = match body { Block(s) => s, _ => return None };
+    // Must end in a bare symbol (the scalar result) so the compiled function
+    // returns a value, not the loop's NULL.
+    match stmts.last() { Some(Symbol(_)) => {}, _ => return None }
+
+    let vecs: Vec<std::sync::Arc<str>> = params.to_vec();
+    if !has_any_vec_index(body, &vecs) { return None; } // must actually index a vector
+
+    // Exactly one counted loop → unambiguous induction variable.
+    let mut fors = Vec::new();
+    collect_fors(body, &mut fors);
+    if fors.len() != 1 { return None; }
+    let (ivar, iter) = match fors[0] { For { var, iter, .. } => (var.clone(), iter), _ => return None };
+
+    // Loop must be `1:<len>` where <len> is `length(vecparam)` or a symbol
+    // assigned `length(vecparam)` among the leading statements.
+    let len_expr = match iter.as_ref() {
+        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
+            if matches!(lhs.as_ref(), NumLit(x) if *x == 1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
+        _ => return None,
+    };
+    let is_len_of_vec = |e: &r2_types::Expr| matches!(e, Call { func, args }
+        if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "length")
+            && args.len() == 1
+            && matches!(&args[0].value, Symbol(a) if vecs.iter().any(|v| v.as_ref() == a.as_ref())));
+    let len_ok = match len_expr {
+        e if is_len_of_vec(e) => true,
+        Symbol(nm) => stmts.iter().any(|s| matches!(s,
+            Assign { target, value, .. }
+                if matches!(target.as_ref(), Symbol(t) if t.as_ref() == nm.as_ref())
+                    && is_len_of_vec(value))),
+        _ => false,
+    };
+    if !len_ok { return None; }
+
+    // Rewrite length(vec) → a synthetic scalar `len` param, then validate the
+    // whole body is faithfully lowerable with in-bounds `v[ivar]` loads only.
+    let len_sym: std::sync::Arc<str> = std::sync::Arc::from(".__ixloop_n");
+    let rewritten = rewrite_length(body, &vecs, &len_sym);
+    if !body_is_indexed_lowerable(&rewritten, &vecs, ivar.as_ref()) { return None; }
+    Some((rewritten, vecs))
+}
+
 /// J.5 groundwork / `explain()` — the FIRST construct in `e` that keeps it out
 /// of the JIT, as a human-readable reason, or `None` if fully lowerable. Mirrors
 /// `body_is_jit_lowerable` but reports *why* instead of a bare bool.
@@ -396,6 +563,27 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
                 if let Ok(c) = JitCompiler::compile_vector_map_generic(&inner_ir) {
                     return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
                 }
+            }
+        }
+    }
+
+    // Phase J.3 — general scalar-returning loop with real indexed loads over
+    // 1-2 vector params (multi-statement folds, conditionals, scalar
+    // recurrences reading x[i]/w[i]). Compiles the *actual* loop via `Load`
+    // codegen — not a recognised map/reduce shape. Runs before the allowlist
+    // gate (which rejects `Index`), and after the specialised fold/map
+    // recognisers so those keep precedence for the shapes they cover.
+    if cl.params.len() == 1 || cl.params.len() == 2 {
+        let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
+        if let Some((rewritten, vecs)) = recognize_indexed_scalar_loop(body_ref, &pnames) {
+            let mut params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = vecs.iter()
+                .map(|v| (v.clone(), r2_types::infer::IrType::vector(IrElem::Real, None)))
+                .collect();
+            params.push((std::sync::Arc::from(".__ixloop_n"), r2_types::infer::IrType::scalar(IrElem::Real)));
+            let mut ir = r2_ir::lower_function("__indexed_scalar_loop__", params, &rewritten);
+            ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
+            if let Ok(c) = JitCompiler::compile_indexed_reduction(&ir) {
+                return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
             }
         }
     }

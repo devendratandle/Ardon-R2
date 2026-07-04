@@ -4,7 +4,7 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 use r2_ir::IrFunc;
-use r2_types::infer::IrElem;
+use r2_types::infer::{IrElem, IrShape};
 use std::collections::HashMap;
 use crate::*;
 
@@ -64,6 +64,69 @@ impl JitCompiler {
 
         let ptr = module.get_finalized_function(func_id);
         Ok(CompiledFn { ptr, arity: func.params.len(), kind: r2_types::JitKind::Scalar, _module: module })
+    }
+
+    /// Phase J.3 — compile a scalar-returning loop with real indexed loads
+    /// `v[i]` over one or two vector-reference parameters. The IR carries the
+    /// full counted loop (J.1 phis) plus `Load` instructions; vector params
+    /// lower to i64 pointers, the trailing `len` scalar to i64. The resulting
+    /// native signature is therefore identical to the fused map-reduce kernels
+    /// — `(ptr, len) -> f64` or `(a_ptr, b_ptr, len) -> f64` — so it reuses the
+    /// existing `Vector1ToScalar` / `Vector2ToScalar` handle kind and engine
+    /// dispatch with no new ABI surface.
+    ///
+    /// `func.params` must be the vector params (shape `Vec`) in order, followed
+    /// by exactly one scalar `len` param.
+    pub fn compile_indexed_reduction(func: &IrFunc) -> JitResult<CompiledFn> {
+        let n_vec = func.params.iter()
+            .filter(|(_, ty, _)| matches!(ty.shape, IrShape::Vec(_)))
+            .count();
+        if !(1..=2).contains(&n_vec) || func.params.len() != n_vec + 1 {
+            return Err(JitError::Unsupported(format!(
+                "indexed reduction needs 1-2 vector params + 1 len param, got {} params ({} vec)",
+                func.params.len(), n_vec
+            )));
+        }
+
+        let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+            .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
+        register_math_symbols(&mut jit_builder);
+        let mut module = JITModule::new(jit_builder);
+        let math_ids = declare_math_imports(&mut module)?;
+
+        // Signature: each vector param → i64 pointer; the trailing len → i64.
+        let mut sig = module.make_signature();
+        for _ in &func.params { sig.params.push(AbiParam::new(types::I64)); }
+        sig.returns.push(AbiParam::new(types::F64));
+
+        let func_id = module
+            .declare_function("__jit_indexed_reduction", Linkage::Export, &sig)
+            .map_err(|e| JitError::CraneliftError(format!("declare: {:?}", e)))?;
+
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        let mut fbctx = FunctionBuilderContext::new();
+        {
+            let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let math_refs: HashMap<&'static str, cranelift::prelude::codegen::ir::FuncRef> =
+                math_ids.iter()
+                    .map(|(k, id)| (*k, module.declare_func_in_func(*id, &mut bcx.func)))
+                    .collect();
+            lower_func_body(&mut bcx, func, Some(&math_refs))?;
+            bcx.finalize();
+        }
+
+        module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| JitError::CraneliftError(format!("define: {:?}", e)))?;
+        module.clear_context(&mut ctx);
+        module
+            .finalize_definitions()
+            .map_err(|e| JitError::CraneliftError(format!("finalize: {:?}", e)))?;
+
+        let ptr = module.get_finalized_function(func_id);
+        let kind = if n_vec == 1 { r2_types::JitKind::Vector1ToScalar } else { r2_types::JitKind::Vector2ToScalar };
+        Ok(CompiledFn { ptr, arity: n_vec, kind, _module: module })
     }
 
     /// Phase C.3: compile a vector reduction `(v) -> scalar`.

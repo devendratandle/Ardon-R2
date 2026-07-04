@@ -1066,11 +1066,15 @@ impl Engine {
                                         // Reads None as NaN in the values buffer (already that way
                                         // by ColumnarF64::from_option_slice), so Cranelift's NaN
                                         // arithmetic propagates correctly through the reduction.
+                                        // Empty → interpreter: the indexed-loop kernel uses R's
+                                        // `1:length` loop, and `1:0` would step out of bounds.
+                                        if !v.is_empty() {
                                         let col = v.columnar();
                                         let values = col.values();
                                         let out = unsafe { h.try_call_vec1(values.as_ptr(), values.len() as i64) };
                                         if let Some(val) = out {
                                             return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
+                                        }
                                         }
                                     } else if let RVal::Matrix(m) = &args[0].value {
                                         // J.3 — a matrix's column-major buffer IS a dense f64

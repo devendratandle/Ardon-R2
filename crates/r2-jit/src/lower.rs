@@ -51,8 +51,18 @@ pub(crate) fn lower_func_body(bcx: &mut FunctionBuilder, func: &IrFunc, math_ref
     for (i, dst) in phi_info[&func.entry.0].dst_regs.iter().enumerate() {
         env.insert(dst.0, entry_params[i]);
     }
-    for ((_, _, vreg), v) in func.params.iter().zip(entry_params.iter().skip(entry_phi_count)) {
-        env.insert(vreg.0, *v);
+    for ((_, pty, vreg), v) in func.params.iter().zip(entry_params.iter().skip(entry_phi_count)) {
+        // Phase J.3 — a vector-reference param (shape Vec) arrives as an i64
+        // pointer and stays i64 (used only by `Load`). A scalar param declared
+        // i64 in the signature (the fused `len`) is converted to f64 so the IR's
+        // f64 arithmetic world sees it uniformly. Plain f64 params pass through.
+        let is_vec = matches!(pty.shape, r2_types::infer::IrShape::Vec(_));
+        let val = if !is_vec && bcx.func.dfg.value_type(*v) == types::I64 {
+            bcx.ins().fcvt_from_sint(types::F64, *v)
+        } else {
+            *v
+        };
+        env.insert(vreg.0, val);
     }
 
     // 6. Lower each block.
@@ -249,6 +259,22 @@ pub(crate) fn lower_inst(
             ))?;
             let call = bcx.ins().call(*fref, &arg_vals);
             Ok(bcx.inst_results(call)[0])
+        }
+        // Phase J.3 — indexed load `base[index]`. `base` is an i64 pointer
+        // (a vector-reference parameter), `index` is a 1-based f64 R index.
+        // addr = base + (trunc(index) - 1) * 8; load an f64. Provably in-bounds
+        // by construction (the recognizer only admits index == loop var over
+        // `1:length(base)`), so a plain trusted load is safe.
+        IrInst::Load { base, index, .. } => {
+            let b = *env.get(&base.0).ok_or(JitError::UndefinedVReg(*base))?;
+            let idx_f = *env.get(&index.0).ok_or(JitError::UndefinedVReg(*index))?;
+            let idx_i = bcx.ins().fcvt_to_sint(types::I64, idx_f);
+            let one = bcx.ins().iconst(types::I64, 1);
+            let idx0 = bcx.ins().isub(idx_i, one);
+            let eight = bcx.ins().iconst(types::I64, 8);
+            let off = bcx.ins().imul(idx0, eight);
+            let addr = bcx.ins().iadd(b, off);
+            Ok(bcx.ins().load(types::F64, MemFlags::trusted(), addr, 0))
         }
         IrInst::Phi { .. } => Err(JitError::CraneliftError(
             "phi must appear at the start of a block (handled by lower_func_body)".into(),

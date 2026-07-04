@@ -83,6 +83,13 @@ pub enum IrInst {
     /// SSA phi — pick a value depending on which predecessor block we
     /// arrived from.
     Phi { dst: VReg, sources: Vec<(BlockId, VReg)>, ty: IrType },
+
+    /// Phase J.3 — indexed load `base[index]` from a vector-reference
+    /// parameter (a raw f64 pointer). `index` is a 1-based R index (an
+    /// f64 register); codegen converts to 0-based and scales by 8 bytes.
+    /// Only emitted for provably in-bounds accesses (index == the loop
+    /// induction var over `1:length(base)`), so no bounds check is needed.
+    Load { dst: VReg, base: VReg, index: VReg, ty: IrType },
 }
 
 impl IrInst {
@@ -93,7 +100,8 @@ impl IrInst {
             | IrInst::Binary { dst, .. }
             | IrInst::Call { dst, .. }
             | IrInst::Intrinsic { dst, .. }
-            | IrInst::Phi { dst, .. } => *dst,
+            | IrInst::Phi { dst, .. }
+            | IrInst::Load { dst, .. } => *dst,
         }
     }
     pub fn ty(&self) -> &IrType {
@@ -103,7 +111,8 @@ impl IrInst {
             | IrInst::Binary { ty, .. }
             | IrInst::Call { ty, .. }
             | IrInst::Intrinsic { ty, .. }
-            | IrInst::Phi { ty, .. } => ty,
+            | IrInst::Phi { ty, .. }
+            | IrInst::Load { ty, .. } => ty,
         }
     }
 }
@@ -364,6 +373,29 @@ impl IrBuilder {
             }
 
             Expr::Pipe { lhs, rhs } => { let _ = self.lower(lhs); self.lower(rhs) }
+
+            // Phase J.3 — indexed load `v[i]` where `v` is a vector-reference
+            // parameter (shape Vec) and there is exactly one index. Lowers to
+            // a real `Load` instruction (codegen: pointer + (i-1)*8). Any other
+            // index shape (list `[[ ]]`, `$`, multi-index, non-vector object)
+            // stays an opaque intrinsic that the codegen rejects (→ interpreter).
+            Expr::Index { object, indices } if indices.len() == 1 && indices[0].is_some() => {
+                let is_vec_param = matches!(object.as_ref(), Expr::Symbol(s)
+                    if matches!(self.type_ctx.lookup(s).shape, infer::IrShape::Vec(_)));
+                if is_vec_param {
+                    let base = self.lower(object);
+                    let index = self.lower(indices[0].as_ref().unwrap());
+                    let ty = IrType::scalar(infer::IrElem::Real);
+                    let dst = self.new_vreg(ty.clone());
+                    self.emit(IrInst::Load { dst, base, index, ty });
+                    dst
+                } else {
+                    let _ = self.lower(object);
+                    let dst = self.new_vreg(IrType::unknown());
+                    self.emit(IrInst::Intrinsic { dst, name: Arc::from("__index__"), args: vec![], ty: IrType::unknown() });
+                    dst
+                }
+            }
 
             // Lowered as opaque calls until later phases.
             Expr::Index { object, .. } | Expr::DblIndex { object, .. } | Expr::Dollar { object, .. } => {
@@ -684,6 +716,7 @@ pub fn validate(f: &IrFunc) -> Result<(), Vec<ValidationError>> {
                 IrInst::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
                 IrInst::Call { args, .. } | IrInst::Intrinsic { args, .. } => args.clone(),
                 IrInst::Phi { sources, .. } => sources.iter().map(|(_, v)| *v).collect(),
+                IrInst::Load { base, index, .. } => vec![*base, *index],
                 IrInst::Const { .. } => vec![],
             };
             for u in used {
@@ -730,6 +763,7 @@ fn print_inst(i: &IrInst) -> String {
         IrInst::Call { dst, name, args, .. } => format!("{} = call @{}({})", dst, name, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")),
         IrInst::Intrinsic { dst, name, args, .. } => format!("{} = intrinsic @{}({})", dst, name, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")),
         IrInst::Phi { dst, sources, .. } => format!("{} = phi [{}]", dst, sources.iter().map(|(b, v)| format!("{} from {}", v, b)).collect::<Vec<_>>().join(", ")),
+        IrInst::Load { dst, base, index, .. } => format!("{} = load {}[{}]", dst, base, index),
     }
 }
 
