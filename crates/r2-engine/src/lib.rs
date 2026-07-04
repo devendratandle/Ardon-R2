@@ -948,6 +948,20 @@ fn _legacy_bi_legend(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     Ok(RVal::Null)
 }
 
+/// `explain(f)` — report how R2 will execute closure `f`: JIT-compiled (and to
+/// which native specialization) or interpreter (with the first reason it can't
+/// JIT). The developer feedback loop for writing fast R2 libraries. (J.5
+/// groundwork / execution explainability.)
+pub(crate) fn bi_explain(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Result<RVal, R2Err> {
+    match a.first().map(|p| &p.value) {
+        Some(RVal::Closure(cl)) => {
+            let verdict = r2_jit::explain_closure(cl);
+            Ok(RVal::Character(vec![Some(Arc::from(verdict.as_str()))], Attrs::default()))
+        }
+        _ => err!(Runtime, "explain: argument must be a function"),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // help-block + trailing builtins moved to builtins/misc.rs.
 

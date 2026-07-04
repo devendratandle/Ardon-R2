@@ -257,6 +257,67 @@ pub(crate) fn recognize_index_map(body: &r2_types::Expr, x: &str) -> Option<r2_t
     Some(mapped)
 }
 
+/// J.5 groundwork / `explain()` — the FIRST construct in `e` that keeps it out
+/// of the JIT, as a human-readable reason, or `None` if fully lowerable. Mirrors
+/// `body_is_jit_lowerable` but reports *why* instead of a bare bool.
+pub fn jit_reject_reason(e: &r2_types::Expr) -> Option<String> {
+    use r2_types::Expr::*;
+    match e {
+        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => None,
+        Unary { expr, .. } => jit_reject_reason(expr),
+        Binary { lhs, rhs, .. } => jit_reject_reason(lhs).or_else(|| jit_reject_reason(rhs)),
+        Assign { value, .. } => jit_reject_reason(value),
+        Call { func, args } => jit_reject_reason(func).or_else(|| args.iter().find_map(|a| jit_reject_reason(&a.value))),
+        If { cond, then, else_ } => jit_reject_reason(cond)
+            .or_else(|| jit_reject_reason(then))
+            .or_else(|| else_.as_ref().and_then(|e| jit_reject_reason(e))),
+        While { cond, body } => jit_reject_reason(cond).or_else(|| jit_reject_reason(body)),
+        Block(stmts) => stmts.iter().find_map(jit_reject_reason),
+        Return(v) => jit_reject_reason(v),
+        Pipe { lhs, rhs } => jit_reject_reason(lhs).or_else(|| jit_reject_reason(rhs)),
+        For { iter, body, .. } => {
+            if !matches!(iter.as_ref(), Binary { op: r2_types::BinOp::Colon, .. }) {
+                return Some("for-loop over a non-range iterable (only counted `for(v in a:b)` JITs)".into());
+            }
+            jit_reject_reason(iter).or_else(|| jit_reject_reason(body))
+        }
+        Index { .. } | DblIndex { .. } => Some("vector/list/matrix indexing (`v[i]` / `x[[i]]`) — needs J.2/J.3".into()),
+        Dollar { .. } => Some("`$` field access — needs J.3".into()),
+        Repeat { .. } => Some("`repeat` loop".into()),
+        FuncDef { .. } | Lambda { .. } => Some("a nested function definition".into()),
+        Match { .. } => Some("`match`/`switch`".into()),
+        TryCatch { .. } => Some("`tryCatch`".into()),
+        Break | Next => Some("`break`/`next`".into()),
+        StrLit(_) | FStringLit(_) => Some("string values (JIT is numeric)".into()),
+        _ => Some("an unsupported construct".into()),
+    }
+}
+
+/// `explain(f)` backend — report whether closure `f` JIT-compiles (and to which
+/// specialization), or the first reason it falls back to the interpreter.
+pub fn explain_closure(cl: &r2_types::Closure) -> String {
+    if let Some(h) = try_compile_closure(cl) {
+        return format!("JIT-compiled → {:?} (native)", h.kind());
+    }
+    if cl.params.len() > 3 {
+        return "interpreter — more than 3 parameters".into();
+    }
+    if cl.params.iter().any(|p| p.default.is_some() || p.dots) {
+        return "interpreter — parameters with defaults or `...`".into();
+    }
+    let body = &*cl.body;
+    if cl.params.len() == 1 {
+        if recognize_index_reduction(body, &cl.params[0].name).is_some()
+            || recognize_index_map(body, &cl.params[0].name).is_some() {
+            return "interpreter — recognized as an index fold/map but that codegen path declined (report this)".into();
+        }
+    }
+    match jit_reject_reason(body) {
+        Some(reason) => format!("interpreter — blocked by {reason}"),
+        None => "interpreter — body is lowerable but codegen is unsupported here (report this)".into(),
+    }
+}
+
 pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn r2_types::JitHandle>> {
     // Phase R.M — gate the JIT on supported architectures. On aarch64 the
     // engine falls back to the interpreter; statistical outputs are

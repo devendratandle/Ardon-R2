@@ -235,7 +235,7 @@ because Cranelift (the backend — the hard part) already exists.
 | **J.2** | unboxed vector element access in loops. **First brick shipped:** index-loop *folds* `for(i in 1:length(v)) s <- s <+/*> f(v[i])` are recognized and routed to the tested fused map-reduce codegen (`v[i]`→element) — `sum(v[i])` over 1e6 went from *timeout* to 0.024 s, correct. **Remaining:** general `Index{v,i}` loads/stores (e.g. `y[i] <- f(x[i])`, two-vector loops) need real Cranelift indexed-load codegen + a vector-param pointer ABI beyond the reduction shape. | index-driven numeric kernels JIT | ◐ **in progress** |
 | **J.3** | matrices / list access unboxed inside compiled code; guards + deopt for speculated types | data plumbing stops boxing | |
 | **J.4** | inline hot user + builtin calls into the loop | kills per-call dispatch → **iterative source libraries (r2sem) go near-native** | |
-| **J.5** | profile-driven tiered dispatch + on-stack replacement | automatic, safe hot/cold tiering | |
+| **J.5** | profile-driven tiered dispatch + on-stack replacement | automatic, safe hot/cold tiering | ◐ groundwork: `explain(f)` |
 | **J.6** | (optional) trace-based JIT across call boundaries | PyPy-class; the last ~2× | |
 
 Why native builtins still exist: the standard dynamic-language pattern is
