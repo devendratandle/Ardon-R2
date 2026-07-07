@@ -1103,9 +1103,46 @@ fn hoist_reductions(e: &r2_types::Expr, stmts: &mut Vec<r2_types::Expr>, ctr: &m
 /// reductions to scalar locals → a `Block` of `local <- <reduction|scalar>`
 /// followed by a final scalar expression (the shape `compile_reduction_kernel`
 /// consumes). Non-Block scalar bodies are handled too.
+/// Rewrite small integer powers `b^k` (k = 2..=4) into repeated multiplication,
+/// e.g. `(x-mean(x))^2` → `(x-mean(x))*(x-mean(x))`. Exact for real `b`, and —
+/// unlike the `pow` extern call — SIMD-vectorisable, so variance/correlation
+/// element expressions become F64X2-clean. Walks the whole tree.
+fn expand_int_powers(e: &r2_types::Expr) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    match e {
+        Binary { op: r2_types::BinOp::Pow, lhs, rhs } => {
+            let base = expand_int_powers(lhs);
+            let k = match rhs.as_ref() {
+                NumLit(x) if *x >= 2.0 && *x <= 4.0 && x.fract() == 0.0 => Some(*x as u32),
+                IntLit(x) if (2..=4).contains(x) => Some(*x as u32),
+                _ => None,
+            };
+            match k {
+                Some(k) => {
+                    let mut acc = base.clone();
+                    for _ in 1..k { acc = Binary { op: r2_types::BinOp::Mul, lhs: Box::new(acc), rhs: Box::new(base.clone()) }; }
+                    acc
+                }
+                None => Binary { op: r2_types::BinOp::Pow, lhs: Box::new(base), rhs: Box::new(expand_int_powers(rhs)) },
+            }
+        }
+        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(expand_int_powers(lhs)), rhs: Box::new(expand_int_powers(rhs)) },
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(expand_int_powers(expr)) },
+        Call { func, args } => Call { func: func.clone(),
+            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: expand_int_powers(&a.value) }).collect() },
+        If { cond, then, else_ } => If { cond: Box::new(expand_int_powers(cond)),
+            then: Box::new(expand_int_powers(then)), else_: else_.as_ref().map(|x| Box::new(expand_int_powers(x))) },
+        Assign { target, value, superassign } => Assign { target: target.clone(), value: Box::new(expand_int_powers(value)), superassign: *superassign },
+        Block(s) => Block(s.iter().map(expand_int_powers).collect()),
+        Return(v) => Return(Box::new(expand_int_powers(v))),
+        Pipe { lhs, rhs } => Pipe { lhs: Box::new(expand_int_powers(lhs)), rhs: Box::new(expand_int_powers(rhs)) },
+        other => other.clone(),
+    }
+}
+
 fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> r2_types::Expr {
     use r2_types::Expr::*;
-    let inlined = inline_vector_locals(body, vec_params);
+    let inlined = expand_int_powers(&inline_vector_locals(body, vec_params));
     let mut out: Vec<r2_types::Expr> = Vec::new();
     let mut ctr = 0u32;
     let mut seen: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();

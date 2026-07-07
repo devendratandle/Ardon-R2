@@ -143,6 +143,20 @@ fn shared_primitive_reused_correctly() {
 }
 
 #[test]
+fn simd_wave_correct_for_even_and_odd_lengths() {
+    // The F64X2 reduction wave has a 2-wide main loop + scalar tail; the tail
+    // must handle the odd element. Check both parities against R.
+    for n in [4usize, 5, 63, 64, 65, 1000, 1001] {
+        let d = scalar(eval_last(&format!(
+            "set.seed({n}); x <- rnorm({n}); y <- rnorm({n})\n\
+             cr <- function(x,y) sum((x-mean(x))*(y-mean(y)))/sqrt(sum((x-mean(x))^2)*sum((y-mean(y))^2))\n\
+             abs(cr(x,y) - cor(x,y))"
+        )));
+        assert!(d < 1e-9, "n={n} correlation err {d}");
+    }
+}
+
+#[test]
 fn single_reduction_paths_unaffected() {
     // Existing specialised shapes must keep their own (non-kernel) codegen.
     for (body, kind) in [

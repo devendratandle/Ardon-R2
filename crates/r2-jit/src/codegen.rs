@@ -1002,6 +1002,175 @@ fn emit_reduction(bcx: &mut FunctionBuilder, k: &Kctx, elem: &r2_types::Expr, op
     Ok(bcx.block_params(exit)[0])
 }
 
+/// Is `e` computable with F64X2 SIMD (arithmetic + native-instruction math
+/// only — no extern transcendentals, comparisons, or branches)?
+fn elem_simd_ok(e: &r2_types::Expr) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        NumLit(_) | IntLit(_) | BoolLit(_) | Symbol(_) => true,
+        Unary { op, expr } => matches!(op, r2_types::UnOp::Neg | r2_types::UnOp::Pos) && elem_simd_ok(expr),
+        Binary { op, lhs, rhs } => matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+            && elem_simd_ok(lhs) && elem_simd_ok(rhs),
+        Call { func, args } => matches!(func.as_ref(), Symbol(s)
+            if matches!(s.as_ref(), "sqrt" | "abs" | "floor" | "ceil" | "trunc" | "round" | "min" | "max"))
+            && args.iter().all(|a| elem_simd_ok(&a.value)),
+        _ => false,
+    }
+}
+
+/// Emit an element expression as an `F64X2` SIMD value. `env` maps each vector
+/// param name → the 2-lane loaded value and each scalar local → its splatted
+/// value. Pre-gated by `elem_simd_ok`, so every node here is representable.
+fn emit_elem_simd(bcx: &mut FunctionBuilder, e: &r2_types::Expr, env: &HashMap<std::sync::Arc<str>, Value>) -> JitResult<Value> {
+    use r2_types::Expr::*;
+    let splat = |bcx: &mut FunctionBuilder, s: Value| bcx.ins().splat(types::F64X2, s);
+    match e {
+        NumLit(x) => { let s = bcx.ins().f64const(*x); Ok(splat(bcx, s)) }
+        IntLit(x) => { let s = bcx.ins().f64const(*x as f64); Ok(splat(bcx, s)) }
+        BoolLit(b) => { let s = bcx.ins().f64const(if *b { 1.0 } else { 0.0 }); Ok(splat(bcx, s)) }
+        Symbol(s) => env.get(s).copied().ok_or_else(|| JitError::Unsupported(format!("simd elem `{}`", s))),
+        Unary { op, expr } => {
+            let v = emit_elem_simd(bcx, expr, env)?;
+            Ok(match op { r2_types::UnOp::Neg => bcx.ins().fneg(v), _ => v })
+        }
+        Binary { op, lhs, rhs } => {
+            let a = emit_elem_simd(bcx, lhs, env)?;
+            let b = emit_elem_simd(bcx, rhs, env)?;
+            Ok(match op { BinOp::Add => bcx.ins().fadd(a, b), BinOp::Sub => bcx.ins().fsub(a, b),
+                BinOp::Mul => bcx.ins().fmul(a, b), BinOp::Div => bcx.ins().fdiv(a, b),
+                _ => return Err(JitError::Unsupported("simd binop".into())) })
+        }
+        Call { func, args } => {
+            let name = match func.as_ref() { Symbol(s) => s.clone(), _ => return Err(JitError::Unsupported("simd call".into())) };
+            let mut av = Vec::with_capacity(args.len());
+            for a in args { av.push(emit_elem_simd(bcx, &a.value, env)?); }
+            Ok(match (name.as_ref(), av.len()) {
+                ("sqrt", 1) => bcx.ins().sqrt(av[0]), ("abs", 1) => bcx.ins().fabs(av[0]),
+                ("floor", 1) => bcx.ins().floor(av[0]), ("ceil", 1) => bcx.ins().ceil(av[0]),
+                ("trunc", 1) => bcx.ins().trunc(av[0]), ("round", 1) => bcx.ins().nearest(av[0]),
+                ("min", 2) => bcx.ins().fmin(av[0], av[1]), ("max", 2) => bcx.ins().fmax(av[0], av[1]),
+                _ => return Err(JitError::Unsupported("simd math".into())),
+            })
+        }
+        _ => Err(JitError::Unsupported("simd elem node".into())),
+    }
+}
+
+/// SIMD (F64X2) version of `emit_reduction_wave`: a 2-elements-per-iteration
+/// main loop with vector accumulators, a horizontal reduce, then a scalar tail
+/// for the odd element. Returns `None` if any element expression isn't SIMD-able
+/// (caller falls back to the scalar wave) — nothing is emitted in that case.
+fn emit_reduction_wave_simd(bcx: &mut FunctionBuilder, k: &Kctx, reds: &[(&r2_types::Expr, FusedReduceOp)], scalar_env: &HashMap<std::sync::Arc<str>, Value>) -> JitResult<Option<Vec<Value>>> {
+    if !reds.iter().all(|(e, _)| elem_simd_ok(e)) { return Ok(None); }
+    let n = reds.len();
+
+    let simd_hdr = bcx.create_block();
+    let simd_body = bcx.create_block();
+    let simd_exit = bcx.create_block();
+    let rem_hdr = bcx.create_block();
+    let rem_body = bcx.create_block();
+    let exit = bcx.create_block();
+    bcx.append_block_param(simd_hdr, types::I64);
+    for _ in 0..n { bcx.append_block_param(simd_hdr, types::F64X2); }
+    bcx.append_block_param(simd_exit, types::I64);
+    for _ in 0..n { bcx.append_block_param(simd_exit, types::F64X2); }
+    bcx.append_block_param(rem_hdr, types::I64);
+    for _ in 0..n { bcx.append_block_param(rem_hdr, types::F64); }
+    for _ in 0..n { bcx.append_block_param(exit, types::F64); }
+
+    // simd_end = len rounded down to even.
+    let simd_end = bcx.ins().band_imm(k.len, -2);
+    let mut init = Vec::with_capacity(n + 1);
+    init.push(bcx.ins().iconst(types::I64, 0));
+    for (_, op) in reds {
+        let s = bcx.ins().f64const(match op { FusedReduceOp::Sum => 0.0, FusedReduceOp::Prod => 1.0 });
+        init.push(bcx.ins().splat(types::F64X2, s));
+    }
+    bcx.ins().jump(simd_hdr, &init);
+
+    // SIMD header: while i < simd_end.
+    bcx.switch_to_block(simd_hdr);
+    let hp: Vec<Value> = bcx.block_params(simd_hdr).to_vec();
+    let cond = bcx.ins().icmp(IntCC::SignedLessThan, hp[0], simd_end);
+    // simd_body has no params (it reads the header's param Values directly via
+    // dominance); simd_exit takes (i, accs...).
+    bcx.ins().brif(cond, simd_body, &[], simd_exit, &hp);
+
+    // SIMD body: load 2 lanes, accumulate.
+    bcx.switch_to_block(simd_body);
+    let bp: Vec<Value> = bcx.block_params(simd_hdr).to_vec(); // same values (single pred)
+    let i_b = bp[0];
+    let eight = bcx.ins().iconst(types::I64, 8);
+    let off = bcx.ins().imul(i_b, eight);
+    let mf = MemFlags::trusted();
+    let mut env: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+    for (nm, v) in scalar_env { let sp = bcx.ins().splat(types::F64X2, *v); env.insert(nm.clone(), sp); }
+    let xa = bcx.ins().iadd(k.x_ptr, off);
+    env.insert(k.names[0].clone(), bcx.ins().load(types::F64X2, mf, xa, 0));
+    if let Some(yp) = k.y_ptr {
+        let ya = bcx.ins().iadd(yp, off);
+        let yv = bcx.ins().load(types::F64X2, mf, ya, 0);
+        if k.names.len() > 1 { env.insert(k.names[1].clone(), yv); }
+    }
+    let mut nxt = Vec::with_capacity(n + 1);
+    let two = bcx.ins().iconst(types::I64, 2);
+    nxt.push(bcx.ins().iadd(i_b, two));
+    for (j, (elem, op)) in reds.iter().enumerate() {
+        let e = emit_elem_simd(bcx, elem, &env)?;
+        let acc = bp[1 + j];
+        nxt.push(match op { FusedReduceOp::Sum => bcx.ins().fadd(acc, e), FusedReduceOp::Prod => bcx.ins().fmul(acc, e) });
+    }
+    bcx.ins().jump(simd_hdr, &nxt);
+
+    // SIMD exit: horizontal-reduce each vector accumulator to a scalar.
+    bcx.switch_to_block(simd_exit);
+    let ep: Vec<Value> = bcx.block_params(simd_exit).to_vec();
+    let i_rem = ep[0];
+    let mut scalars = Vec::with_capacity(n + 1);
+    scalars.push(i_rem);
+    for (j, (_, op)) in reds.iter().enumerate() {
+        let v = ep[1 + j];
+        let l0 = bcx.ins().extractlane(v, 0);
+        let l1 = bcx.ins().extractlane(v, 1);
+        scalars.push(match op { FusedReduceOp::Sum => bcx.ins().fadd(l0, l1), FusedReduceOp::Prod => bcx.ins().fmul(l0, l1) });
+    }
+    bcx.ins().jump(rem_hdr, &scalars);
+
+    // Remainder header: while i < len (0 or 1 iterations).
+    bcx.switch_to_block(rem_hdr);
+    let rp: Vec<Value> = bcx.block_params(rem_hdr).to_vec();
+    let rcond = bcx.ins().icmp(IntCC::SignedLessThan, rp[0], k.len);
+    // rem_body has no params (reads rem_hdr's directly); exit takes (accs...).
+    bcx.ins().brif(rcond, rem_body, &[], exit, &rp[1..]);
+
+    // Remainder body: scalar accumulate one element.
+    bcx.switch_to_block(rem_body);
+    let rbp: Vec<Value> = bcx.block_params(rem_hdr).to_vec();
+    let i_r = rbp[0];
+    let eight_r = bcx.ins().iconst(types::I64, 8); // fresh: simd_body's `eight` doesn't dominate here
+    let off_r = bcx.ins().imul(i_r, eight_r);
+    let mut env_r: HashMap<std::sync::Arc<str>, Value> = scalar_env.clone();
+    let xar = bcx.ins().iadd(k.x_ptr, off_r);
+    env_r.insert(k.names[0].clone(), bcx.ins().load(types::F64, mf, xar, 0));
+    if let Some(yp) = k.y_ptr {
+        let yar = bcx.ins().iadd(yp, off_r);
+        let yvr = bcx.ins().load(types::F64, mf, yar, 0);
+        if k.names.len() > 1 { env_r.insert(k.names[1].clone(), yvr); }
+    }
+    let mut nxt_r = Vec::with_capacity(n + 1);
+    let one = bcx.ins().iconst(types::I64, 1);
+    nxt_r.push(bcx.ins().iadd(i_r, one));
+    for (j, (elem, op)) in reds.iter().enumerate() {
+        let e = emit_elem(bcx, k, elem, &env_r)?;
+        let acc = rbp[1 + j];
+        nxt_r.push(match op { FusedReduceOp::Sum => bcx.ins().fadd(acc, e), FusedReduceOp::Prod => bcx.ins().fmul(acc, e) });
+    }
+    bcx.ins().jump(rem_hdr, &nxt_r);
+
+    bcx.switch_to_block(exit);
+    Ok(Some(bcx.block_params(exit).to_vec()))
+}
+
 /// Phase J.4 brick 4 — emit a *single* loop that computes several reductions at
 /// once (one accumulator each), loading each vector element just once. The
 /// reductions' element expressions typically share sub-terms (e.g. `x[i]-mx`);
@@ -1133,7 +1302,12 @@ fn flush_wave(
 ) -> JitResult<()> {
     if batch.is_empty() { return Ok(()); }
     let reds: Vec<(&r2_types::Expr, FusedReduceOp)> = batch.iter().map(|(_, e, op, _)| (*e, *op)).collect();
-    let vals = emit_reduction_wave(bcx, k, &reds, scalar_env)?;
+    // Prefer the F64X2 SIMD wave; fall back to the scalar wave if any element
+    // expression isn't SIMD-representable (transcendentals, branches, …).
+    let vals = match emit_reduction_wave_simd(bcx, k, &reds, scalar_env)? {
+        Some(v) => v,
+        None => emit_reduction_wave(bcx, k, &reds, scalar_env)?,
+    };
     for ((name, _, _, is_mean), v) in batch.iter().zip(vals.into_iter()) {
         let bound = if *is_mean { bcx.ins().fdiv(v, k.len_f) } else { v };
         scalar_env.insert(name.clone(), bound);
