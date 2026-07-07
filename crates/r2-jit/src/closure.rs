@@ -1009,7 +1009,18 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
         // Brick 3: fuse vector-valued intermediates + hoist reductions to scalar
         // locals, giving the canonical Block form the kernel codegen consumes.
         let kbody = normalize_reduction_kernel(body_ref, &pnames);
-        if let Ok(c) = JitCompiler::compile_reduction_kernel(&kbody, &pnames) {
+        // A vector-valued final expression (e.g. `x - mean(x)`) → vector-output
+        // reduction-map kernel; a scalar one (e.g. `sum(x*y)/sum(x*x)`) → the
+        // scalar reduction kernel.
+        let final_is_vec = match &kbody {
+            r2_types::Expr::Block(s) => s.last().map_or(false, |e| refs_vector_bare(e, &pnames)),
+            other => refs_vector_bare(other, &pnames),
+        };
+        if final_is_vec {
+            if let Ok(c) = JitCompiler::compile_reduction_map_kernel(&kbody, &pnames) {
+                return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
+            }
+        } else if let Ok(c) = JitCompiler::compile_reduction_kernel(&kbody, &pnames) {
             return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
         }
     }

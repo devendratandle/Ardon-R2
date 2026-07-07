@@ -534,6 +534,12 @@ impl JitCompiler {
         compile_reduction_kernel(body, param_names)
     }
 
+    /// Phase J.4 (vector-lowering) — vector-returning kernel with embedded
+    /// reductions (`x-mean(x)`, standardise, normalise). VectorMap ABI.
+    pub fn compile_reduction_map_kernel(body: &r2_types::Expr, param_names: &[std::sync::Arc<str>]) -> JitResult<CompiledFn> {
+        compile_reduction_map_kernel(body, param_names)
+    }
+
     /// Phase C.8 — **SIMD f64x2 vectorized 1-arg vector map.**
     ///
     /// When the IR body is "SIMD-clean" (single block, only arithmetic +

@@ -1317,6 +1317,166 @@ fn flush_wave(
     Ok(())
 }
 
+/// Process a kernel body's leading `local <- <scalar>` assignments into
+/// `scalar_env`, batching independent reductions into fused waves. Shared by the
+/// scalar-return and vector-return kernels.
+fn emit_kernel_prologue(bcx: &mut FunctionBuilder, k: &Kctx, init: &[r2_types::Expr], scalar_env: &mut HashMap<std::sync::Arc<str>, Value>) -> JitResult<()> {
+    let mut batch: Vec<(std::sync::Arc<str>, &r2_types::Expr, FusedReduceOp, bool)> = Vec::new();
+    let mut batch_names: std::collections::HashSet<std::sync::Arc<str>> = std::collections::HashSet::new();
+    for st in init {
+        let (nm, value) = match st {
+            r2_types::Expr::Assign { target, value, .. } => match target.as_ref() {
+                r2_types::Expr::Symbol(n) => (n.clone(), value.as_ref()),
+                _ => return Err(JitError::Unsupported("non-symbol assign in kernel".into())),
+            },
+            _ => return Err(JitError::Unsupported("non-assign statement before final expr".into())),
+        };
+        let red: Option<(&r2_types::Expr, FusedReduceOp, bool)> = match value {
+            r2_types::Expr::Call { func, args } if args.len() == 1 => match func.as_ref() {
+                r2_types::Expr::Symbol(s) if s.as_ref() == "sum" => Some((&args[0].value, FusedReduceOp::Sum, false)),
+                r2_types::Expr::Symbol(s) if s.as_ref() == "prod" => Some((&args[0].value, FusedReduceOp::Prod, false)),
+                r2_types::Expr::Symbol(s) if s.as_ref() == "mean" => Some((&args[0].value, FusedReduceOp::Sum, true)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match red {
+            Some((elem, op, is_mean)) => {
+                if expr_refs_any(elem, &batch_names) { flush_wave(bcx, k, &mut batch, &mut batch_names, scalar_env)?; }
+                batch_names.insert(nm.clone());
+                batch.push((nm, elem, op, is_mean));
+            }
+            None => {
+                flush_wave(bcx, k, &mut batch, &mut batch_names, scalar_env)?;
+                let v = emit_scalar(bcx, k, value, scalar_env)?;
+                scalar_env.insert(nm, v);
+            }
+        }
+    }
+    flush_wave(bcx, k, &mut batch, &mut batch_names, scalar_env)
+}
+
+/// Phase J.4 (matrix/vector-lowering step 1) — compile a **vector-returning**
+/// kernel `function(x[,y]) <element-expr>` where the element expr may embed
+/// whole-vector reductions of the inputs. Reductions are computed first (fused
+/// waves → scalar locals), then a single map pass writes the element expression
+/// to the output buffer. This is the centring/standardise/normalise class:
+///   d(x) = x - mean(x);  (x-mean(x))/sd;  x/sum(x)
+/// The `pow`-free element map is SIMD-vectorised (F64X2 + scalar tail); the ABI
+/// is `VectorMap` / `VectorBinaryMap` (`(in.., out, len)`), so the existing
+/// engine dispatch applies unchanged.
+pub(crate) fn compile_reduction_map_kernel(body: &r2_types::Expr, param_names: &[std::sync::Arc<str>]) -> JitResult<CompiledFn> {
+    let n_vec = param_names.len();
+    if !(1..=2).contains(&n_vec) { return Err(JitError::Unsupported("reduction-map needs 1-2 params".into())); }
+
+    let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+        .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
+    register_math_symbols(&mut jit_builder);
+    let mut module = JITModule::new(jit_builder);
+    let math_ids = declare_math_imports(&mut module)?;
+
+    // Signature: (in_ptr.. , out_ptr, len), all i64. No return.
+    let mut sig = module.make_signature();
+    for _ in 0..n_vec { sig.params.push(AbiParam::new(types::I64)); }
+    sig.params.push(AbiParam::new(types::I64)); // out_ptr
+    sig.params.push(AbiParam::new(types::I64)); // len
+
+    let func_id = module.declare_function("__jit_reduction_map", Linkage::Export, &sig)
+        .map_err(|e| JitError::CraneliftError(format!("declare: {:?}", e)))?;
+    let mut ctx = module.make_context();
+    ctx.func.signature = sig;
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let math: HashMap<&'static str, cranelift::prelude::codegen::ir::FuncRef> =
+            math_ids.iter().map(|(kk, id)| (*kk, module.declare_func_in_func(*id, &mut bcx.func))).collect();
+
+        let entry = bcx.create_block();
+        bcx.append_block_params_for_function_params(entry);
+        bcx.switch_to_block(entry);
+        let ps: Vec<Value> = bcx.block_params(entry).to_vec();
+        let x_ptr = ps[0];
+        let y_ptr = if n_vec == 2 { Some(ps[1]) } else { None };
+        let out_ptr = ps[n_vec];
+        let len = ps[n_vec + 1];
+        let len_f = bcx.ins().fcvt_from_sint(types::F64, len);
+        let k = Kctx { x_ptr, y_ptr, len, len_f, names: param_names, math: &math };
+
+        let (last, init): (&r2_types::Expr, &[r2_types::Expr]) = match body {
+            r2_types::Expr::Block(stmts) if !stmts.is_empty() => { let (l, i) = stmts.split_last().unwrap(); (l, i) }
+            other => (other, &[]),
+        };
+        let mut scalar_env: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+        emit_kernel_prologue(&mut bcx, &k, init, &mut scalar_env)?;
+
+        // Map pass: out[i] = last(x[i][,y[i]], scalar_locals). SIMD 2-wide + tail.
+        let simd_ok = elem_simd_ok(last);
+        let simd_end = bcx.ins().band_imm(len, -2);
+        let eight = bcx.ins().iconst(types::I64, 8);
+        let mf = MemFlags::trusted();
+
+        let shdr = bcx.create_block(); let sbody = bcx.create_block();
+        let rhdr = bcx.create_block(); let rbody = bcx.create_block();
+        let exit = bcx.create_block();
+        bcx.append_block_param(shdr, types::I64);
+        bcx.append_block_param(rhdr, types::I64);
+        let zero = bcx.ins().iconst(types::I64, 0);
+        // SIMD loop only if the element expr is SIMD-clean; else start the scalar loop at 0.
+        if simd_ok { bcx.ins().jump(shdr, &[zero]); } else { bcx.ins().jump(rhdr, &[zero]); }
+
+        // SIMD header/body.
+        bcx.switch_to_block(shdr);
+        let i_sh = bcx.block_params(shdr)[0];
+        let scond = bcx.ins().icmp(IntCC::SignedLessThan, i_sh, simd_end);
+        bcx.ins().brif(scond, sbody, &[], rhdr, &[i_sh]);
+        bcx.switch_to_block(sbody);
+        let i_sb = bcx.block_params(shdr)[0];
+        let off_s = bcx.ins().imul(i_sb, eight);
+        let mut envs: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+        for (nm, v) in &scalar_env { let sp = bcx.ins().splat(types::F64X2, *v); envs.insert(nm.clone(), sp); }
+        let xas = bcx.ins().iadd(x_ptr, off_s);
+        envs.insert(param_names[0].clone(), bcx.ins().load(types::F64X2, mf, xas, 0));
+        if let Some(yp) = y_ptr { let yas = bcx.ins().iadd(yp, off_s); let yv = bcx.ins().load(types::F64X2, mf, yas, 0); if n_vec > 1 { envs.insert(param_names[1].clone(), yv); } }
+        let rv_s = emit_elem_simd(&mut bcx, last, &envs)?;
+        let oas = bcx.ins().iadd(out_ptr, off_s);
+        bcx.ins().store(mf, rv_s, oas, 0);
+        let two = bcx.ins().iconst(types::I64, 2);
+        let ins = bcx.ins().iadd(i_sb, two);
+        bcx.ins().jump(shdr, &[ins]);
+
+        // Scalar remainder header/body.
+        bcx.switch_to_block(rhdr);
+        let i_rh = bcx.block_params(rhdr)[0];
+        let rcond = bcx.ins().icmp(IntCC::SignedLessThan, i_rh, len);
+        bcx.ins().brif(rcond, rbody, &[], exit, &[]);
+        bcx.switch_to_block(rbody);
+        let i_rb = bcx.block_params(rhdr)[0];
+        let eight_r = bcx.ins().iconst(types::I64, 8);
+        let off_r = bcx.ins().imul(i_rb, eight_r);
+        let mut envr = scalar_env.clone();
+        let xar = bcx.ins().iadd(x_ptr, off_r);
+        envr.insert(param_names[0].clone(), bcx.ins().load(types::F64, mf, xar, 0));
+        if let Some(yp) = y_ptr { let yar = bcx.ins().iadd(yp, off_r); let yv = bcx.ins().load(types::F64, mf, yar, 0); if n_vec > 1 { envr.insert(param_names[1].clone(), yv); } }
+        let rv_r = emit_elem(&mut bcx, &k, last, &envr)?;
+        let oar = bcx.ins().iadd(out_ptr, off_r);
+        bcx.ins().store(mf, rv_r, oar, 0);
+        let one = bcx.ins().iconst(types::I64, 1);
+        let inr = bcx.ins().iadd(i_rb, one);
+        bcx.ins().jump(rhdr, &[inr]);
+
+        bcx.switch_to_block(exit);
+        bcx.ins().return_(&[]);
+        bcx.seal_all_blocks();
+        bcx.finalize();
+    }
+    module.define_function(func_id, &mut ctx).map_err(|e| JitError::CraneliftError(format!("define: {:?}", e)))?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().map_err(|e| JitError::CraneliftError(format!("finalize: {:?}", e)))?;
+    let ptr = module.get_finalized_function(func_id);
+    let kind = if n_vec == 1 { r2_types::JitKind::VectorMap } else { r2_types::JitKind::VectorBinaryMap };
+    Ok(CompiledFn { ptr, arity: n_vec, kind, _module: module })
+}
+
 /// Compile a multi-reduction scalar kernel over 1–2 vector params. `body` is a
 /// scalar expression, or a `Block` of `local <- <scalar>` assignments followed
 /// by a final scalar expression.
@@ -1360,47 +1520,7 @@ pub(crate) fn compile_reduction_kernel(body: &r2_types::Expr, param_names: &[std
             r2_types::Expr::Block(stmts) => {
                 if stmts.is_empty() { return Err(JitError::Unsupported("empty body".into())); }
                 let (last, init) = stmts.split_last().unwrap();
-                // Batch independent reductions into single fused passes (brick 4).
-                // `batch` holds (name, element-expr, op, is_mean); flushed when the
-                // next reduction depends on a batch member or a non-reduction stmt
-                // / the final expr is reached.
-                let mut batch: Vec<(std::sync::Arc<str>, &r2_types::Expr, FusedReduceOp, bool)> = Vec::new();
-                let mut batch_names: std::collections::HashSet<std::sync::Arc<str>> = std::collections::HashSet::new();
-
-                for st in init {
-                    let (nm, value) = match st {
-                        r2_types::Expr::Assign { target, value, .. } => match target.as_ref() {
-                            r2_types::Expr::Symbol(n) => (n.clone(), value.as_ref()),
-                            _ => return Err(JitError::Unsupported("non-symbol assign in kernel".into())),
-                        },
-                        _ => return Err(JitError::Unsupported("non-assign statement before final expr".into())),
-                    };
-                    // Is this assignment a single-vector reduction?
-                    let red: Option<(&r2_types::Expr, FusedReduceOp, bool)> = match value {
-                        r2_types::Expr::Call { func, args } if args.len() == 1 => match func.as_ref() {
-                            r2_types::Expr::Symbol(s) if s.as_ref() == "sum" => Some((&args[0].value, FusedReduceOp::Sum, false)),
-                            r2_types::Expr::Symbol(s) if s.as_ref() == "prod" => Some((&args[0].value, FusedReduceOp::Prod, false)),
-                            r2_types::Expr::Symbol(s) if s.as_ref() == "mean" => Some((&args[0].value, FusedReduceOp::Sum, true)),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    match red {
-                        Some((elem, op, is_mean)) => {
-                            if expr_refs_any(elem, &batch_names) {
-                                flush_wave(&mut bcx, &k, &mut batch, &mut batch_names, &mut scalar_env)?;
-                            }
-                            batch_names.insert(nm.clone());
-                            batch.push((nm, elem, op, is_mean));
-                        }
-                        None => {
-                            flush_wave(&mut bcx, &k, &mut batch, &mut batch_names, &mut scalar_env)?;
-                            let v = emit_scalar(&mut bcx, &k, value, &scalar_env)?;
-                            scalar_env.insert(nm, v);
-                        }
-                    }
-                }
-                flush_wave(&mut bcx, &k, &mut batch, &mut batch_names, &mut scalar_env)?;
+                emit_kernel_prologue(&mut bcx, &k, init, &mut scalar_env)?;
                 emit_scalar(&mut bcx, &k, last, &scalar_env)?
             }
             other => emit_scalar(&mut bcx, &k, other, &scalar_env)?,
