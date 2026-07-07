@@ -128,6 +128,21 @@ cr(x, y) - cor(x, y)
 }
 
 #[test]
+fn shared_primitive_reused_correctly() {
+    // Brick 4: `d(x)=x-mean(x)` defined once and reused in var/cov/cor; CSE +
+    // wave fusion must not change results. sd(x) reuses the same centred sum.
+    for (formula, r) in [
+        ("va <- function(x) { d <- function(v) v-mean(v); sum(d(x)*d(x))/(length(x)-1) }; va(x) - var(x)", ()),
+        ("sdf <- function(x) { d <- function(v) v-mean(v); sqrt(sum(d(x)*d(x))/(length(x)-1)) }; sdf(x) - sd(x)", ()),
+        ("cr <- function(x,y) { d <- function(v) v-mean(v); sum(d(x)*d(y))/sqrt(sum(d(x)*d(x))*sum(d(y)*d(y))) }; cr(x,y) - cor(x,y)", ()),
+    ] {
+        let _ = r;
+        let d = scalar(eval_last(&format!("set.seed(9); x <- rnorm(300); y <- rnorm(300)\n{formula}")));
+        assert!(d.abs() < 1e-9, "{formula} -> diff {d}");
+    }
+}
+
+#[test]
 fn single_reduction_paths_unaffected() {
     // Existing specialised shapes must keep their own (non-kernel) codegen.
     for (body, kind) in [

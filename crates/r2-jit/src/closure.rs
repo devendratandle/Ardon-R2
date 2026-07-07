@@ -1035,35 +1035,66 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
 /// vector-local); such statements are dropped and their definition substituted
 /// into later statements. Scalar locals (those whose rhs reduces to a scalar) are
 /// kept. Non-Block bodies pass through unchanged.
+/// Canonical string key for an expression (the reduction-kernel node subset).
+/// Used for common-subexpression elimination: identical reduction sub-trees
+/// (e.g. `mean(x)`, `x-mean(x)` occurring many times) map to the same key and
+/// are computed once. Written verbatim, so `a+b` and `b+a` are distinct — fine,
+/// because the reuse philosophy writes each primitive (`d(x)`) identically.
+fn expr_key(e: &r2_types::Expr) -> String {
+    use r2_types::Expr::*;
+    match e {
+        NumLit(x) => format!("#{}", x),
+        IntLit(x) => format!("i{}", x),
+        BoolLit(b) => format!("b{}", b),
+        Symbol(s) => format!("${}", s),
+        Unary { op, expr } => format!("u{:?}({})", op, expr_key(expr)),
+        Binary { op, lhs, rhs } => format!("({}{:?}{})", expr_key(lhs), op, expr_key(rhs)),
+        Call { func, args } => format!("{}[{}]", expr_key(func),
+            args.iter().map(|a| expr_key(&a.value)).collect::<Vec<_>>().join(",")),
+        If { cond, then, else_ } => format!("if({},{},{})", expr_key(cond), expr_key(then),
+            else_.as_ref().map(|x| expr_key(x)).unwrap_or_else(|| "_".into())),
+        other => format!("?{:p}", other),
+    }
+}
+
 /// Phase J.4 brick 3 — hoist every reduction sub-expression (`sum`/`prod`/
 /// `mean`/`length`) to a fresh scalar local, so what remains inside each fused
 /// loop is a pure element expression over vector params + (now hoisted) scalar
 /// locals. `sum((x-mean(x))^2)` → `__hr0 <- mean(x); __hr1 <- sum((x-__hr0)^2); __hr1`.
-/// Nested reductions are hoisted innermost-first. Emits assignments into `stmts`.
-fn hoist_reductions(e: &r2_types::Expr, stmts: &mut Vec<r2_types::Expr>, ctr: &mut u32) -> r2_types::Expr {
+/// Nested reductions are hoisted innermost-first.
+///
+/// Phase J.4 brick 4 — **CSE**: a reduction whose (fully-hoisted) form was
+/// already emitted reuses that local instead of recomputing. So `mean(x)`
+/// appearing in variance, sd, covariance and correlation is computed *once* —
+/// the "compute the shared primitive `d(x)`/`mean(x)` once, reuse everywhere"
+/// design made real at the machine level.
+fn hoist_reductions(e: &r2_types::Expr, stmts: &mut Vec<r2_types::Expr>, ctr: &mut u32, seen: &mut std::collections::HashMap<String, std::sync::Arc<str>>) -> r2_types::Expr {
     use r2_types::Expr::*;
     match e {
         Call { func, args } => {
             let is_red = matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean" | "length"));
             let new_args: Vec<r2_types::CallArg> = args.iter()
-                .map(|a| r2_types::CallArg { name: a.name.clone(), value: hoist_reductions(&a.value, stmts, ctr) })
+                .map(|a| r2_types::CallArg { name: a.name.clone(), value: hoist_reductions(&a.value, stmts, ctr, seen) })
                 .collect();
             let call = Call { func: func.clone(), args: new_args };
             if is_red {
+                let key = expr_key(&call);
+                if let Some(existing) = seen.get(&key) { return Symbol(existing.clone()); } // CSE hit
                 let name: std::sync::Arc<str> = std::sync::Arc::from(format!(".__hr{}", *ctr));
                 *ctr += 1;
+                seen.insert(key, name.clone());
                 stmts.push(Assign { target: Box::new(Symbol(name.clone())), value: Box::new(call), superassign: false });
                 Symbol(name)
             } else {
                 call
             }
         }
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(hoist_reductions(expr, stmts, ctr)) },
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(hoist_reductions(expr, stmts, ctr, seen)) },
         Binary { op, lhs, rhs } => Binary { op: *op,
-            lhs: Box::new(hoist_reductions(lhs, stmts, ctr)), rhs: Box::new(hoist_reductions(rhs, stmts, ctr)) },
-        If { cond, then, else_ } => If { cond: Box::new(hoist_reductions(cond, stmts, ctr)),
-            then: Box::new(hoist_reductions(then, stmts, ctr)),
-            else_: else_.as_ref().map(|x| Box::new(hoist_reductions(x, stmts, ctr))) },
+            lhs: Box::new(hoist_reductions(lhs, stmts, ctr, seen)), rhs: Box::new(hoist_reductions(rhs, stmts, ctr, seen)) },
+        If { cond, then, else_ } => If { cond: Box::new(hoist_reductions(cond, stmts, ctr, seen)),
+            then: Box::new(hoist_reductions(then, stmts, ctr, seen)),
+            else_: else_.as_ref().map(|x| Box::new(hoist_reductions(x, stmts, ctr, seen))) },
         other => other.clone(),
     }
 }
@@ -1077,20 +1108,21 @@ fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Ar
     let inlined = inline_vector_locals(body, vec_params);
     let mut out: Vec<r2_types::Expr> = Vec::new();
     let mut ctr = 0u32;
+    let mut seen: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
     let final_expr = match &inlined {
         Block(ss) => {
             let (last, init) = match ss.split_last() { Some(x) => x, None => return inlined };
             for st in init {
                 if let Assign { target, value, superassign } = st {
-                    let v = hoist_reductions(value, &mut out, &mut ctr);
+                    let v = hoist_reductions(value, &mut out, &mut ctr, &mut seen);
                     out.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
                 } else {
                     out.push(st.clone());
                 }
             }
-            hoist_reductions(last, &mut out, &mut ctr)
+            hoist_reductions(last, &mut out, &mut ctr, &mut seen)
         }
-        other => hoist_reductions(other, &mut out, &mut ctr),
+        other => hoist_reductions(other, &mut out, &mut ctr, &mut seen),
     };
     out.push(final_expr);
     Block(out)
