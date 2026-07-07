@@ -184,9 +184,15 @@ knn(train,test,labels,k) K-nearest neighbors
 naive.bayes(x,y)        Gaussian naive Bayes
 prcomp(x)               Principal component analysis
 svd(x)                  Singular value decomposition
-eigen(x)                Eigenvalue decomposition
+eigen(x)                Eigenvalue decomposition (symmetric -> dsyev with
+                        vectors; non-symmetric -> dgeev; complex spectra
+                        expose $imaginary, $vectors = NULL)
 solve(a[, b])           Matrix inverse, or solve a x = b
 det(a)                  Determinant (LU)
+backsolve(r, x, k, upper.tri=TRUE, transpose=FALSE)   Upper-triangular solve
+forwardsolve(l, x, k, upper.tri=FALSE, transpose=FALSE) Lower-triangular solve
+rcond(a)                Reciprocal 1-norm condition number (exact, via inverse)
+kappa(z)                2-norm condition number sigma_max/sigma_min (exact SVD)
 mmap.write(x, path)     Write a numeric vector as a packed-f64 file
 mmap.col(path)          Open a memory-mapped column (out-of-core, larger
                         than RAM); sum/mean/sd/var/prod/min/max/range/length

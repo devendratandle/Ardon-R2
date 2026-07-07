@@ -143,7 +143,7 @@ pub(crate) fn stats_table() -> Vec<(&'static str, BuiltinFn)> {
         ("predict",bi_predict),("residuals",bi_residuals),("fitted",bi_fitted),("coef",bi_coef),
         ("glm",bi_glm),("confint",bi_confint),("binomial",bi_binomial),("gaussian",bi_gaussian),("poisson",bi_poisson),("subset",bi_subset),("transform",bi_transform),
         // ML functions
-        ("svd",bi_svd),("eigen",bi_eigen),("prcomp",bi_prcomp),("solve",bi_solve),("det",bi_det),("mmap.write",bi_mmap_write),("mmap.col",bi_mmap_col),("mmap.map",bi_mmap_map),("mmap.csv",bi_mmap_csv),("mmap.lm",bi_mmap_lm),("read.parquet",bi_read_parquet),
+        ("svd",bi_svd),("eigen",bi_eigen),("prcomp",bi_prcomp),("solve",bi_solve),("det",bi_det),("backsolve",bi_backsolve),("forwardsolve",bi_forwardsolve),("rcond",bi_rcond),("kappa",bi_kappa),("mmap.write",bi_mmap_write),("mmap.col",bi_mmap_col),("mmap.map",bi_mmap_map),("mmap.csv",bi_mmap_csv),("mmap.lm",bi_mmap_lm),("read.parquet",bi_read_parquet),
         ("kmeans",bi_kmeans),("knn",bi_knn),("naive.bayes",bi_naive_bayes),("scale",bi_scale),
         ("rpart",bi_rpart),("rf",bi_rf),("gbm",bi_gbm),("cv",bi_cv),("aov",bi_aov),("anova",bi_anova),("cor.test",bi_cor_test),("shapiro.test",bi_shapiro_test),("wilcox.test",bi_wilcox_test),("fisher.test",bi_fisher_test),("weighted.mean",bi_weighted_mean),("IQR",bi_iqr),("confusion.matrix",bi_confusion_matrix),
     ]

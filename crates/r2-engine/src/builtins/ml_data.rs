@@ -87,6 +87,137 @@ pub(crate) fn bi_solve(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
     }
 }
 
+// ── backsolve()/forwardsolve() — triangular solve ────────────────────
+
+/// Read a named logical argument (`TRUE`/`FALSE`, or numeric ≠ 0) if present.
+fn named_bool(a: &[EvalArg], name: &str) -> Option<bool> {
+    match gn(a, name)? {
+        RVal::Logical(b, _) => b.first().copied().flatten(),
+        RVal::Numeric(v, _) => v.first().copied().flatten().map(|x| x != 0.0),
+        RVal::Integer(v, _) => v.first().copied().flatten().map(|x| x != 0),
+        _ => None,
+    }
+}
+
+/// `backsolve(r, x, k, upper.tri = TRUE, transpose = FALSE)` and
+/// `forwardsolve(l, x, k, upper.tri = FALSE, transpose = FALSE)` — solve the
+/// triangular system `op(r)·y = x` by substitution. `x` may be a vector or a
+/// matrix (each column solved independently). `k` selects the leading k×k
+/// block. Built on `r2_linalg::dtrsv_gen`.
+fn triangular_solve(e: &mut Engine, a: &[EvalArg], default_upper: bool, who: &str) -> Result<RVal, R2Err> {
+    let r = match &gv(a, 0) {
+        RVal::Matrix(m) => m.clone(),
+        _ => return err!(Runtime, "{}: first argument must be a matrix", who),
+    };
+    if r.nrow != r.ncol { return err!(Runtime, "{}: matrix must be square", who); }
+    let n = r.nrow;
+    let upper = named_bool(a, "upper.tri").unwrap_or(default_upper);
+    let transpose = named_bool(a, "transpose").unwrap_or(false);
+    // k: named, else the third positional arg, else n.
+    let k = match gn(a, "k").or_else(|| a.get(2).filter(|x| x.name.is_none()).map(|x| x.value.clone())) {
+        Some(v) => e.as_reals(&v)?.first().copied().flatten().map(|x| x as usize).unwrap_or(n),
+        None => n,
+    };
+    if k == 0 || k > n { return err!(Runtime, "{}: 'k' out of range", who); }
+
+    // Leading k×k block of r (column-major).
+    let rsub: Vec<f64> = if k == n { r.data.clone() } else {
+        let mut s = vec![0.0; k * k];
+        for c in 0..k { for row in 0..k { s[c * k + row] = r.data[c * n + row]; } }
+        s
+    };
+
+    // x: the second positional argument.
+    let xval = a.get(1).map(|x| x.value.clone()).unwrap_or(RVal::Null);
+    let solve_col = |b: &mut Vec<f64>| -> Result<(), R2Err> {
+        r2_linalg::dtrsv_gen(k, &rsub, b, upper, transpose)
+            .map_err(|err| R2Err { msg: format!("{}: {}", who, err), kind: ErrKind::Runtime })
+    };
+
+    match xval {
+        RVal::Matrix(x) => {
+            if x.nrow < k { return err!(Runtime, "{}: 'x' has fewer rows than 'k'", who); }
+            let mut out = vec![0.0; k * x.ncol];
+            for c in 0..x.ncol {
+                let mut b: Vec<f64> = (0..k).map(|row| x.data[c * x.nrow + row]).collect();
+                solve_col(&mut b)?;
+                for row in 0..k { out[c * k + row] = b[row]; }
+            }
+            Ok(RVal::Matrix(Matrix::new(out, k, x.ncol)))
+        }
+        other => {
+            let xv: Vec<f64> = e.as_reals(&other)?.into_iter().flatten().collect();
+            if xv.len() < k { return err!(Runtime, "{}: length of 'x' is less than 'k'", who); }
+            let mut b = xv[..k].to_vec();
+            solve_col(&mut b)?;
+            Ok(RVal::Numeric(b.iter().map(|v| Some(*v)).collect::<Vec<_>>().into(), Attrs::default()))
+        }
+    }
+}
+
+pub(crate) fn bi_backsolve(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    triangular_solve(e, a, true, "backsolve")
+}
+pub(crate) fn bi_forwardsolve(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    triangular_solve(e, a, false, "forwardsolve")
+}
+
+// ── rcond()/kappa() — condition number ───────────────────────────────
+
+/// `rcond(x)` — reciprocal of the 1-norm condition number,
+/// `1 / (‖A‖₁ · ‖A⁻¹‖₁)`, computed exactly via the LU inverse. Returns 0 for a
+/// singular matrix. (LAPACK estimates this; we compute it exactly — accurate
+/// and fine for the moderate n where R2 is used.)
+pub(crate) fn bi_rcond(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let m = match &gv(a, 0) {
+        RVal::Matrix(m) => m.clone(),
+        _ => return err!(Runtime, "rcond: argument must be a matrix"),
+    };
+    if m.nrow != m.ncol { return err!(Runtime, "rcond: matrix must be square"); }
+    let n = m.nrow;
+    let norm1 = |data: &[f64]| (0..n).map(|c| (0..n).map(|r| data[c * n + r].abs()).sum::<f64>())
+        .fold(0.0f64, f64::max);
+    let a_norm = norm1(&m.data);
+    let rc = match r2_linalg::dgetri(n, &m.data) {
+        Ok(inv) => {
+            let inv_norm = norm1(&inv);
+            if a_norm == 0.0 || inv_norm == 0.0 { 0.0 } else { 1.0 / (a_norm * inv_norm) }
+        }
+        Err(_) => 0.0, // singular → condition number ∞ → rcond 0
+    };
+    Ok(RVal::Numeric(vec![Some(rc)].into(), Attrs::default()))
+}
+
+/// `kappa(z)` — 2-norm condition number `σ_max / σ_min` (R's
+/// `kappa(z, exact = TRUE)`; R's default is a cheaper estimate). The singular
+/// values are `√λ` of `AᵀA` via the accurate symmetric eigensolver (`dsyev`) —
+/// this avoids `dgesvd`'s current precision loss on the singular values. The
+/// normal-equations form squares the condition number internally, so for
+/// severely ill-conditioned `A` the estimate is optimistic; fine for the
+/// conditioning checks kappa is used for. `Inf` for a singular matrix.
+pub(crate) fn bi_kappa(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let m = match &gv(a, 0) {
+        RVal::Matrix(m) => m.clone(),
+        _ => return err!(Runtime, "kappa: argument must be a matrix"),
+    };
+    let (rows, cols) = (m.nrow, m.ncol);
+    // G = AᵀA (cols×cols, symmetric PSD), column-major.
+    let mut g = vec![0.0f64; cols * cols];
+    for i in 0..cols {
+        for j in 0..cols {
+            let mut s = 0.0;
+            for k in 0..rows { s += m.data[i * rows + k] * m.data[j * rows + k]; }
+            g[j * cols + i] = s;
+        }
+    }
+    let eig = r2_linalg::dsyev(cols, &g)
+        .map_err(|e| R2Err { msg: format!("kappa: {}", e), kind: ErrKind::Runtime })?;
+    let lmax = eig.iter().cloned().fold(0.0f64, f64::max);
+    let lmin = eig.iter().cloned().fold(f64::INFINITY, f64::min).max(0.0);
+    let k = if lmin <= 0.0 { f64::INFINITY } else { (lmax / lmin).sqrt() };
+    Ok(RVal::Numeric(vec![Some(k)].into(), Attrs::default()))
+}
+
 // ── Out-of-core columnar (memory-mapped) ────────────────────────────
 // mmap.write(x, path) writes a numeric vector as a packed-f64 file;
 // mmap.col(path) opens it as a handle whose reductions (sum/mean/min/max/
