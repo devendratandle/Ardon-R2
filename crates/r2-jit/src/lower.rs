@@ -276,6 +276,21 @@ pub(crate) fn lower_inst(
             let addr = bcx.ins().iadd(b, off);
             Ok(bcx.ins().load(types::F64, MemFlags::trusted(), addr, 0))
         }
+        // Phase J.3 — indexed store `base[index] <- value`. `base` is a mutable
+        // i64 pointer (output buffer). Yields the stored value (R semantics).
+        IrInst::Store { base, index, value, .. } => {
+            let b = *env.get(&base.0).ok_or(JitError::UndefinedVReg(*base))?;
+            let idx_f = *env.get(&index.0).ok_or(JitError::UndefinedVReg(*index))?;
+            let val = *env.get(&value.0).ok_or(JitError::UndefinedVReg(*value))?;
+            let idx_i = bcx.ins().fcvt_to_sint(types::I64, idx_f);
+            let one = bcx.ins().iconst(types::I64, 1);
+            let idx0 = bcx.ins().isub(idx_i, one);
+            let eight = bcx.ins().iconst(types::I64, 8);
+            let off = bcx.ins().imul(idx0, eight);
+            let addr = bcx.ins().iadd(b, off);
+            bcx.ins().store(MemFlags::trusted(), val, addr, 0);
+            Ok(val)
+        }
         IrInst::Phi { .. } => Err(JitError::CraneliftError(
             "phi must appear at the start of a block (handled by lower_func_body)".into(),
         )),

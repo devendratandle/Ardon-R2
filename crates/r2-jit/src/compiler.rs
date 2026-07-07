@@ -129,6 +129,67 @@ impl JitCompiler {
         Ok(CompiledFn { ptr, arity: n_vec, kind, _module: module })
     }
 
+    /// Phase J.3 — compile an imperative indexed-**store** loop
+    /// `for(i in 1:length(x)) y[i] <- f(x[i][, w[i]])` into native code. The IR
+    /// carries the counted loop plus `Store` instructions into the output param.
+    /// Params must be the input vectors (shape `Vec`) in order, then the single
+    /// output vector (shape `Vec`), then one scalar `len`. The native signature
+    /// is `(in.., out, len) -> f64` (the f64 return is a dummy — the result is
+    /// written through the out pointer), reusing the same lowering as the
+    /// reduction path with a store-map handle kind.
+    pub fn compile_indexed_store_map(func: &IrFunc) -> JitResult<CompiledFn> {
+        let n_vec = func.params.iter()
+            .filter(|(_, ty, _)| matches!(ty.shape, IrShape::Vec(_)))
+            .count();
+        // n_vec = n_inputs + 1 output; support 1 or 2 inputs.
+        if !(2..=3).contains(&n_vec) || func.params.len() != n_vec + 1 {
+            return Err(JitError::Unsupported(format!(
+                "indexed store map needs 1-2 input vectors + 1 output vector + 1 len, got {} params ({} vec)",
+                func.params.len(), n_vec
+            )));
+        }
+
+        let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+            .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
+        register_math_symbols(&mut jit_builder);
+        let mut module = JITModule::new(jit_builder);
+        let math_ids = declare_math_imports(&mut module)?;
+
+        let mut sig = module.make_signature();
+        for _ in &func.params { sig.params.push(AbiParam::new(types::I64)); }
+        sig.returns.push(AbiParam::new(types::F64));
+
+        let func_id = module
+            .declare_function("__jit_indexed_store_map", Linkage::Export, &sig)
+            .map_err(|e| JitError::CraneliftError(format!("declare: {:?}", e)))?;
+
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        let mut fbctx = FunctionBuilderContext::new();
+        {
+            let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let math_refs: HashMap<&'static str, cranelift::prelude::codegen::ir::FuncRef> =
+                math_ids.iter()
+                    .map(|(k, id)| (*k, module.declare_func_in_func(*id, &mut bcx.func)))
+                    .collect();
+            lower_func_body(&mut bcx, func, Some(&math_refs))?;
+            bcx.finalize();
+        }
+
+        module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| JitError::CraneliftError(format!("define: {:?}", e)))?;
+        module.clear_context(&mut ctx);
+        module
+            .finalize_definitions()
+            .map_err(|e| JitError::CraneliftError(format!("finalize: {:?}", e)))?;
+
+        let ptr = module.get_finalized_function(func_id);
+        let n_in = n_vec - 1;
+        let kind = if n_in == 1 { r2_types::JitKind::IndexedStoreMap1 } else { r2_types::JitKind::IndexedStoreMap2 };
+        Ok(CompiledFn { ptr, arity: n_in, kind, _module: module })
+    }
+
     /// Phase C.3: compile a vector reduction `(v) -> scalar`.
     /// `reduction` is one of "sum", "mean", "length", "prod".
     /// The compiled native fn has signature `(*const f64, i64) -> f64`,

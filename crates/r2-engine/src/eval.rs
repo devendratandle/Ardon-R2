@@ -1202,6 +1202,42 @@ impl Engine {
                                     }
                                 }
                             }
+                            r2_types::JitKind::IndexedStoreMap1 => {
+                                // J.3 imperative store map: one input vector →
+                                // output vector (engine allocates the buffer).
+                                if args.len() == 1 {
+                                    if let RVal::Numeric(v, _) = &args[0].value {
+                                        if !v.is_empty() {
+                                            let col = v.columnar();
+                                            let values = col.values();
+                                            let mut out_buf: Vec<f64> = vec![0.0; values.len()];
+                                            let ok = unsafe { h.try_call_ixstore1(values.as_ptr(), out_buf.as_mut_ptr(), values.len() as i64) };
+                                            if ok {
+                                                let result = combine_unary_output(&out_buf, col.valid_bits());
+                                                return Ok(RVal::Numeric(result.into(), Attrs::default()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            r2_types::JitKind::IndexedStoreMap2 => {
+                                if args.len() == 2 {
+                                    if let (RVal::Numeric(a, _), RVal::Numeric(b, _)) = (&args[0].value, &args[1].value) {
+                                        if a.len() == b.len() && !a.is_empty() {
+                                            let a_col = a.columnar();
+                                            let b_col = b.columnar();
+                                            let a_vals = a_col.values();
+                                            let b_vals = b_col.values();
+                                            let mut out_buf: Vec<f64> = vec![0.0; a.len()];
+                                            let ok = unsafe { h.try_call_ixstore2(a_vals.as_ptr(), b_vals.as_ptr(), out_buf.as_mut_ptr(), a.len() as i64) };
+                                            if ok {
+                                                let result = combine_binary_output(&out_buf, a_col.valid_bits(), b_col.valid_bits());
+                                                return Ok(RVal::Numeric(result.into(), Attrs::default()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             r2_types::JitKind::Scalar => {
                                 let mut farg: Vec<f64> = Vec::with_capacity(args.len());
                                 let mut all_scalar = true;

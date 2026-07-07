@@ -173,6 +173,15 @@ pub enum JitKind {
     /// Used for branchy closures over three columns, e.g. an `ifelse`-shape
     /// `function(c, a, b) if (c > 0) a else b`. Phase C.5.
     VectorTernaryMap,
+    /// `(*const f64, *mut f64, i64) -> f64` — Phase J.3 indexed-**store** map:
+    /// an imperative loop `for(i in 1:length(x)) y[i] <- f(x[i])` with an
+    /// arbitrary (multi-statement) body writing `y[i]` via a real `Store`. The
+    /// f64 return is a dummy (the loop yields NULL); the out buffer carries the
+    /// result. One input vector.
+    IndexedStoreMap1,
+    /// `(*const f64, *const f64, *mut f64, i64) -> f64` — two-input indexed
+    /// store map, e.g. `for(i in 1:length(x)) y[i] <- x[i] + w[i]`. Phase J.3.
+    IndexedStoreMap2,
 }
 
 /// Object-safe handle to a JIT-compiled function. Lives in r2-jit (and any
@@ -214,6 +223,12 @@ pub trait JitHandle: std::fmt::Debug + Send + Sync {
         _out_ptr: *mut f64,
         _len: i64,
     ) -> bool { false }
+    /// IndexedStoreMap1 dispatch (Phase J.3). SAFETY: `in_ptr`/`out_ptr` each
+    /// reference at least `len` valid f64s; out_ptr is written to.
+    unsafe fn try_call_ixstore1(&self, _in_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }
+    /// IndexedStoreMap2 dispatch (Phase J.3). SAFETY: all three pointers each
+    /// reference at least `len` valid f64s; out_ptr is written to.
+    unsafe fn try_call_ixstore2(&self, _a_ptr: *const f64, _b_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }
 }
 
 /// EngineCtx — Phase R.2 step 6.

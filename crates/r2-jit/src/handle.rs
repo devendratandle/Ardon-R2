@@ -83,6 +83,22 @@ impl r2_types::JitHandle for CompiledFn {
         f(a_ptr, b_ptr, c_ptr, out_ptr, len);
         true
     }
+
+    // Phase J.3 indexed-store maps. The native code returns a dummy f64 (the
+    // loop's NULL value) declared in the fn type and ignored; the result is
+    // written through `out_ptr`.
+    unsafe fn try_call_ixstore1(&self, in_ptr: *const f64, out_ptr: *mut f64, len: i64) -> bool {
+        if self.kind != r2_types::JitKind::IndexedStoreMap1 { return false; }
+        let f: extern "C" fn(*const f64, *mut f64, i64) -> f64 = std::mem::transmute(self.ptr);
+        f(in_ptr, out_ptr, len);
+        true
+    }
+    unsafe fn try_call_ixstore2(&self, a_ptr: *const f64, b_ptr: *const f64, out_ptr: *mut f64, len: i64) -> bool {
+        if self.kind != r2_types::JitKind::IndexedStoreMap2 { return false; }
+        let f: extern "C" fn(*const f64, *const f64, *mut f64, i64) -> f64 = std::mem::transmute(self.ptr);
+        f(a_ptr, b_ptr, out_ptr, len);
+        true
+    }
 }
 
 impl CompiledFn {

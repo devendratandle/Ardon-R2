@@ -90,6 +90,12 @@ pub enum IrInst {
     /// Only emitted for provably in-bounds accesses (index == the loop
     /// induction var over `1:length(base)`), so no bounds check is needed.
     Load { dst: VReg, base: VReg, index: VReg, ty: IrType },
+
+    /// Phase J.3 — indexed store `base[index] <- value` into a mutable
+    /// vector-reference parameter (the output buffer). `index` is 1-based.
+    /// `dst` is bound to `value` so the store expression yields the assigned
+    /// value (R semantics), keeping it uniform with other instructions.
+    Store { dst: VReg, base: VReg, index: VReg, value: VReg, ty: IrType },
 }
 
 impl IrInst {
@@ -101,7 +107,8 @@ impl IrInst {
             | IrInst::Call { dst, .. }
             | IrInst::Intrinsic { dst, .. }
             | IrInst::Phi { dst, .. }
-            | IrInst::Load { dst, .. } => *dst,
+            | IrInst::Load { dst, .. }
+            | IrInst::Store { dst, .. } => *dst,
         }
     }
     pub fn ty(&self) -> &IrType {
@@ -112,7 +119,8 @@ impl IrInst {
             | IrInst::Call { ty, .. }
             | IrInst::Intrinsic { ty, .. }
             | IrInst::Phi { ty, .. }
-            | IrInst::Load { ty, .. } => ty,
+            | IrInst::Load { ty, .. }
+            | IrInst::Store { ty, .. } => ty,
         }
     }
 }
@@ -271,11 +279,29 @@ impl IrBuilder {
 
             Expr::Assign { target, value, .. } => {
                 let v = self.lower(value);
-                if let Expr::Symbol(name) = target.as_ref() {
-                    self.locals.insert(name.clone(), v);
-                    self.type_ctx.bind(name.clone(), self.vreg_types[v.0 as usize].clone());
+                match target.as_ref() {
+                    Expr::Symbol(name) => {
+                        self.locals.insert(name.clone(), v);
+                        self.type_ctx.bind(name.clone(), self.vreg_types[v.0 as usize].clone());
+                        v
+                    }
+                    // Phase J.3 — indexed store `y[i] <- value` into a mutable
+                    // vector-reference param (the output buffer). Only when `y`
+                    // is a Vec-shaped param with a single index; otherwise fall
+                    // through to a no-op (the value is still produced).
+                    Expr::Index { object, indices }
+                        if indices.len() == 1 && indices[0].is_some()
+                            && matches!(object.as_ref(), Expr::Symbol(s)
+                                if matches!(self.type_ctx.lookup(s).shape, infer::IrShape::Vec(_))) => {
+                        let base = self.lower(object);
+                        let index = self.lower(indices[0].as_ref().unwrap());
+                        let ty = IrType::scalar(infer::IrElem::Real);
+                        let dst = self.new_vreg(ty.clone());
+                        self.emit(IrInst::Store { dst, base, index, value: v, ty });
+                        dst
+                    }
+                    _ => v,
                 }
-                v
             }
 
             Expr::Call { func, args } => {
@@ -717,6 +743,7 @@ pub fn validate(f: &IrFunc) -> Result<(), Vec<ValidationError>> {
                 IrInst::Call { args, .. } | IrInst::Intrinsic { args, .. } => args.clone(),
                 IrInst::Phi { sources, .. } => sources.iter().map(|(_, v)| *v).collect(),
                 IrInst::Load { base, index, .. } => vec![*base, *index],
+                IrInst::Store { base, index, value, .. } => vec![*base, *index, *value],
                 IrInst::Const { .. } => vec![],
             };
             for u in used {
@@ -764,6 +791,7 @@ fn print_inst(i: &IrInst) -> String {
         IrInst::Intrinsic { dst, name, args, .. } => format!("{} = intrinsic @{}({})", dst, name, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")),
         IrInst::Phi { dst, sources, .. } => format!("{} = phi [{}]", dst, sources.iter().map(|(b, v)| format!("{} from {}", v, b)).collect::<Vec<_>>().join(", ")),
         IrInst::Load { dst, base, index, .. } => format!("{} = load {}[{}]", dst, base, index),
+        IrInst::Store { dst, base, index, value, .. } => format!("{} = store {}[{}] <- {}", dst, base, index, value),
     }
 }
 

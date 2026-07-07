@@ -424,6 +424,137 @@ pub(crate) fn recognize_indexed_scalar_loop(
     Some((rewritten, vecs))
 }
 
+/// Phase J.3 — is `e` a faithfully-lowerable indexed-**store** loop body?
+/// Admits: reads `in_vec[ivar]`, stores `out[ivar] <- value` (both with the
+/// bare loop var → in-bounds), scalar-symbol temporaries, arithmetic, math
+/// calls, and `if`/`else` *as a value*. Rejects reads of `out` (no recurrence),
+/// nested loops, and `if` without `else`.
+fn store_body_ok(e: &r2_types::Expr, in_vecs: &[std::sync::Arc<str>], out: &str, ivar: &str) -> bool {
+    use r2_types::Expr::*;
+    let is_bare_index = |o: &r2_types::Expr, indices: &[Option<r2_types::Expr>], name: &str| {
+        indices.len() == 1
+            && matches!(o, Symbol(s) if s.as_ref() == name)
+            && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref() == ivar)
+    };
+    match e {
+        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
+        Unary { expr, .. } => store_body_ok(expr, in_vecs, out, ivar),
+        Binary { lhs, rhs, .. } => store_body_ok(lhs, in_vecs, out, ivar) && store_body_ok(rhs, in_vecs, out, ivar),
+        Assign { target, value, .. } => {
+            let target_ok = match target.as_ref() {
+                Symbol(_) => true, // scalar temp
+                Index { object, indices } => is_bare_index(object, indices, out), // out[i] store
+                _ => false,
+            };
+            target_ok && store_body_ok(value, in_vecs, out, ivar)
+        }
+        Call { func, args } => store_body_ok(func, in_vecs, out, ivar)
+            && args.iter().all(|a| store_body_ok(&a.value, in_vecs, out, ivar)),
+        If { cond, then, else_ } => else_.is_some()
+            && store_body_ok(cond, in_vecs, out, ivar)
+            && store_body_ok(then, in_vecs, out, ivar)
+            && else_.as_ref().map_or(true, |x| store_body_ok(x, in_vecs, out, ivar)),
+        Block(stmts) => stmts.iter().all(|s| store_body_ok(s, in_vecs, out, ivar)),
+        // A read: only an input vector at the bare loop var (never `out`).
+        Index { object, indices } => in_vecs.iter().any(|v| is_bare_index(object, indices, v)),
+        _ => false, // no For/While/Repeat/Match/etc. inside the loop body
+    }
+}
+
+/// Does `e` contain a store `out[ivar] <- …`?
+fn has_store_to(e: &r2_types::Expr, out: &str, ivar: &str) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        Assign { target, value, .. } => {
+            let hit = matches!(target.as_ref(), Index { object, indices }
+                if indices.len() == 1
+                    && matches!(object.as_ref(), Symbol(o) if o.as_ref() == out)
+                    && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref() == ivar));
+            hit || has_store_to(value, out, ivar)
+        }
+        Binary { lhs, rhs, .. } => has_store_to(lhs, out, ivar) || has_store_to(rhs, out, ivar),
+        Unary { expr, .. } => has_store_to(expr, out, ivar),
+        Call { args, .. } => args.iter().any(|a| has_store_to(&a.value, out, ivar)),
+        If { cond, then, else_ } => has_store_to(cond, out, ivar) || has_store_to(then, out, ivar)
+            || else_.as_ref().map_or(false, |x| has_store_to(x, out, ivar)),
+        Block(s) => s.iter().any(|x| has_store_to(x, out, ivar)),
+        _ => false,
+    }
+}
+
+/// Phase J.3 — recognize a general indexed-**store** map over 1-2 input vectors:
+///   `function(x[, w]) { [n <- length(x);] y <- <alloc>; for(i in 1:length(x)) <body storing y[i]>; y }`
+/// The loop body may be multi-statement with scalar temporaries and reads of
+/// `x[i]`/`w[i]` (bare loop var). Returns (rewritten IR body = the loop only, with
+/// `length(v)`→ the len param), the input vector names, and the output var name.
+pub(crate) fn recognize_indexed_store_map(
+    body: &r2_types::Expr,
+    params: &[std::sync::Arc<str>],
+) -> Option<(r2_types::Expr, Vec<std::sync::Arc<str>>, std::sync::Arc<str>)> {
+    use r2_types::Expr::*;
+    let stmts = match body { Block(s) => s, _ => return None };
+    let out = match stmts.last() { Some(Symbol(o)) => o.clone(), _ => return None };
+    let in_vecs: Vec<std::sync::Arc<str>> = params.to_vec();
+    if in_vecs.iter().any(|v| v.as_ref() == out.as_ref()) { return None; } // out must be a fresh local
+
+    let is_len_of_vec = |e: &r2_types::Expr| matches!(e, Call { func, args }
+        if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "length")
+            && args.len() == 1
+            && matches!(&args[0].value, Symbol(a) if in_vecs.iter().any(|v| v.as_ref() == a.as_ref())));
+
+    // Partition the top-level statements: length-aliases, the single output
+    // alloc, the (single) For, and the trailing `out`. Anything else → bail.
+    let mut len_aliases: Vec<std::sync::Arc<str>> = Vec::new();
+    let mut saw_alloc = false;
+    let mut for_stmt: Option<&r2_types::Expr> = None;
+    for (k, st) in stmts.iter().enumerate() {
+        if k == stmts.len() - 1 { break; } // trailing Symbol(out), already captured
+        match st {
+            Assign { target, value, .. } => {
+                let nm = match target.as_ref() { Symbol(n) => n.clone(), _ => return None };
+                if is_len_of_vec(value) { len_aliases.push(nm); }
+                else if nm.as_ref() == out.as_ref() { saw_alloc = true; }
+                else { return None; } // unexpected pre-loop statement
+            }
+            For { .. } => { if for_stmt.is_some() { return None; } for_stmt = Some(st); }
+            _ => return None,
+        }
+    }
+    if !saw_alloc { return None; }
+    let (ivar, iter, fbody) = match for_stmt? { For { var, iter, body } => (var.clone(), iter, body), _ => return None };
+
+    // Loop must be `1:<len>` with <len> = length(invec) or a length-alias.
+    let len_expr = match iter.as_ref() {
+        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
+            if matches!(lhs.as_ref(), NumLit(x) if *x == 1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
+        _ => return None,
+    };
+    let len_ok = match len_expr {
+        e if is_len_of_vec(e) => true,
+        Symbol(nm) => len_aliases.iter().any(|a| a.as_ref() == nm.as_ref()),
+        _ => false,
+    };
+    if !len_ok { return None; }
+
+    // Validate the loop body and require it actually stores out[ivar].
+    if !store_body_ok(fbody, &in_vecs, out.as_ref(), ivar.as_ref()) { return None; }
+    if !has_store_to(fbody, out.as_ref(), ivar.as_ref()) { return None; }
+
+    // Rewritten IR body = the pre-loop length-aliases + the For (drop alloc &
+    // trailing return); length(vec) → the synthetic len param.
+    let len_sym: std::sync::Arc<str> = std::sync::Arc::from(".__ixloop_n");
+    let mut kept: Vec<r2_types::Expr> = Vec::new();
+    for (k, st) in stmts.iter().enumerate() {
+        if k == stmts.len() - 1 { break; }
+        match st {
+            Assign { target, value, .. }
+                if matches!(target.as_ref(), Symbol(n) if n.as_ref() == out.as_ref()) && !is_len_of_vec(value) => {}
+            other => kept.push(rewrite_length(other, &in_vecs, &len_sym)),
+        }
+    }
+    Some((Block(kept), in_vecs, out))
+}
+
 /// J.5 groundwork / `explain()` — the FIRST construct in `e` that keeps it out
 /// of the JIT, as a human-readable reason, or `None` if fully lowerable. Mirrors
 /// `body_is_jit_lowerable` but reports *why* instead of a bare bool.
@@ -583,6 +714,27 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
             let mut ir = r2_ir::lower_function("__indexed_scalar_loop__", params, &rewritten);
             ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
             if let Ok(c) = JitCompiler::compile_indexed_reduction(&ir) {
+                return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
+            }
+        }
+    }
+
+    // Phase J.3 — general indexed-STORE map (1-2 input vectors → 1 output),
+    // e.g. two-input `for(i in 1:length(x)) y[i] <- x[i]+w[i]; y` or a
+    // multi-statement store body. Runs after the simpler `recognize_index_map`
+    // (which handles the single-input `y[i] <- f(x[i])` shape via VectorMap).
+    if cl.params.len() == 1 || cl.params.len() == 2 {
+        let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
+        if let Some((rewritten, in_vecs, out)) = recognize_indexed_store_map(body_ref, &pnames) {
+            // Params: input vectors, then the output vector, then the len scalar.
+            let mut params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = in_vecs.iter()
+                .map(|v| (v.clone(), r2_types::infer::IrType::vector(IrElem::Real, None)))
+                .collect();
+            params.push((out, r2_types::infer::IrType::vector(IrElem::Real, None)));
+            params.push((std::sync::Arc::from(".__ixloop_n"), r2_types::infer::IrType::scalar(IrElem::Real)));
+            let mut ir = r2_ir::lower_function("__indexed_store_map__", params, &rewritten);
+            ir.return_type = r2_types::infer::IrType::null();
+            if let Ok(c) = JitCompiler::compile_indexed_store_map(&ir) {
                 return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
             }
         }
