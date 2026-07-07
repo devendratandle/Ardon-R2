@@ -526,6 +526,14 @@ impl JitCompiler {
         compile_binary_map_reduce_inner(body_ir, reduce_op)
     }
 
+    /// Phase J.4 brick 2 — multi-reduction scalar kernel over 1-2 vector params
+    /// (e.g. `sum(x*y)/sum(x*x)`, variance/covariance via `mean`). Each
+    /// reduction fuses into its own loop; scalar locals thread between them.
+    /// Takes the closure body AST directly. Reuses the `Vector1/2ToScalar` ABI.
+    pub fn compile_reduction_kernel(body: &r2_types::Expr, param_names: &[std::sync::Arc<str>]) -> JitResult<CompiledFn> {
+        compile_reduction_kernel(body, param_names)
+    }
+
     /// Phase C.8 — **SIMD f64x2 vectorized 1-arg vector map.**
     ///
     /// When the IR body is "SIMD-clean" (single block, only arithmetic +

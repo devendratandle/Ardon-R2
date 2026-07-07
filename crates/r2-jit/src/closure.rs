@@ -998,6 +998,19 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
         }
     }
 
+    // Phase J.4 brick 2 — multi-reduction scalar kernel. Combinations of
+    // whole-vector reductions the single-reduction paths can't express:
+    // `sum(x*y)/sum(x*x)` (regression coef), `{ m<-mean(x); sum((x-m)^2) }`
+    // (variance), covariance, etc. Attempted only when the body actually
+    // mentions a reduction (so pure vector maps skip it), after all the
+    // single-reduction / vector-map paths, before the scalar fallback.
+    if (cl.params.len() == 1 || cl.params.len() == 2) && mentions_reduction(body_ref) {
+        let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
+        if let Ok(c) = JitCompiler::compile_reduction_kernel(body_ref, &pnames) {
+            return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
+        }
+    }
+
     // Phase C.2 — scalar specialization fallback.
     let params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = cl.params.iter()
         .map(|p| (p.name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)))
@@ -1008,6 +1021,24 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
     match JitCompiler::compile(&func) {
         Ok(c) => Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>),
         Err(_) => None,
+    }
+}
+
+/// Does `e` contain a `sum`/`prod`/`mean` reduction call? Cheap gate so the
+/// multi-reduction kernel is only attempted on plausibly-scalar bodies.
+fn mentions_reduction(e: &r2_types::Expr) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        Call { func, args } => matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean"))
+            || args.iter().any(|a| mentions_reduction(&a.value)),
+        Binary { lhs, rhs, .. } => mentions_reduction(lhs) || mentions_reduction(rhs),
+        Unary { expr, .. } => mentions_reduction(expr),
+        Assign { value, .. } => mentions_reduction(value),
+        If { cond, then, else_ } => mentions_reduction(cond) || mentions_reduction(then)
+            || else_.as_ref().map_or(false, |x| mentions_reduction(x)),
+        Block(s) => s.iter().any(mentions_reduction),
+        Return(v) => mentions_reduction(v),
+        _ => false,
     }
 }
 

@@ -847,3 +847,274 @@ pub(crate) fn compile_vector_n_map_generic(
     let ptr = module.get_finalized_function(func_id);
     Ok(CompiledFn { ptr, arity, kind, _module: module })
 }
+
+// ── Phase J.4 brick 2 — multi-reduction scalar kernels ───────────────
+//
+// Compiles a scalar-returning function whose body *combines several whole-
+// vector reductions* — the shape the single-reduction paths can't express:
+//   function(x, y) sum(x*y) / sum(x*x)                 (regression coefficient)
+//   function(x)    { m <- mean(x); sum((x-m)*(x-m)) }  (centred sum / variance)
+//   function(x, y) { mx<-mean(x); my<-mean(y); sum((x-mx)*(y-my)) } (covariance)
+//
+// Each `sum`/`prod`/`mean` emits its own fused loop (no intermediate vector is
+// ever materialised); scalar locals thread between the loops as plain SSA
+// values. Reuses the `Vector1/2ToScalar` ABI (`(ptr[,ptr],len)->f64`) and the
+// existing engine dispatch — no new ABI surface.
+
+struct Kctx<'a> {
+    x_ptr: Value,
+    y_ptr: Option<Value>,
+    len: Value,   // i64 element count
+    len_f: Value, // f64 element count (for mean / length)
+    names: &'a [std::sync::Arc<str>],
+    math: &'a HashMap<&'static str, cranelift::prelude::codegen::ir::FuncRef>,
+}
+
+/// Emit a pure element-wise expression (inside a reduction loop). `env` maps the
+/// vector param names → the loaded element value, and any scalar locals → their
+/// (loop-invariant) values. No reductions here — those live at the scalar level.
+fn emit_elem(bcx: &mut FunctionBuilder, k: &Kctx, e: &r2_types::Expr, env: &HashMap<std::sync::Arc<str>, Value>) -> JitResult<Value> {
+    use r2_types::Expr::*;
+    match e {
+        NumLit(x) => Ok(bcx.ins().f64const(*x)),
+        IntLit(x) => Ok(bcx.ins().f64const(*x as f64)),
+        BoolLit(b) => Ok(bcx.ins().f64const(if *b { 1.0 } else { 0.0 })),
+        Symbol(s) => env.get(s).copied()
+            .ok_or_else(|| JitError::Unsupported(format!("element expr references non-vector `{}`", s))),
+        Unary { op, expr } => {
+            let v = emit_elem(bcx, k, expr, env)?;
+            Ok(match op {
+                r2_types::UnOp::Neg => bcx.ins().fneg(v),
+                r2_types::UnOp::Pos => v,
+                r2_types::UnOp::Not => { let z = bcx.ins().f64const(0.0); cmp_to_f64(bcx, v, z, FloatCC::Equal) }
+            })
+        }
+        Binary { op, lhs, rhs } => {
+            let a = emit_elem(bcx, k, lhs, env)?;
+            let b = emit_elem(bcx, k, rhs, env)?;
+            emit_binop(bcx, k, *op, a, b)
+        }
+        Call { func, args } => {
+            let fname = match func.as_ref() { Symbol(s) => s.clone(), _ => return Err(JitError::Unsupported("call target".into())) };
+            let mut av = Vec::with_capacity(args.len());
+            for a in args { av.push(emit_elem(bcx, k, &a.value, env)?); }
+            emit_math_call(bcx, k, fname.as_ref(), &av)
+        }
+        If { cond, then, else_ } => {
+            let e2 = else_.as_ref().ok_or_else(|| JitError::Unsupported("if without else in element expr".into()))?;
+            let c = emit_elem(bcx, k, cond, env)?;
+            let t = emit_elem(bcx, k, then, env)?;
+            let f = emit_elem(bcx, k, e2, env)?;
+            let z = bcx.ins().f64const(0.0);
+            let nz = bcx.ins().fcmp(FloatCC::NotEqual, c, z);
+            Ok(bcx.ins().select(nz, t, f))
+        }
+        _ => Err(JitError::Unsupported("unsupported node in element expr".into())),
+    }
+}
+
+fn emit_binop(bcx: &mut FunctionBuilder, k: &Kctx, op: BinOp, a: Value, b: Value) -> JitResult<Value> {
+    Ok(match op {
+        BinOp::Add => bcx.ins().fadd(a, b),
+        BinOp::Sub => bcx.ins().fsub(a, b),
+        BinOp::Mul => bcx.ins().fmul(a, b),
+        BinOp::Div => bcx.ins().fdiv(a, b),
+        BinOp::Lt => cmp_to_f64(bcx, a, b, FloatCC::LessThan),
+        BinOp::Gt => cmp_to_f64(bcx, a, b, FloatCC::GreaterThan),
+        BinOp::Le => cmp_to_f64(bcx, a, b, FloatCC::LessThanOrEqual),
+        BinOp::Ge => cmp_to_f64(bcx, a, b, FloatCC::GreaterThanOrEqual),
+        BinOp::Eq => cmp_to_f64(bcx, a, b, FloatCC::Equal),
+        BinOp::Ne => cmp_to_f64(bcx, a, b, FloatCC::NotEqual),
+        BinOp::Pow => {
+            let f = k.math.get("^").ok_or_else(|| JitError::CraneliftError("pow extern missing".into()))?;
+            let call = bcx.ins().call(*f, &[a, b]);
+            bcx.inst_results(call)[0]
+        }
+        other => return Err(JitError::Unsupported(format!("binop {:?}", other))),
+    })
+}
+
+fn emit_math_call(bcx: &mut FunctionBuilder, k: &Kctx, name: &str, av: &[Value]) -> JitResult<Value> {
+    match (name, av.len()) {
+        ("sqrt", 1) => return Ok(bcx.ins().sqrt(av[0])),
+        ("abs", 1) => return Ok(bcx.ins().fabs(av[0])),
+        ("floor", 1) => return Ok(bcx.ins().floor(av[0])),
+        ("ceil", 1) => return Ok(bcx.ins().ceil(av[0])),
+        ("trunc", 1) => return Ok(bcx.ins().trunc(av[0])),
+        ("round", 1) => return Ok(bcx.ins().nearest(av[0])),
+        ("min", 2) => return Ok(bcx.ins().fmin(av[0], av[1])),
+        ("max", 2) => return Ok(bcx.ins().fmax(av[0], av[1])),
+        _ => {}
+    }
+    let me = find_math_extern(name).ok_or_else(|| JitError::Unsupported(format!("call `{}` unsupported", name)))?;
+    if me.arity != av.len() { return Err(JitError::Unsupported(format!("`{}` arity", name))); }
+    let f = k.math.get(me.r_name).ok_or_else(|| JitError::CraneliftError(format!("extern `{}` missing", name)))?;
+    let call = bcx.ins().call(*f, av);
+    Ok(bcx.inst_results(call)[0])
+}
+
+/// Emit a fused reduction loop: `acc = identity; for i in 0..len { acc = acc
+/// <op> elem(i) }`. `scalar_env` provides loop-invariant locals visible in the
+/// element expression. Returns the accumulator value.
+fn emit_reduction(bcx: &mut FunctionBuilder, k: &Kctx, elem: &r2_types::Expr, op: FusedReduceOp, scalar_env: &HashMap<std::sync::Arc<str>, Value>) -> JitResult<Value> {
+    let header = bcx.create_block();
+    let body = bcx.create_block();
+    let exit = bcx.create_block();
+    bcx.append_block_param(header, types::I64);
+    bcx.append_block_param(header, types::F64);
+    bcx.append_block_param(body, types::I64);
+    bcx.append_block_param(body, types::F64);
+    bcx.append_block_param(exit, types::F64);
+
+    let identity = match op { FusedReduceOp::Sum => 0.0, FusedReduceOp::Prod => 1.0 };
+    let zero_i = bcx.ins().iconst(types::I64, 0);
+    let id_v = bcx.ins().f64const(identity);
+    bcx.ins().jump(header, &[zero_i, id_v]);
+
+    bcx.switch_to_block(header);
+    let i_h = bcx.block_params(header)[0];
+    let acc_h = bcx.block_params(header)[1];
+    let lt = bcx.ins().icmp(IntCC::SignedLessThan, i_h, k.len);
+    bcx.ins().brif(lt, body, &[i_h, acc_h], exit, &[acc_h]);
+
+    bcx.switch_to_block(body);
+    let i_b = bcx.block_params(body)[0];
+    let acc_b = bcx.block_params(body)[1];
+    let eight = bcx.ins().iconst(types::I64, 8);
+    let off = bcx.ins().imul(i_b, eight);
+    let mf = MemFlags::trusted();
+    let mut env = scalar_env.clone();
+    let xa = bcx.ins().iadd(k.x_ptr, off);
+    let xv = bcx.ins().load(types::F64, mf, xa, 0);
+    env.insert(k.names[0].clone(), xv);
+    if let Some(yp) = k.y_ptr {
+        let ya = bcx.ins().iadd(yp, off);
+        let yv = bcx.ins().load(types::F64, mf, ya, 0);
+        if k.names.len() > 1 { env.insert(k.names[1].clone(), yv); }
+    }
+    let e = emit_elem(bcx, k, elem, &env)?;
+    let new_acc = match op { FusedReduceOp::Sum => bcx.ins().fadd(acc_b, e), FusedReduceOp::Prod => bcx.ins().fmul(acc_b, e) };
+    let one = bcx.ins().iconst(types::I64, 1);
+    let i_next = bcx.ins().iadd(i_b, one);
+    bcx.ins().jump(header, &[i_next, new_acc]);
+
+    bcx.switch_to_block(exit);
+    Ok(bcx.block_params(exit)[0])
+}
+
+/// Emit a scalar expression whose leaves are reductions, scalar locals,
+/// literals, and scalar math — combined by arithmetic.
+fn emit_scalar(bcx: &mut FunctionBuilder, k: &Kctx, e: &r2_types::Expr, scalar_env: &HashMap<std::sync::Arc<str>, Value>) -> JitResult<Value> {
+    use r2_types::Expr::*;
+    let is_vec = |s: &str| k.names.iter().any(|n| n.as_ref() == s);
+    match e {
+        NumLit(x) => Ok(bcx.ins().f64const(*x)),
+        IntLit(x) => Ok(bcx.ins().f64const(*x as f64)),
+        BoolLit(b) => Ok(bcx.ins().f64const(if *b { 1.0 } else { 0.0 })),
+        Symbol(s) => {
+            if is_vec(s) { return Err(JitError::Unsupported(format!("bare vector `{}` used as scalar", s))); }
+            scalar_env.get(s).copied().ok_or_else(|| JitError::Unsupported(format!("unknown scalar `{}`", s)))
+        }
+        Unary { op, expr } => {
+            let v = emit_scalar(bcx, k, expr, scalar_env)?;
+            Ok(match op { r2_types::UnOp::Neg => bcx.ins().fneg(v), r2_types::UnOp::Pos => v,
+                r2_types::UnOp::Not => { let z = bcx.ins().f64const(0.0); cmp_to_f64(bcx, v, z, FloatCC::Equal) } })
+        }
+        Binary { op, lhs, rhs } => {
+            let a = emit_scalar(bcx, k, lhs, scalar_env)?;
+            let b = emit_scalar(bcx, k, rhs, scalar_env)?;
+            emit_binop(bcx, k, *op, a, b)
+        }
+        Call { func, args } => {
+            let fname = match func.as_ref() { Symbol(s) => s.clone(), _ => return Err(JitError::Unsupported("call target".into())) };
+            match (fname.as_ref(), args.len()) {
+                ("sum", 1) => emit_reduction(bcx, k, &args[0].value, FusedReduceOp::Sum, scalar_env),
+                ("prod", 1) => emit_reduction(bcx, k, &args[0].value, FusedReduceOp::Prod, scalar_env),
+                ("mean", 1) => {
+                    let s = emit_reduction(bcx, k, &args[0].value, FusedReduceOp::Sum, scalar_env)?;
+                    Ok(bcx.ins().fdiv(s, k.len_f))
+                }
+                ("length", 1) => match &args[0].value {
+                    Symbol(v) if is_vec(v) => Ok(k.len_f),
+                    _ => Err(JitError::Unsupported("length of non-vector".into())),
+                },
+                _ => {
+                    let mut av = Vec::with_capacity(args.len());
+                    for a in args { av.push(emit_scalar(bcx, k, &a.value, scalar_env)?); }
+                    emit_math_call(bcx, k, fname.as_ref(), &av)
+                }
+            }
+        }
+        _ => Err(JitError::Unsupported("unsupported node in scalar body".into())),
+    }
+}
+
+/// Compile a multi-reduction scalar kernel over 1–2 vector params. `body` is a
+/// scalar expression, or a `Block` of `local <- <scalar>` assignments followed
+/// by a final scalar expression.
+pub(crate) fn compile_reduction_kernel(body: &r2_types::Expr, param_names: &[std::sync::Arc<str>]) -> JitResult<CompiledFn> {
+    let n_vec = param_names.len();
+    if !(1..=2).contains(&n_vec) { return Err(JitError::Unsupported("reduction kernel needs 1-2 params".into())); }
+
+    let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+        .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
+    register_math_symbols(&mut jit_builder);
+    let mut module = JITModule::new(jit_builder);
+    let math_ids = declare_math_imports(&mut module)?;
+
+    let mut sig = module.make_signature();
+    for _ in 0..n_vec { sig.params.push(AbiParam::new(types::I64)); }
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::F64));
+
+    let func_id = module.declare_function("__jit_reduction_kernel", Linkage::Export, &sig)
+        .map_err(|e| JitError::CraneliftError(format!("declare: {:?}", e)))?;
+    let mut ctx = module.make_context();
+    ctx.func.signature = sig;
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let math: HashMap<&'static str, cranelift::prelude::codegen::ir::FuncRef> =
+            math_ids.iter().map(|(kk, id)| (*kk, module.declare_func_in_func(*id, &mut bcx.func))).collect();
+
+        let entry = bcx.create_block();
+        bcx.append_block_params_for_function_params(entry);
+        bcx.switch_to_block(entry);
+        let ps: Vec<Value> = bcx.block_params(entry).to_vec();
+        let x_ptr = ps[0];
+        let y_ptr = if n_vec == 2 { Some(ps[1]) } else { None };
+        let len = ps[n_vec];
+        let len_f = bcx.ins().fcvt_from_sint(types::F64, len);
+        let k = Kctx { x_ptr, y_ptr, len, len_f, names: param_names, math: &math };
+
+        let mut scalar_env: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+        let result = match body {
+            r2_types::Expr::Block(stmts) => {
+                if stmts.is_empty() { return Err(JitError::Unsupported("empty body".into())); }
+                let (last, init) = stmts.split_last().unwrap();
+                for st in init {
+                    match st {
+                        r2_types::Expr::Assign { target, value, .. } => {
+                            let nm = match target.as_ref() { r2_types::Expr::Symbol(n) => n.clone(),
+                                _ => return Err(JitError::Unsupported("non-symbol assign in kernel".into())) };
+                            let v = emit_scalar(&mut bcx, &k, value, &scalar_env)?;
+                            scalar_env.insert(nm, v);
+                        }
+                        _ => return Err(JitError::Unsupported("non-assign statement before final expr".into())),
+                    }
+                }
+                emit_scalar(&mut bcx, &k, last, &scalar_env)?
+            }
+            other => emit_scalar(&mut bcx, &k, other, &scalar_env)?,
+        };
+        bcx.ins().return_(&[result]);
+        bcx.seal_all_blocks();
+        bcx.finalize();
+    }
+    module.define_function(func_id, &mut ctx).map_err(|e| JitError::CraneliftError(format!("define: {:?}", e)))?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().map_err(|e| JitError::CraneliftError(format!("finalize: {:?}", e)))?;
+    let ptr = module.get_finalized_function(func_id);
+    let kind = if n_vec == 1 { r2_types::JitKind::Vector1ToScalar } else { r2_types::JitKind::Vector2ToScalar };
+    Ok(CompiledFn { ptr, arity: n_vec, kind, _module: module })
+}
