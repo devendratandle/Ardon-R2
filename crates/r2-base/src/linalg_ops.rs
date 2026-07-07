@@ -9,7 +9,12 @@
 //! coerce via `RVal::as_reals()` / `scalar_f64()` from r2-types.
 //!
 //! Honesty notes:
-//!   - `bi_eigen` calls Jacobi `dsyev`. Correct, slow for n ≳ 100.
+//!   - `bi_eigen` dispatches on symmetry: symmetric → `dsyev_full`
+//!     (tridiag + Wilkinson-shift QR), non-symmetric → `dgeev`
+//!     (Hessenberg + Francis double-shift QR). Complex eigenvalues are
+//!     surfaced honestly (`$imaginary` + a warning); complex eigenvectors
+//!     await a complex type, so `$vectors` is `NULL` in that case rather
+//!     than faked.
 //!   - `bi_svd` returns ONLY `$d` (singular values) — it intentionally
 //!     omits `$u` and `$v` because the underlying `dgesvd` does not yet
 //!     accumulate the orthogonal factors. Returning identity matrices
@@ -183,15 +188,21 @@ pub fn bi_svd(a: &[EvalArg]) -> Result<RVal, R2Err> {
     Ok(RVal::List(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()))
 }
 
-/// `eigen(A)` — symmetric eigendecomposition with **eigenvectors** (Tier 1).
+/// `eigen(A)` — eigendecomposition, dispatching on symmetry.
 ///
-/// Returns `$values` (descending) and `$vectors` (column-major matrix where
-/// column i is the eigenvector for `values[i]`). Implementation: Householder
-/// tridiagonalization → implicit symmetric QR with Wilkinson shift → back-
-/// transform. Replaces the previous Jacobi-eigenvalues-only path.
+/// **Symmetric** `A` (within tolerance): Householder tridiagonalization →
+/// implicit symmetric QR with Wilkinson shift (`dsyev_full`) → real `$values`
+/// (descending) + `$vectors` (column i is the eigenvector of `values[i]`).
 ///
-/// The standalone `dsyev` kernel (values-only Jacobi) is retained for
-/// callers that don't need vectors and want the simpler code path.
+/// **Non-symmetric** `A`: the general real eigenvalue path (`dgeev` — Hessenberg
+/// reduction + Francis double-shift QR). Eigenvalues are returned sorted by
+/// decreasing modulus. A real matrix can have complex-conjugate eigenvalue
+/// pairs; R2 has no complex type yet, so:
+///   - all-real spectrum → `$values` + `$vectors` (inverse iteration), like R;
+///   - any complex eigenvalue → `$values` holds the real parts, `$imaginary`
+///     the imaginary parts, and `$vectors` is `NULL` (complex eigenvectors need
+///     the complex type). A one-line warning is emitted rather than silently
+///     dropping the imaginary parts (which the old symmetric-only path did).
 pub fn bi_eigen(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mat = match &gv(a, 0) {
         RVal::Matrix(m) => m.clone(),
@@ -200,16 +211,68 @@ pub fn bi_eigen(a: &[EvalArg]) -> Result<RVal, R2Err> {
     if mat.nrow != mat.ncol {
         return Err(R2Err { msg: "eigen() needs a square matrix".into(), kind: ErrKind::Runtime });
     }
-    let (eigenvalues, vectors) = dsyev_full(mat.nrow, &mat.data)
+    let n = mat.nrow;
+
+    // Symmetry test: max|a_ij - a_ji| relative to the matrix scale.
+    let scale = mat.data.iter().fold(0.0f64, |m, &x| m.max(x.abs())).max(1.0);
+    let mut symmetric = true;
+    'sym: for j in 0..n {
+        for i in (j + 1)..n {
+            if (mat.data[j * n + i] - mat.data[i * n + j]).abs() > 1e-10 * scale { symmetric = false; break 'sym; }
+        }
+    }
+
+    let mut fields: HashMap<Arc<str>, RVal> = HashMap::new();
+    if symmetric {
+        let (eigenvalues, vectors) = dsyev_full(n, &mat.data)
+            .map_err(|e| R2Err { msg: format!("eigen failed: {}", e), kind: ErrKind::Runtime })?;
+        fields.insert(Arc::from("values"), rnums(&eigenvalues));
+        fields.insert(Arc::from("vectors"), RVal::Matrix(Matrix::new(vectors, n, n)));
+        return Ok(RVal::List(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()));
+    }
+
+    // Non-symmetric → general real eigenvalues.
+    let (re, im) = r2_linalg::dgeev_values(n, &mat.data)
         .map_err(|e| R2Err { msg: format!("eigen failed: {}", e), kind: ErrKind::Runtime })?;
 
-    // No auto-print: R's `e <- eigen(A)` returns invisibly; only direct
-    // top-level `eigen(A)` should display, handled by the REPL's
-    // auto-print path on the returned RVal. Caller can `print(e)`,
-    // `summary(e)`, or `e$values` / `e$vectors` to inspect.
-    let mut fields: HashMap<Arc<str>, RVal> = HashMap::new();
-    fields.insert(Arc::from("values"), rnums(&eigenvalues));
-    fields.insert(Arc::from("vectors"), RVal::Matrix(Matrix::new(vectors, mat.nrow, mat.nrow)));
+    // Sort eigenvalue pairs by decreasing modulus (then decreasing real part).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| {
+        let mi = re[i].hypot(im[i]); let mj = re[j].hypot(im[j]);
+        mj.partial_cmp(&mi).unwrap().then(re[j].partial_cmp(&re[i]).unwrap())
+    });
+    let re: Vec<f64> = order.iter().map(|&i| re[i]).collect();
+    let im: Vec<f64> = order.iter().map(|&i| im[i]).collect();
+
+    let has_complex = im.iter().any(|&x| x.abs() > 1e-9 * scale);
+    fields.insert(Arc::from("values"), rnums(&re));
+    if has_complex {
+        r2_types::out::rerr(
+            "Warning: eigen(): matrix has complex eigenvalues; $values holds the real parts, \
+             imaginary parts are in $imaginary, and $vectors is NULL (complex type pending).\n",
+        );
+        fields.insert(Arc::from("imaginary"), rnums(&im));
+        fields.insert(Arc::from("vectors"), RVal::Null);
+    } else {
+        // All-real spectrum: eigenvectors via inverse iteration, one column each.
+        let mut vecs = vec![0.0f64; n * n];
+        let mut ok = true;
+        for (c, &lambda) in re.iter().enumerate() {
+            match r2_linalg::dgeev_real_vector(n, &mat.data, lambda) {
+                Some(v) => for r in 0..n { vecs[c * n + r] = v[r]; },
+                None => { ok = false; break; }
+            }
+        }
+        if ok {
+            fields.insert(Arc::from("vectors"), RVal::Matrix(Matrix::new(vecs, n, n)));
+        } else {
+            r2_types::out::rerr(
+                "Warning: eigen(): eigenvectors for this non-symmetric matrix could not be \
+                 computed by inverse iteration (defective/degenerate); $vectors is NULL.\n",
+            );
+            fields.insert(Arc::from("vectors"), RVal::Null);
+        }
+    }
     Ok(RVal::List(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()))
 }
 
