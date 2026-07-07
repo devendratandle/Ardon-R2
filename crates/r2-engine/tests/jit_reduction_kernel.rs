@@ -86,6 +86,48 @@ pr(x, y) - cor(x, y)
 }
 
 #[test]
+fn nested_reduction_oneliner_jits() {
+    // Brick 3: the textbook one-liner (mean nested inside sum) must JIT and match.
+    let ex = string(eval_last(r#"explain(function(x) sum((x-mean(x))^2)/(length(x)-1))"#));
+    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    let d = scalar(eval_last(
+        r#"
+set.seed(5); x <- rnorm(400)
+va <- function(x) sum((x-mean(x))^2)/(length(x)-1)
+va(x) - var(x)
+"#,
+    ));
+    assert!(d.abs() < 1e-9, "one-liner variance diff = {d}");
+}
+
+#[test]
+fn vector_local_fused_away() {
+    // Brick 3: a vector intermediate (`e <- pred-obs`) is fused, no buffer.
+    let ex = string(eval_last(r#"explain(function(pred, obs) { e <- pred - obs; sqrt(mean(e*e)) })"#));
+    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    let d = scalar(eval_last(
+        r#"
+set.seed(6); a <- rnorm(400); b <- rnorm(400)
+rmse <- function(pred, obs) { e <- pred - obs; sqrt(mean(e*e)) }
+rmse(a, b) - sqrt(mean((a-b)^2))
+"#,
+    ));
+    assert!(d.abs() < 1e-12, "rmse diff = {d}");
+}
+
+#[test]
+fn correlation_oneliner_matches_r() {
+    let d = scalar(eval_last(
+        r#"
+set.seed(7); x <- rnorm(400); y <- rnorm(400)
+cr <- function(x,y) sum((x-mean(x))*(y-mean(y)))/sqrt(sum((x-mean(x))^2)*sum((y-mean(y))^2))
+cr(x, y) - cor(x, y)
+"#,
+    ));
+    assert!(d.abs() < 1e-9, "one-liner correlation diff = {d}");
+}
+
+#[test]
 fn single_reduction_paths_unaffected() {
     // Existing specialised shapes must keep their own (non-kernel) codegen.
     for (body, kind) in [

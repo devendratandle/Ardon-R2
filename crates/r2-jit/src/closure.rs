@@ -1006,7 +1006,10 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
     // single-reduction / vector-map paths, before the scalar fallback.
     if (cl.params.len() == 1 || cl.params.len() == 2) && mentions_reduction(body_ref) {
         let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
-        if let Ok(c) = JitCompiler::compile_reduction_kernel(body_ref, &pnames) {
+        // Brick 3: fuse vector-valued intermediates + hoist reductions to scalar
+        // locals, giving the canonical Block form the kernel codegen consumes.
+        let kbody = normalize_reduction_kernel(body_ref, &pnames);
+        if let Ok(c) = JitCompiler::compile_reduction_kernel(&kbody, &pnames) {
             return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
         }
     }
@@ -1022,6 +1025,130 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
         Ok(c) => Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>),
         Err(_) => None,
     }
+}
+
+/// Phase J.4 brick 3 — inline vector-valued locals into a reduction-kernel body
+/// by substitution, so composed formulas like `{ e <- pred-obs; sqrt(mean(e*e)) }`
+/// or `{ d <- x-mean(x); sum(d*d) }` compile with the intermediate vector *fused*
+/// away (no buffer allocated). A leading `local <- rhs` is a **vector** local iff
+/// `rhs` has no top-level reduction and references a vector (param or earlier
+/// vector-local); such statements are dropped and their definition substituted
+/// into later statements. Scalar locals (those whose rhs reduces to a scalar) are
+/// kept. Non-Block bodies pass through unchanged.
+/// Phase J.4 brick 3 — hoist every reduction sub-expression (`sum`/`prod`/
+/// `mean`/`length`) to a fresh scalar local, so what remains inside each fused
+/// loop is a pure element expression over vector params + (now hoisted) scalar
+/// locals. `sum((x-mean(x))^2)` → `__hr0 <- mean(x); __hr1 <- sum((x-__hr0)^2); __hr1`.
+/// Nested reductions are hoisted innermost-first. Emits assignments into `stmts`.
+fn hoist_reductions(e: &r2_types::Expr, stmts: &mut Vec<r2_types::Expr>, ctr: &mut u32) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    match e {
+        Call { func, args } => {
+            let is_red = matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean" | "length"));
+            let new_args: Vec<r2_types::CallArg> = args.iter()
+                .map(|a| r2_types::CallArg { name: a.name.clone(), value: hoist_reductions(&a.value, stmts, ctr) })
+                .collect();
+            let call = Call { func: func.clone(), args: new_args };
+            if is_red {
+                let name: std::sync::Arc<str> = std::sync::Arc::from(format!(".__hr{}", *ctr));
+                *ctr += 1;
+                stmts.push(Assign { target: Box::new(Symbol(name.clone())), value: Box::new(call), superassign: false });
+                Symbol(name)
+            } else {
+                call
+            }
+        }
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(hoist_reductions(expr, stmts, ctr)) },
+        Binary { op, lhs, rhs } => Binary { op: *op,
+            lhs: Box::new(hoist_reductions(lhs, stmts, ctr)), rhs: Box::new(hoist_reductions(rhs, stmts, ctr)) },
+        If { cond, then, else_ } => If { cond: Box::new(hoist_reductions(cond, stmts, ctr)),
+            then: Box::new(hoist_reductions(then, stmts, ctr)),
+            else_: else_.as_ref().map(|x| Box::new(hoist_reductions(x, stmts, ctr))) },
+        other => other.clone(),
+    }
+}
+
+/// Normalize a reduction-kernel body: fuse vector locals, then hoist all
+/// reductions to scalar locals → a `Block` of `local <- <reduction|scalar>`
+/// followed by a final scalar expression (the shape `compile_reduction_kernel`
+/// consumes). Non-Block scalar bodies are handled too.
+fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    let inlined = inline_vector_locals(body, vec_params);
+    let mut out: Vec<r2_types::Expr> = Vec::new();
+    let mut ctr = 0u32;
+    let final_expr = match &inlined {
+        Block(ss) => {
+            let (last, init) = match ss.split_last() { Some(x) => x, None => return inlined };
+            for st in init {
+                if let Assign { target, value, superassign } = st {
+                    let v = hoist_reductions(value, &mut out, &mut ctr);
+                    out.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
+                } else {
+                    out.push(st.clone());
+                }
+            }
+            hoist_reductions(last, &mut out, &mut ctr)
+        }
+        other => hoist_reductions(other, &mut out, &mut ctr),
+    };
+    out.push(final_expr);
+    Block(out)
+}
+
+/// Does `e` reference a vector name in a *vector position* — i.e. bare, or under
+/// element-wise ops, but NOT enclosed in a reduction (`sum`/`prod`/`mean`/
+/// `length`, which collapse a vector to a scalar)? Determines whether a local's
+/// rhs evaluates to a vector (fuse it) or a scalar (keep it).
+fn refs_vector_bare(e: &r2_types::Expr, vec_names: &[std::sync::Arc<str>]) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        Symbol(s) => vec_names.iter().any(|v| v.as_ref() == s.as_ref()),
+        Unary { expr, .. } => refs_vector_bare(expr, vec_names),
+        Binary { lhs, rhs, .. } => refs_vector_bare(lhs, vec_names) || refs_vector_bare(rhs, vec_names),
+        If { cond, then, else_ } => refs_vector_bare(cond, vec_names) || refs_vector_bare(then, vec_names)
+            || else_.as_ref().map_or(false, |x| refs_vector_bare(x, vec_names)),
+        Call { func, args } => {
+            // A reduction collapses its argument to a scalar → not a vector position.
+            if matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean" | "length")) {
+                return false;
+            }
+            args.iter().any(|a| refs_vector_bare(&a.value, vec_names))
+        }
+        _ => false,
+    }
+}
+
+fn inline_vector_locals(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    let stmts = match body { Block(s) => s, _ => return body.clone() };
+    if stmts.len() < 2 { return body.clone(); }
+    let (last, init) = stmts.split_last().unwrap();
+
+    let mut vecdefs: std::collections::HashMap<std::sync::Arc<str>, r2_types::Expr> = std::collections::HashMap::new();
+    let mut vec_names: Vec<std::sync::Arc<str>> = vec_params.to_vec();
+    let mut out: Vec<r2_types::Expr> = Vec::new();
+
+    for st in init {
+        if let Assign { target, value, superassign } = st {
+            if let Symbol(nm) = target.as_ref() {
+                // Inline already-known vector-locals into this rhs first.
+                let rhs = substitute_symbols(value, &vecdefs);
+                if refs_vector_bare(&rhs, &vec_names) {
+                    // Vector local: record its (fully-inlined) definition, drop the stmt.
+                    vecdefs.insert(nm.clone(), rhs);
+                    vec_names.push(nm.clone());
+                    continue;
+                }
+                // Scalar local: keep, with vector-locals substituted in.
+                out.push(Assign { target: target.clone(), value: Box::new(rhs), superassign: *superassign });
+                continue;
+            }
+        }
+        out.push(st.clone());
+    }
+    out.push(substitute_symbols(last, &vecdefs));
+    Block(out)
 }
 
 /// Does `e` contain a `sum`/`prod`/`mean` reduction call? Cheap gate so the
