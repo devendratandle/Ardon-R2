@@ -35,20 +35,28 @@ match validates the R2 implementations against the reference library.
 |---|---|---:|---:|
 | **cSEM** (default) | consistent PLSc, path, single-thread | 12.44 s | — |
 | **cSEM** (matched) | plain PLS, factorial, single-thread | **9.86 s** | 1× |
-| **r2sem** | R2 *source library*, parallel bootstrap (`par.sapply`) | **~1.3 s** | **≈ 7.6× faster** |
+| **r2sem** | R2 *source library*, parallel bootstrap (`par.sapply`) | **~0.75 s** | **≈ 13× faster** |
 | **plssem** | R2 *native Rust builtin* | **0.104 s** | **≈ 95× faster** |
 
-r2sem run-to-run: 1.10–1.47 s (parallel-scheduling jitter); ~1.3 s typical.
+r2sem run-to-run (unloaded machine): 0.63–0.87 s; ~0.75 s typical.
+
+> **Measurement note:** an earlier draft reported r2sem at ~1.3 s. That figure
+> was taken while cSEM and several R/r2 processes ran concurrently, starving
+> r2sem's own parallel bootstrap of cores. Re-measured on an idle machine it is
+> ~0.75 s. Always benchmark a parallel workload with nothing else competing for
+> the cores.
 
 ## Reading the result
 
 - **r2sem** is a library written *in the R2 language* (pure `.r2` source, no
-  native code) and still runs ~7–8× faster than cSEM on identical inputs and
-  identical estimates. The win is **parallelism** — r2sem's bootstrap loop uses
+  native code) and runs ~13× faster than cSEM on identical inputs and identical
+  estimates. The win is **parallelism** — r2sem's bootstrap loop uses
   `par.sapply` across 6 cores (Phase P); cSEM's bootstrap is single-threaded.
 - **plssem** is the first-party **native builtin** (Rust): ~95× faster than
-  cSEM and ~13× faster than the source library — the expected gap between a
-  hand-optimised native kernel and language-level source.
+  cSEM and ~7× faster than the source library — the expected gap between a
+  hand-optimised native kernel and language-level source (per-op RVal
+  allocation + interpreter dispatch is what the source pays; closing it is the
+  goal of JIT phase J.4 brick 2).
 - The two R2 numbers bracket the design: *source libraries* get parallelism for
   free; the *hot 5%* that matters most (`lm`, `plssem`) ships as native kernels.
 
