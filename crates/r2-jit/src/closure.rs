@@ -616,6 +616,95 @@ pub fn explain_closure(cl: &r2_types::Closure) -> String {
     }
 }
 
+/// Phase J.4 — is `e` a *pure single-expression* tree safe to inline by
+/// substitution (no local bindings to alpha-rename, no control-flow that binds
+/// its own variables)? Literals, symbols, arithmetic, calls, `if`/`else`, and
+/// indexing only.
+fn is_pure_inlinable(e: &r2_types::Expr) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
+        Unary { expr, .. } => is_pure_inlinable(expr),
+        Binary { lhs, rhs, .. } => is_pure_inlinable(lhs) && is_pure_inlinable(rhs),
+        Call { func, args } => is_pure_inlinable(func) && args.iter().all(|a| is_pure_inlinable(&a.value)),
+        If { cond, then, else_ } => is_pure_inlinable(cond) && is_pure_inlinable(then)
+            && else_.as_ref().map_or(true, |x| is_pure_inlinable(x)),
+        Index { object, indices } => is_pure_inlinable(object) && indices.iter().flatten().all(is_pure_inlinable),
+        Pipe { lhs, rhs } => is_pure_inlinable(lhs) && is_pure_inlinable(rhs),
+        _ => false,
+    }
+}
+
+/// Substitute bare symbols with argument expressions (used to inline a callee
+/// body once its params are bound to the caller's argument expressions). Only
+/// walks the pure-inlinable node set (guaranteed by `is_pure_inlinable`).
+fn substitute_symbols(e: &r2_types::Expr, subst: &std::collections::HashMap<std::sync::Arc<str>, r2_types::Expr>) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    match e {
+        Symbol(s) => subst.get(s).cloned().unwrap_or_else(|| e.clone()),
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(substitute_symbols(expr, subst)) },
+        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(substitute_symbols(lhs, subst)), rhs: Box::new(substitute_symbols(rhs, subst)) },
+        Call { func, args } => Call { func: Box::new(substitute_symbols(func, subst)),
+            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: substitute_symbols(&a.value, subst) }).collect() },
+        If { cond, then, else_ } => If { cond: Box::new(substitute_symbols(cond, subst)),
+            then: Box::new(substitute_symbols(then, subst)),
+            else_: else_.as_ref().map(|x| Box::new(substitute_symbols(x, subst))) },
+        Index { object, indices } => Index { object: Box::new(substitute_symbols(object, subst)),
+            indices: indices.iter().map(|ix| ix.as_ref().map(|x| substitute_symbols(x, subst))).collect() },
+        Pipe { lhs, rhs } => Pipe { lhs: Box::new(substitute_symbols(lhs, subst)), rhs: Box::new(substitute_symbols(rhs, subst)) },
+        other => other.clone(),
+    }
+}
+
+/// Phase J.4 — inline calls to pure JIT-lowerable user closures found in `env`.
+/// `function(a,b) sq(a) + sq(b)` with `sq <- function(x) x*x` becomes
+/// `a*a + b*b`, so the composed function JITs as one unit instead of bailing on
+/// the user-function `Call`. Depth-bounded so (mutual) recursion terminates with
+/// a residual `Call` that safely falls back to the interpreter.
+fn inline_user_calls(e: &r2_types::Expr, env: &r2_types::EnvRef, depth: u32) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    if depth == 0 { return e.clone(); }
+    match e {
+        Call { func, args } => {
+            let new_args: Vec<r2_types::CallArg> = args.iter()
+                .map(|a| r2_types::CallArg { name: a.name.clone(), value: inline_user_calls(&a.value, env, depth) })
+                .collect();
+            if let Symbol(f) = func.as_ref() {
+                if new_args.iter().all(|a| a.name.is_none()) {
+                    if let Some(r2_types::RVal::Closure(cl2)) = env.lookup(f) {
+                        if cl2.params.len() == new_args.len()
+                            && cl2.params.iter().all(|p| p.default.is_none() && !p.dots)
+                            && is_pure_inlinable(&cl2.body)
+                        {
+                            let mut subst = std::collections::HashMap::new();
+                            for (p, a) in cl2.params.iter().zip(new_args.iter()) {
+                                subst.insert(p.name.clone(), a.value.clone());
+                            }
+                            let body_sub = substitute_symbols(&cl2.body, &subst);
+                            return inline_user_calls(&body_sub, env, depth - 1);
+                        }
+                    }
+                }
+            }
+            Call { func: func.clone(), args: new_args }
+        }
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(inline_user_calls(expr, env, depth)) },
+        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(inline_user_calls(lhs, env, depth)), rhs: Box::new(inline_user_calls(rhs, env, depth)) },
+        If { cond, then, else_ } => If { cond: Box::new(inline_user_calls(cond, env, depth)),
+            then: Box::new(inline_user_calls(then, env, depth)),
+            else_: else_.as_ref().map(|x| Box::new(inline_user_calls(x, env, depth))) },
+        While { cond, body } => While { cond: Box::new(inline_user_calls(cond, env, depth)), body: Box::new(inline_user_calls(body, env, depth)) },
+        For { var, iter, body } => For { var: var.clone(), iter: Box::new(inline_user_calls(iter, env, depth)), body: Box::new(inline_user_calls(body, env, depth)) },
+        Block(s) => Block(s.iter().map(|x| inline_user_calls(x, env, depth)).collect()),
+        Assign { target, value, superassign } => Assign { target: target.clone(), value: Box::new(inline_user_calls(value, env, depth)), superassign: *superassign },
+        Return(v) => Return(Box::new(inline_user_calls(v, env, depth))),
+        Pipe { lhs, rhs } => Pipe { lhs: Box::new(inline_user_calls(lhs, env, depth)), rhs: Box::new(inline_user_calls(rhs, env, depth)) },
+        Index { object, indices } => Index { object: Box::new(inline_user_calls(object, env, depth)),
+            indices: indices.iter().map(|ix| ix.as_ref().map(|x| inline_user_calls(x, env, depth))).collect() },
+        other => other.clone(),
+    }
+}
+
 pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn r2_types::JitHandle>> {
     // Phase R.M — gate the JIT on supported architectures. On aarch64 the
     // engine falls back to the interpreter; statistical outputs are
@@ -645,8 +734,14 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
     // are by-value at creation time. If R2 ever adds reactive/observable
     // values, this substitution will need to be invalidated on capture
     // mutation; we'll cross that bridge when it appears.
+    // Phase J.4 brick 1 — inline calls to pure JIT-lowerable user helpers first,
+    // so a function composed of small numeric helpers compiles as one unit. A
+    // body with no such calls is returned structurally unchanged (a clone), so
+    // existing paths are unaffected. Depth-bounded → recursion falls back safely.
+    let inlined_body = inline_user_calls(cl.body.as_ref(), &cl.env, 8);
+
     let param_names: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
-    let free_vars = r2_ir::collect_free_vars(cl.body.as_ref(), &param_names);
+    let free_vars = r2_ir::collect_free_vars(&inlined_body, &param_names);
     let body_expr: r2_types::Expr;
     let body_ref: &r2_types::Expr;
     if !free_vars.is_empty() {
@@ -660,13 +755,13 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
             }
         }
         if !subs.is_empty() {
-            body_expr = r2_ir::substitute_constants(cl.body.as_ref(), &subs);
+            body_expr = r2_ir::substitute_constants(&inlined_body, &subs);
             body_ref = &body_expr;
         } else {
-            body_ref = cl.body.as_ref();
+            body_ref = &inlined_body;
         }
     } else {
-        body_ref = cl.body.as_ref();
+        body_ref = &inlined_body;
     }
 
     // Phase J.2 — index-loop fold over a vector param:
