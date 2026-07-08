@@ -115,6 +115,155 @@ pub enum FusedReduceOp {
     Prod,
 }
 
+/// SIMD (F64X2) fused map-reduce over `n_in` (1 or 2) input vectors:
+/// `reduce(f(x[i][, y[i]]))` → scalar. A 2-elements-per-iteration main loop
+/// accumulates into an F64X2 vector, horizontally reduces to a scalar, then a
+/// scalar tail handles the odd element. Requires a SIMD-clean IR body (single
+/// block, arithmetic + native-instruction math only); returns `Err` otherwise
+/// so the caller uses the scalar loop. Signature `(in_ptr..N, len) -> f64`.
+pub(crate) fn compile_simd_map_reduce_n(
+    body_ir: &IrFunc,
+    n_in: usize,
+    reduce_op: FusedReduceOp,
+    fn_name: &str,
+) -> JitResult<CompiledFn> {
+    if !body_is_simd_clean(body_ir) {
+        return Err(JitError::Unsupported("body is not SIMD-clean".into()));
+    }
+    let blk = &body_ir.blocks[0];
+    let ret_reg = match &blk.term {
+        IrTerm::Return(Some(r)) => *r,
+        _ => return Err(JitError::Unsupported("simd map-reduce: body must Return".into())),
+    };
+
+    let jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+        .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
+    let mut module = JITModule::new(jit_builder);
+
+    let mut sig = module.make_signature();
+    for _ in 0..n_in { sig.params.push(AbiParam::new(types::I64)); }
+    sig.params.push(AbiParam::new(types::I64)); // len
+    sig.returns.push(AbiParam::new(types::F64));
+
+    let func_id = module.declare_function(fn_name, Linkage::Export, &sig)
+        .map_err(|e| JitError::CraneliftError(format!("declare: {:?}", e)))?;
+    let mut ctx = module.make_context();
+    ctx.func.signature = sig;
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let identity = match reduce_op { FusedReduceOp::Sum => 0.0, FusedReduceOp::Prod => 1.0 };
+        // 4× unroll: 4 independent F64X2 accumulators break the reduction's
+        // dependency chain (a single accumulator is fadd-latency-bound), so the
+        // loop saturates the FP units — 8 elements per iteration.
+        const U: usize = 4;
+
+        let entry = bcx.create_block();
+        let shdr = bcx.create_block();      // (i, acc0..acc3 : f64x2)
+        let sbody = bcx.create_block();
+        let sexit = bcx.create_block();     // (i, acc0..acc3) — combine + horizontal reduce
+        let rhdr = bcx.create_block();      // (i, acc:f64)
+        let rbody = bcx.create_block();
+        let exit = bcx.create_block();      // (acc:f64)
+        bcx.append_block_param(shdr, types::I64);
+        for _ in 0..U { bcx.append_block_param(shdr, types::F64X2); }
+        bcx.append_block_param(sexit, types::I64);
+        for _ in 0..U { bcx.append_block_param(sexit, types::F64X2); }
+        bcx.append_block_param(rhdr, types::I64);
+        bcx.append_block_param(rhdr, types::F64);
+        bcx.append_block_param(exit, types::F64);
+
+        bcx.append_block_params_for_function_params(entry);
+        bcx.switch_to_block(entry);
+        let ep: Vec<Value> = bcx.block_params(entry).to_vec();
+        let in_ptrs: Vec<Value> = ep[..n_in].to_vec();
+        let len = ep[n_in];
+        let simd_end = bcx.ins().band_imm(len, -(2 * U as i64)); // multiple of 8
+        let zero = bcx.ins().iconst(types::I64, 0);
+        let id_s = bcx.ins().f64const(identity);
+        let id_v = bcx.ins().splat(types::F64X2, id_s);
+        let mut init = vec![zero]; for _ in 0..U { init.push(id_v); }
+        bcx.ins().jump(shdr, &init);
+
+        // SIMD header.
+        bcx.switch_to_block(shdr);
+        let hp: Vec<Value> = bcx.block_params(shdr).to_vec();
+        let cond = bcx.ins().icmp(IntCC::SignedLessThan, hp[0], simd_end);
+        bcx.ins().brif(cond, sbody, &[], sexit, &hp);
+
+        // SIMD body: U independent F64X2 accumulators, 2*U elements per iter.
+        bcx.switch_to_block(sbody);
+        let sp: Vec<Value> = bcx.block_params(shdr).to_vec();
+        let i_sb = sp[0];
+        let eight = bcx.ins().iconst(types::I64, 8);
+        let mf = MemFlags::trusted();
+        let mut next = vec![]; // filled below (i_next first)
+        let mut new_accs = Vec::with_capacity(U);
+        for u in 0..U {
+            let two_u = bcx.ins().iconst(types::I64, 2 * u as i64);
+            let idx = bcx.ins().iadd(i_sb, two_u);
+            let off = bcx.ins().imul(idx, eight);
+            let mut env: HashMap<u32, Value> = HashMap::new();
+            for (j, p) in in_ptrs.iter().enumerate() {
+                let addr = bcx.ins().iadd(*p, off);
+                env.insert(body_ir.params[j].2.0, bcx.ins().load(types::F64X2, mf, addr, 0));
+            }
+            for inst in &blk.insts { let v = lower_inst_simd(&mut bcx, inst, &env)?; env.insert(inst.dst().0, v); }
+            let e = *env.get(&ret_reg.0).ok_or(JitError::UndefinedVReg(ret_reg))?;
+            let acc = sp[1 + u];
+            new_accs.push(match reduce_op { FusedReduceOp::Sum => bcx.ins().fadd(acc, e), FusedReduceOp::Prod => bcx.ins().fmul(acc, e) });
+        }
+        let stride = bcx.ins().iconst(types::I64, 2 * U as i64);
+        let i_next = bcx.ins().iadd(i_sb, stride);
+        next.push(i_next); next.extend(new_accs);
+        bcx.ins().jump(shdr, &next);
+
+        // SIMD exit: combine the U accumulators, then horizontal reduce to scalar.
+        bcx.switch_to_block(sexit);
+        let xp: Vec<Value> = bcx.block_params(sexit).to_vec();
+        let mut comb = xp[1];
+        for u in 1..U { comb = match reduce_op { FusedReduceOp::Sum => bcx.ins().fadd(comb, xp[1 + u]), FusedReduceOp::Prod => bcx.ins().fmul(comb, xp[1 + u]) }; }
+        let l0 = bcx.ins().extractlane(comb, 0);
+        let l1 = bcx.ins().extractlane(comb, 1);
+        let hacc = match reduce_op { FusedReduceOp::Sum => bcx.ins().fadd(l0, l1), FusedReduceOp::Prod => bcx.ins().fmul(l0, l1) };
+        bcx.ins().jump(rhdr, &[xp[0], hacc]);
+
+        // Scalar remainder.
+        bcx.switch_to_block(rhdr);
+        let rp: Vec<Value> = bcx.block_params(rhdr).to_vec();
+        let rcond = bcx.ins().icmp(IntCC::SignedLessThan, rp[0], len);
+        bcx.ins().brif(rcond, rbody, &[], exit, &[rp[1]]);
+        bcx.switch_to_block(rbody);
+        let i_rb = bcx.block_params(rhdr)[0];
+        let acc_rb = bcx.block_params(rhdr)[1];
+        let eight_r = bcx.ins().iconst(types::I64, 8);
+        let off_r = bcx.ins().imul(i_rb, eight_r);
+        let mut env_s: HashMap<u32, Value> = HashMap::new();
+        for (j, p) in in_ptrs.iter().enumerate() {
+            let addr = bcx.ins().iadd(*p, off_r);
+            env_s.insert(body_ir.params[j].2.0, bcx.ins().load(types::F64, mf, addr, 0));
+        }
+        for inst in &blk.insts { let v = lower_inst(&mut bcx, inst, &env_s, None)?; env_s.insert(inst.dst().0, v); }
+        let e_s = *env_s.get(&ret_reg.0).ok_or(JitError::UndefinedVReg(ret_reg))?;
+        let racc = match reduce_op { FusedReduceOp::Sum => bcx.ins().fadd(acc_rb, e_s), FusedReduceOp::Prod => bcx.ins().fmul(acc_rb, e_s) };
+        let one = bcx.ins().iconst(types::I64, 1);
+        let i_rn = bcx.ins().iadd(i_rb, one);
+        bcx.ins().jump(rhdr, &[i_rn, racc]);
+
+        bcx.switch_to_block(exit);
+        let fin = bcx.block_params(exit)[0];
+        bcx.ins().return_(&[fin]);
+        bcx.seal_all_blocks();
+        bcx.finalize();
+    }
+    module.define_function(func_id, &mut ctx).map_err(|e| JitError::CraneliftError(format!("define: {:?}", e)))?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().map_err(|e| JitError::CraneliftError(format!("finalize: {:?}", e)))?;
+    let ptr = module.get_finalized_function(func_id);
+    let kind = if n_in == 1 { r2_types::JitKind::Vector1ToScalar } else { r2_types::JitKind::Vector2ToScalar };
+    Ok(CompiledFn { ptr, arity: n_in, kind, _module: module })
+}
+
 /// Codegen for Phase C.9 — fused map-reduce.
 ///
 /// Loop structure:
@@ -128,6 +277,10 @@ pub(crate) fn compile_map_reduce_inner(
 ) -> JitResult<CompiledFn> {
     if body_ir.blocks.is_empty() {
         return Err(JitError::Unsupported("empty IR body".into()));
+    }
+    // SIMD fast-path for a SIMD-clean element body; scalar loop otherwise.
+    if let Ok(c) = compile_simd_map_reduce_n(body_ir, 1, reduce_op, "__jit_simd_map_reduce") {
+        return Ok(c);
     }
 
     let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
@@ -332,6 +485,10 @@ pub(crate) fn compile_binary_map_reduce_inner(
     }
     if body_ir.params.len() != 2 {
         return Err(JitError::Unsupported("binary map-reduce expects 2 inner params".into()));
+    }
+    // SIMD fast-path (dot products `sum(x*w)` etc.); scalar loop otherwise.
+    if let Ok(c) = compile_simd_map_reduce_n(body_ir, 2, reduce_op, "__jit_simd_binary_map_reduce") {
+        return Ok(c);
     }
     let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
         .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
