@@ -75,18 +75,18 @@ locked unless this file is changed.
 | Frontend | Type Inferencer | ✅ built | `crates/r2-types/src/infer.rs` (Phase A, 9 tests passing) |
 | Frontend | Notebook UI | ✗ not started | (out of scope until Phase 4) |
 | IR | Typed SSA | ✅ built | `crates/r2-ir/src/lib.rs` (Phase B, 8 tests passing) |
-| Oracle | Auto-scheduler | ✅ V1 built | `crates/r2-oracle/` — 5 tests passing. `dispatch(Op, Shape) → Backend{Serial\|Rayon}`. `bi_kmeans` already migrated. `bi_rf`, `bi_gbm`, `bi_cv` still inline; migrate next. V2 adds GPU/Cloud. |
-| JIT | Cranelift backend | ◐ scalar + vector reductions + vector maps + composed bodies | `crates/r2-jit/src/lib.rs` + engine call path (Phases C through C.4-full part 2, 16 tests passing). Scalar functions; vector reductions; element-wise `v OP scalar`; element-wise `v OP w`; **generic 1-param composed arithmetic bodies (`(v+1)*2`, `v*v - 1`, etc.) lowered via IR into single fused native loops.** NA propagates via NaN. Next: C.5 matrices, C.6 `.Internal` direct lowering. |
-| Rayon | Work-stealing | ✅ Phase D wrapped | Oracle-dispatched: `bi_rf`, `bi_kmeans`, reductions (`sum`/`mean`/`sd`/`var`/`min`/`max`/`prod`/`median`), `bi_cv`, `bi_summary`, **full apply family** (`lapply`/`sapply`/`apply`/`tapply`/`aggregate`) with pure-builtin allowlist (`sum`/`mean`/`sd`/`var`/`min`/`max`/`prod`/`length`/`sqrt`/`abs`/`exp`/`log`/`log2`/`log10`), `bi_gbm` (per-iteration row-work parallel; outer boosting loop sequential by algorithm), **inner tree split-search now parallel across features via `par_for` (v0.0.9 polish — Oracle dispatches per-node based on n_features × active_samples; trees with few features stay serial automatically)**. Closures and non-pure builtins fall back to serial path. `mapply`/`vapply` multi-arg pure-allowlist parallel = V2. |
+| Oracle | Auto-scheduler | ✅ V1 built | `crates/r2-oracle/`. `dispatch(Op, Shape) → Backend{Serial\|Rayon}`, hardware-scaled thresholds. V2 adds GPU/Cloud tiers. |
+| JIT | Cranelift backend | ◐ numeric code → native; matrix-multiply queued | `crates/r2-jit/`. Compiles counted loops, imperative indexed element loops (`x[i]`, `y[i]<-…`), whole-vector/-matrix reductions & maps, and the statistics primitive set to native **checked** code — fused, CSE'd, F64X2-SIMD; guards deopt to the interpreter, NA propagates. Capability detail in the **Phase J** section below. |
+| Rayon | Work-stealing | ✅ Oracle-dispatched | Parallelism owned by `r2-kernel` (never imported in builtins). Parallel: the numeric reductions, the apply family (`lapply`/`sapply`/`apply`/`tapply`/`aggregate`) over a pure-builtin allowlist, and the ML builtins (`rf`/`gbm`/`kmeans`/`cv`) via `par_for`. Closures & non-pure builtins fall back to serial. |
 | GPU | Dispatcher | ✗ not started | — |
 | Cloud-RAM | Shards | ✗ not started | — |
 | FFI Hub | 200–500 syscalls | ✗ not started | — |
-| Memory | R2-ARROW columnar | ◐ F.1+F.2+F.3a+F.4 shipped; F.3 storage migration pending | `crates/r2-arrow/src/lib.rs` (8 reduction + 6 binary tests). **F.4 element-wise kernels now in place**: `binary`, `binary_scalar`, `add`/`sub`/`mul`/`div` shortcut methods. Dense × dense uses tight `for i in 0..n` over `&[f64]` slices for compiler auto-vectorization; sparse path ANDs validity bitmaps so NA propagates correctly. Same semantics as `r2_kernel::binary()` but zero-copy through the columnar representation — ready to be the default arithmetic path once F.3 lands. Previous lib.rs sketch — `ColumnarF64`, null bitmap, dense fast-path reductions. All 7 numeric reductions on columnar view. F.3a: `from_option_slice` + lazy-bitmap. **F.3 attempted but reverted in-session**: changing the `RVal::Numeric` variant to take `Reals` (Vec<Real> + cached `Arc<ColumnarF64>`) requires fixing ~75 construction sites across r2-base/r2-utils/r2-engine; could not complete safely in one session's budget. The `Reals` wrapper type is committed to `r2-types` for the eventual migration. **Verdict**: destructive F.3 needs a dedicated full-budget session — it's the kind of refactor that must finish atomically (every site updated) or the build breaks. F.4: element-wise vector ops on columnar; F.5: mmap-backed columns; F.6: i32/i64/bool/Utf8 dtypes. |
+| Memory | R2-ARROW columnar | ◐ storage + kernels shipped; default-storage migration queued | `crates/r2-arrow/`. `ColumnarF64` with null bitmap; dense fast-path reductions + zero-copy element-wise binary kernels (NA via validity bitmaps); `i32`/`i64`/`bool` dtypes; mmap-backed out-of-core columns. *Remaining:* make columnar the **default** `RVal::Numeric` storage — a large atomic refactor (the `Reals` wrapper is staged in `r2-types`) — plus parquet/Utf8. |
 | Microkernel ① | Math kernel | ✅ built | `crates/r2-linalg/` (1,278 LoC, BLAS L1-L3, decompositions) |
 | Microkernel ② | BLAS/LAPACK | ◐ partial | LU, Cholesky, QR, SVD, symmetric eigen (`dsyev`), non-symmetric eigen (`dgeev`), triangular solve (`backsolve`/`forwardsolve`), condition number (`rcond`/`kappa`) — done. Pivoting QR, Lanczos, complex type — todo |
-| Microkernel ③ | Reduction + Map + Binary + ParFor kernels (Phase K → K.4) | ✅ kernel API complete | `crates/r2-kernel/src/lib.rs` (20 tests). Four op families: `ReduceOp`, `MapOp`, `BinaryOp`, plus generic `par_for(kind, n, f)` — backend-dispatched parallel-for-each. Backends: `SerialBackend`, `RayonBackend`. Dispatchers: `reduce()`, `map()`, `binary()`, `par_for()` — all ask Oracle. **`par_for` lets ML builtins like `bi_rf` use parallelism without importing Rayon — kernel owns the dispatch (§4.9).** |
-| Microkernel ③' | Stats domain crate (Phase R.0) | ✅ math + bi_* in r2-stats | `crates/r2-stats/src/lib.rs` (6 tests). Math layer + builtin layer (8 reductions via `reduce_builtin!` macro). `R2Err`/`ErrKind` moved to `r2-types`. `register_builtins() -> Vec<(name, fn)>` pattern locked. r2-engine `bi_sum`/etc are now 1-line adapters. |
-| Microkernel ③'' | ML domain crate (Phase R.1 step 4: ✅ all 8 migrated) | ✅ Phase R.1 complete | All 8 ML builtins now live in `r2-ml::dispatch`: **`bi_rpart`**, **`bi_rf`**, **`bi_gbm`**, **`bi_kmeans`**, **`bi_cv`**, **`bi_knn`**, **`bi_naive_bayes`**, **`bi_prcomp`**. Engine `bi_*` are 1-line delegators. Every ML builtin that uses parallelism is on `kernel::par_for` — zero Rayon imports in any ML body. ML domain crate is the second fully-populated domain after r2-stats. |
+| Microkernel ③ | Reduction/Map/Binary/ParFor kernels | ✅ complete | `crates/r2-kernel/`. Four op families (reduce/map/binary + generic `par_for`), each Oracle-dispatched to a Serial or Rayon backend — lets domain crates use parallelism without importing Rayon. |
+| Microkernel ③' | Stats domain crate | ✅ complete | `crates/r2-stats/`. Math + builtin layers; the `register_builtins() -> Vec<(name, fn)>` pattern; engine `bi_*` are 1-line adapters. |
+| Microkernel ③'' | ML domain crate | ✅ complete | `crates/r2-ml/`. All 8 ML builtins (`rpart`/`rf`/`gbm`/`kmeans`/`cv`/`knn`/`naive.bayes`/`prcomp`); engine `bi_*` delegate; parallelism via `kernel::par_for`. |
 | Microkernel ④ | Tensor | ✗ stub | `Tensor` type exists in `r2-types`, no ops |
 
 ---
@@ -229,14 +229,24 @@ ever matters. Near-native for *iterative* libraries (bootstrap, MCMC,
 optimisation loops) arrives around J.4. Feasible as a long-horizon effort
 because Cranelift (the backend — the hard part) already exists.
 
-| Phase | Adds | Unlocks | Status |
-|---|---|---|---|
-| **J.1** | counted `for(v in a:b)` lowering (real loop-carried phi for induction var + accumulators; ±1 step so ascending & R's descending `a:b` both match the interpreter) | scalar-arithmetic, **math-intrinsic**, and **nested** loops JIT (verified ~4000× on 1e7 iters) | ✅ **shipped** |
-| **J.2** | unboxed vector element access in loops. **Bricks shipped:** (a) index-loop *folds* `for(i in 1:length(v)) s <- s <+/*> f(v[i])` route to the tested fused map-reduce codegen (`v[i]`→element) — `sum(v[i])` over 1e6 went *timeout*→0.024 s. (b) **binary map-reduce** `function(x,w) sum(f(x,w))` / `prod(...)` compiles to a fused two-pointer loop (`JitKind::Vector2ToScalar`, ABI `(*const f64,*const f64,i64)->f64`) — dot products / weighted sums `sum(x*w)` now native, verified bit-exact vs the interpreter (167167000 over 1:1000·1000:1). **Remaining:** general `Index{v,i}` stores (e.g. `y[i] <- f(x[i])`) need indexed-*store* codegen + a mutable vector-out ABI. | index-driven numeric kernels JIT | ◐ **in progress** |
-| **J.3** | matrices / list access unboxed inside compiled code; guards + deopt for speculated types. **Bricks shipped:** (a) **matrix unboxing** at the JIT dispatch — a matrix's column-major buffer is fed to the existing vector kernels, so `sum(m*m)` / `sqrt(m)` / `A+B` / `sum(A*B)` JIT with zero new codegen (dim + dimnames preserved, bit-exact on 100×100). (b) **real indexed loads** — a new `IrInst::Load` + i64 pointer params let a scalar-returning counted loop reading `x[i]`/`w[i]` (index == the loop var over `1:length`, so provably in-bounds) compile to genuine native loads. This closes the imperative two-vector dot product `for(i in 1:length(x)) s<-s+x[i]*w[i]`, multi-statement folds (`sum((x-w)^2)`), and **scalar recurrences** (Horner) — none of which any map/reduce recogniser covers. Reuses the `Vector1/2ToScalar` ABI/dispatch (len passed as the fused count); empty input & `if`-without-`else` decline to the interpreter for safety. 1e7-elem dot loop: interpreter-timeout → 0.55 s (debug). (c) **indexed stores** — a new `IrInst::Store` + mutable output-pointer param compile `for(i in 1:length(x)) y[i] <- f(x[i][, w[i]])` returning a vector: two-input stores (`y[i]<-x[i]+w[i]`), multi-statement bodies, and `if`/`else`-valued stores (`IndexedStoreMap1/2`, engine allocates the out buffer, input NA bitmap AND-ed onto the result). The single-input pure form keeps its VectorMap path. **Remaining:** 2-D `m[i,j]` address arithmetic (needs nrow + nested-loop bounds), general in-bounds-checked / offset indices (`x[i-1]` recurrences), and list `x[[i]]`. | index-driven numeric kernels JIT | ◐ **in progress** |
-| **J.4** | inline hot user + builtin calls into the loop | kills per-call dispatch → **iterative source libraries (r2sem) go near-native** | ◐ **bricks 1–2 shipped.** (1) pure user-helper *inlining* — a function composed of JIT-lowerable helpers (`function(a,b) sq(a)+sq(b)`) is inlined by AST substitution (depth-bounded → recursion falls back). (2) **multi-reduction scalar kernels** — functions that *combine* whole-vector reductions (`sum(x*y)/sum(x*x)` regression coef; `{m<-mean(x); sum((x-m)^2)/(length(x)-1)}` variance; covariance; Pearson `cor`) compile to several **fused loops** with scalar locals threaded between them — no intermediate vector materialised, reusing the `Vector1/2ToScalar` ABI. Verified bit-exact vs R (`var`/`cov`/`cor`). (3) **vector-local fusion + reduction hoisting** — a vector intermediate (`e <- pred-obs`) is *fused* away by substitution, and reductions nested inside expressions (`sum((x-mean(x))^2)`) are hoisted to scalar locals, so the *naive one-liner* forms of `var`/`cov`/`cor`/RMSE/R² JIT with zero intermediate allocation. Demonstrates the "one formula, one implementation" thesis: at small n a JIT'd R2-source `cor` reaches ~88% of the native builtin, and 1.5–3.3× the interpreted path (largest at small n). (4) **CSE + wave fusion** — identical reduction sub-trees (`mean(x)`, `d(x)=x-mean(x)`) are computed *once* and reused across variance/sd/cov/cor (common-subexpression elimination on a canonical key), and independent reductions sharing the same element loads run in a *single* pass with N accumulators (Cranelift GVN folds the shared `x[i]-mx`). This realises the "define the primitive `d` once, reuse everywhere; compute it once" design at the machine level, and matches a native `cor`'s pass structure (means, then `sxy`/`sxx`/`syy` in one pass). **(5) SIMD:** the reduction waves are F64X2-vectorised (2-wide main loop + horizontal reduce + scalar tail), and small integer powers `b^2..b^4` are expanded to multiplication so variance/correlation element exprs vectorise (the `pow` extern would block SIMD). Net: a JIT'd R2-source `cor` now **beats the hand-written native `cor` builtin** — 2.71 s vs 4.01 s at n=1000 (3.9× faster than the pre-SIMD kernel), 2.46 s vs 2.81 s at n=200. The "one formula, written once, reaches *past* native" goal is met for the scalar-reduction class. Transcendental/branchy element exprs fall back to the scalar wave. The single/binary **fused map-reduce** paths (`sum(f(x))`, dot products `sum(x*w)`) are also F64X2-vectorised with **4× unrolling** (4 independent accumulators break the fadd-latency chain, 8 elements/iter) + scalar tail. Payoff is on *compound* element expressions where the interpreter needs many passes: `sum(sqrt(x*x+w*w))` at n=10000 is 2.16 s (one fused SIMD pass) vs 5.37 s interpreted (5 passes) — **2.5×**. For a trivial single `sum(x*w)` the interpreter's LLVM-AVX2 reduce kernel is already optimal (Cranelift emits SSE2), so those tie — the JIT's edge is fusion, not raw lane width. **(6) vector-valued output (matrix/vector-lowering step 1):** a *vector-returning* kernel whose element expression embeds reductions — `d(x)=x-mean(x)`, z-score `(x-mean(x))/sd`, `x/sum(x)` — compiles to a reduction pass (fused waves → scalar locals) + a SIMD map pass writing the output buffer, reusing the `VectorMap`/`VectorBinaryMap` ABI. This establishes non-scalar JIT output (the prerequisite for matrix ops); the centring primitive `d` is now both a standalone native vector kernel and inlined into the scalar var/cov/cor formulas. **Remaining:** true matrix builtins (`%*%`→ the one `dgemm` kernel, `cor(matrix)`, `scale(matrix)`) producing matrix outputs on a scratch arena — the r2sem `fit_once` bottleneck, still the largest brick. **Remaining (the r2sem matrix bottleneck):** lower *matrix* builtins (`%*%`→dgemm, `cor(matrix)`, `scale`) inside a JIT'd region onto unboxed buffers + a scratch arena, so whole functions like `fit_once` compile without per-op RVal allocation. |
-| **J.5** | profile-driven tiered dispatch + on-stack replacement | automatic, safe hot/cold tiering | ◐ groundwork: `explain(f)` |
-| **J.6** | (optional) trace-based JIT across call boundaries | PyPy-class; the last ~2× | |
+**Accomplished (J.1–J.4):** pure-R2 numeric code — counted loops, imperative
+`x[i]`/`y[i]<-…` element loops, whole-vector/-matrix reductions, and the entire
+first-order statistics primitive set — now JIT-compiles to native, checked code.
+The headline: a statistic written *once* as an R2 formula (`var`, `cov`, `cor`,
+`sd`, z-score, RMSE, R², normalise) reaches or **beats** the hand-written native
+builtin, with no unsafe escape hatch. Shared sub-expressions are computed once
+and independent reductions run in a single SIMD pass, so `cor` written in R2 out-
+runs the C-style native `cor`. (Implementation detail archived in
+`code-history/phase-j-jit-detail.md`.)
+
+| Phase | Capability | Status |
+|---|---|---|
+| **J.1** | Counted `for(v in a:b)` loops — scalar, math-intrinsic, and nested — compile to native. | ✅ shipped |
+| **J.2** | In-loop vector element access: index folds and dot products / weighted sums (`sum(x*w)`) become fused native loops. | ✅ shipped |
+| **J.3** | Real indexed loads **and** stores + matrix unboxing: imperative `x[i]`/`y[i]<-f(x[i],w[i])` loops (dot products, scalar recurrences, multi-statement folds & maps) and whole-matrix elementwise/reduction ops JIT natively. *Remaining:* 2-D `m[i,j]`, offset indices (`x[i-1]`), list `x[[i]]`. | ✅ shipped (niche remainders) |
+| **J.4** | Compose source libraries to native: user-helper inlining, multi-reduction & vector-returning kernels for the statistics primitive set, with common-subexpression elimination, single-pass wave fusion, and F64X2 SIMD. A formula written once reaches/beats the native builtin. *Remaining:* matrix-multiply lowering (`%*%`→the shared `dgemm`, `cor(matrix)`, `scale`) producing matrix outputs on a scratch arena — the r2sem `fit_once` bottleneck, the largest remaining brick. | ◐ scalar/vector-reduction class shipped; matrix lowering queued |
+| **J.5** | Profile-driven tiered dispatch + on-stack replacement — automatic, safe hot/cold tiering. | queued (groundwork: `explain(f)`) |
+| **J.6** | Trace-based JIT across call boundaries — PyPy-class, the last ~2×. | queued (optional) |
 
 Why native builtins still exist: the standard dynamic-language pattern is
 *interpreter/JIT for breadth + native kernels for the hot 5%*. First-party
@@ -245,42 +255,16 @@ hot kernels (`lm`, `plssem`, …) stay native builtins; J.4 is what lets
 
 ### Phase P — parallel `apply` for library code (the *other* speed lever)
 
-Profiling `r2sem` (source library) vs `plssem` (native builtin), both release,
-showed a ~25× gap that splits **~equally** into two independent factors:
-**~6× serial-vs-parallel bootstrap** and **~4× interpreted-vs-compiled per fit**.
-The JIT (Phase J) attacks the ~4×. Phase P attacks the ~6× — **separately, and
-at much lower risk**, because it's parallelism, not codegen.
-
-**Deliver:** an `mclapply`/`par.sapply(x, f)` builtin that runs an R2 closure
-over the elements of `x` across cores (Rayon lives in `r2-kernel`; this exposes
-it to *library code*). Libraries call it for embarrassingly-parallel work —
-bootstrap, permutation tests, cross-validation, Monte-Carlo — which is
-ubiquitous in statistics.
-
-**Why it's tractable + safe:** the hot types are already `Arc`-based (`RVal`,
-`EnvRef`), closure calls create child envs copy-on-write, and the output sink is
-thread-local — so each worker evaluates in an isolated context sharing the
-registry + global env read-only via `Arc`. No shared mutation ⇒ no data race
-⇒ no *silent-wrong-math* class (unlike JIT codegen); any bug surfaces as a
-crash/incorrect result caught by tests. Scope: **pure** map closures (no `<<-`
-to shared state), matching R's `parallel::` worker isolation.
-
-**Impact:** ~6× for *any* embarrassingly-parallel library, as pure modular
-source. `r2sem`: 0.80 s → ~0.13 s (~66× vs cSEM). Composes with the JIT later —
-a `par.sapply` of a JIT-compiled closure runs parallel **and** native.
-
-**Recommended order:** **P before J.3/J.4** — bigger single win, lower risk,
-broadly applicable, and independent of the delicate codegen work.
-
-**Brick 1 shipped:** `mclapply(x, FUN)` / `par.lapply` — runs a closure over
-`x` across cores via `rayon`, returning a list. Unlock: `RVal`/`EnvRef` were
-already `Send+Sync`; the only blocker was the JIT-handle cache, fixed by
-requiring `JitHandle: Send+Sync` + a justified `unsafe impl` on the (immutable,
-reentrant) compiled code. Each element evaluates in an isolated `fork_worker`
-engine (shared read-only registry/globals via `Arc`, fresh scratch). Verified:
-correct incl. captured variables across threads; **~4.5× on a 6-core interpreted
-workload** (10.75 s → 2.40 s). Remaining: `par.sapply` simplification, chunking,
-and an opt-in guard against `<<-` in the mapped closure.
+**Accomplished:** `mclapply(x, FUN)` / `par.lapply` / `par.sapply` run an R2
+closure over the elements of `x` across cores — the *other* speed lever (the JIT
+attacks per-fit compute; this attacks embarrassingly-parallel repetition:
+bootstrap, permutation tests, cross-validation, Monte-Carlo). Each element
+evaluates in an isolated worker sharing the registry + global env read-only via
+`Arc`, so there is no shared mutation and no data-race / silent-wrong-math class;
+scope is **pure** map closures (no `<<-` to shared state), matching R's
+`parallel::` isolation. **~4.5× on a 6-core interpreted workload**; composes with
+the JIT — a `par.sapply` of a JIT-compiled closure runs parallel *and* native.
+*Remaining:* chunking, and an opt-in guard against `<<-` in the mapped closure.
 
 > Release history → `CHANGELOG.md`. Archived phase narrative →
 > `code-history/`.
