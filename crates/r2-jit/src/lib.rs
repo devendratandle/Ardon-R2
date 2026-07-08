@@ -35,6 +35,8 @@ mod error;
 mod handle;
 mod compiler;
 mod codegen;
+mod mapreduce;
+mod reduce_kernel;
 mod externs;
 mod closure;
 mod lower;
@@ -44,6 +46,8 @@ pub use handle::*;
 pub use compiler::*;
 pub use closure::*;
 pub(crate) use codegen::*;
+pub(crate) use mapreduce::*;
+pub(crate) use reduce_kernel::*;
 pub(crate) use externs::*;
 pub(crate) use lower::*;
 
