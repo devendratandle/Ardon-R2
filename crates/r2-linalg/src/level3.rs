@@ -30,8 +30,17 @@ pub fn dgemm(
     else if beta != 1.0 { for ci in c.iter_mut() { *ci *= beta; } }
     if alpha == 0.0 { return Ok(()); }
 
-    // Small matrix fast path
-    if m <= MR && n <= NR && k <= 32 {
+    // Small / thin matrix fast path. The blocked path below packs A- and
+    // B-panels into scratch buffers and asks the Oracle whether to parallelise
+    // — worthwhile amortised cost for large square matrices, but pure overhead
+    // for the small and *thin* shapes that dominate statistics (`X %*% w`,
+    // `t(X) %*% y`, small covariance blocks). `gemm_small` is a tight
+    // column-major SAXPY loop the compiler auto-vectorises: it re-streams A
+    // once per output column, so it wins whenever A (m·k) and the B-panel (k·n)
+    // comfortably fit cache. Route there for genuinely small dims OR when both
+    // panels are ≤ ~128 KB (16384 f64); use the blocked kernel only for the
+    // large square case where its packing actually pays.
+    if m.max(n).max(k) <= 96 || (m * k <= 16_384 && k * n <= 16_384) {
         gemm_small(m, n, k, alpha, a, b, c);
         return Ok(());
     }
@@ -497,5 +506,27 @@ mod tests {
         dgemm(n, n, n, 1.0, &a, &eye, 0.0, &mut c).unwrap();
         assert!((c[0] - a[0]).abs() < 1e-10);
         assert!((c[n*n-1] - a[n*n-1]).abs() < 1e-10);
+    }
+
+    /// The small/thin fast path and the blocked path must agree on every shape
+    /// straddling the routing threshold (naive triple-loop reference).
+    #[test]
+    fn dgemm_paths_agree_across_threshold() {
+        fn naive(m: usize, n: usize, k: usize, a: &[f64], b: &[f64]) -> Vec<f64> {
+            let mut c = vec![0.0; m * n];
+            for j in 0..n { for p in 0..k { for i in 0..m { c[j*m+i] += a[p*m+i] * b[j*k+p]; } } }
+            c
+        }
+        // (m,n,k): small, thin (both orientations — the r2sem shapes), and large
+        // square (blocked path).
+        for &(m, n, k) in &[(5,5,5), (50,50,50), (100,100,100), (1000,1,7), (7,1,1000), (200,200,200)] {
+            let a: Vec<f64> = (0..m*k).map(|i| ((i * 7 + 1) % 13) as f64 - 6.0).collect();
+            let b: Vec<f64> = (0..k*n).map(|i| ((i * 5 + 2) % 11) as f64 - 5.0).collect();
+            let mut c = vec![0.0; m * n];
+            dgemm(m, n, k, 1.0, &a, &b, 0.0, &mut c).unwrap();
+            let r = naive(m, n, k, &a, &b);
+            let err = c.iter().zip(&r).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+            assert!(err < 1e-9, "dgemm {}x{}x{} disagrees with naive by {}", m, n, k, err);
+        }
     }
 }
