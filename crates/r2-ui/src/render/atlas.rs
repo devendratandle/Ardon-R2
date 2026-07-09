@@ -3,24 +3,36 @@
 use std::collections::HashMap;
 
 
-// Font loading — we try a small list of system monospace fonts and
-// use the first one that loads. This keeps r2-ui self-contained
-// without bundling a TTF asset. Order matches typical Windows /
-// macOS / Linux installations.
+// Font loading — platform-appropriate monospace candidates, first one that
+// parses wins. Keeps r2-ui self-contained (no bundled TTF asset). Each OS
+// leads with its *native* console font so the GUI looks at home on
+// Windows / macOS / Linux; on Linux (where paths vary by distro) a bounded
+// directory scan backstops the fixed list so exotic distros still get a
+// monospace face rather than a startup error.
 pub(crate) fn load_system_font() -> Result<fontdue::Font, String> {
     const CANDIDATES: &[&str] = &[
-        // Windows
+        // Windows — Consolas (the ClearType-era console classic), then the
+        // modern Cascadia family (Windows Terminal / Win11), then the old guard.
         "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/CascadiaMono.ttf",
+        "C:/Windows/Fonts/CascadiaCode.ttf",
         "C:/Windows/Fonts/cour.ttf",
         "C:/Windows/Fonts/lucon.ttf",
-        // macOS
+        // macOS — Menlo (Terminal.app default), Monaco (the timeless one).
         "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Monaco.ttf",
         "/Library/Fonts/Courier New.ttf",
-        // Linux
+        // Linux — the faces shipped by the major distro families.
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
     ];
     for path in CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
@@ -29,7 +41,46 @@ pub(crate) fn load_system_font() -> Result<fontdue::Font, String> {
             }
         }
     }
-    Err("no system monospace font found (tried Consolas, Courier New, Menlo, DejaVu, Liberation)".into())
+    // Last resort on Unix: scan the standard font roots for any *Mono*.ttf.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut roots: Vec<std::path::PathBuf> = vec![
+            "/usr/share/fonts".into(),
+            "/usr/local/share/fonts".into(),
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(std::path::Path::new(&home).join(".local/share/fonts"));
+        }
+        for root in roots {
+            if let Some(font) = scan_for_mono(&root, 0) { return Ok(font); }
+        }
+    }
+    Err("no system monospace font found (tried Consolas/Cascadia, Menlo/Monaco, \
+         DejaVu/Liberation/Noto/Ubuntu/FreeMono + a /usr/share/fonts scan)".into())
+}
+
+/// Bounded recursive search (≤3 levels) for a parseable `*mono*.ttf`.
+#[cfg(not(target_os = "windows"))]
+fn scan_for_mono(dir: &std::path::Path, depth: u8) -> Option<fontdue::Font> {
+    if depth > 3 { return None; }
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut subdirs = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() { subdirs.push(p); continue; }
+        let name = p.file_name()?.to_string_lossy().to_lowercase();
+        if name.contains("mono") && name.ends_with(".ttf") {
+            if let Ok(bytes) = std::fs::read(&p) {
+                if let Ok(f) = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+                    return Some(f);
+                }
+            }
+        }
+    }
+    for d in subdirs {
+        if let Some(f) = scan_for_mono(&d, depth + 1) { return Some(f); }
+    }
+    None
 }
 
 // ─── Vertex format ───────────────────────────────────────────────────

@@ -56,6 +56,17 @@ impl Selection {
         if self.start <= self.end { (self.start, self.end) }
         else                       { (self.end, self.start) }
     }
+
+    /// Is cell (row, col) inside the selection? Transcript semantics: the
+    /// range flows through full lines between the endpoints (same bounds the
+    /// highlight band paints), not a rectangular block.
+    pub fn contains(self, row: usize, col: usize) -> bool {
+        let (a, b) = self.normalized();
+        if row < a.row || row > b.row { return false; }
+        if row == a.row && col < a.col { return false; }
+        if row == b.row && col > b.col { return false; }
+        true
+    }
 }
 
 /// Per-frame builder that renders a CellGrid bound to a ConsoleBuffer.
@@ -246,11 +257,18 @@ pub fn paint_cells_scrolled(
             let x = rect.x + (c - scroll_x) as f32 * cell_w;
             if x >= max_x { break; }        // fully off the right edge
             if cell.ch == ' ' { continue; }
+            // Selected text inverts to the theme's selection foreground
+            // (white on the solid blue band) — the classic, high-contrast
+            // editor convention.
+            let fg = match selection {
+                Some(sel) if sel.contains(r, c) => theme.console_selection_fg,
+                _ => cell.fg,
+            };
             // Clip the glyph at the console's right edge: a character
             // crossing the boundary is drawn only up to `max_x`, sliding
             // under the sidebar (R-console behaviour) rather than painting
             // over the bar or beyond the console.
-            frame.paint_glyph_clipped(renderer, x, y_baseline, cell.ch, size_pt, cell.fg, max_x);
+            frame.paint_glyph_clipped(renderer, x, y_baseline, cell.ch, size_pt, fg, max_x);
         }
     }
 }

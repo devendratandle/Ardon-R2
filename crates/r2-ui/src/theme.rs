@@ -38,7 +38,8 @@ pub struct Theme {
     pub console_output:       Color,  // engine results
     pub console_error:        Color,  // error / warning messages
     pub console_banner:       Color,  // welcome text
-    pub console_selection_bg: Color,  // selection highlight on transcript
+    pub console_selection_bg: Color,  // selection highlight band (solid)
+    pub console_selection_fg: Color,  // selected text (inverted, e.g. white on blue)
     pub cursor:               Color,  // blinking I-beam color
 
     // ── Title-bar traffic-light buttons ─────────────────────────
@@ -107,7 +108,9 @@ impl Theme {
             // lighter so the strip is distinguishable from the area
             // sub-windows live in.
             mdi_background:    Color::rgb(148, 140, 118),
-            window_background: Color::WHITE,
+            // Warm off-white ("paper") instead of pure #FFF: noticeably less
+            // glare over long sessions, still reads as a clean white window.
+            window_background: Color::rgb(251, 249, 244),
             menu_background:   Color::rgb(186, 178, 156),
             menu_text:         Color::rgb(20, 20, 30),
             // Two-level faint-blue title strips, slightly more
@@ -126,7 +129,11 @@ impl Theme {
             console_output:    Color::rgb(40,  30, 130),    // violet blue
             console_error:     Color::rgb(180, 22, 30),     // deeper red
             console_banner:    Color::rgb(40,  30, 130),    // matches output
-            console_selection_bg: Color::rgba(65, 105, 225, 120), // royal blue, medium
+            // Selection = the editor convention: SOLID blue band, selected
+            // text inverted to white. (A translucent band over dark text was
+            // the old approach — muddy and low-contrast.)
+            console_selection_bg: Color::rgb(61, 111, 217),   // royal blue, solid
+            console_selection_fg: Color::WHITE,
             cursor:            Color::rgb(196, 40, 40),
             button_min:        Color::rgb(40,  160, 60),    // green
             button_max:        Color::rgb(40,  120, 200),   // blue
@@ -155,7 +162,10 @@ impl Theme {
             console_output:    Color::rgb(32, 92, 168),
             console_error:     Color::rgb(208, 48, 48),
             console_banner:    Color::rgb(32, 92, 168),
-            console_selection_bg: Color::rgba(65, 105, 225, 120), // royal blue, medium
+            // Classic Windows highlight: deep selection blue + white text —
+            // the timeless look (and what RGui inherits from the OS).
+            console_selection_bg: Color::rgb(0, 84, 166),
+            console_selection_fg: Color::WHITE,
             cursor:            Color::BLACK,
             button_min:        Color::rgb(40, 160, 60),
             button_max:        Color::rgb(40, 120, 200),
