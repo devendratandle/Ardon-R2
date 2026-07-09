@@ -479,10 +479,156 @@ fn flush_wave(
 /// Process a kernel body's leading `local <- <scalar>` assignments into
 /// `scalar_env`, batching independent reductions into fused waves. Shared by the
 /// scalar-return and vector-return kernels.
+/// First symbol in `e` that is neither defined, a vector param, nor the loop
+/// var — used to guarantee a loop-carried scalar's 0.0-init is never observed
+/// (read-before-define inside a compiled loop must reject → interpreter, which
+/// reports R's "object not found" instead of silently computing with 0).
+fn first_undefined_symbol<'e>(
+    e: &'e r2_types::Expr,
+    defined: &std::collections::HashSet<String>,
+    k: &Kctx,
+    var: &str,
+) -> Option<&'e str> {
+    use r2_types::Expr::*;
+    match e {
+        Symbol(s) => {
+            let name = s.as_ref();
+            if defined.contains(name) || var == name
+                || k.names.iter().any(|n| n.as_ref() == name) { None } else { Some(name) }
+        }
+        Unary { expr, .. } => first_undefined_symbol(expr, defined, k, var),
+        Binary { lhs, rhs, .. } => first_undefined_symbol(lhs, defined, k, var)
+            .or_else(|| first_undefined_symbol(rhs, defined, k, var)),
+        // Function-position symbols (sum/mean/sqrt/…) are not variables.
+        Call { args, .. } => args.iter().find_map(|a| first_undefined_symbol(&a.value, defined, k, var)),
+        If { cond, then, else_ } => first_undefined_symbol(cond, defined, k, var)
+            .or_else(|| first_undefined_symbol(then, defined, k, var))
+            .or_else(|| else_.as_ref().and_then(|x| first_undefined_symbol(x, defined, k, var))),
+        _ => None,
+    }
+}
+
+/// Phase J.4 (whole-function slice 1) — compile a counted loop whose body is a
+/// sequence of scalar assignments that may embed whole-vector reductions:
+///
+///   for (it in 1:K) { g <- mean(x - b); b <- b + 0.2*g }
+///
+/// The iterative-algorithm shape (gradient descent, Newton, fixed-point, EM
+/// updates). Loop-carried scalars ride as header block params (SSA phis); each
+/// iteration re-runs the body's fused reduction waves against the carried
+/// values. `1:K` matches R in BOTH directions (step ±1, so `1:0` iterates 1,0).
+fn emit_scalar_loop(
+    bcx: &mut FunctionBuilder,
+    k: &Kctx,
+    var: &std::sync::Arc<str>,
+    iter: &r2_types::Expr,
+    body: &r2_types::Expr,
+    scalar_env: &mut HashMap<std::sync::Arc<str>, Value>,
+) -> JitResult<()> {
+    use r2_types::Expr::*;
+    let hi_expr = match iter {
+        Binary { op: BinOp::Colon, lhs, rhs }
+            if matches!(lhs.as_ref(), NumLit(x) if *x == 1.0)
+                || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
+        _ => return Err(JitError::Unsupported("iterative kernel: loop must be `for (v in 1:K)`".into())),
+    };
+    let body_stmts: Vec<r2_types::Expr> = match body {
+        Block(b) => b.clone(),
+        other => vec![other.clone()],
+    };
+
+    // Carried scalars = every Assign target in the body, first-assign order.
+    let mut carried: Vec<std::sync::Arc<str>> = Vec::new();
+    for bs in &body_stmts {
+        match bs {
+            Assign { target, .. } => match target.as_ref() {
+                Symbol(n) => if !carried.iter().any(|c| c.as_ref() == n.as_ref()) { carried.push(n.clone()); },
+                _ => return Err(JitError::Unsupported("iterative kernel: non-symbol assign in loop body".into())),
+            },
+            _ => return Err(JitError::Unsupported("iterative kernel: loop body must be assignments".into())),
+        }
+    }
+    if carried.is_empty() { return Err(JitError::Unsupported("iterative kernel: empty loop body".into())); }
+
+    // Safety: no name may be read before it is defined (pre-loop or earlier in
+    // the body) — otherwise the 0.0 phi-init would be observable where R errors.
+    {
+        let mut defined: std::collections::HashSet<String> =
+            scalar_env.keys().map(|s| s.to_string()).collect();
+        for bs in &body_stmts {
+            if let Assign { target, value, .. } = bs {
+                if let Some(bad) = first_undefined_symbol(value, &defined, k, var.as_ref()) {
+                    return Err(JitError::Unsupported(format!("iterative kernel: `{}` read before defined", bad)));
+                }
+                if let Symbol(n) = target.as_ref() { defined.insert(n.to_string()); }
+            }
+        }
+    }
+
+    // Loop bound (loop-invariant, evaluated once) + R-faithful ±1 step.
+    let hi_f = emit_scalar(bcx, k, hi_expr, scalar_env)?;
+    let hi_i = bcx.ins().fcvt_to_sint(types::I64, hi_f);
+    let one_i = bcx.ins().iconst(types::I64, 1);
+    let neg1 = bcx.ins().iconst(types::I64, -1);
+    let asc = bcx.ins().icmp(IntCC::SignedGreaterThanOrEqual, hi_i, one_i);
+    let step = bcx.ins().select(asc, one_i, neg1);
+
+    let header = bcx.create_block();
+    let bodyb = bcx.create_block();
+    let exit = bcx.create_block();
+    bcx.append_block_param(header, types::I64);
+    for _ in &carried { bcx.append_block_param(header, types::F64); }
+    for _ in &carried { bcx.append_block_param(exit, types::F64); }
+
+    let mut init_args: Vec<Value> = vec![one_i];
+    let zero = bcx.ins().f64const(0.0);
+    for c in &carried {
+        init_args.push(scalar_env.get(c).copied().unwrap_or(zero));
+    }
+    bcx.ins().jump(header, &init_args);
+
+    // Header: continue while (i - hi) * step <= 0 (runs 1..=hi both directions).
+    bcx.switch_to_block(header);
+    let hp: Vec<Value> = bcx.block_params(header).to_vec();
+    let i_h = hp[0];
+    let diff = bcx.ins().isub(i_h, hi_i);
+    let prod = bcx.ins().imul(diff, step);
+    let cond = bcx.ins().icmp_imm(IntCC::SignedLessThan, prod, 1);
+    bcx.ins().brif(cond, bodyb, &[], exit, &hp[1..]);
+
+    // Body: bind carried + induction var, run the statements (waves + scalars),
+    // loop back with the updated carried values.
+    bcx.switch_to_block(bodyb);
+    let mut env2 = scalar_env.clone();
+    for (j, c) in carried.iter().enumerate() { env2.insert(c.clone(), hp[1 + j]); }
+    let i_f = bcx.ins().fcvt_from_sint(types::F64, i_h);
+    env2.insert(var.clone(), i_f);
+    emit_kernel_prologue(bcx, k, &body_stmts, &mut env2)?;
+    let mut next: Vec<Value> = vec![bcx.ins().iadd(i_h, step)];
+    for c in &carried {
+        next.push(*env2.get(c).ok_or_else(|| JitError::Unsupported("iterative kernel: carried scalar lost".into()))?);
+    }
+    bcx.ins().jump(header, &next);
+
+    // Exit: carried values become the post-loop scalars; `var` ends at hi (R).
+    bcx.switch_to_block(exit);
+    let xp: Vec<Value> = bcx.block_params(exit).to_vec();
+    for (j, c) in carried.iter().enumerate() { scalar_env.insert(c.clone(), xp[j]); }
+    scalar_env.insert(var.clone(), hi_f);
+    Ok(())
+}
+
 fn emit_kernel_prologue(bcx: &mut FunctionBuilder, k: &Kctx, init: &[r2_types::Expr], scalar_env: &mut HashMap<std::sync::Arc<str>, Value>) -> JitResult<()> {
     let mut batch: Vec<(std::sync::Arc<str>, &r2_types::Expr, FusedReduceOp, bool)> = Vec::new();
     let mut batch_names: std::collections::HashSet<std::sync::Arc<str>> = std::collections::HashSet::new();
     for st in init {
+        // J.4 iterative kernels — a counted `for` carrying scalar state across
+        // per-iteration reduction waves (gradient descent / Newton / EM shape).
+        if let r2_types::Expr::For { var, iter, body } = st {
+            flush_wave(bcx, k, &mut batch, &mut batch_names, scalar_env)?;
+            emit_scalar_loop(bcx, k, var, iter, body, scalar_env)?;
+            continue;
+        }
         let (nm, value) = match st {
             r2_types::Expr::Assign { target, value, .. } => match target.as_ref() {
                 r2_types::Expr::Symbol(n) => (n.clone(), value.as_ref()),

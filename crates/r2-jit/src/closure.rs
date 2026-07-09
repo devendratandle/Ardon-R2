@@ -1161,11 +1161,36 @@ fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Ar
         Block(ss) => {
             let (last, init) = match ss.split_last() { Some(x) => x, None => return inlined };
             for st in init {
-                if let Assign { target, value, superassign } = st {
-                    let v = hoist_reductions(value, &mut out, &mut ctr, &mut seen);
-                    out.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
-                } else {
-                    out.push(st.clone());
+                match st {
+                    Assign { target, value, superassign } => {
+                        let v = hoist_reductions(value, &mut out, &mut ctr, &mut seen);
+                        out.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
+                    }
+                    // J.4 iterative kernels — normalize a counted loop's body:
+                    // hoist reductions PER STATEMENT with a fresh CSE scope
+                    // (loop-carried scalars change between statements and
+                    // iterations, so no cross-statement reuse), keeping the
+                    // hoisted temps inside the loop body. The bound is loop-
+                    // invariant → hoisted into the outer scope.
+                    For { var, iter, body } => {
+                        let iter_n = hoist_reductions(iter, &mut out, &mut ctr, &mut seen);
+                        let body_stmts: Vec<r2_types::Expr> = match body.as_ref() {
+                            Block(b) => b.clone(),
+                            single => vec![single.clone()],
+                        };
+                        let mut new_body: Vec<r2_types::Expr> = Vec::new();
+                        for bs in &body_stmts {
+                            if let Assign { target, value, superassign } = bs {
+                                let mut fresh: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
+                                let v = hoist_reductions(value, &mut new_body, &mut ctr, &mut fresh);
+                                new_body.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
+                            } else {
+                                new_body.push(bs.clone()); // codegen will reject → fallback
+                            }
+                        }
+                        out.push(For { var: var.clone(), iter: Box::new(iter_n), body: Box::new(Block(new_body)) });
+                    }
+                    _ => out.push(st.clone()),
                 }
             }
             hoist_reductions(last, &mut out, &mut ctr, &mut seen)
@@ -1245,6 +1270,9 @@ fn mentions_reduction(e: &r2_types::Expr) -> bool {
             || else_.as_ref().map_or(false, |x| mentions_reduction(x)),
         Block(s) => s.iter().any(mentions_reduction),
         Return(v) => mentions_reduction(v),
+        // J.4 iterative kernels: reductions inside a counted loop body count.
+        For { iter, body, .. } => mentions_reduction(iter) || mentions_reduction(body),
+        While { cond, body } => mentions_reduction(cond) || mentions_reduction(body),
         _ => false,
     }
 }
