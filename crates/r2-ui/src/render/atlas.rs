@@ -231,7 +231,7 @@ impl Atlas {
                 // resvg-rendered graphics-device text. 0.72 darkens without
                 // the blocky over-thickening a more aggressive curve causes.
                 let cov = c as f32 / 255.0;
-                let a = (cov.powf(0.72) * 255.0 + 0.5) as u8;
+                let a = (cov.powf(0.58) * 255.0 + 0.5) as u8;
                 rgba.extend_from_slice(&[255, 255, 255, a]);
             }
             queue.write_texture(

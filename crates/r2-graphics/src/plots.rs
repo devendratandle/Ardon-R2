@@ -368,7 +368,7 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let ptype  = gn(a, "type").map(|v| val_to_str(&v)).unwrap_or_else(|| "p".into());
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 40.0));
+    let (ml, mr, mt, mb) = resolve_margins(a, (78.0, 20.0, 36.0, 40.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
 
@@ -850,7 +850,7 @@ pub fn bi_matplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let xrange = xmax - xmin; let yrange = ymax - ymin;
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 40.0));
+    let (ml, mr, mt, mb) = resolve_margins(a, (78.0, 20.0, 36.0, 40.0));
     let pw = w - ml - mr; let ph = h - mt - mb;
     with_device(|d| d.coords = Some(crate::device::PlotCoords {
         px0: ox + ml, py0: oy + mt, pw, ph, xmin, xmax, ymin, ymax,
@@ -944,7 +944,7 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // mb tightened from 50 to 40: the new xlab placement (right
     // below tick labels) no longer needs the extra 10 px margin
     // and the plot region gets that height back.
-    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 40.0));
+    let (ml, mr, mt, mb) = resolve_margins(a, (78.0, 20.0, 36.0, 40.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
 
@@ -1020,7 +1020,7 @@ pub fn bi_boxplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 30.0, 36.0, 50.0));
+    let (ml, mr, mt, mb) = resolve_margins(a, (78.0, 30.0, 36.0, 50.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
 
@@ -1118,7 +1118,7 @@ pub fn bi_barplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let col_border = gn(a, "border").map(|v| val_to_str(&v)).unwrap_or_else(|| "black".into());
 
     let (ox, oy, w, h) = begin_plot();
-    let (ml, mr, mt, mb) = resolve_margins(a, (60.0, 20.0, 36.0, 60.0));
+    let (ml, mr, mt, mb) = resolve_margins(a, (78.0, 20.0, 36.0, 60.0));
     let pw = w - ml - mr;
     let ph = h - mt - mb;
     let raw_max = heights.iter().cloned().fold(0.0f64, f64::max);

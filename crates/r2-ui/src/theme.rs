@@ -125,10 +125,12 @@ impl Theme {
             // Rose-red prompt + violet-blue output. R-Console-faithful
             // weight, distinct hues that read clearly on the cream
             // sub-window background.
-            console_input:     Color::rgb(150, 28, 60),     // rose red
-            console_output:    Color::rgb(40,  30, 130),    // violet blue
-            console_error:     Color::rgb(180, 22, 30),     // deeper red
-            console_banner:    Color::rgb(40,  30, 130),    // matches output
+            // Deepened for readability: darker ink = higher contrast on the
+            // paper background, especially at small sizes / high DPI.
+            console_input:     Color::rgb(132, 18, 48),     // deep rose red
+            console_output:    Color::rgb(26,  20, 104),    // deep violet blue
+            console_error:     Color::rgb(168, 16, 24),     // deep red
+            console_banner:    Color::rgb(26,  20, 104),    // matches output
             // Selection = the editor convention: SOLID blue band, selected
             // text inverted to white. (A translucent band over dark text was
             // the old approach — muddy and low-contrast.)
