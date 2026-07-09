@@ -1190,6 +1190,26 @@ fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Ar
                         }
                         out.push(For { var: var.clone(), iter: Box::new(iter_n), body: Box::new(Block(new_body)) });
                     }
+                    // J.4 while-convergence loops: hoist body reductions per
+                    // statement (fresh CSE scope); the condition stays intact —
+                    // `emit_scalar` evaluates embedded reductions per iteration.
+                    While { cond, body } => {
+                        let body_stmts: Vec<r2_types::Expr> = match body.as_ref() {
+                            Block(b) => b.clone(),
+                            single => vec![single.clone()],
+                        };
+                        let mut new_body: Vec<r2_types::Expr> = Vec::new();
+                        for bs in &body_stmts {
+                            if let Assign { target, value, superassign } = bs {
+                                let mut fresh: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
+                                let v = hoist_reductions(value, &mut new_body, &mut ctr, &mut fresh);
+                                new_body.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
+                            } else {
+                                new_body.push(bs.clone());
+                            }
+                        }
+                        out.push(While { cond: cond.clone(), body: Box::new(Block(new_body)) });
+                    }
                     _ => out.push(st.clone()),
                 }
             }

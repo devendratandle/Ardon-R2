@@ -394,6 +394,18 @@ fn emit_scalar(bcx: &mut FunctionBuilder, k: &Kctx, e: &r2_types::Expr, scalar_e
     use r2_types::Expr::*;
     let is_vec = |s: &str| k.names.iter().any(|n| n.as_ref() == s);
     match e {
+        // Scalar if/else as a value (adaptive updates: `b <- if (g>0) a else c`).
+        // Lowered branch-free via `select`: both arms are pure scalar exprs, so
+        // evaluating both is safe (an untaken arm's NaN is discarded).
+        If { cond, then, else_ } => {
+            let e2 = else_.as_ref().ok_or_else(|| JitError::Unsupported("scalar if without else".into()))?;
+            let c = emit_scalar(bcx, k, cond, scalar_env)?;
+            let t = emit_scalar(bcx, k, then, scalar_env)?;
+            let f = emit_scalar(bcx, k, e2, scalar_env)?;
+            let z = bcx.ins().f64const(0.0);
+            let nz = bcx.ins().fcmp(FloatCC::NotEqual, c, z);
+            Ok(bcx.ins().select(nz, t, f))
+        }
         NumLit(x) => Ok(bcx.ins().f64const(*x)),
         IntLit(x) => Ok(bcx.ins().f64const(*x as f64)),
         BoolLit(b) => Ok(bcx.ins().f64const(if *b { 1.0 } else { 0.0 })),
@@ -618,6 +630,93 @@ fn emit_scalar_loop(
     Ok(())
 }
 
+/// Phase J.4 — `while (cond) { scalar stmts }` convergence loop. The condition
+/// is a scalar expression of pre-loop state (it may itself embed reductions,
+/// e.g. `while (mean(abs(x - b)) > 1e-8)` — the wave re-runs per iteration in
+/// the header region). Loop-carried scalars ride as header block params, same
+/// as `emit_scalar_loop`. Safety: every name the condition reads must exist
+/// before the loop, and the body may not read a name before defining it — so
+/// the 0.0 phi-init is never observable where R would error. A genuinely
+/// non-terminating loop hangs exactly like the interpreter would.
+fn emit_scalar_while(
+    bcx: &mut FunctionBuilder,
+    k: &Kctx,
+    cond: &r2_types::Expr,
+    body: &r2_types::Expr,
+    scalar_env: &mut HashMap<std::sync::Arc<str>, Value>,
+) -> JitResult<()> {
+    use r2_types::Expr::*;
+    let body_stmts: Vec<r2_types::Expr> = match body {
+        Block(b) => b.clone(),
+        other => vec![other.clone()],
+    };
+    let mut carried: Vec<std::sync::Arc<str>> = Vec::new();
+    for bs in &body_stmts {
+        match bs {
+            Assign { target, .. } => match target.as_ref() {
+                Symbol(n) => if !carried.iter().any(|c| c.as_ref() == n.as_ref()) { carried.push(n.clone()); },
+                _ => return Err(JitError::Unsupported("while kernel: non-symbol assign".into())),
+            },
+            _ => return Err(JitError::Unsupported("while kernel: body must be assignments".into())),
+        }
+    }
+    if carried.is_empty() { return Err(JitError::Unsupported("while kernel: empty body".into())); }
+
+    // Safety checks (see doc comment).
+    {
+        let pre: std::collections::HashSet<String> = scalar_env.keys().map(|s| s.to_string()).collect();
+        if let Some(bad) = first_undefined_symbol(cond, &pre, k, "") {
+            return Err(JitError::Unsupported(format!("while kernel: condition reads undefined `{}`", bad)));
+        }
+        let mut defined = pre;
+        for bs in &body_stmts {
+            if let Assign { target, value, .. } = bs {
+                if let Some(bad) = first_undefined_symbol(value, &defined, k, "") {
+                    return Err(JitError::Unsupported(format!("while kernel: `{}` read before defined", bad)));
+                }
+                if let Symbol(n) = target.as_ref() { defined.insert(n.to_string()); }
+            }
+        }
+    }
+
+    let header = bcx.create_block();
+    let bodyb = bcx.create_block();
+    let exit = bcx.create_block();
+    for _ in &carried { bcx.append_block_param(header, types::F64); }
+    for _ in &carried { bcx.append_block_param(exit, types::F64); }
+
+    let zero = bcx.ins().f64const(0.0);
+    let init_args: Vec<Value> = carried.iter()
+        .map(|c| scalar_env.get(c).copied().unwrap_or(zero))
+        .collect();
+    bcx.ins().jump(header, &init_args);
+
+    // Header: bind carried, evaluate the condition (waves allowed), branch.
+    bcx.switch_to_block(header);
+    let hp: Vec<Value> = bcx.block_params(header).to_vec();
+    let mut env_h = scalar_env.clone();
+    for (j, c) in carried.iter().enumerate() { env_h.insert(c.clone(), hp[j]); }
+    let cv = emit_scalar(bcx, k, cond, &env_h)?;
+    let z = bcx.ins().f64const(0.0);
+    let nz = bcx.ins().fcmp(FloatCC::NotEqual, cv, z);
+    bcx.ins().brif(nz, bodyb, &[], exit, &hp);
+
+    // Body: run the statements against the carried values, loop back.
+    bcx.switch_to_block(bodyb);
+    let mut env2 = scalar_env.clone();
+    for (j, c) in carried.iter().enumerate() { env2.insert(c.clone(), hp[j]); }
+    emit_kernel_prologue(bcx, k, &body_stmts, &mut env2)?;
+    let next: Vec<Value> = carried.iter()
+        .map(|c| env2.get(c).copied().ok_or_else(|| JitError::Unsupported("while kernel: carried scalar lost".into())))
+        .collect::<JitResult<Vec<_>>>()?;
+    bcx.ins().jump(header, &next);
+
+    bcx.switch_to_block(exit);
+    let xp: Vec<Value> = bcx.block_params(exit).to_vec();
+    for (j, c) in carried.iter().enumerate() { scalar_env.insert(c.clone(), xp[j]); }
+    Ok(())
+}
+
 fn emit_kernel_prologue(bcx: &mut FunctionBuilder, k: &Kctx, init: &[r2_types::Expr], scalar_env: &mut HashMap<std::sync::Arc<str>, Value>) -> JitResult<()> {
     let mut batch: Vec<(std::sync::Arc<str>, &r2_types::Expr, FusedReduceOp, bool)> = Vec::new();
     let mut batch_names: std::collections::HashSet<std::sync::Arc<str>> = std::collections::HashSet::new();
@@ -627,6 +726,11 @@ fn emit_kernel_prologue(bcx: &mut FunctionBuilder, k: &Kctx, init: &[r2_types::E
         if let r2_types::Expr::For { var, iter, body } = st {
             flush_wave(bcx, k, &mut batch, &mut batch_names, scalar_env)?;
             emit_scalar_loop(bcx, k, var, iter, body, scalar_env)?;
+            continue;
+        }
+        if let r2_types::Expr::While { cond, body } = st {
+            flush_wave(bcx, k, &mut batch, &mut batch_names, scalar_env)?;
+            emit_scalar_while(bcx, k, cond, body, scalar_env)?;
             continue;
         }
         let (nm, value) = match st {

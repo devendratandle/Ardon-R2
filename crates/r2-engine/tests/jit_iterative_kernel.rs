@@ -91,6 +91,46 @@ abs(nsq(x) - sqrt(mean(x*x)))
 }
 
 #[test]
+fn while_convergence_matches_interpreter() {
+    // Convergence loop: reduction in the body, scalar tolerance condition.
+    let d = scalar(eval_last(
+        r#"
+set.seed(5); x <- rnorm(400)
+wgd <- function(x) { b <- 0; g <- 1; while (abs(g) > 1e-10) { g <- mean(x - b); b <- b + 0.5*g }; b }
+b <- 0; g <- 1; while (abs(g) > 1e-10) { g <- mean(x - b); b <- b + 0.5*g }
+abs(wgd(x) - b)
+"#,
+    ));
+    assert!(d < 1e-12, "while-convergence diff = {d}");
+}
+
+#[test]
+fn adaptive_ifelse_step_matches() {
+    // Scalar if/else value inside the loop (adaptive step size).
+    let d = scalar(eval_last(
+        r#"
+set.seed(6); x <- rnorm(300)
+ad <- function(x) { b <- 0; for(it in 1:60) { g <- mean(x - b); s <- if (abs(g) > 0.5) 0.9 else 0.3; b <- b + s*g }; b }
+b <- 0; for(it in 1:60) { g <- mean(x - b); s <- if (abs(g) > 0.5) 0.9 else 0.3; b <- b + s*g }
+abs(ad(x) - b)
+"#,
+    ));
+    assert!(d < 1e-12, "adaptive if/else diff = {d}");
+}
+
+#[test]
+fn while_false_at_entry_runs_zero_iterations() {
+    let v = scalar(eval_last(
+        r#"
+x <- as.numeric(1:10)
+z0 <- function(x) { b <- 7; while (b > 100) { b <- b - mean(x) }; b }
+z0(x)
+"#,
+    ));
+    assert!((v - 7.0).abs() < 1e-12, "zero-iteration while = {v}");
+}
+
+#[test]
 fn read_before_define_falls_back() {
     // `g` is read before it is assigned inside the loop — R errors; the JIT
     // must NOT compile this (a 0.0 phi-init would silently produce a value).
