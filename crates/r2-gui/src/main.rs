@@ -134,6 +134,9 @@ fn main() -> Result<(), String> {
     // scrolled". Horizontal cursor-follow only runs on a typing change, so
     // a manual drag of the bottom scrollbar isn't snapped back every frame.
     let last_input = Rc::new(RefCell::new(String::new()));
+    // Transcript row count last frame — detects "new output arrived" so the
+    // console can snap back to the prompt (R-console behaviour).
+    let last_total_rows = Rc::new(RefCell::new(0usize));
     let input      = Rc::new(RefCell::new(InputField::new()));
     let quit_requested = Rc::new(RefCell::new(false));
     // Modal dialogs (R-style): quit confirmation ("Save workspace image?")
@@ -217,6 +220,7 @@ fn main() -> Result<(), String> {
             let vscroll       = vscroll.clone();
             let hscroll       = hscroll.clone();
             let last_input    = last_input.clone();
+            let last_total_rows = last_total_rows.clone();
             let frame_counter = frame_counter.clone();
             let did_layout    = did_layout.clone();
             let quit_requested = quit_requested.clone();
@@ -819,6 +823,25 @@ fn main() -> Result<(), String> {
                                           .max(cursor_col_in_row + 1);
                         let visible_rows = (grid_rect.h / line_h).floor() as usize;
                         let visible_cols = (grid_rect.w / cell_w).floor() as usize;
+
+                        // ── Snap to the prompt on new output (R-console).
+                        // If the user had scrolled up (pinned override) or
+                        // right (long line) and a command returns, the fresh
+                        // prompt would otherwise sit below / left-of the view
+                        // — i.e. hidden. Any transcript growth hands control
+                        // back to auto-scroll and returns the horizontal bar
+                        // to its default left position. Typing doesn't change
+                        // the row count, so this never fights the cursor-
+                        // follow logic below.
+                        {
+                            let mut lt = last_total_rows.borrow_mut();
+                            if *lt != total_rows {
+                                *lt = total_rows;
+                                let mut gs = grid_state.borrow_mut();
+                                gs.scroll_y_override = None;
+                                gs.scroll_x = 0;
+                            }
+                        }
                         if total_rows > 0 {
                             vscroll.borrow_mut().visible_fraction =
                                 (visible_rows as f32 / total_rows as f32).min(1.0);
