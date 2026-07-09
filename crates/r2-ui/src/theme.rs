@@ -127,7 +127,7 @@ impl Theme {
             // sub-window background.
             // Deepened for readability: darker ink = higher contrast on the
             // paper background, especially at small sizes / high DPI.
-            console_input:     Color::rgb(132, 18, 48),     // deep rose red
+            console_input:     Color::rgb(200, 24, 12),     // scarlet red (maintainer's pick)
             console_output:    Color::rgb(26,  20, 104),    // deep violet blue
             console_error:     Color::rgb(168, 16, 24),     // deep red
             console_banner:    Color::rgb(26,  20, 104),    // matches output

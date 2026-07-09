@@ -398,7 +398,7 @@ pub fn bi_plot(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mut frag = String::new();
     // Plotting region border.
     frag.push_str(&format!(
-        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1.5"/>"#,
         ox + ml, oy + mt, pw, ph
     ));
 
@@ -597,7 +597,7 @@ pub fn bi_pairs(a: &[EvalArg]) -> Result<RVal, R2Err> {
             let chd = cell_h - 2.0 * pad;
             // Cell border.
             frag.push_str(&format!(
-                r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+                r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="none" stroke="black" stroke-width="1.5"/>"#,
                 cx0, cy0, cwd, chd));
             if i == j {
                 // Diagonal — variable name.
@@ -858,7 +858,7 @@ pub fn bi_matplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     let panel = PanelRect { ox, oy, w, h, ml, mt, pw, ph };
     let mut frag = format!(
-        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1.5"/>"#,
         ox + ml, oy + mt, pw, ph);
     frag.push_str(&render_chrome(&panel, &title, "", &xlab, &ylab, &opts));
     frag.push_str(&render_axis_ticks(&panel, xmin, xmax, ymin, ymax, xrange, yrange, &opts));
@@ -952,7 +952,7 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     // Plot area frame.
     frag.push_str(&format!(
-        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1.5"/>"#,
         ox + ml, oy + mt, pw, ph
     ));
 
@@ -1042,7 +1042,7 @@ pub fn bi_boxplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     // Plot frame.
     frag.push_str(&format!(
-        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1.5"/>"#,
         ox + ml, oy + mt, pw, ph
     ));
 
@@ -1131,7 +1131,7 @@ pub fn bi_barplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     // Plot frame.
     frag.push_str(&format!(
-        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1" shape-rendering="crispEdges"/>"#,
+        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="black" stroke-width="1.5"/>"#,
         ox + ml, oy + mt, pw, ph
     ));
 
