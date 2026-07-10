@@ -20,16 +20,18 @@ broad interpreter overhead across `fit_once`: the `rawmat[rows,]` subset copy,
 2. **Whole-function compilation (large, the only full-gap closer)** — lower an
    entire numeric function like `fit_once` onto reused buffers/arena, calling
    the shared kernels (dgemm, cor, scale) with no per-op RVal allocation.
-   **Slices 1–2 SHIPPED (3e6c627, 622f956):** iterative kernels — whole
-   functions with `for (1:K)` / `while (cond)` loops carrying scalar state
-   across per-iteration vector reductions (gradient descent, Newton, EM,
-   fixed-point), plus adaptive scalar `if/else` values. 3.1× release / 8.4×
-   debug on a 200-iteration training loop; bit-close to the interpreter incl.
-   the `1:0` edge; read-before-define declines safely. **Remaining:**
-   matrix-valued state inside compiled functions (`%*%`, `cor(matrix)`,
-   `scale(matrix)` on a scratch arena) — the r2sem `fit_once` bottleneck —
-   and vector-valued loop-carried state (e.g. multi-parameter gradient
-   vectors `b <- b + step*g` where `b`,`g` are vectors).
+   **Slices 1–3 SHIPPED (3e6c627, 622f956, 80cc6f8):** iterative kernels —
+   whole functions with `for (1:K)` / `while (cond)` loops carrying SCALAR
+   and VECTOR state across per-iteration reductions and fused map updates
+   (gradient descent, Newton, EM, fixed-point, residual/shrinkage
+   iterations), plus adaptive scalar `if/else` values. Carried vectors live
+   in scratch buffers (alloc once per call via __r2_scratch_alloc/free —
+   no ABI change). 3.1× release / 8.4× debug scalar-state; **64× debug** on
+   vector-state (interpreter allocates 3–4 vectors per iteration, kernel
+   none); bit-close incl. the `1:0` edge; read-before-define declines
+   safely. **Remaining:** matrix-valued state inside compiled functions
+   (`%*%`, `cor(matrix)`, `scale(matrix)` on the scratch arena) — the
+   r2sem `fit_once` bottleneck and the final J.4 piece.
 
 3. **Call matrix work done** — matmul is now native-fast everywhere; move to
    another phase (J.5 tiered dispatch, Arrow default-storage migration, etc.).
