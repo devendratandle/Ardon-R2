@@ -43,6 +43,7 @@ are never burned re-deriving context.
 
 ## Opus queue — well-scoped, spec-complete, lands inside 5 h
 
+0. **Split closure.rs (1345) and reduce_kernel.rs (1123) per the 500–800 LoC policy** — mechanical, behavior-neutral (normalize passes → normalize.rs; loops/prologue/drivers → kernel_state.rs), all JIT tests must stay green.
 1. **Peephole: `t(X) %*% v` → `dgemv_t`** — detect the transpose-then-multiply
    shape in `binary_op` (BinOp::MatMul arm, `crates/r2-engine/src/ops.rs`) and
    call `r2_linalg::dgemv_t` directly instead of materialising `t(X)`. Kernel
