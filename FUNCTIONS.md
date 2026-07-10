@@ -95,7 +95,7 @@ quantile(x,p)   Quantile at probability p
 lm(y~x,data)    Linear regression
 glm(y~x,data,family) Generalized linear model
 aov(y~x,data)   One-way analysis of variance
-                Repeated measures (Phase R.S.1):
+                Repeated measures:
                   aov(y ~ x + Error(subject), data=df)
                   aov(y ~ x + Error(subject/treatment), data=df)
                 Multi-stratum output matching R's summary(aov).
@@ -108,19 +108,19 @@ t.test(x,mu)    T-test, paired and unpaired forms
                 Paired:        t.test(x, y, paired=TRUE)
                 Formula:       t.test(y ~ group, data=df)
                 Paired w/ id:  t.test(y ~ group, id=subj, paired=TRUE)
-                Phase R.S.1 extensions (not supported by R itself):
+                R2 extensions (not supported by R itself):
                   t.test(y ~ group + Error(subject), paired=TRUE, data=df)
                   t.test(y ~ Error(subject), paired=TRUE, data=df)
                     (pairs each subject's 2 obs by row order)
 chisq.test(x)   Chi-squared test
-hotelling.test  Multivariate Hotelling's T² (Phase R.S.2)
+hotelling.test  Multivariate Hotelling's T²
                 One-sample:    hotelling.test(X)
                 With null mu:  hotelling.test(X, mu=c(0,0,0))
                 Two-sample:    hotelling.test(X, Y)
                 Paired/RM:     hotelling.test(X, Y, paired=TRUE)
                 X and Y are n×p matrices of multivariate observations.
                 Returns T², F, df, p-value.
-manova(formula,data) Multivariate ANOVA (Phase R.S.2)
+manova(formula,data) Multivariate ANOVA
                 LHS is a multivariate response (use cbind):
                   manova(cbind(y1, y2, y3) ~ group, data=df)
                 Reports four classical statistics:
@@ -361,6 +361,17 @@ fitted(model)           Fitted values
 coef(model)             Coefficients
 summary(model)          Model summary (auto-dispatch)
 plot(model)             Model diagnostic plot (auto-dispatch)
+```
+
+## Performance & Parallelism (4)
+```
+explain(f)          Report whether closure f JIT-compiles (and to what), or
+                    exactly which construct keeps it on the interpreter
+explain(x)          For data: size, architecture (SIMD/cores), and whether
+                    operations on x will run serial or parallel
+mclapply(x, FUN)    Run FUN over x across CPU cores (isolated workers,
+                    per-worker reproducible RNG); par.lapply is an alias
+par.sapply(x, FUN)  Parallel sapply — simplifies to vector/matrix
 ```
 
 ## System (13)

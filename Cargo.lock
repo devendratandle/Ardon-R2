@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "r2-gui"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "image",
  "r2-console",
@@ -3098,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "r2-repl"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "ctrlc",
  "ico",

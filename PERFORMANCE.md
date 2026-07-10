@@ -49,7 +49,7 @@ entirely.
 | `sqrt(x*x + 1)` | 0.006s | 0.014s | R 2.2× (memory-bandwidth bound) |
 | `log(exp(x))` | 0.048s | **0.029s** | 🏆 **R2 1.7×** (chained extern calls fuse) |
 | `sin(x)² + cos(x)²` | 0.184s | **0.037s** | 🏆 **R2 5.0×** (4 calls + ops in one loop) |
-| `sqrt(x² + y²)` | 0.008s | 0.022s | R 2.8× (Phase C.7 closed it from 7.3×) |
+| `sqrt(x² + y²)` | 0.008s | 0.022s | R 2.8× |
 | `\|sin(x)\| + \|cos(x)\|` | 0.073s | **0.027s** | 🏆 **R2 2.7×** |
 
 All on 1e6-element vectors, single workstation. R2 wins whenever the
@@ -67,7 +67,7 @@ footprint. Reproduce with `pwsh benchmarks/comparison/run.ps1` and inspect
   result. R2's edge holds against the default; tuned BLAS wins.
 - Element-wise add was R2's one meaningful loss (~3.6× in earlier releases),
   caused by a `Vec<Option<f64>> ↔ ColumnarF64` round-trip on the arithmetic
-  path. **Fixed in v0.3.4** (Phase F.3): the fast-path guard no longer
+  path. **Fixed in v0.3.4**: the fast-path guard no longer
   materialises the boxed form, and the columnar kernel hoists the op match
   out of the loop so each op auto-vectorises — `a + b` is now zero-copy and
   at parity with (slightly faster than) R.

@@ -9,7 +9,7 @@
 
 ## 1. Purpose of this document
 
-R2 v0.3.4 ships a working tree-walking interpreter (~48K lines, 400+ builtins)
+R2 v0.3.7 ships a working tree-walking interpreter (~48K lines, 400+ builtins)
 with a Cranelift JIT for eligible user functions.
 The next several versions transform R2 into a **compiled, scheduled, columnar
 runtime** without rewriting the working interpreter. This file is the
@@ -65,18 +65,18 @@ locked unless this file is changed.
 
 ---
 
-## 3. Layer status (as of v0.3.4)
+## 3. Layer status (as of v0.3.7)
 
 | Layer | Component | Status | Where it lives |
 |---|---|---|---|
 | Frontend | Lexer | ✅ built | `crates/r2-parser/src/lexer.rs` (152 LoC) |
 | Frontend | Parser → AST | ✅ built | `crates/r2-parser/src/parser.rs` (333 LoC) |
 | Frontend | REPL | ✅ built | `crates/r2-repl/src/main.rs` |
-| Frontend | Type Inferencer | ✅ built | `crates/r2-types/src/infer.rs` (Phase A, 9 tests passing) |
+| Frontend | Type Inferencer | ✅ built | `crates/r2-types/src/infer.rs` (typed annotation pass) |
 | Frontend | Notebook UI | ✗ not started | (out of scope until Phase 4) |
-| IR | Typed SSA | ✅ built | `crates/r2-ir/src/lib.rs` (Phase B, 8 tests passing) |
+| IR | Typed SSA | ✅ built | `crates/r2-ir/src/lib.rs` (SSA-with-phi) |
 | Oracle | Auto-scheduler | ✅ V1 built | `crates/r2-oracle/`. `dispatch(Op, Shape) → Backend{Serial\|Rayon}`, hardware-scaled thresholds. V2 adds GPU/Cloud tiers. |
-| JIT | Cranelift backend | ◐ numeric code → native; matrix-multiply queued | `crates/r2-jit/`. Compiles counted loops, imperative indexed element loops (`x[i]`, `y[i]<-…`), whole-vector/-matrix reductions & maps, and the statistics primitive set to native **checked** code — fused, CSE'd, F64X2-SIMD; guards deopt to the interpreter, NA propagates. Capability detail in the **Phase J** section below. |
+| JIT | Cranelift backend | ◐ numeric + iterative algorithms → native | `crates/r2-jit/`. Compiles counted loops, imperative indexed element loops (`x[i]`, `y[i]<-…`), whole-vector/-matrix reductions & maps, and the statistics primitive set to native **checked** code — fused, CSE'd, F64X2-SIMD; guards deopt to the interpreter, NA propagates. Capability detail in §5. |
 | Rayon | Work-stealing | ✅ Oracle-dispatched | Parallelism owned by `r2-kernel` (never imported in builtins). Parallel: the numeric reductions, the apply family (`lapply`/`sapply`/`apply`/`tapply`/`aggregate`) over a pure-builtin allowlist, and the ML builtins (`rf`/`gbm`/`kmeans`/`cv`) via `par_for`. Closures & non-pure builtins fall back to serial. |
 | GPU | Dispatcher | ✗ not started | — |
 | Cloud-RAM | Shards | ✗ not started | — |
@@ -154,7 +154,7 @@ Shipped layers:
 - **Arrow bridge** (`r2-arrow`) — `ColumnarF64` + null bitmap + dense
   reductions; **memory-mapped out-of-core** (`mmap.col` → streaming
   `sum`/`mean`/`min`/`max`, larger-than-RAM); vector⊗scalar chain fusion.
-- **Columnar numeric storage (Phase F.3, shipped)** — `RVal::Numeric`
+- **Columnar numeric storage — available** — `RVal::Numeric`
   holds `Reals`, a lazy dual representation (boxed `Vec<Option<f64>>`
   ⇄ `Arc<ColumnarF64>`, either canonical, the other materialised on
   demand). Dense producers (`rnorm`/`seq`/…) and the fusion fast path use
@@ -178,13 +178,13 @@ running on any x86-64 CPU (`R2_SIMD`/`R2_NO_SIMD` knobs). `crossprod` is
 multi-core too but memory-bandwidth-bound (small SIMD gain). Reaches users
 via `%*%`. GUI caches + pre-warms the SVG font DB (fast first plot).
 
-### Phase F.5 — out-of-core ops beyond reductions (shipped)
+### Out-of-core ops beyond reductions — available now
 
 `MmapWriter` (chunked >RAM file builder), `MmapColumnar::map_to`
 (out-of-core scalar map), streaming `sd`/`var`/`prod`/`range`/`length`
 wired into the `bi_*` mmap interception. Surfaced as `mmap.map`.
 
-### Phase F.6 — additional dtypes & on-disk formats (partial)
+### Additional dtypes & on-disk formats (partial)
 
 Shipped: `i64` columnar dtype; **`read.parquet`** (pure-Rust parquet/arrow
 crates, row-group streaming). Pending: `Utf8` columnar dtype (native
@@ -213,58 +213,65 @@ is complete.
 
 Pluggable accelerators behind the kernel/Oracle boundary.
 
-### Phase J — Type-specializing JIT (the "fastest **and** safest" bet)
+### JIT compiler — capabilities available now
 
-**Goal:** make *modular, pure-R2 source libraries* run at near-native speed
-without an unsafe escape hatch. R forces a choice — fast (unsafe C
-extensions) *or* safe (slow pure-R). R2's JIT compiles R2's **checked**
-semantics to native via Cranelift, so speed and safety are not traded off.
-Every phase keeps a hard invariant: **guards check assumptions on entry and
-deopt to the interpreter on violation — the JIT never emits unsafe code.**
+R forces a choice — fast (unsafe C extensions) *or* safe (slow pure-R). R2's
+JIT compiles R2's **checked** semantics to native via Cranelift, so speed and
+safety are not traded off. Hard invariant: **anything outside the compiled
+subset falls back to the interpreter — the JIT never emits unsafe code and
+never guesses** (mis-typed calls, read-before-define, unsupported shapes all
+decline). Write plain R2 source; `explain(f)` reports whether it compiled and
+why not.
 
-Chosen direction: **expand the JIT; skip a bytecode VM** (tiered model =
-AST-interpret cold code → JIT hot code directly). A bytecode tier (~2–3×
-baseline uplift, R-proven) is optional and only built if cold-code startup
-ever matters. Near-native for *iterative* libraries (bootstrap, MCMC,
-optimisation loops) arrives around J.4. Feasible as a long-horizon effort
-because Cranelift (the backend — the hard part) already exists.
+**What compiles to native today** (all verified bit-close to the interpreter):
 
-**Accomplished (J.1–J.4):** pure-R2 numeric code — counted loops, imperative
-`x[i]`/`y[i]<-…` element loops, whole-vector/-matrix reductions, and the entire
-first-order statistics primitive set — now JIT-compiles to native, checked code.
-The headline: a statistic written *once* as an R2 formula (`var`, `cov`, `cor`,
-`sd`, z-score, RMSE, R², normalise) reaches or **beats** the hand-written native
-builtin, with no unsafe escape hatch. Shared sub-expressions are computed once
-and independent reductions run in a single SIMD pass, so `cor` written in R2 out-
-runs the C-style native `cor`. (Implementation detail archived in
-`code-history/phase-j-jit-detail.md`.)
-
-| Phase | Capability | Status |
-|---|---|---|
-| **J.1** | Counted `for(v in a:b)` loops — scalar, math-intrinsic, and nested — compile to native. | ✅ shipped |
-| **J.2** | In-loop vector element access: index folds and dot products / weighted sums (`sum(x*w)`) become fused native loops. | ✅ shipped |
-| **J.3** | Real indexed loads **and** stores + matrix unboxing: imperative `x[i]`/`y[i]<-f(x[i],w[i])` loops (dot products, scalar recurrences, multi-statement folds & maps) and whole-matrix elementwise/reduction ops JIT natively. *Remaining:* 2-D `m[i,j]`, offset indices (`x[i-1]`), list `x[[i]]`. | ✅ shipped (niche remainders) |
-| **J.4** | Compose source libraries to native: user-helper inlining, multi-reduction & vector-returning kernels for the statistics primitive set, with common-subexpression elimination, single-pass wave fusion, and F64X2 SIMD. A formula written once reaches/beats the native builtin. **Iterative kernels (whole-function slices 1–3):** a whole function with `for (1:K)` / `while (cond)` loops carrying SCALAR and VECTOR state across per-iteration reductions and fused map updates — the gradient-descent / Newton / EM / fixed-point / shrinkage shape — compiles as one native unit. Scalars ride as SSA phis; vectors live in scratch buffers allocated once per call (no ABI change); adaptive scalar `if/else` values lower branch-free; R-faithful `1:K` both directions; read-before-define declines to the interpreter. Scalar-state training loop: 3.1× release / 8.4× debug; vector-state (map+reduce per iteration): **64× debug** — the interpreter allocates 3–4 vectors per iteration, the kernel none.  **Matrix state shipped:** `function(X, y)` kernels with `X %*% b` / `t(X) %*% r` statements (two length classes N/P on the scratch arena, shared matvec externs — matrix math never re-emitted) compile whole multi-parameter GD/IRLS loops: **32× release** vs interpreted, diff = 0. *Remaining beyond the iterative class:* general `fit_once`-style bodies (lists, `cbind`, `cor(matrix)`, dynamic block structure) — future J.5/J.6 territory. | ◐ scalar/vector class + iterative kernels (scalar+vector state) shipped; matrix state queued |
-| **J.5** | Profile-driven tiered dispatch + on-stack replacement — automatic, safe hot/cold tiering. | queued (groundwork: `explain(f)`) |
-| **J.6** | Trace-based JIT across call boundaries — PyPy-class, the last ~2×. | queued (optional) |
+- **Counted loops** `for (v in a:b)` — scalar arithmetic, math intrinsics,
+  nested loops; R-faithful in both directions (`1:0` iterates 1, 0).
+- **Imperative element loops** — `for (i in 1:length(x)) s <- s + x[i]*w[i]`,
+  indexed stores `y[i] <- f(x[i], w[i])`, scalar recurrences (Horner),
+  multi-statement folds and maps.
+- **The statistics primitive set as formulas** — `var`, `cov`, `cor`, `sd`,
+  z-score, RMSE, R², normalise written *once* as R2 one-liners reach or
+  **beat** the hand-written native builtins (`cor` in R2 source outruns the
+  C-style native `cor`). Shared sub-expressions compute once (CSE);
+  independent reductions run in a single SIMD pass; user helpers inline.
+- **Whole iterative algorithms** — functions carrying **scalar, vector, and
+  matrix state** across `for (1:K)` / `while (cond)` loops compile as one
+  native unit: gradient descent, Newton, EM, fixed-point, shrinkage, and
+  multi-parameter GD/IRLS with `X %*% b` / `t(X) %*% r` statements. Vector
+  state lives in scratch buffers allocated once per call; matrix products
+  call the one shared matvec kernel. Measured vs interpreted (release):
+  scalar-state training loops ~3×, matrix-state GD **32×**, vector-state
+  iteration up to ~64× — the interpreter allocates several vectors per
+  iteration, the compiled kernel allocates none.
+- **Matrix unboxing** — whole-matrix element-wise ops and reductions
+  (`sum(m*m)`, `sqrt(m)`, `A+B`, `sum(A*B)`) run on the matrix buffer
+  directly, dims preserved.
 
 Why native builtins still exist: the standard dynamic-language pattern is
 *interpreter/JIT for breadth + native kernels for the hot 5%*. First-party
-hot kernels (`lm`, `plssem`, …) stay native builtins; J.4 is what lets
+hot kernels (`lm`, `plssem`, …) stay native builtins; the JIT is what lets
 *third-party source* libraries reach the same class without engine edits.
 
-### Phase P — parallel `apply` for library code (the *other* speed lever)
+**Queued (JIT roadmap):** general dynamic bodies (lists, `cbind`,
+`cor(matrix)` inside compiled functions); profile-driven tiered dispatch +
+on-stack replacement (groundwork shipped: `explain(f)`); optional trace JIT
+across call boundaries. Niche gaps: 2-D `m[i,j]` element loops, offset
+indices (`x[i-1]`), list `x[[i]]`.
 
-**Accomplished:** `mclapply(x, FUN)` / `par.lapply` / `par.sapply` run an R2
-closure over the elements of `x` across cores — the *other* speed lever (the JIT
-attacks per-fit compute; this attacks embarrassingly-parallel repetition:
-bootstrap, permutation tests, cross-validation, Monte-Carlo). Each element
-evaluates in an isolated worker sharing the registry + global env read-only via
-`Arc`, so there is no shared mutation and no data-race / silent-wrong-math class;
-scope is **pure** map closures (no `<<-` to shared state), matching R's
-`parallel::` isolation. **~4.5× on a 6-core interpreted workload**; composes with
-the JIT — a `par.sapply` of a JIT-compiled closure runs parallel *and* native.
-*Remaining:* chunking, and an opt-in guard against `<<-` in the mapped closure.
+### Parallel apply — available now
+
+`mclapply(x, FUN)` / `par.lapply` / `par.sapply` run an R2 closure over the
+elements of `x` across cores — the *other* speed lever (the JIT attacks
+per-fit compute; this attacks embarrassingly-parallel repetition: bootstrap,
+permutation tests, cross-validation, Monte-Carlo). Each element evaluates in
+an isolated worker sharing the registry + global env read-only via `Arc`, so
+there is no shared mutation and no data-race / silent-wrong-math class; scope
+is **pure** map closures (no `<<-` to shared state), matching R's
+`parallel::` isolation. **~4.5× on a 6-core interpreted workload**; composes
+with the JIT — a `par.sapply` of a JIT-compiled closure runs parallel *and*
+native. Per-worker RNG streams keep resampling reproducible.
+*Queued:* chunking, and an opt-in guard against `<<-` in the mapped closure.
 
 > Release history → `CHANGELOG.md`. Archived phase narrative →
 > `code-history/`.

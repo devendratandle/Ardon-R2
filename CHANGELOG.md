@@ -6,6 +6,44 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
+## v0.3.7 (July 2026)
+
+**New — the JIT compiles whole iterative algorithms.** Plain R2 source
+functions carrying scalar, vector, and matrix state across `for`/`while`
+loops compile to one native unit — gradient descent, Newton, EM,
+fixed-point, shrinkage, and multi-parameter GD/IRLS with `X %*% b` /
+`t(X) %*% r`. Measured vs interpreted (release): matrix-state GD **32×**,
+vector-state iteration up to ~64×, scalar-state training loops ~3×.
+Anything outside the compiled subset (mis-typed calls, read-before-define,
+unsupported shapes) falls back to the interpreter — never a wrong answer.
+
+**New — statistics formulas reach/beat native.** `var`/`cov`/`cor`/`sd`/
+z-score/RMSE/R² written as one-line R2 formulas JIT with common-
+subexpression elimination, single-pass SIMD wave fusion, and user-helper
+inlining; `cor` written in R2 source outruns the native builtin.
+`explain(f)` reports whether a function compiled and, if not, exactly why;
+`explain(x)` reports data size, architecture, and the serial-vs-parallel
+plan.
+
+**New — parallel apply for library code.** `mclapply` / `par.lapply` /
+`par.sapply` run pure closures across cores with isolated workers and
+per-worker reproducible RNG (~4.5× on 6 cores; the r2sem PLS-SEM source
+library runs ~13× faster than R's cSEM on identical estimates). Composes
+with the JIT.
+
+**New — linear algebra.** Non-symmetric `eigen()` (complex spectra reported
+honestly via `$imaginary`), `backsolve`/`forwardsolve`, `rcond`, `kappa`.
+Matrix multiply routes small/thin shapes to a fast path (5×5 `%*%` ~34×
+faster; thin regression shapes like `X %*% w` benefit throughout).
+
+**GUI (verified live on screen).** Console selection is a solid blue band
+with white inverted text; warm paper background, deeper ink, and scarlet
+input for long-session readability; the console snaps back to the prompt
+when output arrives (previously the returning prompt could stay hidden
+after scrolling up or right); platform-appropriate monospace fonts on
+Windows/macOS/Linux with a directory-scan fallback; plot y-axis labels and
+frame no longer clip at the default device size.
+
 ## v0.3.6 (July 2026)
 
 **Fixed**
