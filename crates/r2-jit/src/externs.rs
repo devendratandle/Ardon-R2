@@ -157,3 +157,27 @@ pub(crate) fn declare_math_imports(
 pub(crate) fn is_scalar_numeric(e: &IrElem) -> bool {
     matches!(e, IrElem::Real | IrElem::Int | IrElem::Bool)
 }
+
+// ── Phase J.4 — scratch buffers for loop-carried vector state ────────
+//
+// Compiled kernels that carry a VECTOR across loop iterations (e.g.
+// `v <- x; for(it in 1:K) v <- v - s*(v - m)`) allocate their working
+// buffers through these wrappers at kernel entry and free them before
+// returning. Keeps the ABI unchanged (no dispatch-side scratch passing).
+
+pub(crate) extern "C" fn r2_scratch_alloc(bytes: i64) -> i64 {
+    let size = (bytes.max(8)) as usize;
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(size, 8);
+        std::alloc::alloc(layout) as i64
+    }
+}
+
+pub(crate) extern "C" fn r2_scratch_free(ptr: i64, bytes: i64) {
+    if ptr == 0 { return; }
+    let size = (bytes.max(8)) as usize;
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(size, 8);
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
+}

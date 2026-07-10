@@ -1008,13 +1008,15 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
         let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
         // Brick 3: fuse vector-valued intermediates + hoist reductions to scalar
         // locals, giving the canonical Block form the kernel codegen consumes.
-        let kbody = normalize_reduction_kernel(body_ref, &pnames);
-        // A vector-valued final expression (e.g. `x - mean(x)`) → vector-output
-        // reduction-map kernel; a scalar one (e.g. `sum(x*y)/sum(x*x)`) → the
-        // scalar reduction kernel.
+        let (kbody, kept) = normalize_reduction_kernel(body_ref, &pnames);
+        // A vector-valued final expression (e.g. `x - mean(x)`, or a KEPT
+        // loop-carried vector) → vector-output reduction-map kernel; a scalar
+        // one (e.g. `sum(x*y)/sum(x*x)`) → the scalar reduction kernel.
+        let all_vec_names: Vec<std::sync::Arc<str>> =
+            pnames.iter().chain(kept.iter()).cloned().collect();
         let final_is_vec = match &kbody {
-            r2_types::Expr::Block(s) => s.last().map_or(false, |e| refs_vector_bare(e, &pnames)),
-            other => refs_vector_bare(other, &pnames),
+            r2_types::Expr::Block(s) => s.last().map_or(false, |e| refs_vector_bare(e, &all_vec_names)),
+            other => refs_vector_bare(other, &all_vec_names),
         };
         if final_is_vec {
             if let Ok(c) = JitCompiler::compile_reduction_map_kernel(&kbody, &pnames) {
@@ -1151,15 +1153,16 @@ fn expand_int_powers(e: &r2_types::Expr) -> r2_types::Expr {
     }
 }
 
-fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> r2_types::Expr {
+fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> (r2_types::Expr, Vec<std::sync::Arc<str>>) {
     use r2_types::Expr::*;
-    let inlined = expand_int_powers(&inline_vector_locals(body, vec_params));
+    let (inlined_raw, kept) = inline_vector_locals(body, vec_params);
+    let inlined = expand_int_powers(&inlined_raw);
     let mut out: Vec<r2_types::Expr> = Vec::new();
     let mut ctr = 0u32;
     let mut seen: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
     let final_expr = match &inlined {
         Block(ss) => {
-            let (last, init) = match ss.split_last() { Some(x) => x, None => return inlined };
+            let (last, init) = match ss.split_last() { Some(x) => x, None => return (inlined.clone(), kept) };
             for st in init {
                 match st {
                     Assign { target, value, superassign } => {
@@ -1218,7 +1221,7 @@ fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Ar
         other => hoist_reductions(other, &mut out, &mut ctr, &mut seen),
     };
     out.push(final_expr);
-    Block(out)
+    (Block(out), kept)
 }
 
 /// Does `e` reference a vector name in a *vector position* — i.e. bare, or under
@@ -1244,14 +1247,49 @@ fn refs_vector_bare(e: &r2_types::Expr, vec_names: &[std::sync::Arc<str>]) -> bo
     }
 }
 
-fn inline_vector_locals(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> r2_types::Expr {
+/// Names assigned anywhere inside `For`/`While` bodies of `e` — such vector
+/// locals are LOOP-CARRIED STATE and must stay as real (buffered) statements,
+/// never fused away by substitution.
+fn loop_assigned_names(e: &r2_types::Expr, out: &mut std::collections::HashSet<std::sync::Arc<str>>) {
     use r2_types::Expr::*;
-    let stmts = match body { Block(s) => s, _ => return body.clone() };
-    if stmts.len() < 2 { return body.clone(); }
+    fn collect_assigns(e: &r2_types::Expr, out: &mut std::collections::HashSet<std::sync::Arc<str>>) {
+        match e {
+            Assign { target, value, .. } => {
+                if let Symbol(n) = target.as_ref() { out.insert(n.clone()); }
+                collect_assigns(value, out);
+            }
+            Block(s) => for x in s { collect_assigns(x, out); },
+            If { cond, then, else_ } => { collect_assigns(cond, out); collect_assigns(then, out);
+                if let Some(x) = else_ { collect_assigns(x, out); } }
+            For { body, .. } | While { body, .. } => collect_assigns(body, out),
+            _ => {}
+        }
+    }
+    match e {
+        For { body, .. } | While { body, .. } => collect_assigns(body, out),
+        Block(s) => for x in s { loop_assigned_names(x, out); },
+        Assign { value, .. } => loop_assigned_names(value, out),
+        If { cond, then, else_ } => { loop_assigned_names(cond, out); loop_assigned_names(then, out);
+            if let Some(x) = else_ { loop_assigned_names(x, out); } }
+        _ => {}
+    }
+}
+
+/// Returns the transformed body plus the vector locals that were KEPT as real
+/// statements because a loop reassigns them (loop-carried vector state — the
+/// codegen buffers those; everything else fuses by substitution as before).
+fn inline_vector_locals(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> (r2_types::Expr, Vec<std::sync::Arc<str>>) {
+    use r2_types::Expr::*;
+    let stmts = match body { Block(s) => s, _ => return (body.clone(), Vec::new()) };
+    if stmts.len() < 2 { return (body.clone(), Vec::new()); }
     let (last, init) = stmts.split_last().unwrap();
+
+    let mut in_loops: std::collections::HashSet<std::sync::Arc<str>> = std::collections::HashSet::new();
+    loop_assigned_names(body, &mut in_loops);
 
     let mut vecdefs: std::collections::HashMap<std::sync::Arc<str>, r2_types::Expr> = std::collections::HashMap::new();
     let mut vec_names: Vec<std::sync::Arc<str>> = vec_params.to_vec();
+    let mut kept: Vec<std::sync::Arc<str>> = Vec::new();
     let mut out: Vec<r2_types::Expr> = Vec::new();
 
     for st in init {
@@ -1259,10 +1297,18 @@ fn inline_vector_locals(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>
             if let Symbol(nm) = target.as_ref() {
                 // Inline already-known vector-locals into this rhs first.
                 let rhs = substitute_symbols(value, &vecdefs);
-                if refs_vector_bare(&rhs, &vec_names) {
-                    // Vector local: record its (fully-inlined) definition, drop the stmt.
-                    vecdefs.insert(nm.clone(), rhs);
-                    vec_names.push(nm.clone());
+                let kept_names: Vec<std::sync::Arc<str>> =
+                    vec_names.iter().chain(kept.iter()).cloned().collect();
+                if refs_vector_bare(&rhs, &kept_names) {
+                    if in_loops.contains(nm) {
+                        // Loop-carried vector: keep as a real statement.
+                        if !kept.iter().any(|k| k.as_ref() == nm.as_ref()) { kept.push(nm.clone()); }
+                        out.push(Assign { target: target.clone(), value: Box::new(rhs), superassign: *superassign });
+                    } else {
+                        // Pure vector temp: fuse away by substitution.
+                        vecdefs.insert(nm.clone(), rhs);
+                        vec_names.push(nm.clone());
+                    }
                     continue;
                 }
                 // Scalar local: keep, with vector-locals substituted in.
@@ -1273,7 +1319,7 @@ fn inline_vector_locals(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>
         out.push(st.clone());
     }
     out.push(substitute_symbols(last, &vecdefs));
-    Block(out)
+    (Block(out), kept)
 }
 
 /// Does `e` contain a `sum`/`prod`/`mean` reduction call? Cheap gate so the

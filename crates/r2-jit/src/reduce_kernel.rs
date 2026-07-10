@@ -7,6 +7,22 @@ use r2_types::BinOp;
 use std::collections::HashMap;
 use crate::*;
 
+/// Declare the scratch alloc/free imports (J.4 vector state). Returns their
+/// FuncIds; callers materialise per-function FuncRefs.
+fn declare_scratch_imports(module: &mut JITModule) -> JitResult<(cranelift_module::FuncId, cranelift_module::FuncId)> {
+    let mut asig = module.make_signature();
+    asig.params.push(AbiParam::new(types::I64));
+    asig.returns.push(AbiParam::new(types::I64));
+    let aid = module.declare_function("__r2_scratch_alloc", Linkage::Import, &asig)
+        .map_err(|e| JitError::CraneliftError(format!("declare scratch_alloc: {:?}", e)))?;
+    let mut fsig = module.make_signature();
+    fsig.params.push(AbiParam::new(types::I64));
+    fsig.params.push(AbiParam::new(types::I64));
+    let fid = module.declare_function("__r2_scratch_free", Linkage::Import, &fsig)
+        .map_err(|e| JitError::CraneliftError(format!("declare scratch_free: {:?}", e)))?;
+    Ok((aid, fid))
+}
+
 // ── Phase J.4 brick 2 — multi-reduction scalar kernels ───────────────
 //
 // Compiles a scalar-returning function whose body *combines several whole-
@@ -27,6 +43,70 @@ struct Kctx<'a> {
     len_f: Value, // f64 element count (for mean / length)
     names: &'a [std::sync::Arc<str>],
     math: &'a HashMap<&'static str, cranelift::prelude::codegen::ir::FuncRef>,
+    /// J.4 vector state — loop-carried vectors: name → scratch base pointer
+    /// (length-n f64 buffer allocated at kernel entry, freed at exit). Element
+    /// loads for these join the input params in every wave / map pass.
+    carried: std::cell::RefCell<HashMap<std::sync::Arc<str>, Value>>,
+}
+
+/// Does `e` evaluate to a VECTOR — a bare vector name (input param or carried
+/// buffer) under element-wise operations? Reductions collapse to scalar.
+fn is_vector_expr(e: &r2_types::Expr, vec_names: &[std::sync::Arc<str>]) -> bool {
+    use r2_types::Expr::*;
+    match e {
+        Symbol(s) => vec_names.iter().any(|n| n.as_ref() == s.as_ref()),
+        Unary { expr, .. } => is_vector_expr(expr, vec_names),
+        Binary { lhs, rhs, .. } => is_vector_expr(lhs, vec_names) || is_vector_expr(rhs, vec_names),
+        If { cond, then, else_ } => is_vector_expr(cond, vec_names) || is_vector_expr(then, vec_names)
+            || else_.as_ref().map_or(false, |x| is_vector_expr(x, vec_names)),
+        Call { func, args } => {
+            if matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean" | "length")) {
+                return false;
+            }
+            args.iter().any(|a| is_vector_expr(&a.value, vec_names))
+        }
+        _ => false,
+    }
+}
+
+/// Pre-scan (program order, through loop bodies): every Assign target whose
+/// rhs is vector-valued needs a scratch buffer. Matches the runtime
+/// classification in `emit_kernel_prologue` exactly.
+fn collect_carried_vectors(stmts: &[r2_types::Expr], param_names: &[std::sync::Arc<str>], out: &mut Vec<std::sync::Arc<str>>) {
+    use r2_types::Expr::*;
+    for st in stmts {
+        match st {
+            Assign { target, value, .. } => {
+                if let Symbol(n) = target.as_ref() {
+                    let known: Vec<std::sync::Arc<str>> =
+                        param_names.iter().chain(out.iter()).cloned().collect();
+                    if is_vector_expr(value, &known) && !out.iter().any(|c| c.as_ref() == n.as_ref()) {
+                        out.push(n.clone());
+                    }
+                }
+            }
+            For { body, .. } | While { body, .. } => {
+                let inner: Vec<r2_types::Expr> = match body.as_ref() {
+                    Block(b) => b.clone(),
+                    single => vec![single.clone()],
+                };
+                collect_carried_vectors(&inner, param_names, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Load the current element of every carried vector buffer into `env`
+/// (F64 scalar or F64X2 two-lane, matching the surrounding loop).
+fn load_carried_elems(bcx: &mut FunctionBuilder, k: &Kctx, off: Value, simd: bool, env: &mut HashMap<std::sync::Arc<str>, Value>) {
+    let mf = MemFlags::trusted();
+    for (nm, ptr) in k.carried.borrow().iter() {
+        let addr = bcx.ins().iadd(*ptr, off);
+        let v = if simd { bcx.ins().load(types::F64X2, mf, addr, 0) }
+                else { bcx.ins().load(types::F64, mf, addr, 0) };
+        env.insert(nm.clone(), v);
+    }
 }
 
 /// Emit a pure element-wise expression (inside a reduction loop). `env` maps the
@@ -151,6 +231,7 @@ fn emit_reduction(bcx: &mut FunctionBuilder, k: &Kctx, elem: &r2_types::Expr, op
         let yv = bcx.ins().load(types::F64, mf, ya, 0);
         if k.names.len() > 1 { env.insert(k.names[1].clone(), yv); }
     }
+    load_carried_elems(bcx, k, off, false, &mut env);
     let e = emit_elem(bcx, k, elem, &env)?;
     let new_acc = match op { FusedReduceOp::Sum => bcx.ins().fadd(acc_b, e), FusedReduceOp::Prod => bcx.ins().fmul(acc_b, e) };
     let one = bcx.ins().iconst(types::I64, 1);
@@ -271,6 +352,7 @@ fn emit_reduction_wave_simd(bcx: &mut FunctionBuilder, k: &Kctx, reds: &[(&r2_ty
         let yv = bcx.ins().load(types::F64X2, mf, ya, 0);
         if k.names.len() > 1 { env.insert(k.names[1].clone(), yv); }
     }
+    load_carried_elems(bcx, k, off, true, &mut env);
     let mut nxt = Vec::with_capacity(n + 1);
     let two = bcx.ins().iconst(types::I64, 2);
     nxt.push(bcx.ins().iadd(i_b, two));
@@ -316,6 +398,7 @@ fn emit_reduction_wave_simd(bcx: &mut FunctionBuilder, k: &Kctx, reds: &[(&r2_ty
         let yvr = bcx.ins().load(types::F64, mf, yar, 0);
         if k.names.len() > 1 { env_r.insert(k.names[1].clone(), yvr); }
     }
+    load_carried_elems(bcx, k, off_r, false, &mut env_r);
     let mut nxt_r = Vec::with_capacity(n + 1);
     let one = bcx.ins().iconst(types::I64, 1);
     nxt_r.push(bcx.ins().iadd(i_r, one));
@@ -374,6 +457,7 @@ fn emit_reduction_wave(bcx: &mut FunctionBuilder, k: &Kctx, reds: &[(&r2_types::
         let yv = bcx.ins().load(types::F64, mf, ya, 0);
         if k.names.len() > 1 { env.insert(k.names[1].clone(), yv); }
     }
+    load_carried_elems(bcx, k, off, false, &mut env);
     let mut next = Vec::with_capacity(n + 1);
     let one = bcx.ins().iconst(types::I64, 1);
     next.push(bcx.ins().iadd(i_b, one));
@@ -392,7 +476,8 @@ fn emit_reduction_wave(bcx: &mut FunctionBuilder, k: &Kctx, reds: &[(&r2_types::
 /// literals, and scalar math — combined by arithmetic.
 fn emit_scalar(bcx: &mut FunctionBuilder, k: &Kctx, e: &r2_types::Expr, scalar_env: &HashMap<std::sync::Arc<str>, Value>) -> JitResult<Value> {
     use r2_types::Expr::*;
-    let is_vec = |s: &str| k.names.iter().any(|n| n.as_ref() == s);
+    let is_vec = |s: &str| k.names.iter().any(|n| n.as_ref() == s)
+        || k.carried.borrow().contains_key(s);
     match e {
         // Scalar if/else as a value (adaptive updates: `b <- if (g>0) a else c`).
         // Lowered branch-free via `select`: both arms are pure scalar exprs, so
@@ -491,6 +576,91 @@ fn flush_wave(
 /// Process a kernel body's leading `local <- <scalar>` assignments into
 /// `scalar_env`, batching independent reductions into fused waves. Shared by the
 /// scalar-return and vector-return kernels.
+/// J.4 vector state — emit one element-wise map pass `out[i] = elem(...)` over
+/// the full length: F64X2 two-wide main loop (when the expression is
+/// SIMD-clean) + scalar tail. Loads input params AND carried buffers; `out_ptr`
+/// may itself be one of the carried buffers (same-index read-then-write is
+/// safe for pure element expressions). Used for carried-vector updates and the
+/// kernel's final vector output.
+fn emit_map_pass(
+    bcx: &mut FunctionBuilder,
+    k: &Kctx,
+    elem: &r2_types::Expr,
+    scalar_env: &HashMap<std::sync::Arc<str>, Value>,
+    out_ptr: Value,
+) -> JitResult<()> {
+    let simd_ok = elem_simd_ok(elem);
+    let mf = MemFlags::trusted();
+    let rhdr = bcx.create_block();
+    let rbody = bcx.create_block();
+    let exit = bcx.create_block();
+    bcx.append_block_param(rhdr, types::I64);
+
+    if simd_ok {
+        let shdr = bcx.create_block();
+        let sbody = bcx.create_block();
+        bcx.append_block_param(shdr, types::I64);
+        let simd_end = bcx.ins().band_imm(k.len, -2);
+        let zero = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().jump(shdr, &[zero]);
+
+        bcx.switch_to_block(shdr);
+        let i_sh = bcx.block_params(shdr)[0];
+        let scond = bcx.ins().icmp(IntCC::SignedLessThan, i_sh, simd_end);
+        bcx.ins().brif(scond, sbody, &[], rhdr, &[i_sh]);
+
+        bcx.switch_to_block(sbody);
+        let eight = bcx.ins().iconst(types::I64, 8);
+        let off = bcx.ins().imul(i_sh, eight);
+        let mut env: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+        for (nm, v) in scalar_env { let sp = bcx.ins().splat(types::F64X2, *v); env.insert(nm.clone(), sp); }
+        let xa = bcx.ins().iadd(k.x_ptr, off);
+        env.insert(k.names[0].clone(), bcx.ins().load(types::F64X2, mf, xa, 0));
+        if let Some(yp) = k.y_ptr {
+            let ya = bcx.ins().iadd(yp, off);
+            let yv = bcx.ins().load(types::F64X2, mf, ya, 0);
+            if k.names.len() > 1 { env.insert(k.names[1].clone(), yv); }
+        }
+        load_carried_elems(bcx, k, off, true, &mut env);
+        let v = emit_elem_simd(bcx, elem, &env)?;
+        let oa = bcx.ins().iadd(out_ptr, off);
+        bcx.ins().store(mf, v, oa, 0);
+        let two = bcx.ins().iconst(types::I64, 2);
+        let nx = bcx.ins().iadd(i_sh, two);
+        bcx.ins().jump(shdr, &[nx]);
+    } else {
+        let zero = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().jump(rhdr, &[zero]);
+    }
+
+    bcx.switch_to_block(rhdr);
+    let i_rh = bcx.block_params(rhdr)[0];
+    let rcond = bcx.ins().icmp(IntCC::SignedLessThan, i_rh, k.len);
+    bcx.ins().brif(rcond, rbody, &[], exit, &[]);
+
+    bcx.switch_to_block(rbody);
+    let eight_r = bcx.ins().iconst(types::I64, 8);
+    let off_r = bcx.ins().imul(i_rh, eight_r);
+    let mut env_r = scalar_env.clone();
+    let xar = bcx.ins().iadd(k.x_ptr, off_r);
+    env_r.insert(k.names[0].clone(), bcx.ins().load(types::F64, mf, xar, 0));
+    if let Some(yp) = k.y_ptr {
+        let yar = bcx.ins().iadd(yp, off_r);
+        let yv = bcx.ins().load(types::F64, mf, yar, 0);
+        if k.names.len() > 1 { env_r.insert(k.names[1].clone(), yv); }
+    }
+    load_carried_elems(bcx, k, off_r, false, &mut env_r);
+    let v = emit_elem(bcx, k, elem, &env_r)?;
+    let oar = bcx.ins().iadd(out_ptr, off_r);
+    bcx.ins().store(mf, v, oar, 0);
+    let one = bcx.ins().iconst(types::I64, 1);
+    let nx = bcx.ins().iadd(i_rh, one);
+    bcx.ins().jump(rhdr, &[nx]);
+
+    bcx.switch_to_block(exit);
+    Ok(())
+}
+
 /// First symbol in `e` that is neither defined, a vector param, nor the loop
 /// var — used to guarantee a loop-carried scalar's 0.0-init is never observed
 /// (read-before-define inside a compiled loop must reject → interpreter, which
@@ -506,7 +676,8 @@ fn first_undefined_symbol<'e>(
         Symbol(s) => {
             let name = s.as_ref();
             if defined.contains(name) || var == name
-                || k.names.iter().any(|n| n.as_ref() == name) { None } else { Some(name) }
+                || k.names.iter().any(|n| n.as_ref() == name)
+                || k.carried.borrow().contains_key(name) { None } else { Some(name) }
         }
         Unary { expr, .. } => first_undefined_symbol(expr, defined, k, var),
         Binary { lhs, rhs, .. } => first_undefined_symbol(lhs, defined, k, var)
@@ -554,13 +725,13 @@ fn emit_scalar_loop(
     for bs in &body_stmts {
         match bs {
             Assign { target, .. } => match target.as_ref() {
-                Symbol(n) => if !carried.iter().any(|c| c.as_ref() == n.as_ref()) { carried.push(n.clone()); },
+                Symbol(n) => if !k.carried.borrow().contains_key(n.as_ref()) && !carried.iter().any(|c| c.as_ref() == n.as_ref()) { carried.push(n.clone()); },
                 _ => return Err(JitError::Unsupported("iterative kernel: non-symbol assign in loop body".into())),
             },
             _ => return Err(JitError::Unsupported("iterative kernel: loop body must be assignments".into())),
         }
     }
-    if carried.is_empty() { return Err(JitError::Unsupported("iterative kernel: empty loop body".into())); }
+    if carried.is_empty() && body_stmts.is_empty() { return Err(JitError::Unsupported("iterative kernel: empty loop body".into())); }
 
     // Safety: no name may be read before it is defined (pre-loop or earlier in
     // the body) — otherwise the 0.0 phi-init would be observable where R errors.
@@ -654,13 +825,13 @@ fn emit_scalar_while(
     for bs in &body_stmts {
         match bs {
             Assign { target, .. } => match target.as_ref() {
-                Symbol(n) => if !carried.iter().any(|c| c.as_ref() == n.as_ref()) { carried.push(n.clone()); },
+                Symbol(n) => if !k.carried.borrow().contains_key(n.as_ref()) && !carried.iter().any(|c| c.as_ref() == n.as_ref()) { carried.push(n.clone()); },
                 _ => return Err(JitError::Unsupported("while kernel: non-symbol assign".into())),
             },
             _ => return Err(JitError::Unsupported("while kernel: body must be assignments".into())),
         }
     }
-    if carried.is_empty() { return Err(JitError::Unsupported("while kernel: empty body".into())); }
+    if carried.is_empty() && body_stmts.is_empty() { return Err(JitError::Unsupported("while kernel: empty body".into())); }
 
     // Safety checks (see doc comment).
     {
@@ -757,8 +928,18 @@ fn emit_kernel_prologue(bcx: &mut FunctionBuilder, k: &Kctx, init: &[r2_types::E
             }
             None => {
                 flush_wave(bcx, k, &mut batch, &mut batch_names, scalar_env)?;
-                let v = emit_scalar(bcx, k, value, scalar_env)?;
-                scalar_env.insert(nm, v);
+                // Vector-valued rhs → an element-wise map pass into the
+                // target's scratch buffer (pre-allocated at kernel entry).
+                let vec_names: Vec<std::sync::Arc<str>> = k.names.iter().cloned()
+                    .chain(k.carried.borrow().keys().cloned()).collect();
+                if is_vector_expr(value, &vec_names) {
+                    let ptr = *k.carried.borrow().get(&nm).ok_or_else(||
+                        JitError::Unsupported(format!("vector local `{}` has no buffer", nm)))?;
+                    emit_map_pass(bcx, k, value, scalar_env, ptr)?;
+                } else {
+                    let v = emit_scalar(bcx, k, value, scalar_env)?;
+                    scalar_env.insert(nm, v);
+                }
             }
         }
     }
@@ -781,8 +962,11 @@ pub(crate) fn compile_reduction_map_kernel(body: &r2_types::Expr, param_names: &
     let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
         .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
     register_math_symbols(&mut jit_builder);
+    jit_builder.symbol("__r2_scratch_alloc", r2_scratch_alloc as *const u8);
+    jit_builder.symbol("__r2_scratch_free", r2_scratch_free as *const u8);
     let mut module = JITModule::new(jit_builder);
     let math_ids = declare_math_imports(&mut module)?;
+    let (alloc_id, free_id) = declare_scratch_imports(&mut module)?;
 
     // Signature: (in_ptr.. , out_ptr, len), all i64. No return.
     let mut sig = module.make_signature();
@@ -809,71 +993,39 @@ pub(crate) fn compile_reduction_map_kernel(body: &r2_types::Expr, param_names: &
         let out_ptr = ps[n_vec];
         let len = ps[n_vec + 1];
         let len_f = bcx.ins().fcvt_from_sint(types::F64, len);
-        let k = Kctx { x_ptr, y_ptr, len, len_f, names: param_names, math: &math };
+        let k = Kctx { x_ptr, y_ptr, len, len_f, names: param_names, math: &math,
+                       carried: std::cell::RefCell::new(HashMap::new()) };
 
         let (last, init): (&r2_types::Expr, &[r2_types::Expr]) = match body {
             r2_types::Expr::Block(stmts) if !stmts.is_empty() => { let (l, i) = stmts.split_last().unwrap(); (l, i) }
             other => (other, &[]),
         };
+
+        // J.4 vector state — pre-scan for carried vectors, allocate their
+        // scratch buffers (n f64 each) once at entry, free them at exit.
+        let aref = module.declare_func_in_func(alloc_id, &mut bcx.func);
+        let fref = module.declare_func_in_func(free_id, &mut bcx.func);
+        let mut carried_names: Vec<std::sync::Arc<str>> = Vec::new();
+        collect_carried_vectors(init, param_names, &mut carried_names);
+        let eight_b = bcx.ins().iconst(types::I64, 8);
+        let bytes = bcx.ins().imul(len, eight_b);
+        for nm in &carried_names {
+            let call = bcx.ins().call(aref, &[bytes]);
+            let ptr = bcx.inst_results(call)[0];
+            k.carried.borrow_mut().insert(nm.clone(), ptr);
+        }
+
         let mut scalar_env: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
         emit_kernel_prologue(&mut bcx, &k, init, &mut scalar_env)?;
 
-        // Map pass: out[i] = last(x[i][,y[i]], scalar_locals). SIMD 2-wide + tail.
-        let simd_ok = elem_simd_ok(last);
-        let simd_end = bcx.ins().band_imm(len, -2);
-        let eight = bcx.ins().iconst(types::I64, 8);
-        let mf = MemFlags::trusted();
+        // Final map pass: out[i] = last(...) — loads params + carried buffers.
+        emit_map_pass(&mut bcx, &k, last, &scalar_env, out_ptr)?;
 
-        let shdr = bcx.create_block(); let sbody = bcx.create_block();
-        let rhdr = bcx.create_block(); let rbody = bcx.create_block();
-        let exit = bcx.create_block();
-        bcx.append_block_param(shdr, types::I64);
-        bcx.append_block_param(rhdr, types::I64);
-        let zero = bcx.ins().iconst(types::I64, 0);
-        // SIMD loop only if the element expr is SIMD-clean; else start the scalar loop at 0.
-        if simd_ok { bcx.ins().jump(shdr, &[zero]); } else { bcx.ins().jump(rhdr, &[zero]); }
-
-        // SIMD header/body.
-        bcx.switch_to_block(shdr);
-        let i_sh = bcx.block_params(shdr)[0];
-        let scond = bcx.ins().icmp(IntCC::SignedLessThan, i_sh, simd_end);
-        bcx.ins().brif(scond, sbody, &[], rhdr, &[i_sh]);
-        bcx.switch_to_block(sbody);
-        let i_sb = bcx.block_params(shdr)[0];
-        let off_s = bcx.ins().imul(i_sb, eight);
-        let mut envs: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
-        for (nm, v) in &scalar_env { let sp = bcx.ins().splat(types::F64X2, *v); envs.insert(nm.clone(), sp); }
-        let xas = bcx.ins().iadd(x_ptr, off_s);
-        envs.insert(param_names[0].clone(), bcx.ins().load(types::F64X2, mf, xas, 0));
-        if let Some(yp) = y_ptr { let yas = bcx.ins().iadd(yp, off_s); let yv = bcx.ins().load(types::F64X2, mf, yas, 0); if n_vec > 1 { envs.insert(param_names[1].clone(), yv); } }
-        let rv_s = emit_elem_simd(&mut bcx, last, &envs)?;
-        let oas = bcx.ins().iadd(out_ptr, off_s);
-        bcx.ins().store(mf, rv_s, oas, 0);
-        let two = bcx.ins().iconst(types::I64, 2);
-        let ins = bcx.ins().iadd(i_sb, two);
-        bcx.ins().jump(shdr, &[ins]);
-
-        // Scalar remainder header/body.
-        bcx.switch_to_block(rhdr);
-        let i_rh = bcx.block_params(rhdr)[0];
-        let rcond = bcx.ins().icmp(IntCC::SignedLessThan, i_rh, len);
-        bcx.ins().brif(rcond, rbody, &[], exit, &[]);
-        bcx.switch_to_block(rbody);
-        let i_rb = bcx.block_params(rhdr)[0];
-        let eight_r = bcx.ins().iconst(types::I64, 8);
-        let off_r = bcx.ins().imul(i_rb, eight_r);
-        let mut envr = scalar_env.clone();
-        let xar = bcx.ins().iadd(x_ptr, off_r);
-        envr.insert(param_names[0].clone(), bcx.ins().load(types::F64, mf, xar, 0));
-        if let Some(yp) = y_ptr { let yar = bcx.ins().iadd(yp, off_r); let yv = bcx.ins().load(types::F64, mf, yar, 0); if n_vec > 1 { envr.insert(param_names[1].clone(), yv); } }
-        let rv_r = emit_elem(&mut bcx, &k, last, &envr)?;
-        let oar = bcx.ins().iadd(out_ptr, off_r);
-        bcx.ins().store(mf, rv_r, oar, 0);
-        let one = bcx.ins().iconst(types::I64, 1);
-        let inr = bcx.ins().iadd(i_rb, one);
-        bcx.ins().jump(rhdr, &[inr]);
-
-        bcx.switch_to_block(exit);
+        // Free the scratch buffers.
+        let eight_e = bcx.ins().iconst(types::I64, 8);
+        let bytes_e = bcx.ins().imul(len, eight_e);
+        let ptrs: Vec<Value> = k.carried.borrow().values().copied().collect();
+        for p in ptrs { bcx.ins().call(fref, &[p, bytes_e]); }
         bcx.ins().return_(&[]);
         bcx.seal_all_blocks();
         bcx.finalize();
@@ -896,8 +1048,11 @@ pub(crate) fn compile_reduction_kernel(body: &r2_types::Expr, param_names: &[std
     let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
         .map_err(|e| JitError::CraneliftError(format!("JITBuilder: {:?}", e)))?;
     register_math_symbols(&mut jit_builder);
+    jit_builder.symbol("__r2_scratch_alloc", r2_scratch_alloc as *const u8);
+    jit_builder.symbol("__r2_scratch_free", r2_scratch_free as *const u8);
     let mut module = JITModule::new(jit_builder);
     let math_ids = declare_math_imports(&mut module)?;
+    let (alloc_id, free_id) = declare_scratch_imports(&mut module)?;
 
     let mut sig = module.make_signature();
     for _ in 0..n_vec { sig.params.push(AbiParam::new(types::I64)); }
@@ -922,7 +1077,23 @@ pub(crate) fn compile_reduction_kernel(body: &r2_types::Expr, param_names: &[std
         let y_ptr = if n_vec == 2 { Some(ps[1]) } else { None };
         let len = ps[n_vec];
         let len_f = bcx.ins().fcvt_from_sint(types::F64, len);
-        let k = Kctx { x_ptr, y_ptr, len, len_f, names: param_names, math: &math };
+        let k = Kctx { x_ptr, y_ptr, len, len_f, names: param_names, math: &math,
+                       carried: std::cell::RefCell::new(HashMap::new()) };
+
+        // J.4 vector state — pre-allocate scratch for any carried vectors.
+        let aref = module.declare_func_in_func(alloc_id, &mut bcx.func);
+        let fref = module.declare_func_in_func(free_id, &mut bcx.func);
+        if let r2_types::Expr::Block(stmts) = body {
+            let mut carried_names: Vec<std::sync::Arc<str>> = Vec::new();
+            collect_carried_vectors(stmts, param_names, &mut carried_names);
+            let eight_b = bcx.ins().iconst(types::I64, 8);
+            let bytes = bcx.ins().imul(len, eight_b);
+            for nm in &carried_names {
+                let call = bcx.ins().call(aref, &[bytes]);
+                let ptr = bcx.inst_results(call)[0];
+                k.carried.borrow_mut().insert(nm.clone(), ptr);
+            }
+        }
 
         let mut scalar_env: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
         let result = match body {
@@ -934,6 +1105,11 @@ pub(crate) fn compile_reduction_kernel(body: &r2_types::Expr, param_names: &[std
             }
             other => emit_scalar(&mut bcx, &k, other, &scalar_env)?,
         };
+        // Free scratch buffers before returning.
+        let eight_e = bcx.ins().iconst(types::I64, 8);
+        let bytes_e = bcx.ins().imul(len, eight_e);
+        let ptrs: Vec<Value> = k.carried.borrow().values().copied().collect();
+        for p in ptrs { bcx.ins().call(fref, &[p, bytes_e]); }
         bcx.ins().return_(&[result]);
         bcx.seal_all_blocks();
         bcx.finalize();

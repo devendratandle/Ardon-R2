@@ -131,6 +131,65 @@ z0(x)
 }
 
 #[test]
+fn carried_vector_map_matches() {
+    // Vector state: v updated per iteration alongside a per-iteration scalar.
+    let ex = string(eval_last(
+        r#"explain(function(x) { v <- x; for(it in 1:20) { m <- mean(v); v <- v - 0.5*(v - m) }; v })"#,
+    ));
+    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    let d = scalar(eval_last(
+        r#"
+set.seed(7); x <- rnorm(301)
+sh <- function(x) { v <- x; for(it in 1:20) { m <- mean(v); v <- v - 0.5*(v - m) }; v }
+v <- x; for(it in 1:20) { m <- mean(v); v <- v - 0.5*(v - m) }
+max(abs(sh(x) - v))
+"#,
+    ));
+    assert!(d < 1e-12, "carried-vector map diff = {d}");
+}
+
+#[test]
+fn carried_vector_reduced_to_scalar() {
+    let d = scalar(eval_last(
+        r#"
+set.seed(8); x <- rnorm(257)
+sv <- function(x) { v <- x; for(it in 1:10) v <- v*0.9; sum(v) }
+v <- x; for(it in 1:10) v <- v*0.9
+abs(sv(x) - sum(v))
+"#,
+    ));
+    assert!(d < 1e-9, "carried-vector reduction diff = {d}");
+}
+
+#[test]
+fn mixed_vector_and_scalar_state() {
+    let d = scalar(eval_last(
+        r#"
+set.seed(9); x <- rnorm(400)
+mx <- function(x) { v <- x; s <- 0; for(it in 1:15) { s <- s + mean(v); v <- v*0.8 }; s }
+v <- x; s <- 0; for(it in 1:15) { s <- s + mean(v); v <- v*0.8 }
+abs(mx(x) - s)
+"#,
+    ));
+    assert!(d < 1e-12, "mixed state diff = {d}");
+}
+
+#[test]
+fn vector_state_repeated_calls_no_leak_smoke() {
+    // Scratch buffers alloc/free per call — 2000 calls must stay correct.
+    let d = scalar(eval_last(
+        r#"
+x <- as.numeric(1:64)
+sv <- function(x) { v <- x; for(it in 1:5) v <- v*0.5; sum(v) }
+acc <- 0
+for (r in 1:2000) acc <- acc + sv(x)
+abs(acc - 2000*sum(x*0.5^5))
+"#,
+    ));
+    assert!(d < 1e-6, "repeated-call accumulation diff = {d}");
+}
+
+#[test]
 fn read_before_define_falls_back() {
     // `g` is read before it is assigned inside the loop — R errors; the JIT
     // must NOT compile this (a 0.0 phi-init would silently produce a value).
