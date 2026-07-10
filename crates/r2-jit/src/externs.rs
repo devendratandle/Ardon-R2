@@ -181,3 +181,42 @@ pub(crate) extern "C" fn r2_scratch_free(ptr: i64, bytes: i64) {
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
 }
+
+// ── Phase J.4 matrix state — shared matvec kernels ───────────────────
+//
+// Column-major n×p matrix. One implementation each, called from compiled
+// kernels (the "one formula, one program" rule: no matvec is ever emitted
+// as bespoke JIT code — kernels call these).
+
+/// out[0..n] = M · v   (v has length p)
+pub(crate) extern "C" fn r2_kern_matvec(m: *const f64, nrow: i64, ncol: i64, v: *const f64, out: *mut f64) {
+    let (n, p) = (nrow as usize, ncol as usize);
+    unsafe {
+        let mm = std::slice::from_raw_parts(m, n * p);
+        let vv = std::slice::from_raw_parts(v, p);
+        let oo = std::slice::from_raw_parts_mut(out, n);
+        for x in oo.iter_mut() { *x = 0.0; }
+        for j in 0..p {
+            let c = vv[j];
+            if c == 0.0 { continue; }
+            let col = &mm[j * n..j * n + n];
+            for i in 0..n { oo[i] += c * col[i]; }
+        }
+    }
+}
+
+/// out[0..p] = Mᵀ · v   (v has length n) — column dot-products.
+pub(crate) extern "C" fn r2_kern_tmatvec(m: *const f64, nrow: i64, ncol: i64, v: *const f64, out: *mut f64) {
+    let (n, p) = (nrow as usize, ncol as usize);
+    unsafe {
+        let mm = std::slice::from_raw_parts(m, n * p);
+        let vv = std::slice::from_raw_parts(v, n);
+        let oo = std::slice::from_raw_parts_mut(out, p);
+        for j in 0..p {
+            let col = &mm[j * n..j * n + n];
+            let mut acc = 0.0;
+            for i in 0..n { acc += col[i] * vv[i]; }
+            oo[j] = acc;
+        }
+    }
+}

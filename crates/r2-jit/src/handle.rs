@@ -99,6 +99,14 @@ impl r2_types::JitHandle for CompiledFn {
         f(a_ptr, b_ptr, out_ptr, len);
         true
     }
+
+    // Phase J.4 matrix state — (matrix, vector) → p-vector out.
+    unsafe fn try_call_matvec(&self, m_ptr: *const f64, nrow: i64, ncol: i64, v_ptr: *const f64, out_ptr: *mut f64) -> bool {
+        if self.kind != r2_types::JitKind::MatVecIterOut { return false; }
+        let f: extern "C" fn(*const f64, i64, i64, *const f64, *mut f64) = std::mem::transmute(self.ptr);
+        f(m_ptr, nrow, ncol, v_ptr, out_ptr);
+        true
+    }
 }
 
 impl CompiledFn {

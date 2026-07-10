@@ -182,6 +182,11 @@ pub enum JitKind {
     /// `(*const f64, *const f64, *mut f64, i64) -> f64` — two-input indexed
     /// store map, e.g. `for(i in 1:length(x)) y[i] <- x[i] + w[i]`. Phase J.3.
     IndexedStoreMap2,
+    /// `(m_ptr, nrow, ncol, v_ptr, out_ptr)` — Phase J.4 matrix state: a
+    /// column-major n×p matrix + an n-vector in, a p-vector out. The compiled
+    /// body is an iterative kernel with `X %*% b` / `t(X) %*% r` statements
+    /// (multi-parameter gradient descent / IRLS-core shape).
+    MatVecIterOut,
 }
 
 /// Object-safe handle to a JIT-compiled function. Lives in r2-jit (and any
@@ -229,6 +234,9 @@ pub trait JitHandle: std::fmt::Debug + Send + Sync {
     /// IndexedStoreMap2 dispatch (Phase J.3). SAFETY: all three pointers each
     /// reference at least `len` valid f64s; out_ptr is written to.
     unsafe fn try_call_ixstore2(&self, _a_ptr: *const f64, _b_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }
+    /// MatVecIterOut dispatch (Phase J.4 matrix state). SAFETY: `m_ptr` holds
+    /// nrow*ncol f64s (column-major), `v_ptr` nrow f64s, `out_ptr` ncol f64s.
+    unsafe fn try_call_matvec(&self, _m_ptr: *const f64, _nrow: i64, _ncol: i64, _v_ptr: *const f64, _out_ptr: *mut f64) -> bool { false }
 }
 
 /// EngineCtx — Phase R.2 step 6.

@@ -540,6 +540,12 @@ impl JitCompiler {
         compile_reduction_map_kernel(body, param_names)
     }
 
+    /// Phase J.4 (matrix state) — `function(X, y)` iterative kernels with
+    /// `X %*% v` / `t(X) %*% v` statements (multi-parameter GD / IRLS-core).
+    pub fn compile_matvec_kernel(body: &r2_types::Expr, mat: &std::sync::Arc<str>, vec: &std::sync::Arc<str>) -> JitResult<CompiledFn> {
+        compile_matvec_kernel(body, mat, vec)
+    }
+
     /// Phase C.8 — **SIMD f64x2 vectorized 1-arg vector map.**
     ///
     /// When the IR body is "SIMD-clean" (single block, only arithmetic +

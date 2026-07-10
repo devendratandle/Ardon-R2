@@ -37,6 +37,7 @@ mod compiler;
 mod codegen;
 mod mapreduce;
 mod reduce_kernel;
+mod kernel_matrix;
 mod externs;
 mod closure;
 mod lower;
@@ -48,6 +49,7 @@ pub use closure::*;
 pub(crate) use codegen::*;
 pub(crate) use mapreduce::*;
 pub(crate) use reduce_kernel::*;
+pub(crate) use kernel_matrix::*;
 pub(crate) use externs::*;
 pub(crate) use lower::*;
 

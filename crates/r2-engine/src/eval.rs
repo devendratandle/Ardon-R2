@@ -1238,6 +1238,23 @@ impl Engine {
                                     }
                                 }
                             }
+                            r2_types::JitKind::MatVecIterOut => {
+                                // J.4 matrix state: (n×p matrix, n-vector) → p-vector.
+                                if args.len() == 2 {
+                                    if let (RVal::Matrix(m), RVal::Numeric(v, _)) = (&args[0].value, &args[1].value) {
+                                        if m.nrow > 0 && m.ncol > 0 && v.len() == m.nrow {
+                                            let col = v.columnar();
+                                            let vv = col.values();
+                                            let mut out = vec![0.0f64; m.ncol];
+                                            let ok = unsafe { h.try_call_matvec(m.data.as_ptr(), m.nrow as i64, m.ncol as i64, vv.as_ptr(), out.as_mut_ptr()) };
+                                            if ok {
+                                                let res: Vec<Option<f64>> = out.into_iter().map(Some).collect();
+                                                return Ok(RVal::Numeric(res.into(), Attrs::default()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             r2_types::JitKind::Scalar => {
                                 let mut farg: Vec<f64> = Vec::with_capacity(args.len());
                                 let mut all_scalar = true;

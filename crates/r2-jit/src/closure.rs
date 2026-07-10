@@ -998,6 +998,27 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
         }
     }
 
+    // Phase J.4 matrix state — `function(X, y)` iterative kernels using
+    // `X %*% v` / `t(X) %*% v` (multi-parameter GD / IRLS-core). The matrix
+    // param is the one used as a `%*%` left operand (bare or `t(...)`); the
+    // engine dispatch only takes this handle when arg0 is actually a Matrix
+    // with matching dims, so a mis-typed call falls back to the interpreter.
+    if cl.params.len() == 2 {
+        if let Some(mat) = matmul_matrix_param(body_ref, &cl.params[0].name, &cl.params[1].name) {
+            let vec = if mat.as_ref() == cl.params[0].name.as_ref() { cl.params[1].name.clone() } else { cl.params[0].name.clone() };
+            if mat.as_ref() == cl.params[0].name.as_ref() { // ABI fixes X as param 0
+                let pnames: Vec<std::sync::Arc<str>> = vec![vec.clone()];
+                let (kbody0, _kept) = normalize_reduction_kernel(body_ref, &pnames);
+                let mut mvctr = 0u32;
+                let kbody = hoist_matmuls(&kbody0, &mut mvctr);
+                match JitCompiler::compile_matvec_kernel(&kbody, &mat, &vec) {
+                    Ok(c) => return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>),
+                    Err(e) => if std::env::var("R2_JIT_DEBUG").is_ok() { eprintln!("[matvec-kernel] {:?}", e); }
+                }
+            }
+        }
+    }
+
     // Phase J.4 brick 2 — multi-reduction scalar kernel. Combinations of
     // whole-vector reductions the single-reduction paths can't express:
     // `sum(x*y)/sum(x*x)` (regression coef), `{ m<-mean(x); sum((x-m)^2) }`
@@ -1320,6 +1341,128 @@ fn inline_vector_locals(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>
     }
     out.push(substitute_symbols(last, &vecdefs));
     (Block(out), kept)
+}
+
+/// J.4 matrix state — hoist every `%*%` sub-expression to its own statement
+/// (`.__mvN <- X %*% v`), and any non-symbol `%*%` right operand to an
+/// element-wise temp, so the matrix kernel sees matvecs only as whole
+/// statements with named operands. Mirrors `hoist_reductions`.
+fn hoist_matmuls_expr(e: &r2_types::Expr, pre: &mut Vec<r2_types::Expr>, ctr: &mut u32) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    match e {
+        Binary { op: r2_types::BinOp::MatMul, lhs, rhs } => {
+            // Named right operand, else hoist it first.
+            let rname = match rhs.as_ref() {
+                Symbol(_) => rhs.as_ref().clone(),
+                other => {
+                    let inner = hoist_matmuls_expr(other, pre, ctr);
+                    let t: std::sync::Arc<str> = std::sync::Arc::from(format!(".__mvarg{}", *ctr));
+                    *ctr += 1;
+                    pre.push(Assign { target: Box::new(Symbol(t.clone())), value: Box::new(inner), superassign: false });
+                    Symbol(t)
+                }
+            };
+            let call = Binary { op: r2_types::BinOp::MatMul, lhs: lhs.clone(), rhs: Box::new(rname) };
+            let t: std::sync::Arc<str> = std::sync::Arc::from(format!(".__mv{}", *ctr));
+            *ctr += 1;
+            pre.push(Assign { target: Box::new(Symbol(t.clone())), value: Box::new(call), superassign: false });
+            Symbol(t)
+        }
+        Binary { op, lhs, rhs } => Binary { op: *op,
+            lhs: Box::new(hoist_matmuls_expr(lhs, pre, ctr)), rhs: Box::new(hoist_matmuls_expr(rhs, pre, ctr)) },
+        Unary { op, expr } => Unary { op: *op, expr: Box::new(hoist_matmuls_expr(expr, pre, ctr)) },
+        If { cond, then, else_ } => If { cond: Box::new(hoist_matmuls_expr(cond, pre, ctr)),
+            then: Box::new(hoist_matmuls_expr(then, pre, ctr)),
+            else_: else_.as_ref().map(|x| Box::new(hoist_matmuls_expr(x, pre, ctr))) },
+        Call { func, args } => Call { func: func.clone(),
+            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: hoist_matmuls_expr(&a.value, pre, ctr) }).collect() },
+        other => other.clone(),
+    }
+}
+
+/// Statement-level matmul hoisting (recurses into loop bodies).
+fn hoist_matmuls(body: &r2_types::Expr, ctr: &mut u32) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    let stmts = match body { Block(s) => s.clone(), other => vec![other.clone()] };
+    let mut out: Vec<r2_types::Expr> = Vec::new();
+    let n = stmts.len();
+    for (i, st) in stmts.iter().enumerate() {
+        let is_last = i + 1 == n;
+        match st {
+            Assign { target, value, superassign } => {
+                // Whole-rhs matvec stays a statement; only its rhs-arg may hoist.
+                if let Binary { op: r2_types::BinOp::MatMul, lhs, rhs } = value.as_ref() {
+                    let rname = match rhs.as_ref() {
+                        Symbol(_) => rhs.as_ref().clone(),
+                        other => {
+                            let mut pre = Vec::new();
+                            let inner = hoist_matmuls_expr(other, &mut pre, ctr);
+                            out.extend(pre);
+                            let t: std::sync::Arc<str> = std::sync::Arc::from(format!(".__mvarg{}", *ctr));
+                            *ctr += 1;
+                            out.push(Assign { target: Box::new(Symbol(t.clone())), value: Box::new(inner), superassign: false });
+                            Symbol(t)
+                        }
+                    };
+                    out.push(Assign { target: target.clone(),
+                        value: Box::new(Binary { op: r2_types::BinOp::MatMul, lhs: lhs.clone(), rhs: Box::new(rname) }),
+                        superassign: *superassign });
+                } else {
+                    let mut pre = Vec::new();
+                    let v = hoist_matmuls_expr(value, &mut pre, ctr);
+                    out.extend(pre);
+                    out.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
+                }
+            }
+            For { var, iter, body } => {
+                let mut pre = Vec::new();
+                let it = hoist_matmuls_expr(iter, &mut pre, ctr);
+                out.extend(pre);
+                let nb = hoist_matmuls(body, ctr);
+                out.push(For { var: var.clone(), iter: Box::new(it), body: Box::new(nb) });
+            }
+            other if is_last => {
+                let mut pre = Vec::new();
+                let v = hoist_matmuls_expr(other, &mut pre, ctr);
+                out.extend(pre);
+                out.push(v);
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    Block(out)
+}
+
+/// Which of the two params is used as a `%*%` LEFT operand (bare or wrapped in
+/// `t(...)`)? That param is the matrix of a matrix-state kernel.
+fn matmul_matrix_param(e: &r2_types::Expr, p0: &std::sync::Arc<str>, p1: &std::sync::Arc<str>) -> Option<std::sync::Arc<str>> {
+    use r2_types::Expr::*;
+    let as_param = |s: &str| -> Option<std::sync::Arc<str>> {
+        if s == p0.as_ref() { Some(p0.clone()) } else if s == p1.as_ref() { Some(p1.clone()) } else { None }
+    };
+    match e {
+        Binary { op: r2_types::BinOp::MatMul, lhs, rhs } => {
+            let hit = match lhs.as_ref() {
+                Symbol(s) => as_param(s.as_ref()),
+                Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "t") && args.len() == 1 =>
+                    match &args[0].value { Symbol(s) => as_param(s.as_ref()), _ => None },
+                _ => None,
+            };
+            hit.or_else(|| matmul_matrix_param(rhs, p0, p1))
+        }
+        Binary { lhs, rhs, .. } => matmul_matrix_param(lhs, p0, p1).or_else(|| matmul_matrix_param(rhs, p0, p1)),
+        Unary { expr, .. } => matmul_matrix_param(expr, p0, p1),
+        Assign { value, .. } => matmul_matrix_param(value, p0, p1),
+        Call { args, .. } => args.iter().find_map(|a| matmul_matrix_param(&a.value, p0, p1)),
+        If { cond, then, else_ } => matmul_matrix_param(cond, p0, p1)
+            .or_else(|| matmul_matrix_param(then, p0, p1))
+            .or_else(|| else_.as_ref().and_then(|x| matmul_matrix_param(x, p0, p1))),
+        For { iter, body, .. } => matmul_matrix_param(iter, p0, p1).or_else(|| matmul_matrix_param(body, p0, p1)),
+        While { cond, body } => matmul_matrix_param(cond, p0, p1).or_else(|| matmul_matrix_param(body, p0, p1)),
+        Block(s) => s.iter().find_map(|x| matmul_matrix_param(x, p0, p1)),
+        Return(v) => matmul_matrix_param(v, p0, p1),
+        _ => None,
+    }
 }
 
 /// Does `e` contain a `sum`/`prod`/`mean` reduction call? Cheap gate so the
