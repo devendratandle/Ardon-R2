@@ -34,7 +34,8 @@ fn string(v: RVal) -> String {
 #[test]
 fn regression_coefficient_jits_and_matches() {
     let ex = string(eval_last(r#"explain(function(x, y) sum(x*y) / sum(x*x))"#));
-    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}"); }
     let d = scalar(eval_last(
         r#"
 set.seed(1); x <- rnorm(500); y <- rnorm(500)
@@ -89,7 +90,8 @@ pr(x, y) - cor(x, y)
 fn nested_reduction_oneliner_jits() {
     // Brick 3: the textbook one-liner (mean nested inside sum) must JIT and match.
     let ex = string(eval_last(r#"explain(function(x) sum((x-mean(x))^2)/(length(x)-1))"#));
-    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}"); }
     let d = scalar(eval_last(
         r#"
 set.seed(5); x <- rnorm(400)
@@ -104,7 +106,8 @@ va(x) - var(x)
 fn vector_local_fused_away() {
     // Brick 3: a vector intermediate (`e <- pred-obs`) is fused, no buffer.
     let ex = string(eval_last(r#"explain(function(pred, obs) { e <- pred - obs; sqrt(mean(e*e)) })"#));
-    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}"); }
     let d = scalar(eval_last(
         r#"
 set.seed(6); a <- rnorm(400); b <- rnorm(400)
@@ -165,6 +168,7 @@ fn single_reduction_paths_unaffected() {
         ("function(v) v*v", "VectorMap"),
     ] {
         let ex = string(eval_last(&format!("explain({body})")));
-        assert!(ex.contains("JIT-compiled") && ex.contains(kind), "{body} -> {ex}");
+        // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+        if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled") && ex.contains(kind), "{body} -> {ex}"); }
     }
 }

@@ -36,7 +36,8 @@ fn two_input_store_jits_and_matches() {
     let ex = string(eval_last(
         r#"explain(function(x, w){ y <- numeric(length(x)); for(i in 1:length(x)) y[i] <- x[i] + w[i]; y })"#,
     ));
-    assert!(ex.contains("IndexedStoreMap2"), "expected store-map JIT, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("IndexedStoreMap2"), "expected store-map JIT, got: {ex}"); }
 
     let d = scalar(eval_last(
         r#"

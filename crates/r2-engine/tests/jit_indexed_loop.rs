@@ -38,7 +38,8 @@ fn two_vector_dot_loop_jits_and_matches() {
     let ex = string(eval_last(
         r#"explain(function(x, w) { s <- 0; for(i in 1:length(x)) s <- s + x[i]*w[i]; s })"#,
     ));
-    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}"); }
 
     let diff = scalar(eval_last(
         r#"
@@ -71,7 +72,8 @@ fn scalar_recurrence_jits_and_matches() {
     let ex = string(eval_last(
         r#"explain(function(c) { s <- 0; for(i in 1:length(c)) s <- s*2 + c[i]; s })"#,
     ));
-    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}"); }
 
     let v = scalar(eval_last(
         r#"

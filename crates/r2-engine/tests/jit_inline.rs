@@ -34,7 +34,8 @@ fn string(v: RVal) -> String {
 #[test]
 fn composed_helpers_jit_and_match() {
     let ex = string(eval_last(r#"sq <- function(x) x*x; explain(function(a, b) sq(a) + sq(b))"#));
-    assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled"), "expected JIT, got: {ex}"); }
     // (a+1)^2 over a vector, arg expression duplicated by inlining — must match.
     let d = scalar(eval_last(
         r#"

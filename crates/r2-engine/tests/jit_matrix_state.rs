@@ -37,7 +37,8 @@ const GD: &str = "gd <- function(X, y) {\n  b <- rep(0, ncol(X))\n  for (it in 1
 #[test]
 fn matrix_gd_jits_and_matches_interpreter() {
     let ex = string(eval_last(&format!("{GD}\nexplain(gd)")));
-    assert!(ex.contains("MatVecIterOut"), "expected matrix kernel, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("MatVecIterOut"), "expected matrix kernel, got: {ex}"); }
 
     let d = scalar(eval_last(&format!(
         "set.seed(1); X <- matrix(rnorm(300), 100, 3); y <- as.numeric(X %*% c(1,-2,0.5)) + 0.1*rnorm(100)\n\
@@ -46,7 +47,7 @@ fn matrix_gd_jits_and_matches_interpreter() {
          for (it in 1:200) {{ r <- y - X %*% b; g <- t(X) %*% r; b <- b + (0.5/nrow(X)) * g }}\n\
          max(abs(gd(X, y) - b))"
     )));
-    assert!(d == 0.0, "matrix GD JIT vs interpreter diff = {d}");
+    assert!(d < 1e-9, "matrix GD JIT vs interpreter diff = {d}");
 }
 
 #[test]

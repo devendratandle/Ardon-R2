@@ -35,7 +35,8 @@ fn string(v: RVal) -> String {
 #[test]
 fn centering_primitive_jits_to_vector_map() {
     let ex = string(eval_last(r#"explain(function(v) v - mean(v))"#));
-    assert!(ex.contains("JIT-compiled") && ex.contains("VectorMap"), "expected VectorMap, got: {ex}");
+    // JIT is x86_64-only (Cranelift PLT gate); on aarch64 these run interpreted.
+    if cfg!(target_arch = "x86_64") { assert!(ex.contains("JIT-compiled") && ex.contains("VectorMap"), "expected VectorMap, got: {ex}"); }
 }
 
 #[test]

@@ -39,6 +39,54 @@ impl Engine {
                 }
             };
         }
+        // Element-wise arithmetic with a MATRIX operand keeps R's dims:
+        // Matrix ⊙ Matrix (conformable), Matrix ⊙ vector/scalar (recycled
+        // over the column-major data). Previously matrices were coerced to
+        // plain vectors here, silently losing dim — surfaced by the aarch64
+        // CI where the interpreter (not the JIT) runs these shapes.
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow) {
+            let mat_dims = match (lhs, rhs) {
+                (RVal::Matrix(a), RVal::Matrix(b)) => {
+                    if a.nrow != b.nrow || a.ncol != b.ncol {
+                        return err!(Runtime, "non-conformable arrays ({}x{} vs {}x{})", a.nrow, a.ncol, b.nrow, b.ncol);
+                    }
+                    Some((a.nrow, a.ncol))
+                }
+                (RVal::Matrix(a), _) | (_, RVal::Matrix(a)) => Some((a.nrow, a.ncol)),
+                _ => None,
+            };
+            if let Some((nr, nc)) = mat_dims {
+                let to_data = |e: &mut Self, v: &RVal| -> Result<Vec<f64>, R2Err> {
+                    Ok(match v {
+                        RVal::Matrix(m) => m.data.clone(),
+                        other => e.as_reals(other)?.into_iter()
+                            .map(|o| o.unwrap_or(f64::NAN)).collect(),
+                    })
+                };
+                let lv = to_data(self, lhs)?;
+                let rv = to_data(self, rhs)?;
+                let n = nr * nc;
+                if lv.is_empty() || rv.is_empty() || lv.len().max(rv.len()) != n {
+                    return err!(Runtime, "dims [product {}] do not match the length of object [{}]",
+                                n, lv.len().max(rv.len()).max(1));
+                }
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    let a = lv[i % lv.len()];
+                    let b = rv[i % rv.len()];
+                    out.push(match op {
+                        BinOp::Add => a + b, BinOp::Sub => a - b,
+                        BinOp::Mul => a * b, BinOp::Div => a / b,
+                        BinOp::Pow => a.powf(b),
+                        _ => unreachable!(),
+                    });
+                }
+                let mut m = Matrix::new(out, nr, nc);
+                if let RVal::Matrix(src) = lhs { m.col_names = src.col_names.clone(); m.row_names = src.row_names.clone(); }
+                else if let RVal::Matrix(src) = rhs { m.col_names = src.col_names.clone(); m.row_names = src.row_names.clone(); }
+                return Ok(RVal::Matrix(m));
+            }
+        }
         // Logical operators — handled before numeric coercion to preserve
         // R's NA semantics (`TRUE & NA = NA`, `FALSE & NA = FALSE`, etc.).
         //
