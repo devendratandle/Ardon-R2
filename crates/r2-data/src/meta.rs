@@ -63,6 +63,10 @@ pub fn bi_colnames(a: &[EvalArg]) -> Result<RVal, R2Err> {
             df.columns.iter().map(|(n, _)| Some(n.clone())).collect(),
             Attrs::default(),
         )),
+        RVal::Matrix(m) => Ok(match &m.col_names {
+            Some(cn) => RVal::Character(cn.iter().map(|n| Some(n.clone())).collect(), Attrs::default()),
+            None => RVal::Null,
+        }),
         _ => Ok(RVal::Null),
     }
 }
@@ -76,6 +80,12 @@ pub fn bi_rownames(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 Attrs::default(),
             )),
         },
+        // R returns NULL for an unnamed matrix (no "1","2",… synthesis,
+        // unlike data frames).
+        RVal::Matrix(m) => Ok(match &m.row_names {
+            Some(rn) => RVal::Character(rn.iter().map(|n| Some(n.clone())).collect(), Attrs::default()),
+            None => RVal::Null,
+        }),
         _ => Ok(RVal::Null),
     }
 }
@@ -192,6 +202,35 @@ mod tests {
         match r {
             RVal::Numeric(v, _) => assert_eq!(v.len(), 2),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn matrix_dimnames_getters_match_r() {
+        use r2_types::Matrix;
+        // R: colnames/rownames of an unnamed matrix are NULL.
+        let m = Matrix::new(vec![1.0, 2.0, 3.0, 4.0], 2, 2);
+        assert!(matches!(bi_colnames(&[evarg(RVal::Matrix(m.clone()))]).unwrap(), RVal::Null));
+        assert!(matches!(bi_rownames(&[evarg(RVal::Matrix(m.clone()))]).unwrap(), RVal::Null));
+        // After setting, the getters return the character vector.
+        let mut named = m;
+        named.col_names = Some(vec![Arc::from("a"), Arc::from("b")]);
+        named.row_names = Some(vec![Arc::from("r1"), Arc::from("r2")]);
+        let cn = bi_colnames(&[evarg(RVal::Matrix(named.clone()))]).unwrap();
+        match cn {
+            RVal::Character(v, _) => {
+                let got: Vec<String> = v.iter().filter_map(|x| x.clone().map(|s| s.to_string())).collect();
+                assert_eq!(got, vec!["a", "b"]);
+            }
+            other => panic!("colnames returned {:?}", other),
+        }
+        let rn = bi_rownames(&[evarg(RVal::Matrix(named))]).unwrap();
+        match rn {
+            RVal::Character(v, _) => {
+                let got: Vec<String> = v.iter().filter_map(|x| x.clone().map(|s| s.to_string())).collect();
+                assert_eq!(got, vec!["r1", "r2"]);
+            }
+            other => panic!("rownames returned {:?}", other),
         }
     }
 
