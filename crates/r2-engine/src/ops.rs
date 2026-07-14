@@ -196,7 +196,11 @@ impl Engine {
                 // `.len()` here would Deref → materialise the boxed
                 // `Vec<Option<f64>>`, the exact O(n) round-trip this columnar
                 // path exists to avoid for `rnorm`/`seq`-style dense inputs.
-                if a.len_fast() == b.len_fast() && a.len_fast() >= 64 {
+                // Take the columnar kernel when the repack is free (both
+                // operands already columnar — the producer-flip default) or
+                // when n is large enough to amortise a repack.
+                if a.len_fast() == b.len_fast()
+                    && (a.len_fast() >= 64 || (a.len_fast() >= 2 && a.has_columnar() && b.has_columnar())) {
                     use r2_arrow::ArrowBinaryOp;
                     let arrow_op = match op {
                         BinOp::Add => ArrowBinaryOp::Add,

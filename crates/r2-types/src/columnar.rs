@@ -122,6 +122,10 @@ impl Reals {
 
     /// Empty check that doesn't materialise.
     pub fn is_empty_fast(&self) -> bool { self.len_fast() == 0 }
+
+    /// True when the Arrow form is already cached — `.columnar()` is then
+    /// O(1), so columnar kernels are profitable at ANY length (no repack).
+    pub fn has_columnar(&self) -> bool { self.columnar.get().is_some() }
 }
 
 impl Clone for Reals {
