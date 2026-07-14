@@ -600,7 +600,8 @@ pub(crate) fn bi_ave(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal
         };
         for &i in idxs { out[i] = stat; }
     }
-    Ok(RVal::Numeric(out.into_iter().map(Some).collect::<Vec<_>>().into(), Attrs::default()))
+    // Columnar-first: `out` is a dense Vec<f64> with no NAs.
+    Ok(RVal::Numeric(Reals::from_dense_f64(out), Attrs::default()))
 }
 pub(crate) fn bi_nargs(_: &mut Engine, _a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let key: Arc<str> = Arc::from(".nargs");

@@ -248,7 +248,9 @@ mod tests {
     use super::*;
 
     fn nums(v: &[f64]) -> RVal {
-        RVal::Numeric(v.iter().map(|x| Some(*x)).collect(), Attrs::default())
+        use r2_types::Reals;
+        // Columnar-first: dense, no NAs by construction.
+        RVal::Numeric(Reals::from_dense_f64(v.to_vec()), Attrs::default())
     }
     fn evarg(v: RVal) -> EvalArg { EvalArg { name: None, value: v } }
 
