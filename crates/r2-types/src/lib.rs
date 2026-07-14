@@ -400,7 +400,10 @@ pub fn rint(x: i32) -> RVal { RVal::Integer(vec![Some(x)].into(), Attrs::default
 pub fn rstr(s: &str) -> RVal { RVal::Character(vec![Some(Arc::from(s))], Attrs::default()) }
 pub fn rbool(b: bool) -> RVal { RVal::Logical(vec![Some(b)].into(), Attrs::default()) }
 pub fn rna() -> RVal { RVal::Numeric(vec![None].into(), Attrs::default()) }
-pub fn rnums(v: &[f64]) -> RVal { RVal::Numeric(v.iter().map(|x| Some(*x)).collect::<Vec<_>>().into(), Attrs::default()) }
+// Columnar-first: dense f64 slices have no NAs by construction, so build
+// the Arrow form directly (tight memcpy); the boxed Vec<Option> view only
+// materialises if a caller later asks for &[Real].
+pub fn rnums(v: &[f64]) -> RVal { RVal::Numeric(Reals::from_dense_f64(v.to_vec()), Attrs::default()) }
 pub fn rints(v: &[i32]) -> RVal { RVal::Integer(v.iter().map(|x| Some(*x)).collect(), Attrs::default()) }
 
 /// Deparse an `Expr` back into R source text — the inverse of parsing.
