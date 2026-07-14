@@ -404,7 +404,8 @@ pub fn rna() -> RVal { RVal::Numeric(vec![None].into(), Attrs::default()) }
 // the Arrow form directly (tight memcpy); the boxed Vec<Option> view only
 // materialises if a caller later asks for &[Real].
 pub fn rnums(v: &[f64]) -> RVal { RVal::Numeric(Reals::from_dense_f64(v.to_vec()), Attrs::default()) }
-pub fn rints(v: &[i32]) -> RVal { RVal::Integer(v.iter().map(|x| Some(*x)).collect(), Attrs::default()) }
+// Columnar-first: dense i32 slices (ranges, indices) have no NAs.
+pub fn rints(v: &[i32]) -> RVal { RVal::Integer(Ints::from_dense_i32(v.to_vec()), Attrs::default()) }
 
 /// Deparse an `Expr` back into R source text — the inverse of parsing.
 /// Lives here (next to `Expr`) so both `RVal::Lang`'s `Display` and the

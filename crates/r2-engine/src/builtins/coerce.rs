@@ -407,6 +407,15 @@ pub(crate) fn bi_as_num(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
         let nums: Vec<Real> = v.iter().map(|x| x.as_ref().and_then(|s| s.trim().parse::<f64>().ok())).collect();
         return Ok(RVal::Numeric(nums.into(), Attrs::default()));
     }
+    // Columnar fast path: as.numeric(1:n)-style dense integer input
+    // converts i32→f64 in one tight loop — no Option boxing either side.
+    if let RVal::Integer(v, _) = &gv(a,0) {
+        let col = v.columnar();
+        if col.is_dense() {
+            let out: Vec<f64> = col.values().iter().map(|&x| x as f64).collect();
+            return Ok(RVal::Numeric(Reals::from_dense_f64(out), Attrs::default()));
+        }
+    }
     Ok(RVal::Numeric(e.as_reals(&gv(a,0))?.into(), Attrs::default()))
 }
 /// `as.single(x)` — coerce to f32 single-precision storage (Phase F.7).

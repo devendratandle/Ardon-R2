@@ -310,37 +310,76 @@ impl FromIterator<Single> for Singles {
 // Mirrors `Reals`: `Vec<Integer>` + cached `Arc<ColumnarI32>`.
 #[derive(Debug, Default)]
 pub struct Ints {
-    data: Vec<Integer>,
+    // Dual-form like `Reals`: EITHER view materialises lazily from the
+    // other. `from_dense_i32` (e.g. `1:n` ranges) skips the per-element
+    // Option boxing entirely until a caller demands `&[Integer]`.
+    data: std::sync::OnceLock<Vec<Integer>>,
     columnar: std::sync::OnceLock<std::sync::Arc<r2_arrow::ColumnarI32>>,
 }
 impl Ints {
-    pub fn new(data: Vec<Integer>) -> Self { Ints { data, columnar: std::sync::OnceLock::new() } }
-    pub fn into_inner(self) -> Vec<Integer> { self.data }
-    pub fn as_vec(&self) -> &Vec<Integer> { &self.data }
+    pub fn new(data: Vec<Integer>) -> Self {
+        let r = Ints { data: std::sync::OnceLock::new(), columnar: std::sync::OnceLock::new() };
+        let _ = r.data.set(data);
+        r
+    }
+    /// Dense, no-NA constructor (ranges, indices): columnar only.
+    pub fn from_dense_i32(v: Vec<i32>) -> Self {
+        let r = Ints { data: std::sync::OnceLock::new(), columnar: std::sync::OnceLock::new() };
+        let _ = r.columnar.set(std::sync::Arc::new(r2_arrow::ColumnarI32::from_vec(v)));
+        r
+    }
+    pub fn into_inner(mut self) -> Vec<Integer> {
+        if self.data.get().is_some() { self.data.take().unwrap() }
+        else if let Some(c) = self.columnar.get() { c.to_options() }
+        else { Vec::new() }
+    }
+    pub fn as_vec(&self) -> &Vec<Integer> {
+        self.data.get_or_init(|| match self.columnar.get() {
+            Some(c) => c.to_options(),
+            None => Vec::new(),
+        })
+    }
     pub fn columnar(&self) -> std::sync::Arc<r2_arrow::ColumnarI32> {
         self.columnar.get_or_init(|| {
-            std::sync::Arc::new(r2_arrow::ColumnarI32::from_option_slice(&self.data))
+            let boxed = self.data.get().map(|v| v.as_slice()).unwrap_or(&[]);
+            std::sync::Arc::new(r2_arrow::ColumnarI32::from_option_slice(boxed))
         }).clone()
+    }
+    /// Length from whichever form is populated — no materialisation.
+    pub fn len_fast(&self) -> usize {
+        if let Some(v) = self.data.get() { v.len() }
+        else if let Some(c) = self.columnar.get() { c.len() }
+        else { 0 }
     }
 }
 impl Clone for Ints {
     fn clone(&self) -> Self {
-        let r = Ints { data: self.data.clone(), columnar: std::sync::OnceLock::new() };
+        let r = Ints { data: std::sync::OnceLock::new(), columnar: std::sync::OnceLock::new() };
+        if let Some(v) = self.data.get() { let _ = r.data.set(v.clone()); }
         if let Some(c) = self.columnar.get() { let _ = r.columnar.set(c.clone()); }
         r
     }
 }
 impl PartialEq for Ints {
-    fn eq(&self, other: &Self) -> bool { self.data == other.data }
+    fn eq(&self, other: &Self) -> bool { self.as_vec() == other.as_vec() }
 }
 impl std::ops::Deref for Ints {
     type Target = [Integer];
-    fn deref(&self) -> &[Integer] { &self.data }
+    fn deref(&self) -> &[Integer] { self.as_vec() }
 }
 impl std::ops::DerefMut for Ints {
     fn deref_mut(&mut self) -> &mut [Integer] {
+        // Mutation requires the boxed form. Materialise if needed, then
+        // invalidate the columnar cache.
+        if self.data.get().is_none() {
+            let v = match self.columnar.get() {
+                Some(c) => c.to_options(),
+                None => Vec::new(),
+            };
+            let _ = self.data.set(v);
+        }
         self.columnar = std::sync::OnceLock::new();
-        &mut self.data
+        self.data.get_mut().unwrap()
     }
 }
 impl From<Vec<Integer>> for Ints { fn from(v: Vec<Integer>) -> Self { Ints::new(v) } }
@@ -350,11 +389,11 @@ impl FromIterator<Integer> for Ints {
 impl<'a> IntoIterator for &'a Ints {
     type Item = &'a Integer;
     type IntoIter = std::slice::Iter<'a, Integer>;
-    fn into_iter(self) -> Self::IntoIter { self.data.iter() }
+    fn into_iter(self) -> Self::IntoIter { self.as_vec().iter() }
 }
 impl<I: std::slice::SliceIndex<[Integer]>> std::ops::Index<I> for Ints {
     type Output = I::Output;
-    fn index(&self, idx: I) -> &Self::Output { &self.data[idx] }
+    fn index(&self, idx: I) -> &Self::Output { &self.as_vec()[idx] }
 }
 
 // ── Logicals — Phase F.6 storage wrapper ─────────────────────────────
@@ -401,11 +440,11 @@ impl FromIterator<Logical> for Logicals {
 impl<'a> IntoIterator for &'a Logicals {
     type Item = &'a Logical;
     type IntoIter = std::slice::Iter<'a, Logical>;
-    fn into_iter(self) -> Self::IntoIter { self.data.iter() }
+    fn into_iter(self) -> Self::IntoIter { self.as_vec().iter() }
 }
 impl<I: std::slice::SliceIndex<[Logical]>> std::ops::Index<I> for Logicals {
     type Output = I::Output;
-    fn index(&self, idx: I) -> &Self::Output { &self.data[idx] }
+    fn index(&self, idx: I) -> &Self::Output { &self.as_vec()[idx] }
 }
 
 // ── Attributes ───────────────────────────────────────────────────────

@@ -284,5 +284,8 @@ impl Engine {
         }
     }
     pub(crate) fn unary_op(&self, op: UnOp, v: &RVal) -> Result<RVal, R2Err> { match op { UnOp::Neg => { let r = self.as_reals(v)?; Ok(RVal::Numeric(r.into_iter().map(|x| x.map(|n| -n)).collect(), Attrs::default())) } UnOp::Pos => Ok(v.clone()), UnOp::Not => { let r = self.as_logicals(v)?; Ok(RVal::Logical(r.into_iter().map(|x| x.map(|b| !b)).collect(), Attrs::default())) } } }
-    pub(crate) fn seq_colon(&self, l: &RVal, r: &RVal) -> Result<RVal, R2Err> { let from = self.scalar_f64(l)?.ok_or(R2Err{msg:"NA in seq".into(),kind:ErrKind::Runtime})? as i32; let to = self.scalar_f64(r)?.ok_or(R2Err{msg:"NA in seq".into(),kind:ErrKind::Runtime})? as i32; let s: Vec<Integer> = if from<=to { (from..=to).map(Some).collect() } else { (to..=from).rev().map(Some).collect() }; Ok(RVal::Integer(s.into(), Attrs::default())) }
+    // `a:b` — columnar-first: ranges are dense i32 with no NAs, so build
+    // ColumnarI32 directly; the boxed Vec<Option<i32>> view materialises
+    // only if a caller walks elements.
+    pub(crate) fn seq_colon(&self, l: &RVal, r: &RVal) -> Result<RVal, R2Err> { let from = self.scalar_f64(l)?.ok_or(R2Err{msg:"NA in seq".into(),kind:ErrKind::Runtime})? as i32; let to = self.scalar_f64(r)?.ok_or(R2Err{msg:"NA in seq".into(),kind:ErrKind::Runtime})? as i32; let s: Vec<i32> = if from<=to { (from..=to).collect() } else { (to..=from).rev().collect() }; Ok(RVal::Integer(Ints::from_dense_i32(s), Attrs::default())) }
 }
