@@ -1,0 +1,17 @@
+# dim/dimnames metadata: getters, setters, survival through ops.
+m <- matrix(1:4, 2, 2)
+cat("dim.nrow=", dim(m)[1], "\n", sep = "")
+cat("dim.ncol=", dim(m)[2], "\n", sep = "")
+cat("cn.null=", if (is.null(colnames(m))) 1 else 0, "\n", sep = "")
+cat("rn.null=", if (is.null(rownames(m))) 1 else 0, "\n", sep = "")
+colnames(m) <- c("a", "b")
+rownames(m) <- c("r1", "r2")
+cat("cn.get=", paste(colnames(m), collapse = ","), "\n", sep = "")
+cat("rn.get=", paste(rownames(m), collapse = ","), "\n", sep = "")
+m2 <- m * 2
+cat("cn.after_arith=", paste(colnames(m2), collapse = ","), "\n", sep = "")
+tm <- t(m)
+cat("t.nrow=", nrow(tm), "\n", sep = "")
+cat("t.e12=", tm[1, 2], "\n", sep = "")
+cat("nrow.direct=", nrow(m), "\n", sep = "")
+cat("ncol.direct=", ncol(m), "\n", sep = "")

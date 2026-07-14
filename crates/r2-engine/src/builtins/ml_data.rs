@@ -566,7 +566,16 @@ pub(crate) fn mmap_reduce(v: &RVal, op: &str) -> Option<Result<RVal, R2Err>> {
 // ── scale() — center and scale matrix columns ───────────────────────
 
 pub(crate) fn bi_scale(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let mat = match &gv(a,0) { RVal::Matrix(m) => m.clone(), _ => return err!(Runtime, "scale() needs matrix") };
+    // R promotes a plain numeric vector to an n x 1 matrix before scaling.
+    let mat = match &gv(a,0) {
+        RVal::Matrix(m) => m.clone(),
+        v @ (RVal::Numeric(..) | RVal::Integer(..)) => {
+            let d: Vec<f64> = e.as_reals(v)?.into_iter().map(|o| o.unwrap_or(f64::NAN)).collect();
+            let n = d.len();
+            Matrix::new(d, n, 1)
+        }
+        _ => return err!(Runtime, "scale() needs a numeric vector or matrix"),
+    };
     let center = gn(a,"center").and_then(|v| e.as_logicals(&v).ok()).map(|v| v[0] == Some(true)).unwrap_or(true);
     let do_scale = gn(a,"scale").and_then(|v| e.as_logicals(&v).ok()).map(|v| v[0] == Some(true)).unwrap_or(true);
     let (m, n) = (mat.nrow, mat.ncol);

@@ -24,6 +24,7 @@ pub(crate) fn core_table() -> Vec<(&'static str, BuiltinFn)> {
         ("c",bi_c),("length",bi_length),("print",bi_print),("cat",bi_cat),
         ("clear",bi_clear),("cls",bi_clear),("clr",bi_clear),
         ("typeof",bi_typeof),("class",bi_class),("is.na",bi_is_na),
+        ("is.nan",bi_is_nan),("is.infinite",bi_is_infinite),("is.finite",bi_is_finite),
         ("is.numeric",bi_is_num),("is.character",bi_is_chr),("is.logical",bi_is_lgl),
         ("as.numeric",bi_as_num),("as.single",bi_as_single),("is.single",bi_is_single),
         ("as.character",bi_as_chr),("as.integer",bi_as_int),
@@ -140,7 +141,7 @@ pub(crate) fn stats_table() -> Vec<(&'static str, BuiltinFn)> {
         // hypothesis tests
         ("t.test",bi_t_test),("chisq.test",bi_chisq_test),("hotelling.test",bi_hotelling_test),("manova",bi_manova),("lmer",bi_lmer),
         // model accessors
-        ("predict",bi_predict),("residuals",bi_residuals),("fitted",bi_fitted),("coef",bi_coef),
+        ("predict",bi_predict),("residuals",bi_residuals),("fitted",bi_fitted),("coef",bi_coef),("deviance",bi_deviance),
         ("glm",bi_glm),("confint",bi_confint),("binomial",bi_binomial),("gaussian",bi_gaussian),("poisson",bi_poisson),("subset",bi_subset),("transform",bi_transform),
         // ML functions
         ("svd",bi_svd),("eigen",bi_eigen),("prcomp",bi_prcomp),("solve",bi_solve),("det",bi_det),("backsolve",bi_backsolve),("forwardsolve",bi_forwardsolve),("rcond",bi_rcond),("kappa",bi_kappa),("mmap.write",bi_mmap_write),("mmap.col",bi_mmap_col),("mmap.map",bi_mmap_map),("mmap.csv",bi_mmap_csv),("mmap.lm",bi_mmap_lm),("read.parquet",bi_read_parquet),

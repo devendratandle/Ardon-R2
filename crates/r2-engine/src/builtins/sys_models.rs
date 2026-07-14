@@ -539,6 +539,16 @@ pub(crate) fn bi_coef(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     }
 }
 
+pub(crate) fn bi_deviance(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match &gv(a,0) {
+        RVal::TypeInstance(inst) if matches!(inst.type_name.as_ref(), "lm" | "glm") => {
+            inst.fields.get("deviance").cloned()
+                .ok_or(R2Err{msg:"no deviance".into(),kind:ErrKind::Runtime})
+        }
+        _ => err!(Runtime, "deviance() needs an lm or glm object"),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // boxplot() — SVG box-and-whisker plot
 // ═══════════════════════════════════════════════════════════════════════

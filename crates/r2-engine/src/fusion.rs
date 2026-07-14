@@ -53,19 +53,12 @@ impl Engine {
         let col = a.columnar();
         if !col.is_dense() { return Ok(None); } // NA present → normal path
 
-        if self.mode == ErrorMode::Strict {
-            for (o, s) in &ops {
-                if matches!(o, BinOp::Div | BinOp::Mod) && *s == 0.0 {
-                    return err!(Runtime, "division by zero");
-                }
-            }
-        }
-
         #[inline]
         fn step(op: BinOp, a: f64, b: f64) -> f64 {
             match op {
                 BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b,
-                BinOp::Div => a / b, BinOp::Pow => a.powf(b), BinOp::Mod => a % b,
+                // R: IEEE division (no zero error); %% is floored modulo.
+                BinOp::Div => a / b, BinOp::Pow => a.powf(b), BinOp::Mod => a - (a / b).floor() * b,
                 _ => a,
             }
         }

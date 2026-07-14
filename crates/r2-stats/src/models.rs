@@ -325,6 +325,8 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 .find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("family"))
                 .map(|(_, val)| val_to_str(val))
                 .unwrap_or_else(|| "gaussian".into()),
+            // R accepts the bare family function: glm(..., family = binomial)
+            RVal::BuiltinFn(name) => name.to_string(),
             _ => val_to_str(&v),
         })
         .unwrap_or_else(|| "gaussian".into());

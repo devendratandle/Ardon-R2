@@ -273,6 +273,20 @@ with the JIT — a `par.sapply` of a JIT-compiled closure runs parallel *and*
 native. Per-worker RNG streams keep resampling reproducible.
 *Queued:* chunking, and an opt-in guard against `<<-` in the mapped closure.
 
+### Differential-vs-R correctness harness — available now
+
+`tests/differential/run.sh` runs each script in `tests/differential/cases/`
+under **both** r2 and GNU R (local `Rscript`) and compares their
+`key=value` outputs numerically (1e-9 relative tolerance; strings exact).
+This is the guard rail for the project's core promise — R-faithful
+semantics: a divergence R would answer differently fails a case before it
+ships, the class of bug unit tests miss because code and test share the
+same wrong assumption. Cases are plain R scripts valid in both engines;
+RNG draws are excluded by rule (streams differ by design — cases assert
+structure, not random values). Runs locally where R is installed; CI
+stays R-free.
+*Queued:* generated/fuzzed cases; a coverage map of FUNCTIONS.md entries.
+
 > Release history → `CHANGELOG.md`. Archived phase narrative →
 > `code-history/`.
 

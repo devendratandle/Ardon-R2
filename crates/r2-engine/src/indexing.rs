@@ -103,6 +103,24 @@ impl Engine {
                     .ok_or_else(|| R2Err { msg: "subscript out of bounds".into(), kind: ErrKind::Runtime })
             }
             _ => {
+                // `v[["name"]]` on a named atomic vector: resolve the name
+                // against the names attribute (R drops names on `[[`).
+                if let RVal::Character(cv, _) = idx {
+                    if let Some(Some(name)) = cv.first() {
+                        let names = match obj {
+                            RVal::Numeric(_, at) | RVal::Character(_, at)
+                            | RVal::Integer(_, at) | RVal::Logical(_, at) => at.names.clone(),
+                            _ => None,
+                        };
+                        let pos = names.as_ref().and_then(|ns| {
+                            ns.iter().position(|n| n.as_ref() == name.as_ref())
+                        });
+                        return match pos {
+                            Some(p) => self.index_obj(obj, &[Some(rnum(p as f64 + 1.0))]),
+                            None => err!(Runtime, "subscript out of bounds: '{}'", name),
+                        };
+                    }
+                }
                 let i = self.as_reals(idx)?.first().copied().flatten().unwrap_or(0.0);
                 self.index_obj(obj, &[Some(rnum(i))])
             }

@@ -423,8 +423,11 @@ pub fn fmt_num(n: f64) -> String {
         // toward zero so 0.9999999999999998 became "0" instead of "1".
         format!("{}", n.round() as i64)
     } else {
-        // Fixed notation: smart decimal places based on magnitude
-        let decimals = if abs >= 100.0 { 4 } else if abs >= 10.0 { 5 } else if abs >= 1.0 { 6 } else { 7 };
+        // Fixed notation: 7 SIGNIFICANT digits like R's default (digits=7),
+        // so 0.03177295 keeps all 7 (the old per-magnitude table capped
+        // sub-1 values at 7 DECIMALS, silently dropping a digit for
+        // leading-zero values like 0.03…).
+        let decimals = (6 - abs.log10().floor() as i32).clamp(0, 15) as usize;
         let s = format!("{:.prec$}", n, prec = decimals);
         let s = s.trim_end_matches('0');
         let s = s.trim_end_matches('.');

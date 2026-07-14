@@ -1,0 +1,20 @@
+# Matrix elementwise arithmetic keeps dims; recycling; %*% interplay.
+m <- matrix(as.numeric(1:6), nrow = 2)
+r <- m * m
+cat("mm.ismat=", if (is.matrix(r)) 1 else 0, "\n", sep = "")
+cat("mm.e23=", r[2, 3], "\n", sep = "")
+cat("mm.sum=", sum(r), "\n", sep = "")
+cat("madd.e12=", (m + 10)[1, 2], "\n", sep = "")
+cat("mdiv.e21=", (m / 2)[2, 1], "\n", sep = "")
+cat("mpow.e22=", (m ^ 2)[2, 2], "\n", sep = "")
+v <- as.numeric(1:6)
+cat("mvec.e23=", (m * v)[2, 3], "\n", sep = "")
+X <- matrix(as.numeric(1:35), 5, 7)
+y <- as.numeric(1:5)
+b <- rep(0, 7)
+res <- y - X %*% b
+cat("vecmat.len=", length(res), "\n", sep = "")
+cat("vecmat.sum=", sum(res), "\n", sep = "")
+g <- t(X) %*% (y - X %*% b)
+cat("grad.len=", length(g), "\n", sep = "")
+cat("grad.first=", g[1], "\n", sep = "")

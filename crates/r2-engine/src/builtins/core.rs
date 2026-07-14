@@ -126,7 +126,40 @@ pub(crate) fn bi_class(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
     let names = class_names(&gv(a,0));
     Ok(RVal::Character(names.iter().map(|s| Some(Arc::from(s.as_str()))).collect(), Attrs::default()))
 }
-pub(crate) fn bi_is_na(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())), _ => Ok(rbool(false)) } }
+pub(crate) fn bi_is_na(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // R: is.na(NaN) is TRUE, and the predicate is elementwise on every
+    // atomic type (not just doubles).
+    match &gv(a,0) {
+        RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(match x { None => true, Some(d) => d.is_nan() })).collect(), Attrs::default())),
+        RVal::Integer(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
+        RVal::Logical(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
+        RVal::Character(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
+        _ => Ok(rbool(false)),
+    }
+}
+pub(crate) fn bi_is_nan(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // R: is.nan(NA) is FALSE (NA is not NaN); FALSE elementwise for
+    // non-double types.
+    match &gv(a,0) {
+        RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(matches!(x, Some(d) if d.is_nan()))).collect(), Attrs::default())),
+        other => Ok(RVal::Logical(vec![Some(false); rval_length(other).max(1)].into(), Attrs::default())),
+    }
+}
+pub(crate) fn bi_is_infinite(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match &gv(a,0) {
+        RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(matches!(x, Some(d) if d.is_infinite()))).collect(), Attrs::default())),
+        other => Ok(RVal::Logical(vec![Some(false); rval_length(other).max(1)].into(), Attrs::default())),
+    }
+}
+pub(crate) fn bi_is_finite(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // R: NA/NaN/Inf are all not finite; integers/logicals are finite unless NA.
+    match &gv(a,0) {
+        RVal::Numeric(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(matches!(x, Some(d) if d.is_finite()))).collect(), Attrs::default())),
+        RVal::Integer(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_some())).collect(), Attrs::default())),
+        RVal::Logical(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_some())).collect(), Attrs::default())),
+        other => Ok(RVal::Logical(vec![Some(false); rval_length(other).max(1)].into(), Attrs::default())),
+    }
+}
 pub(crate) fn bi_seq(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let from = e.scalar_f64(&gv(a,0))?.unwrap_or(1.0);
     let to = e.scalar_f64(&gv(a,1))?.unwrap_or(1.0);
@@ -199,7 +232,8 @@ pub(crate) fn bi_sqrt(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     let v = e.as_reals(&gv(a,0))?;
     Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Sqrt, &v).into(), Attrs::default()))
 }
-pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = if a.len() > 1 { e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) } else { 0.0 } as i32; let f = 10f64.powi(d); Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| (n*f).round()/f)).collect(), Attrs::default())) }
+// R rounds half to EVEN (IEC 60559 banker's rounding): round(2.5)=2, round(3.5)=4.
+pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = if a.len() > 1 { e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) } else { 0.0 } as i32; let f = 10f64.powi(d); Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| (n*f).round_ties_even()/f)).collect(), Attrs::default())) }
 pub(crate) fn bi_sort(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let mut n: Vec<f64> = v.into_iter().filter_map(|x| x).collect(); n.sort_by(|a,b| a.partial_cmp(b).unwrap()); Ok(rnums(&n)) }
 pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) {
     RVal::Numeric(v,_)   => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())),

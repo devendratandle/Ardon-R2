@@ -444,7 +444,7 @@ fn apply_scalar(op: ArrowBinaryOp, a: f64, b: f64) -> f64 {
         ArrowBinaryOp::Mul => a * b,
         ArrowBinaryOp::Div => a / b,
         ArrowBinaryOp::Pow => a.powf(b),
-        ArrowBinaryOp::Mod => a % b,
+        ArrowBinaryOp::Mod => a - (a / b).floor() * b, // R floored modulo
     }
 }
 
@@ -482,7 +482,7 @@ impl ColumnarF64 {
                 ArrowBinaryOp::Mul => a.iter().zip(b.iter()).map(|(&x, &y)| x * y).collect(),
                 ArrowBinaryOp::Div => a.iter().zip(b.iter()).map(|(&x, &y)| x / y).collect(),
                 ArrowBinaryOp::Pow => a.iter().zip(b.iter()).map(|(&x, &y)| x.powf(y)).collect(),
-                ArrowBinaryOp::Mod => a.iter().zip(b.iter()).map(|(&x, &y)| x % y).collect(),
+                ArrowBinaryOp::Mod => a.iter().zip(b.iter()).map(|(&x, &y)| x - (x / y).floor() * y).collect(),
             };
             return Ok(ColumnarF64::from_vec(out));
         }
@@ -528,7 +528,7 @@ impl ColumnarF64 {
                 ArrowBinaryOp::Mul => a.iter().map(|&x| x * scalar).collect(),
                 ArrowBinaryOp::Div => a.iter().map(|&x| x / scalar).collect(),
                 ArrowBinaryOp::Pow => a.iter().map(|&x| x.powf(scalar)).collect(),
-                ArrowBinaryOp::Mod => a.iter().map(|&x| x % scalar).collect(),
+                ArrowBinaryOp::Mod => a.iter().map(|&x| x - (x / scalar).floor() * scalar).collect(),
             };
             return ColumnarF64::from_vec(out);
         }

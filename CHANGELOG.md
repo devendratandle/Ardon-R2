@@ -6,6 +6,36 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
+## Unreleased
+
+**New — differential-vs-R correctness harness.** `tests/differential/run.sh`
+executes a battery of R scripts under both Ardon-R2 and GNU R and compares
+their outputs numerically. Any semantic divergence from R now fails a test
+before it can ship. Nine case files cover matrix arithmetic and metadata,
+indexing, statistics, lm/glm, data frames, strings, control flow, and
+numeric edge semantics.
+
+**Fixed — R-compatibility batch (found by the harness on its first run):**
+- `v[["name"]]` extracts from a named vector (previously an error).
+- `is.nan()`, `is.infinite()`, `is.finite()` added; `is.na()` is TRUE for
+  NaN and works elementwise on every atomic type.
+- `summary(fit)` returns the summary object, so `s <- summary(fit);
+  s$r.squared` works (printing unchanged).
+- `scale(x)` accepts a plain numeric vector (promoted to n×1, as in R).
+- Division by zero follows IEEE/R semantics: `1/0` is `Inf`, `0/0` is
+  `NaN` — no longer a runtime error.
+- `%%` is floored modulo like R (`-7 %% 3` is `2`, was `-1`), across the
+  scalar, fused, and columnar paths.
+- `round()` rounds half to even (banker's rounding): `round(2.5)` is `2`.
+- Recycling is silent when the longer length is a clean multiple of the
+  shorter (`c(1,2,3,4) + c(10,20)` works).
+- `glm(..., family = binomial)` accepts the bare family function.
+- `deviance(model)` added for lm/glm.
+- Numbers print with 7 significant digits like R (values below 1 with
+  leading zeros previously lost a digit).
+- `colnames()` / `rownames()` getters work on matrices (previously NULL
+  even when names were set).
+
 ## v0.3.7 (July 2026)
 
 **New — the JIT compiles whole iterative algorithms.** Plain R2 source

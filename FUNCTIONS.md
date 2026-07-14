@@ -1,6 +1,6 @@
 # Ardon-R2 Function Reference — 320 Built-in Functions
 
-## Core (58)
+## Core (61)
 ```
 c(...)              Create vector: c(1,2,3)
 isTRUE(x)/isFALSE(x) Test for a length-1 logical TRUE/FALSE
@@ -21,7 +21,10 @@ as.character(x)     Convert to character
 as.integer(x)       Convert to integer
 as.logical(x)       Convert to logical
 as.factor(x)        Convert to factor
-is.na(x)            Test for NA
+is.na(x)            Test for NA (TRUE for NaN too, as in R)
+is.nan(x)           Test for NaN (FALSE for NA)
+is.infinite(x)      Test for Inf/-Inf
+is.finite(x)        Test for finite values (NA/NaN/Inf are FALSE)
 is.numeric(x)       Test if numeric
 is.character(x)     Test if character
 is.logical(x)       Test if logical
@@ -353,12 +356,13 @@ Supported `par()` parameters: `mfrow`, `mfcol`, `mar`, `oma`, `cex`,
 `cex.axis`, `cex.lab`, `cex.main`, `col`, `bg`, `fg`, `lty`, `lwd`,
 `pch`, `las`, `new`. Defaults match CRAN R 4.5.x.
 
-## Model Functions (6)
+## Model Functions (7)
 ```
 predict(model,newdata)  Predict from model
 residuals(model)        Residuals
 fitted(model)           Fitted values
 coef(model)             Coefficients
+deviance(model)         Residual deviance (lm/glm)
 summary(model)          Model summary (auto-dispatch)
 plot(model)             Model diagnostic plot (auto-dispatch)
 ```

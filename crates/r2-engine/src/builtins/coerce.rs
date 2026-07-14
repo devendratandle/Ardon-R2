@@ -1001,7 +1001,10 @@ pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
                     }
                 }
             }
-            Ok(RVal::Null)
+            // R's summary() returns an object; `s <- summary(fit); s$r.squared`
+            // must work. Top-level auto-print is already suppressed (`summary`
+            // is in the console's silent set), so no double printing.
+            Ok(RVal::TypeInstance(inst.clone()))
         }
         _ => { soutln!("{}", v); Ok(RVal::Null) }
     }

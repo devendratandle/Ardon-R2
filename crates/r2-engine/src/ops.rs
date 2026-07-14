@@ -207,12 +207,6 @@ impl Engine {
                         BinOp::Mod => ArrowBinaryOp::Mod,
                         _ => unreachable!(),
                     };
-                    // Preserve strict-mode division-by-zero semantics.
-                    if (op == BinOp::Div || op == BinOp::Mod) && self.mode == ErrorMode::Strict {
-                        if b.iter().any(|x| *x == Some(0.0)) {
-                            return err!(Runtime, "division by zero");
-                        }
-                    }
                     let ac = a.columnar();
                     let bc = b.columnar();
                     let result = ac.binary(arrow_op, &bc)
@@ -234,9 +228,6 @@ impl Engine {
                             BinOp::Mod => ArrowBinaryOp::Mod,
                             _ => unreachable!(),
                         };
-                        if (op == BinOp::Div || op == BinOp::Mod) && self.mode == ErrorMode::Strict && s == 0.0 {
-                            return err!(Runtime, "division by zero");
-                        }
                         let ac = a.columnar();
                         let result = ac.binary_scalar(arrow_op, s);
                         return Ok(RVal::Numeric(Reals::from_columnar(result), Attrs::default()));
@@ -270,7 +261,10 @@ impl Engine {
 
         let l = self.as_reals(lhs)?; let r = self.as_reals(rhs)?;
         let (ll, rl) = (l.len(), r.len());
-        if ll != rl && ll != 1 && rl != 1 { if self.mode == ErrorMode::Strict { return err!(Runtime, "vectors length {} vs {} mismatch", ll, rl); } else { self.warnings.push(format!("Warning: recycling {} and {}", ll, rl)); } }
+        // R recycles silently when the longer length is a multiple of the
+        // shorter (c(1,2,3,4) + c(10,20) is legal); only a fractional
+        // recycle is worth flagging.
+        if ll != rl && ll != 1 && rl != 1 && ll.max(rl) % ll.min(rl).max(1) != 0 { if self.mode == ErrorMode::Strict { return err!(Runtime, "vectors length {} vs {} mismatch", ll, rl); } else { self.warnings.push(format!("Warning: recycling {} and {}", ll, rl)); } }
         let len = ll.max(rl);
         match op {
             BinOp::Eq|BinOp::Ne|BinOp::Lt|BinOp::Gt|BinOp::Le|BinOp::Ge => {
@@ -278,11 +272,10 @@ impl Engine {
                 Ok(RVal::Logical(r.into(), Attrs::default()))
             }
             _ => {
-                // Strict mode: division by zero check before computation
-                if (op == BinOp::Div || op == BinOp::Mod || op == BinOp::IntDiv) && self.mode == ErrorMode::Strict {
-                    if r.iter().any(|x| *x == Some(0.0)) { return err!(Runtime, "division by zero"); }
-                }
-                let r: Vec<Real> = (0..len).map(|i| { let (a,b) = (l[i%ll], r[i%rl]); match (a,b) { (Some(a),Some(b)) => Some(match op { BinOp::Add => a+b, BinOp::Sub => a-b, BinOp::Mul => a*b, BinOp::Div => a/b, BinOp::Pow => a.powf(b), BinOp::Mod => a%b, BinOp::IntDiv => (a/b).floor(), _ => 0.0 }), _ => None } }).collect(); Ok(RVal::Numeric(r.into(), Attrs::default()))
+                // R semantics: division by zero is IEEE (1/0 = Inf, 0/0 = NaN),
+                // never an error. %% is FLOORED modulo (sign of the divisor):
+                // -7 %% 3 = 2, matching R, not Rust's truncated `%`.
+                let r: Vec<Real> = (0..len).map(|i| { let (a,b) = (l[i%ll], r[i%rl]); match (a,b) { (Some(a),Some(b)) => Some(match op { BinOp::Add => a+b, BinOp::Sub => a-b, BinOp::Mul => a*b, BinOp::Div => a/b, BinOp::Pow => a.powf(b), BinOp::Mod => a - (a/b).floor()*b, BinOp::IntDiv => (a/b).floor(), _ => 0.0 }), _ => None } }).collect(); Ok(RVal::Numeric(r.into(), Attrs::default()))
             }
         }
     }

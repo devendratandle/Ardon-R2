@@ -1,0 +1,22 @@
+# Vector/matrix/list indexing: positive, negative, logical, names.
+v <- c(10, 20, 30, 40, 50)
+cat("idx.pos=", v[3], "\n", sep = "")
+cat("idx.range.sum=", sum(v[2:4]), "\n", sep = "")
+cat("idx.neg.sum=", sum(v[-1]), "\n", sep = "")
+cat("idx.neg2.len=", length(v[c(-1, -5)]), "\n", sep = "")
+cat("idx.logical.sum=", sum(v[v > 25]), "\n", sep = "")
+names(v) <- c("a", "b", "c", "d", "e")
+cat("idx.name=", v[["d"]], "\n", sep = "")
+m <- matrix(as.numeric(1:12), 3, 4)
+cat("idx.mat=", m[2, 3], "\n", sep = "")
+cat("idx.matrow.sum=", sum(m[2, ]), "\n", sep = "")
+cat("idx.matcol.sum=", sum(m[, 3]), "\n", sep = "")
+cat("idx.matneg.sum=", sum(m[-1, ]), "\n", sep = "")
+l <- list(x = 1:3, y = "hello", z = c(2.5, 3.5))
+cat("idx.listnum=", l[[1]][2], "\n", sep = "")
+cat("idx.listname=", l[["y"]], "\n", sep = "")
+cat("idx.dollar=", l$z[2], "\n", sep = "")
+v[2] <- 99
+cat("idx.assign=", v[["b"]], "\n", sep = "")
+m[1, 1] <- -5
+cat("idx.matassign=", m[1, 1], "\n", sep = "")
