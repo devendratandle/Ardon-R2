@@ -1,6 +1,6 @@
 # Ardon-R2 Function Reference — 320 Built-in Functions
 
-## Core (62)
+## Core (63)
 ```
 c(...)              Create vector: c(1,2,3)
 isTRUE(x)/isFALSE(x) Test for a length-1 logical TRUE/FALSE
@@ -42,6 +42,7 @@ setNames(x,nm)      Return x with names set
 append(x,vals,after) Insert values into a vector
 invisible(x)        Return x without auto-printing
 local(expr)         Evaluate expr in a fresh local environment
+missing(arg)        TRUE if the parameter was not supplied in the call
 switch(expr,...)    Select a branch by name or position
 with(data,expr)     Evaluate expr in data's column/element scope
 stopifnot(...)      Error unless all arguments are TRUE

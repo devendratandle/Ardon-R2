@@ -315,6 +315,17 @@ impl Engine {
 
                     // NSE for `with(data, expr)`: evaluate `expr` in a scope
                     // where `data`'s columns / list elements are bound.
+                    // `missing(arg)` — NSE: TRUE if the named parameter was not
+                    // supplied in the current call (defaulted or absent).
+                    if fname.as_ref() == "missing" && args.len() == 1 {
+                        if let Expr::Symbol(pn) = &args[0].value {
+                            let miss = env.lookup(".missing")
+                                .or_else(|| self.frames.last().and_then(|f| f.lookup(".missing")));
+                            let hit = matches!(&miss, Some(RVal::Character(v, _))
+                                if v.iter().any(|n| n.as_ref().map(|s| s.as_ref()) == Some(pn.as_ref())));
+                            return Ok(rbool(hit));
+                        }
+                    }
                     // `local(expr)` — NSE: evaluate in a FRESH child env of the
                     // current scope, so its assignments don't leak out but its
                     // closures capture the local frame (R semantics).
@@ -1247,14 +1258,24 @@ impl Engine {
                     // Record the call's argument count for nargs().
                     m.insert(Arc::from(".nargs"), RVal::Integer(vec![Some(args.len() as i32)].into(), Attrs::default()));
                 }
-                // Defaults evaluate OUTSIDE the write lock (they may recurse).
+                // R semantics: defaults evaluate lazily IN THE FUNCTION'S OWN
+                // environment, so `function(x, y = x * 2)` sees the bound `x`,
+                // and later defaults can use earlier ones (`m = n+1, p = m*2`
+                // — params are processed in declaration order). Record which
+                // params were NOT supplied first, for `missing()`.
+                let unsupplied: Vec<Option<Arc<str>>> = cl.params.iter()
+                    .filter(|p| !p.dots && !func_env.contains(p.name.as_ref()))
+                    .map(|p| Some(p.name.clone())).collect();
+                if !unsupplied.is_empty() {
+                    func_env.set(Arc::from(".missing"), RVal::Character(unsupplied, Attrs::default()));
+                }
+                self.frames.push(func_env.clone());
                 for p in cl.params.iter().filter(|p| !p.dots) {
                     if !func_env.contains(p.name.as_ref()) {
-                        let v = p.default.as_ref().and_then(|d| self.eval_in(d, env).ok()).unwrap_or(RVal::Null);
+                        let v = p.default.as_ref().and_then(|d| self.eval_in(d, &func_env).ok()).unwrap_or(RVal::Null);
                         func_env.set(p.name.clone(), v);
                     }
                 }
-                self.frames.push(func_env.clone());
                 let result = match self.eval_in(&cl.body, &func_env) { Err(R2Err { kind: ErrKind::CtrlReturn(v), .. }) => Ok(*v), r => r };
                 self.frames.pop();
                 result

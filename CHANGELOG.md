@@ -19,6 +19,12 @@ copy-on-write model cloned the global binding table on every top-level
 assignment: top-level loops run ~31× faster, function calls ~18× faster
 (release, measured on the same machine).
 
+**New — R-faithful default arguments + `missing()`.** Defaults evaluate
+in the function's own environment, so they can reference other arguments
+and chain in declaration order (`function(n, m = n + 1, p = m * 2)`), as
+in R. `missing(arg)` reports whether a parameter was supplied in the
+call.
+
 **New — differential-vs-R correctness harness.** `tests/differential/run.sh`
 executes a battery of R scripts under both Ardon-R2 and GNU R and compares
 their outputs numerically. Any semantic divergence from R now fails a test
