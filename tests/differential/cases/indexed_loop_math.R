@@ -14,3 +14,11 @@ nested <- function(x, w) { b <- 0; for (it in 1:5) { s <- 0; for (i in 1:length(
 cat("nested.loops=", nested(x, y), "\n", sep = "")
 recur <- function(c) { s <- 0; for (i in 1:length(c)) s <- s * 2 + c[i]; s }
 cat("recurrence.untouched=", recur(c(1, 2, 3, 4)), "\n", sep = "")
+# Block-bodied helper composition (J.5b): library-style std() chain.
+vmean2 <- function(x) sum(x) / length(x)
+vsd2 <- function(x) { m <- vmean2(x); s <- sqrt(sum((x - m)^2) / length(x)); if (s < 1e-12) 1 else s }
+std2 <- function(x) { m <- vmean2(x); (x - m) / vsd2(x) }
+z <- std2(x)
+cat("std.mean.iszero=", if (abs(vmean2(z)) < 1e-9) 1 else 0, "\n", sep = "")
+cat("std.sd=", vsd2(z), "\n", sep = "")
+cat("std.first=", z[1], "\n", sep = "")

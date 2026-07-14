@@ -705,6 +705,120 @@ fn inline_user_calls(e: &r2_types::Expr, env: &r2_types::EnvRef, depth: u32) -> 
     }
 }
 
+/// Phase J.5b — inline user helpers whose bodies are BLOCKS of local
+/// assignments ending in an expression: the standard addon-library style
+///   vsd <- function(x) { m <- mean(x); s <- sqrt(...); if (s < eps) 1 else s }
+/// `inline_user_calls` only handles single-expression helpers (no locals
+/// to rename); this pass alpha-renames the helper's locals with a unique
+/// prefix, hoists the renamed assignments BEFORE the statement containing
+/// the call, and replaces the call with the substituted final expression.
+/// Guards: unnamed pure-inlinable args, params without defaults/dots,
+/// every non-final statement a single-assignment `Symbol <- pure-expr`
+/// (each local assigned once), pure-inlinable final expr.
+fn inline_block_helpers(e: &r2_types::Expr, env: &r2_types::EnvRef, ctr: &mut u32, depth: u32) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    fn expand(e: &r2_types::Expr, env: &r2_types::EnvRef, pre: &mut Vec<r2_types::Expr>, ctr: &mut u32, depth: u32) -> r2_types::Expr {
+        if depth == 0 { return e.clone(); }
+        match e {
+            Call { func, args } => {
+                let new_args: Vec<r2_types::CallArg> = args.iter()
+                    .map(|a| r2_types::CallArg { name: a.name.clone(), value: expand(&a.value, env, pre, ctr, depth) })
+                    .collect();
+                if let Symbol(f) = func.as_ref() {
+                    if new_args.iter().all(|a| a.name.is_none() && is_pure_inlinable(&a.value)) {
+                        if let Some(r2_types::RVal::Closure(cl2)) = env.lookup(f) {
+                            if cl2.params.len() == new_args.len()
+                                && cl2.params.iter().all(|p| p.default.is_none() && !p.dots)
+                            {
+                                if let Block(inner) = cl2.body.as_ref() {
+                                    if let Some(expanded) = splice_block(inner, &cl2.params, &new_args, env, pre, ctr, depth) {
+                                        return expanded;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Call { func: func.clone(), args: new_args }
+            }
+            Unary { op, expr } => Unary { op: *op, expr: Box::new(expand(expr, env, pre, ctr, depth)) },
+            Binary { op, lhs, rhs } => Binary { op: *op,
+                lhs: Box::new(expand(lhs, env, pre, ctr, depth)), rhs: Box::new(expand(rhs, env, pre, ctr, depth)) },
+            If { cond, then, else_ } => If { cond: Box::new(expand(cond, env, pre, ctr, depth)),
+                then: Box::new(expand(then, env, pre, ctr, depth)),
+                else_: else_.as_ref().map(|x| Box::new(expand(x, env, pre, ctr, depth))) },
+            other => other.clone(),
+        }
+    }
+    /// Try to splice a helper body `{a <- ..; b <- ..; final}` at a call
+    /// site: renamed assigns are pushed to `pre`, the substituted final
+    /// expression is returned. None when the body doesn't fit the shape.
+    fn splice_block(inner: &[r2_types::Expr], params: &[r2_types::Param], args: &[r2_types::CallArg],
+                    env: &r2_types::EnvRef, pre: &mut Vec<r2_types::Expr>, ctr: &mut u32, depth: u32) -> Option<r2_types::Expr> {
+        if inner.len() < 2 { return None; }
+        let (last, assigns) = inner.split_last()?;
+        // shape check first (no side effects until certain)
+        let mut locals: std::collections::HashSet<std::sync::Arc<str>> = Default::default();
+        for st in assigns {
+            match st {
+                Assign { target, value, superassign: false } => match target.as_ref() {
+                    Symbol(n) if !locals.contains(n.as_ref()) && is_pure_inlinable(value) => { locals.insert(n.clone()); }
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+        if !is_pure_inlinable(last) { return None; }
+        let tag = *ctr; *ctr += 1;
+        let mut subst: std::collections::HashMap<std::sync::Arc<str>, r2_types::Expr> = Default::default();
+        for (p, a) in params.iter().zip(args.iter()) { subst.insert(p.name.clone(), a.value.clone()); }
+        for st in assigns {
+            if let Assign { target, value, .. } = st {
+                if let Symbol(n) = target.as_ref() {
+                    let renamed: std::sync::Arc<str> = std::sync::Arc::from(format!(".__ib{}_{}", tag, n));
+                    // Substitute params + earlier locals, then keep expanding
+                    // nested helpers inside the hoisted value too (both the
+                    // single-expression and block-helper kinds).
+                    let v = inline_user_calls(&substitute_symbols(value, &subst), env, 4);
+                    let v = expand(&v, env, pre, ctr, depth - 1);
+                    pre.push(Assign { target: Box::new(Symbol(renamed.clone())), value: Box::new(v), superassign: false });
+                    subst.insert(n.clone(), Symbol(renamed));
+                }
+            }
+        }
+        let fin = inline_user_calls(&substitute_symbols(last, &subst), env, 4);
+        Some(expand(&fin, env, pre, ctr, depth - 1))
+    }
+    match e {
+        Block(stmts) => {
+            let mut out: Vec<r2_types::Expr> = Vec::with_capacity(stmts.len());
+            for st in stmts {
+                let mut pre: Vec<r2_types::Expr> = Vec::new();
+                let new_st = match st {
+                    Assign { target, value, superassign } => {
+                        let v = expand(value, env, &mut pre, ctr, depth);
+                        Assign { target: target.clone(), value: Box::new(v), superassign: *superassign }
+                    }
+                    For { var, iter, body } => For { var: var.clone(), iter: iter.clone(),
+                        body: Box::new(inline_block_helpers(body, env, ctr, depth)) },
+                    While { cond, body } => While { cond: cond.clone(),
+                        body: Box::new(inline_block_helpers(body, env, ctr, depth)) },
+                    other => expand(other, env, &mut pre, ctr, depth),
+                };
+                out.extend(pre);
+                out.push(new_st);
+            }
+            Block(out)
+        }
+        // Single-expression body: hoisted assigns turn it into a Block.
+        other => {
+            let mut pre: Vec<r2_types::Expr> = Vec::new();
+            let fin = expand(other, env, &mut pre, ctr, depth);
+            if pre.is_empty() { fin } else { pre.push(fin); Block(pre) }
+        }
+    }
+}
+
 pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn r2_types::JitHandle>> {
     // Phase R.M — gate the JIT on supported architectures. On aarch64 the
     // engine falls back to the interpreter; statistical outputs are
@@ -742,7 +856,9 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
     // reductions FIRST, so every later pass (fold/map recognizers,
     // iterative kernels, reduction kernels) sees the one canonical
     // spelling and reuses the same compiled waves.
-    let inlined_body = vectorize_indexed_loops(&inline_user_calls(cl.body.as_ref(), &cl.env, 8));
+    let mut ib_ctr = 0u32;
+    let inlined_body = vectorize_indexed_loops(
+        &inline_block_helpers(&inline_user_calls(cl.body.as_ref(), &cl.env, 8), &cl.env, &mut ib_ctr, 4));
     if std::env::var("R2_JIT_DEBUG").is_ok() {
         eprintln!("[J5] normalized body: {:?}", inlined_body);
     }
