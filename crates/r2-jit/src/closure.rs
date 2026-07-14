@@ -738,7 +738,14 @@ pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn 
     // so a function composed of small numeric helpers compiles as one unit. A
     // body with no such calls is returned structurally unchanged (a clone), so
     // existing paths are unaffected. Depth-bounded → recursion falls back safely.
-    let inlined_body = inline_user_calls(cl.body.as_ref(), &cl.env, 8);
+    // Phase J.5 — normalize indexed accumulation loops into vector
+    // reductions FIRST, so every later pass (fold/map recognizers,
+    // iterative kernels, reduction kernels) sees the one canonical
+    // spelling and reuses the same compiled waves.
+    let inlined_body = vectorize_indexed_loops(&inline_user_calls(cl.body.as_ref(), &cl.env, 8));
+    if std::env::var("R2_JIT_DEBUG").is_ok() {
+        eprintln!("[J5] normalized body: {:?}", inlined_body);
+    }
 
     let param_names: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
     let free_vars = r2_ir::collect_free_vars(&inlined_body, &param_names);
@@ -1102,6 +1109,111 @@ fn expr_key(e: &r2_types::Expr) -> String {
 /// appearing in variance, sd, covariance and correlation is computed *once* —
 /// the "compute the shared primitive `d(x)`/`mean(x)` once, reuse everywhere"
 /// design made real at the machine level.
+/// Phase J.5 — loop-to-vector normalization ("same math, one kernel").
+/// Rewrites elementwise accumulation loops into the vector reductions the
+/// existing kernels already compile:
+///
+///   for (i in 1:length(x)) s <- s + EXPR(x[i], w[i], scalars, mean(x)…)
+///     ⇒  s <- s + sum(EXPR(x, w, …))
+///
+/// Guards (all must hold, else the loop is left untouched):
+///  - iterator is `1:length(v)`, or `1:n` where `n` was bound to
+///    `length(v)` earlier in the same block;
+///  - the loop body is exactly one statement `s <- s + EXPR` (Add only —
+///    order-independent, so vectorising cannot change results beyond the
+///    FP reassociation already inherent to the SIMD waves);
+///  - the index var appears ONLY as a whole-symbol subscript `vec[i]`;
+///  - the accumulator `s` is not read inside EXPR (no recurrence).
+/// Same-length requirements between subscripted vectors are enforced at
+/// call time by the kernel handles (mismatch → interpreter fallback).
+fn vectorize_indexed_loops(e: &r2_types::Expr) -> r2_types::Expr {
+    use r2_types::Expr::*;
+    fn is_one(e: &r2_types::Expr) -> bool {
+        matches!(e, NumLit(n) if *n == 1.0) || matches!(e, IntLit(1))
+    }
+    fn length_of(e: &r2_types::Expr) -> Option<std::sync::Arc<str>> {
+        if let Call { func, args } = e {
+            if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "length") && args.len() == 1 {
+                if let Symbol(v) = &args[0].value { return Some(v.clone()); }
+            }
+        }
+        None
+    }
+    // Replace `vec[i]` with `vec` (counting replacements); fail (None) if
+    // `i` or the accumulator appears any other way.
+    fn strip_index(e: &r2_types::Expr, i: &str, acc: &str, hits: &mut u32) -> Option<r2_types::Expr> {
+        match e {
+            Index { object, indices } => {
+                if let (Symbol(_), [Some(Symbol(idx))]) = (object.as_ref(), indices.as_slice()) {
+                    if idx.as_ref() == i { *hits += 1; return Some((**object).clone()); }
+                }
+                None // any other indexing shape: bail conservatively
+            }
+            Symbol(s) if s.as_ref() == i || s.as_ref() == acc => None,
+            Binary { op, lhs, rhs } => Some(Binary { op: *op,
+                lhs: Box::new(strip_index(lhs, i, acc, hits)?), rhs: Box::new(strip_index(rhs, i, acc, hits)?) }),
+            Unary { op, expr } => Some(Unary { op: *op, expr: Box::new(strip_index(expr, i, acc, hits)?) }),
+            Call { func, args } => {
+                let mut na = Vec::with_capacity(args.len());
+                for a in args { na.push(r2_types::CallArg { name: a.name.clone(), value: strip_index(&a.value, i, acc, hits)? }); }
+                Some(Call { func: func.clone(), args: na })
+            }
+            If { cond, then, else_ } => Some(If {
+                cond: Box::new(strip_index(cond, i, acc, hits)?),
+                then: Box::new(strip_index(then, i, acc, hits)?),
+                else_: match else_ { Some(x) => Some(Box::new(strip_index(x, i, acc, hits)?)), None => None } }),
+            other => Some(other.clone()),
+        }
+    }
+    fn rewrite_for(var: &std::sync::Arc<str>, iter: &r2_types::Expr, body: &r2_types::Expr,
+                   len_aliases: &std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>>) -> Option<r2_types::Expr> {
+        let ok_iter = if let Binary { op: r2_types::BinOp::Colon, lhs, rhs } = iter {
+            is_one(lhs) && (length_of(rhs).is_some()
+                || matches!(rhs.as_ref(), Symbol(n) if len_aliases.contains_key(n.as_ref())))
+        } else { false };
+        if !ok_iter { return None; }
+        let stmt = match body { Block(v) if v.len() == 1 => &v[0], b @ Assign { .. } => b, _ => return None };
+        if let Assign { target, value, superassign: false } = stmt {
+            if let (Symbol(s), Binary { op: r2_types::BinOp::Add, lhs, rhs }) = (target.as_ref(), value.as_ref()) {
+                if matches!(lhs.as_ref(), Symbol(l) if l == s) {
+                    let mut hits = 0u32;
+                    let vecexpr = strip_index(rhs, var.as_ref(), s.as_ref(), &mut hits)?;
+                    // The index must actually be used (else it's not a map).
+                    if hits == 0 { return None; }
+                    let sum = Call {
+                        func: Box::new(Symbol(std::sync::Arc::from("sum"))),
+                        args: vec![r2_types::CallArg { name: None, value: vecexpr }] };
+                    return Some(Assign { target: target.clone(),
+                        value: Box::new(Binary { op: r2_types::BinOp::Add, lhs: lhs.clone(), rhs: Box::new(sum) }),
+                        superassign: false });
+                }
+            }
+        }
+        None
+    }
+    match e {
+        Block(stmts) => {
+            let mut aliases: std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>> = Default::default();
+            let out = stmts.iter().map(|st| {
+                if let Assign { target, value, superassign: false } = st {
+                    if let (Symbol(n), Some(v)) = (target.as_ref(), length_of(value)) { aliases.insert(n.clone(), v); }
+                }
+                if let For { var, iter, body } = st {
+                    if let Some(r) = rewrite_for(var, iter, body, &aliases) { return r; }
+                }
+                vectorize_indexed_loops(st)
+            }).collect();
+            Block(out)
+        }
+        For { var, iter, body } => {
+            if let Some(r) = rewrite_for(var, iter, body, &Default::default()) { return r; }
+            For { var: var.clone(), iter: iter.clone(), body: Box::new(vectorize_indexed_loops(body)) }
+        }
+        While { cond, body } => While { cond: cond.clone(), body: Box::new(vectorize_indexed_loops(body)) },
+        other => other.clone(),
+    }
+}
+
 fn hoist_reductions(e: &r2_types::Expr, stmts: &mut Vec<r2_types::Expr>, ctr: &mut u32, seen: &mut std::collections::HashMap<String, std::sync::Arc<str>>) -> r2_types::Expr {
     use r2_types::Expr::*;
     match e {

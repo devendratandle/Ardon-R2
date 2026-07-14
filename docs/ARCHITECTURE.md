@@ -284,6 +284,18 @@ the copy-on-write snapshot model and its per-statement global re-snapshot
 workarounds — deleting them made top-level loops ~31× and calls ~18×
 faster in release. Unblocks lazy promises (queued) — same plumbing.
 
+### JIT loop-to-vector normalization (J.5) — available now
+
+Indexed accumulation loops (`for (i in 1:n) s <- s + f(x[i], w[i])`)
+normalize to `s <- s + sum(f(x, w))` before kernel routing, so loop
+spellings, one-liners, and helper-composed formulas all compile into the
+SAME shared SIMD waves — including loops nested inside J.4 iterative
+kernels and loops mixing whole-vector reductions (`mean(x)`). Guards:
+`1:length(v)` iterator (or alias), single additive accumulation, index
+used only as `vec[i]`, no accumulator recurrence; anything else falls
+back to the interpreter. See docs/MODULARITY_AUDIT.md for the
+one-formula-one-implementation audit.
+
 ### Differential-vs-R correctness harness — available now
 
 `tests/differential/run.sh` runs each script in `tests/differential/cases/`

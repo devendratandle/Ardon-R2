@@ -19,6 +19,13 @@ copy-on-write model cloned the global binding table on every top-level
 assignment: top-level loops run ~31× faster, function calls ~18× faster
 (release, measured on the same machine).
 
+**New — JIT compiles indexed-loop math (J.5).** Textbook loops like
+`for (i in 1:n) s <- s + (x[i] - mean(x))^2` now JIT-compile by
+normalizing to their vector form, reusing the same SIMD kernels as the
+one-line formulas — nested loops inside iterative kernels and two-vector
+dot/weighted-sum loops included. Scalar recurrences and anything outside
+the guarded shape still fall back safely.
+
 **New — R-faithful default arguments + `missing()`.** Defaults evaluate
 in the function's own environment, so they can reference other arguments
 and chain in declaration order (`function(n, m = n + 1, p = m * 2)`), as
