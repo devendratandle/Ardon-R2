@@ -143,19 +143,13 @@ fn split_by_group(values: &[f64], group: &RVal) -> Result<(String, Vec<f64>, Str
     Ok((levels[0].clone(), g1, levels[1].clone(), g2))
 }
 
-/// Pearson correlation between two equal-length slices.
+/// Pearson correlation between two equal-length slices — delegates to
+/// the shared centred-moment primitive so cor.test, cor(), and cor(X)
+/// agree numerically by construction.
 fn pearson_r(x: &[f64], y: &[f64]) -> f64 {
-    let n = x.len().min(y.len());
-    if n < 2 { return f64::NAN; }
-    let nf = n as f64;
-    let mx = x.iter().take(n).sum::<f64>() / nf;
-    let my = y.iter().take(n).sum::<f64>() / nf;
-    let mut sxy = 0.0; let mut sxx = 0.0; let mut syy = 0.0;
-    for i in 0..n {
-        let dx = x[i] - mx; let dy = y[i] - my;
-        sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
-    }
-    if sxx > 0.0 && syy > 0.0 { sxy / (sxx * syy).sqrt() } else { f64::NAN }
+    if x.len().min(y.len()) < 2 { return f64::NAN; }
+    let (_, _, _, sxx, syy, sxy) = crate::moments::centred2_dense(x, y);
+    crate::moments::pearson_from(sxx, syy, sxy)
 }
 
 fn welch_two_sample(

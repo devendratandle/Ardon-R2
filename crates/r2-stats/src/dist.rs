@@ -246,8 +246,8 @@ pub fn bi_density(a: &[EvalArg]) -> Result<RVal, R2Err> {
         return Err(R2Err { msg: "density: need a non-empty numeric vector".into(), kind: ErrKind::Runtime });
     }
     let n = x.len() as f64;
-    let mean = x.iter().sum::<f64>() / n;
-    let sd = (x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0)).sqrt();
+    let (_, _, sxx) = crate::moments::centred1_dense(&x);
+    let sd = (sxx / (n - 1.0).max(1.0)).sqrt();
     let h = (0.9 * sd * n.powf(-0.2)).max(1e-6); // Silverman's rule of thumb
     let xmin = x.iter().cloned().fold(f64::INFINITY, f64::min);
     let xmax = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);

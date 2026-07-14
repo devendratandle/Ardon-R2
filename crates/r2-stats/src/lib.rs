@@ -45,6 +45,7 @@ pub fn __rout(s: &str) { r2_types::out::rout(s); }
 pub fn __rerr(s: &str) { r2_types::out::rerr(s); }
 
 pub mod dist;
+pub mod moments;
 pub mod summary;
 pub mod htest;
 pub mod models;

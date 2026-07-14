@@ -260,9 +260,10 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     for i in 0..n { for j in 0..p { fitted[i] += x_mat.get(i, j) * coeffs[j]; } }
     let residuals: Vec<f64> = y_vec.iter().zip(fitted.iter()).map(|(y, yhat)| y - yhat).collect();
 
-    let y_mean = y_vec.iter().sum::<f64>() / n as f64;
     let ss_res: f64 = residuals.iter().map(|r| r * r).sum();
-    let ss_tot: f64 = y_vec.iter().map(|y| (y - y_mean).powi(2)).sum();
+    // Total SS via the shared centred-moment primitive (same numerics as
+    // sd/var/cor everywhere else).
+    let (_, _, ss_tot) = crate::moments::centred1_dense(&y_vec);
     let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
     let adj_r2 = if n > p { 1.0 - (1.0 - r_squared) * (n - 1) as f64 / (n - p) as f64 } else { 0.0 };
     let rse = if n > p { (ss_res / (n - p) as f64).sqrt() } else { 0.0 };

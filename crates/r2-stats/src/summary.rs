@@ -7,23 +7,16 @@ use r2_types::{Attrs, ErrKind, EvalArg, Matrix, R2Err, RVal, Real};
 
 /// `cor(X)` for a matrix — the p×p Pearson correlation matrix (column-major).
 fn cor_matrix(m: &Matrix) -> RVal {
+    // Column-pair Pearson via the shared centred-moment primitive — the
+    // same numerics as cor(x, y) and cor.test, by construction.
     let (n, p) = (m.nrow, m.ncol);
-    let nf = n as f64;
-    let mut means = vec![0.0f64; p];
-    let mut sds = vec![0.0f64; p];
-    for j in 0..p {
-        let col = &m.data[j * n..j * n + n];
-        let mean = col.iter().sum::<f64>() / nf;
-        let var = col.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (nf - 1.0);
-        means[j] = mean; sds[j] = var.sqrt();
-    }
     let mut out = vec![0.0f64; p * p];
     for i in 0..p {
         for j in i..p {
             let ci = &m.data[i * n..i * n + n];
             let cj = &m.data[j * n..j * n + n];
-            let cov = ci.iter().zip(cj).map(|(x, y)| (x - means[i]) * (y - means[j])).sum::<f64>() / (nf - 1.0);
-            let r = if sds[i] == 0.0 || sds[j] == 0.0 { f64::NAN } else { cov / (sds[i] * sds[j]) };
+            let (_, _, _, sxx, syy, sxy) = crate::moments::centred2_dense(ci, cj);
+            let r = crate::moments::pearson_from(sxx, syy, sxy);
             out[j * p + i] = r; out[i * p + j] = r;
         }
     }
@@ -54,36 +47,26 @@ pub fn bi_cor(a: &[EvalArg]) -> Result<RVal, R2Err> {
     if let RVal::Matrix(m) = first(a) {
         if matches!(nth(a, 1), RVal::Null) { return Ok(cor_matrix(&m)); }
     }
+    // One implementation of the centred-moment math (crate::moments) is
+    // shared by cor/cov/cor-matrix/cor.test — accuracy consistency rule.
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
-    let pairs: Vec<(f64, f64)> = x.iter().zip(y.iter())
-        .filter_map(|(a, b)| match (a, b) { (Some(a), Some(b)) => Some((*a, *b)), _ => None })
-        .collect();
-    let n = pairs.len() as f64;
-    if n < 2.0 { return Ok(rna()); }
-    let mx = pairs.iter().map(|(a, _)| a).sum::<f64>() / n;
-    let my = pairs.iter().map(|(_, b)| b).sum::<f64>() / n;
-    let cov = pairs.iter().map(|(a, b)| (a - mx) * (b - my)).sum::<f64>() / (n - 1.0);
-    let sx = (pairs.iter().map(|(a, _)| (a - mx).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
-    let sy = (pairs.iter().map(|(_, b)| (b - my).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
-    if sx == 0.0 || sy == 0.0 { Ok(rna()) } else { Ok(rnum(cov / (sx * sy))) }
+    match crate::moments::centred2_pairwise(&x, &y) {
+        Some((_, _, _, sxx, syy, sxy)) => {
+            let r = crate::moments::pearson_from(sxx, syy, sxy);
+            if r.is_nan() { Ok(rna()) } else { Ok(rnum(r)) }
+        }
+        None => Ok(rna()),
+    }
 }
 
 pub fn bi_cov(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
-    let pairs: Vec<(f64, f64)> = x.iter().zip(y.iter())
-        .filter_map(|(a, b)| match (a, b) { (Some(a), Some(b)) => Some((*a, *b)), _ => None })
-        .collect();
-    let n = pairs.len();
-    if n < 2 { return Ok(rna()); }
-    let nf = n as f64;
-    let (sx, sy) = pairs.iter()
-        .fold((0.0_f64, 0.0_f64), |(ax, ay), (bx, by)| (ax + bx, ay + by));
-    let mx = sx / nf;
-    let my = sy / nf;
-    let cov = pairs.iter().map(|(a, b)| (a - mx) * (b - my)).sum::<f64>() / (nf - 1.0);
-    Ok(rnum(cov))
+    match crate::moments::centred2_pairwise(&x, &y) {
+        Some((n, _, _, _, _, sxy)) => Ok(rnum(crate::moments::cov_from(n, sxy))),
+        None => Ok(rna()),
+    }
 }
 
 pub fn bi_diff(a: &[EvalArg]) -> Result<RVal, R2Err> {
