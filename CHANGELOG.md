@@ -8,6 +8,17 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## Unreleased
 
+**New — mutable environments (R's environment semantics).** Environments
+are now live, shared objects rather than snapshots. Everything built on
+them works as in R: stateful closures (`make_counter()` factories,
+accumulators), `<<-` from any nesting depth using R's lexical rule
+(rebind in the nearest enclosing frame that has the name, else global),
+independent per-call factory environments, and the new `local(expr)`.
+As a direct consequence the interpreter got dramatically faster — the old
+copy-on-write model cloned the global binding table on every top-level
+assignment: top-level loops run ~31× faster, function calls ~18× faster
+(release, measured on the same machine).
+
 **New — differential-vs-R correctness harness.** `tests/differential/run.sh`
 executes a battery of R scripts under both Ardon-R2 and GNU R and compares
 their outputs numerically. Any semantic divergence from R now fails a test

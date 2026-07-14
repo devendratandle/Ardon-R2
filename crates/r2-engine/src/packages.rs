@@ -215,7 +215,7 @@ fn try_load_from_disk(e: &mut Engine, name: &str) -> Result<bool, R2Err> {
             .map_err(|pe| R2Err { msg: format!("error parsing package '{}': {}", name, pe), kind: ErrKind::Runtime })?;
 
         // Snapshot: record existing global names BEFORE eval
-        let before: Vec<Arc<str>> = e.global_env.bindings.keys().cloned().collect();
+        let before: Vec<Arc<str>> = e.global_env.bindings.read().unwrap().keys().cloned().collect();
 
         // Evaluate all statements — assignments go directly into global_env
         let env = e.global_env.clone();
@@ -232,7 +232,7 @@ fn try_load_from_disk(e: &mut Engine, name: &str) -> Result<bool, R2Err> {
 
         // Diff: find NEW bindings that are closures
         let mut exports = Vec::new();
-        for (fname, fval) in &e.global_env.bindings {
+        for (fname, fval) in e.global_env.bindings.read().unwrap().iter() {
             if !before.contains(fname) && matches!(fval, RVal::Closure(_)) {
                 if e.registry.is_core(fname) {
                     return err!(Runtime, "package '{}' cannot mask core function '{}'", name, fname);
@@ -296,7 +296,7 @@ fn load_r2pkg_layout(e: &mut Engine, name: &str, pkg_root: &std::path::Path) -> 
     let stmts = r2_parser::Parser::parse(&all_source)
         .map_err(|pe| R2Err { msg: format!("error parsing package '{}': {}", name, pe), kind: ErrKind::Runtime })?;
 
-    let before: Vec<Arc<str>> = e.global_env.bindings.keys().cloned().collect();
+    let before: Vec<Arc<str>> = e.global_env.bindings.read().unwrap().keys().cloned().collect();
     let methods_before: std::collections::HashSet<(Arc<str>, Arc<str>)> =
         e.methods.keys().cloned().collect();
     let env = e.global_env.clone();
@@ -324,7 +324,7 @@ fn load_r2pkg_layout(e: &mut Engine, name: &str, pkg_root: &std::path::Path) -> 
             // A package may export functions (Closure), types (TypeDef), or
             // methods (registered in e.methods).
             let is_fn_or_type = matches!(
-                e.global_env.bindings.get(&key),
+                e.global_env.bindings.read().unwrap().get(&key),
                 Some(RVal::Closure(_)) | Some(RVal::TypeDef(_))
             );
             if is_fn_or_type || new_method_names.contains(ex) {
@@ -335,7 +335,7 @@ fn load_r2pkg_layout(e: &mut Engine, name: &str, pkg_root: &std::path::Path) -> 
         }
     } else {
         // Auto-export: every new function/type binding, plus every method.
-        for (fname, fval) in &e.global_env.bindings {
+        for (fname, fval) in e.global_env.bindings.read().unwrap().iter() {
             if !before.contains(fname) && matches!(fval, RVal::Closure(_) | RVal::TypeDef(_)) {
                 exports.push(fname.to_string());
             }

@@ -118,23 +118,69 @@ pub struct TypeInstance {
 
 pub type EnvRef = Arc<Env>;
 
-#[derive(Debug, Clone)]
+/// Environments are R's mutable scope objects: a frame of bindings plus a
+/// parent pointer. Interior mutability (RwLock) makes every `EnvRef` a LIVE
+/// reference — a closure that captured its defining environment sees (and
+/// can mutate, via `<<-`) the same frame on every call. This is what makes
+/// stateful closures (counters, accumulators, factories) work like R.
+#[derive(Debug)]
 pub struct Env {
     pub name: Option<Arc<str>>,
-    pub bindings: HashMap<Arc<str>, RVal>,
+    pub bindings: std::sync::RwLock<HashMap<Arc<str>, RVal>>,
     pub parent: Option<EnvRef>,
     pub locked: bool,
 }
 
+impl Clone for Env {
+    fn clone(&self) -> Self {
+        Env {
+            name: self.name.clone(),
+            bindings: std::sync::RwLock::new(self.bindings.read().unwrap().clone()),
+            parent: self.parent.clone(),
+            locked: self.locked,
+        }
+    }
+}
+
 impl Env {
     pub fn new_global() -> EnvRef {
-        Arc::new(Env { name: Some(Arc::from(".GlobalEnv")), bindings: HashMap::new(), parent: None, locked: false })
+        Arc::new(Env { name: Some(Arc::from(".GlobalEnv")), bindings: std::sync::RwLock::new(HashMap::new()), parent: None, locked: false })
     }
     pub fn new_child(parent: EnvRef, name: Option<&str>) -> EnvRef {
-        Arc::new(Env { name: name.map(Arc::from), bindings: HashMap::new(), parent: Some(parent), locked: false })
+        Arc::new(Env { name: name.map(Arc::from), bindings: std::sync::RwLock::new(HashMap::new()), parent: Some(parent), locked: false })
     }
-    pub fn lookup(&self, name: &str) -> Option<&RVal> {
-        self.bindings.get(name).or_else(|| self.parent.as_ref().and_then(|p| p.lookup(name)))
+    /// Walk the scope chain; clone the value out (bindings live behind a lock).
+    pub fn lookup(&self, name: &str) -> Option<RVal> {
+        if let Some(v) = self.bindings.read().unwrap().get(name) { return Some(v.clone()); }
+        self.parent.as_ref().and_then(|p| p.lookup(name))
+    }
+    /// Bind `name` in THIS frame (R's `<-` inside the owning scope).
+    pub fn set(&self, name: Arc<str>, val: RVal) {
+        self.bindings.write().unwrap().insert(name, val);
+    }
+    /// R's `<<-`: rebind where `name` is found in the ENCLOSING chain
+    /// (starting at this frame's parent). Returns false if not found —
+    /// the caller then binds in the global environment, as R does.
+    pub fn set_in_enclosing(&self, name: &Arc<str>, val: &RVal) -> bool {
+        let mut cur = self.parent.clone();
+        while let Some(e) = cur {
+            if e.bindings.read().unwrap().contains_key(name.as_ref()) {
+                e.bindings.write().unwrap().insert(name.clone(), val.clone());
+                return true;
+            }
+            cur = e.parent.clone();
+        }
+        false
+    }
+    pub fn contains(&self, name: &str) -> bool {
+        self.bindings.read().unwrap().contains_key(name)
+    }
+    pub fn remove(&self, name: &str) -> Option<RVal> {
+        self.bindings.write().unwrap().remove(name)
+    }
+    /// Snapshot of the frame's own names (for ls()/exists()).
+    pub fn own_names(&self) -> Vec<Arc<str>> {
+        self.bindings.read().unwrap().keys().cloned().collect()
     }
 }
 

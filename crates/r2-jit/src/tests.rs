@@ -681,10 +681,9 @@
     #[test]
     fn closure_capture_scalar_baked_in() {
         // env { scale = 2.5 }, function(x) x * scale
-        let mut env = std::sync::Arc::make_mut(&mut Env::new_global().clone()).clone();
-        env.bindings.insert(Arc::from("scale"),
+        let env = Env::new_global();
+        env.set(Arc::from("scale"),
             RVal::Numeric(vec![Some(2.5)].into(), Default::default()));
-        let env = std::sync::Arc::new(env);
 
         let body = Expr::Binary {
             op: BinOp::Mul,

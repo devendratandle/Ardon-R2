@@ -407,7 +407,7 @@ pub(crate) fn bi_save(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     } else {
         // Session save — all variables
         let mut count = 0;
-        for (name, val) in &e.global_env.bindings {
+        for (name, val) in e.global_env.bindings.read().unwrap().iter() {
             if matches!(name.as_ref(), "iris" | "mtcars" | "airquality") { continue; }
             let serialized = serialize_rval(val);
             if !serialized.is_empty() {

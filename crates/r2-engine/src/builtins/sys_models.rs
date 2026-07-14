@@ -746,7 +746,7 @@ pub(crate) fn bi_message(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
 }
 
 pub(crate) fn bi_ls(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let names: Vec<Character> = e.global_env.bindings.keys()
+    let names: Vec<Character> = e.global_env.bindings.read().unwrap().keys()
         .map(|k| Some(k.clone()))
         .collect();
     Ok(RVal::Character(names, Attrs::default()))
@@ -756,7 +756,7 @@ pub(crate) fn bi_rm(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R
     let name = match &gv(a,0) { RVal::Character(v,_) => v[0].as_ref().map(|s| s.to_string()).unwrap_or_default(), _ => return err!(Runtime, "rm needs name") };
     let mut binding = e.global_env.clone();
     let g = Arc::make_mut(&mut binding);
-    g.bindings.remove(name.as_str());
+    g.bindings.write().unwrap().remove(name.as_str());
     e.global_env = Arc::new(g.clone());
     Ok(RVal::Null)
 }

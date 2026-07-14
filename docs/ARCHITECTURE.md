@@ -273,6 +273,17 @@ with the JIT — a `par.sapply` of a JIT-compiled closure runs parallel *and*
 native. Per-worker RNG streams keep resampling reproducible.
 *Queued:* chunking, and an opt-in guard against `<<-` in the mapped closure.
 
+### Mutable environments — available now
+
+`Env` carries interior-mutable bindings (`RwLock<HashMap>`); every
+`EnvRef` is a live reference, so a closure that captured its defining
+frame sees and mutates the ORIGINAL frame — R's environment model.
+Function calls push a real child env (frame stack); `<<-` walks the
+lexical chain; `local()` evaluates in a fresh child frame. This replaced
+the copy-on-write snapshot model and its per-statement global re-snapshot
+workarounds — deleting them made top-level loops ~31× and calls ~18×
+faster in release. Unblocks lazy promises (queued) — same plumbing.
+
 ### Differential-vs-R correctness harness — available now
 
 `tests/differential/run.sh` runs each script in `tests/differential/cases/`

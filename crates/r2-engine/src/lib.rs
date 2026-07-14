@@ -100,9 +100,12 @@ pub struct Engine {
     types: HashMap<Arc<str>, TypeDef>,
     methods: HashMap<(Arc<str>, Arc<str>), Method>,
     pub(crate) warnings: Vec<String>,
-    /// Lightweight local scope stack for function scoping.
-    /// Each entry is a simple HashMap — no Arc overhead.
-    local_scopes: Vec<HashMap<Arc<str>, RVal>>,
+    /// Call-frame stack: one live environment per active function call.
+    /// Frames are real `Env`s (interior-mutable), so a closure defined in a
+    /// frame captures it by reference and `<<-` mutates the ORIGINAL frame —
+    /// R's environment semantics. The stack tracks call depth and the
+    /// current write target; lookup goes through the env chain.
+    frames: Vec<EnvRef>,
     /// JIT cache keyed by closure body's Arc pointer (Phase C.2).
     /// Value is `None` when compilation has been tried and rejected,
     /// `Some(handle)` when a callable specialization exists.
@@ -180,12 +183,11 @@ pub use r2_types::{R2Err, ErrKind};
 pub(crate) fn gv(args: &[EvalArg], i: usize) -> RVal { args.get(i).map(|a| a.value.clone()).unwrap_or(RVal::Null) }
 pub(crate) fn gn(args: &[EvalArg], name: &str) -> Option<RVal> { args.iter().find(|a| a.name.as_ref().map(|n| n.as_ref()) == Some(name)).map(|a| a.value.clone()) }
 
-/// Helper: mutate an Arc<Env> safely — avoids temporary-dropped-while-borrowed
+/// Bind in-place: `Env` is interior-mutable, so writes are visible through
+/// every Arc alias of the environment (closures, the frame stack, `env`
+/// parameters held by callers) — no copy-on-write detachment.
 pub(crate) fn env_insert(env: &mut EnvRef, name: Arc<str>, val: RVal) {
-    let mut binding = env.clone();
-    let g = Arc::make_mut(&mut binding);
-    g.bindings.insert(name, val);
-    *env = Arc::new(g.clone());
+    env.set(name, val);
 }
 
 fn mkpkg(name: &str, tier: PackageTier, fns: Vec<(&str, BuiltinFn)>) -> PackageLayer {
@@ -221,11 +223,10 @@ impl Engine {
             types: self.types.clone(),
             methods: self.methods.clone(),
             warnings: Vec::new(),
-            // Carry the caller's lexical scope stack (a cheap clone; RVals are
-            // Arc-backed) so a mapped closure can still see enclosing-function
-            // locals — e.g. a nested `fit_once` defined in the calling
-            // function. Owned per worker ⇒ no shared mutation, no race.
-            local_scopes: self.local_scopes.clone(),
+            // Carry the caller's frame stack (Arc clones — frames are shared
+            // live envs guarded by RwLock) so a mapped closure still sees
+            // enclosing-function locals. Pure map closures only read.
+            frames: self.frames.clone(),
             jit_cache: HashMap::new(),
             jit_enabled: self.jit_enabled,
             nse_stack: Vec::new(),
@@ -292,7 +293,7 @@ impl Engine {
             },
             installed: HashMap::new(),
             types: HashMap::new(), methods: HashMap::new(), warnings: Vec::new(),
-            local_scopes: Vec::new(),
+            frames: Vec::new(),
             jit_cache: HashMap::new(),
             jit_enabled: std::env::var("R2_JIT").map(|v| v != "0").unwrap_or(true),
             nse_stack: Vec::new(),
@@ -308,19 +309,15 @@ impl Engine {
         e.registry.add_layer(mkpkg("utils", PackageTier::Base, registry_tables::utils_table()));
 
         // ── DATASETS ─────────────────────────────────────────────────
-        let mut binding = e.global_env.clone();
-        let g = Arc::make_mut(&mut binding);
-        r2_base::register_datasets(&mut g.bindings);
+        r2_base::register_datasets(&mut e.global_env.bindings.write().unwrap());
 
         // ── BUILT-IN CONSTANTS (Phase R.M.1) ─────────────────────────
         // R-compatible numeric constants. Users write `pi`, `Inf`, `NaN`
         // and they resolve to these without needing a function call.
         let scalar = |x: f64| RVal::Numeric(vec![Some(x)].into(), Attrs::default());
-        g.bindings.insert(Arc::from("pi"),  scalar(std::f64::consts::PI));
-        g.bindings.insert(Arc::from("Inf"), scalar(f64::INFINITY));
-        g.bindings.insert(Arc::from("NaN"), scalar(f64::NAN));
-
-        e.global_env = Arc::new(g.clone());
+        e.global_env.set(Arc::from("pi"),  scalar(std::f64::consts::PI));
+        e.global_env.set(Arc::from("Inf"), scalar(f64::INFINITY));
+        e.global_env.set(Arc::from("NaN"), scalar(f64::NAN));
         e
     }
 
@@ -354,12 +351,9 @@ impl Engine {
         let result = self.registry.remove_layer(name)?;
 
         // For addon packages: remove their functions + types from global env
-        let mut binding = self.global_env.clone();
-        let g = Arc::make_mut(&mut binding);
         for fname in &exports {
-            g.bindings.remove(fname.as_str());
+            self.global_env.remove(fname.as_str());
         }
-        self.global_env = Arc::new(g.clone());
 
         // Drop any types and methods the package contributed, so a detached
         // package leaves no type/method dispatch behind.
@@ -384,28 +378,25 @@ impl Engine {
     pub(crate) fn to_items(&self, obj: &RVal) -> Result<Vec<RVal>, R2Err> { match obj { RVal::Integer(v,_) => Ok(v.iter().map(|x| RVal::Integer(vec![*x].into(),Attrs::default())).collect()), RVal::Numeric(v,_) => Ok(v.iter().map(|x| RVal::Numeric(vec![*x].into(),Attrs::default())).collect()), RVal::Character(v,_) => Ok(v.iter().map(|x| RVal::Character(vec![x.clone()],Attrs::default())).collect()), RVal::List(v) => Ok(v.iter().map(|(_,val)| val.clone()).collect()), RVal::DataFrame(df) => Ok(df.columns.iter().map(|(_,val)| val.clone()).collect()), _ => err!(Runtime,"cannot iterate over {}",obj.type_name()) } }
     pub fn drain_warnings(&mut self) -> Vec<String> { std::mem::take(&mut self.warnings) }
 
-    /// Insert into the correct scope: local (inside function) or global (top-level)
+    /// Insert into the correct scope: the current call frame (inside a
+    /// function) or the global environment (top level). Writes are in-place;
+    /// every holder of the env Arc sees them immediately.
     fn scope_insert(&mut self, name: Arc<str>, val: RVal) {
-        if let Some(scope) = self.local_scopes.last_mut() {
-            scope.insert(name, val);
-        } else {
-            env_insert(&mut self.global_env, name, val);
+        match self.frames.last() {
+            Some(f) => f.set(name, val),
+            None => self.global_env.set(name, val),
         }
     }
 
-    /// `<<-` superassignment: update the variable in the nearest ENCLOSING
-    /// local scope that already has it (skipping the current frame), else
-    /// assign it in the global environment. (R's `<<-` semantics.)
+    /// `<<-` superassignment — R's LEXICAL rule: rebind where the name is
+    /// found walking the current frame's ENCLOSING environment chain (the
+    /// closure capture chain, not the dynamic call stack); if absent all
+    /// the way up, bind in the global environment.
     fn super_assign(&mut self, name: Arc<str>, val: RVal) {
-        let top = self.local_scopes.len();
-        // Enclosing frames are everything below the current (top) one.
-        for idx in (0..top.saturating_sub(1)).rev() {
-            if self.local_scopes[idx].contains_key(name.as_ref()) {
-                self.local_scopes[idx].insert(name, val);
-                return;
-            }
+        if let Some(f) = self.frames.last() {
+            if f.set_in_enclosing(&name, &val) { return; }
         }
-        env_insert(&mut self.global_env, name, val);
+        self.global_env.set(name, val);
     }
 
 }

@@ -35,14 +35,12 @@ impl Engine {
             Expr::NaLit => Ok(rna()), Expr::NullLit => Ok(RVal::Null),
             Expr::FStringLit(parts) => { let mut r = String::new(); for p in parts { match p { FStringPart::Literal(s) => r.push_str(s), FStringPart::Expr(e) => { let v = self.eval_in(e, env)?; r.push_str(&val_to_str(&v)); } } } Ok(rstr(&r)) }
             Expr::Symbol(name) => {
-                // 1. Check local scope stack (function-local variables)
-                for scope in self.local_scopes.iter().rev() {
-                    if let Some(val) = scope.get(name.as_ref()) { return Ok(val.clone()); }
-                }
-                // 2. Check env chain (parameters, closures)
-                if let Some(val) = env.lookup(name) { Ok(val.clone()) }
-                // 3. Check global env (top-level assignments, datasets)
-                else if let Some(val) = self.global_env.lookup(name) { Ok(val.clone()) }
+                // 1. Current call frame — locals + args live in the frame env,
+                //    which is the head of the lexical chain.
+                // 2. Env chain (enclosing closures → global root).
+                if let Some(val) = env.lookup(name) { Ok(val) }
+                // 3. Global env (for envs not rooted there, e.g. package envs)
+                else if let Some(val) = self.global_env.lookup(name) { Ok(val) }
                 // 4. Check builtins
                 else if self.registry.resolve(name.as_ref()).is_some() { Ok(RVal::BuiltinFn(name.clone())) }
                 // ..1, ..2, … — the N-th element of the captured `...`.
@@ -198,8 +196,8 @@ impl Engine {
                                 let child = Arc::new(Env {
                                     name: Some(Arc::from(".subset.env")),
                                     parent: Some(env.clone()),
-                                    bindings: df.columns.iter()
-                                        .map(|(n, v)| (n.clone(), v.clone())).collect(),
+                                    bindings: std::sync::RwLock::new(df.columns.iter()
+                                        .map(|(n, v)| (n.clone(), v.clone())).collect()),
                                     locked: false,
                                 });
                                 let f = self.eval_in(func, env)?;
@@ -241,9 +239,8 @@ impl Engine {
                             }
                         }
                         for nm in &to_remove {
-                            for scope in self.local_scopes.iter_mut() { scope.remove(nm.as_ref()); }
-                            let g = Arc::make_mut(&mut self.global_env);
-                            g.bindings.remove(nm.as_ref());
+                            for frame in &self.frames { frame.remove(nm.as_ref()); }
+                            self.global_env.remove(nm.as_ref());
                         }
                         return Ok(RVal::Null);
                     }
@@ -318,18 +315,28 @@ impl Engine {
 
                     // NSE for `with(data, expr)`: evaluate `expr` in a scope
                     // where `data`'s columns / list elements are bound.
+                    // `local(expr)` — NSE: evaluate in a FRESH child env of the
+                    // current scope, so its assignments don't leak out but its
+                    // closures capture the local frame (R semantics).
+                    if fname.as_ref() == "local" && args.len() == 1 && self.registry.resolve("local").is_none() {
+                        let child = Env::new_child(env.clone(), Some(".local.env"));
+                        self.frames.push(child.clone());
+                        let r = self.eval_in(&args[0].value, &child);
+                        self.frames.pop();
+                        return r;
+                    }
                     if fname.as_ref() == "with" && args.len() >= 2 {
                         let data = self.eval_in(&args[0].value, env)?;
                         let child = Arc::new(Env {
                             name: Some(Arc::from(".with.env")),
                             parent: Some(env.clone()),
-                            bindings: match &data {
+                            bindings: std::sync::RwLock::new(match &data {
                                 RVal::DataFrame(df) =>
                                     df.columns.iter().map(|(n, v)| (n.clone(), v.clone())).collect(),
                                 RVal::List(items) => items.iter()
                                     .filter_map(|(n, v)| n.clone().map(|nm| (nm, v.clone()))).collect(),
                                 _ => Default::default(),
-                            },
+                            }),
                             locked: false,
                         });
                         return self.eval_in(&args[1].value, &child);
@@ -398,7 +405,7 @@ impl Engine {
                         let child = Arc::new(Env {
                             name: Some(Arc::from(".curve.env")),
                             parent: Some(env.clone()),
-                            bindings: std::iter::once((Arc::from("x"), xs_val.clone())).collect(),
+                            bindings: std::sync::RwLock::new(std::iter::once((Arc::from("x"), xs_val.clone())).collect()),
                             locked: false,
                         });
                         let mut y_val = self.eval_in(&args[0].value, &child)?;
@@ -758,115 +765,42 @@ impl Engine {
             }
             Expr::If { cond, then, else_ } => { let c = self.eval_in(cond, env)?; if self.truthy(&c)? { self.eval_in(then, env) } else if let Some(e) = else_ { self.eval_in(e, env) } else { Ok(RVal::Null) } }
             Expr::For { var, iter, body } => {
-                // Phase R.T.4-fix — top-level for-loops must re-snapshot env
-                // from `self.global_env` each iteration, because subscript
-                // assignments (`x[i] <- ...`) write through `env_insert` which
-                // replaces the Arc; the body's captured env would otherwise
-                // see the pre-loop value of every variable on each iteration.
-                // Inside function bodies, writes go to `local_scopes`, which
-                // Symbol-lookup checks first, so the original env still works.
+                // Environments are interior-mutable: assignments write into
+                // the live env, so the body always sees prior writes through
+                // the same Arc — no re-snapshot machinery needed.
                 let iv = self.eval_in(iter, env)?;
-                let at_top_level = self.local_scopes.is_empty();
-                'each_item: for item in self.to_items(&iv)? {
+                for item in self.to_items(&iv)? {
                     self.scope_insert(var.clone(), item);
-                    if at_top_level {
-                        // Re-snapshot global_env before EACH statement. A single
-                        // per-iteration snapshot made a variable that is both
-                        // ASSIGNED and READ in the same iteration read its stale
-                        // (previous-iteration) value, because a top-level
-                        // assignment replaces the env's Arc and the snapshot
-                        // kept pointing at the old one. Cloning per statement
-                        // makes prior assignments in this iteration visible.
-                        let stmts: &[Expr] = match body.as_ref() {
-                            Expr::Block(s) => s,
-                            single => std::slice::from_ref(single),
-                        };
-                        for stmt in stmts {
-                            let genv = self.global_env.clone();
-                            match self.eval_in(stmt, &genv) {
-                                Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break 'each_item,
-                                Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue 'each_item,
-                                Err(e) => return Err(e),
-                                _ => {}
-                            }
-                        }
-                    } else {
-                        match self.eval_in(body, env) {
-                            Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
-                            Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
-                            Err(e) => return Err(e),
-                            _ => {}
-                        }
+                    match self.eval_in(body, env) {
+                        Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
+                        Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
+                        Err(e) => return Err(e),
+                        _ => {}
                     }
                 }
                 Ok(RVal::Null)
             }
             Expr::While { cond, body } => {
-                // Same top-level re-snapshot rule as For: re-clone global_env
-                // before the condition AND before each body statement, so an
-                // assigned-then-read variable in one iteration isn't stale.
-                let at_top_level = self.local_scopes.is_empty();
                 loop {
-                    if at_top_level {
-                        let cenv = self.global_env.clone();
-                        let c = self.eval_in(cond, &cenv)?;
-                        if !self.truthy(&c)? { break; }
-                        let stmts: &[Expr] = match body.as_ref() {
-                            Expr::Block(s) => s,
-                            single => std::slice::from_ref(single),
-                        };
-                        let mut do_break = false;
-                        for stmt in stmts {
-                            let genv = self.global_env.clone();
-                            match self.eval_in(stmt, &genv) {
-                                Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => { do_break = true; break; }
-                                Err(R2Err { kind: ErrKind::CtrlNext, .. }) => break, // skip rest, recheck cond
-                                Err(e) => return Err(e),
-                                _ => {}
-                            }
-                        }
-                        if do_break { break; }
-                    } else {
-                        let c = self.eval_in(cond, env)?;
-                        if !self.truthy(&c)? { break; }
-                        match self.eval_in(body, env) {
-                            Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
-                            Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
-                            Err(e) => return Err(e),
-                            _ => {}
-                        }
+                    let c = self.eval_in(cond, env)?;
+                    if !self.truthy(&c)? { break; }
+                    match self.eval_in(body, env) {
+                        Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
+                        Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
+                        Err(e) => return Err(e),
+                        _ => {}
                     }
                 }
                 Ok(RVal::Null)
             }
             Expr::Repeat { body } => {
                 // `repeat { ... }` — loop forever until `break` (R semantics).
-                // Same top-level per-statement re-snapshot as For/While.
-                let at_top_level = self.local_scopes.is_empty();
                 loop {
-                    if at_top_level {
-                        let stmts: &[Expr] = match body.as_ref() {
-                            Expr::Block(s) => s,
-                            single => std::slice::from_ref(single),
-                        };
-                        let mut do_break = false;
-                        for stmt in stmts {
-                            let genv = self.global_env.clone();
-                            match self.eval_in(stmt, &genv) {
-                                Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => { do_break = true; break; }
-                                Err(R2Err { kind: ErrKind::CtrlNext, .. }) => break,
-                                Err(e) => return Err(e),
-                                _ => {}
-                            }
-                        }
-                        if do_break { break; }
-                    } else {
-                        match self.eval_in(body, env) {
-                            Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
-                            Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
-                            Err(e) => return Err(e),
-                            _ => {}
-                        }
+                    match self.eval_in(body, env) {
+                        Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
+                        Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
+                        Err(e) => return Err(e),
+                        _ => {}
                     }
                 }
                 Ok(RVal::Null)
@@ -935,16 +869,18 @@ impl Engine {
     /// (which yields the proper "not callable"/"not found" error).
     fn resolve_call_target(&mut self, func: &Expr, env: &EnvRef) -> Result<RVal, R2Err> {
         if let Expr::Symbol(name) = func {
-            for scope in self.local_scopes.iter().rev() {
-                if let Some(v) = scope.get(name.as_ref()) {
+            // Walk the env chain FRAME BY FRAME, keeping only a callable
+            // binding at each level (R skips non-function bindings in call
+            // position: `c <- c(1,2); c(3,4)` still calls the builtin).
+            let mut cur = Some(env.clone());
+            while let Some(e) = cur {
+                if let Some(v) = e.bindings.read().unwrap().get(name.as_ref()) {
                     if matches!(v, RVal::Closure(_) | RVal::BuiltinFn(_)) { return Ok(v.clone()); }
                 }
-            }
-            if let Some(v) = env.lookup(name) {
-                if matches!(v, RVal::Closure(_) | RVal::BuiltinFn(_)) { return Ok(v.clone()); }
+                cur = e.parent.clone();
             }
             if let Some(v) = self.global_env.lookup(name) {
-                if matches!(v, RVal::Closure(_) | RVal::BuiltinFn(_)) { return Ok(v.clone()); }
+                if matches!(v, RVal::Closure(_) | RVal::BuiltinFn(_)) { return Ok(v); }
             }
             if self.registry.resolve(name.as_ref()).is_some() {
                 return Ok(RVal::BuiltinFn(name.clone()));
@@ -1013,7 +949,7 @@ impl Engine {
             }
             RVal::Closure(cl) => {
                 // Recursion depth limit
-                if self.local_scopes.len() >= 500 {
+                if self.frames.len() >= 500 {
                     return err!(Runtime, "recursion depth limit exceeded (max 500). Use iteration instead.");
                 }
 
@@ -1276,46 +1212,51 @@ impl Engine {
                     }
                 }
                 // ── Fallback: tree-walking interpreter (existing path) ──────
-                let mut ce = Env::new_child(cl.env.clone(), None);
-                let m = Arc::make_mut(&mut ce);
-                // R-style argument matching with `...`: named args bind to
-                // formals by name; positional args fill the formals before
-                // `...`; everything left over is collected into `...` (bound
-                // as a List of (name, value) under the key "...").
-                let dots_pos = cl.params.iter().position(|p| p.dots);
-                let mut used = vec![false; args.len()];
-                for p in cl.params.iter().filter(|p| !p.dots) {
-                    if let Some(j) = (0..args.len()).find(|&j| !used[j] && args[j].name.as_deref() == Some(p.name.as_ref())) {
-                        used[j] = true;
-                        m.bindings.insert(p.name.clone(), args[j].value.clone());
+                // The call frame is a LIVE child of the closure's captured
+                // env: closures defined in the body capture it by reference,
+                // and `<<-` from inner calls mutates it in place.
+                let func_env = Env::new_child(cl.env.clone(), None);
+                {
+                    let mut m = func_env.bindings.write().unwrap();
+                    // R-style argument matching with `...`: named args bind to
+                    // formals by name; positional args fill the formals before
+                    // `...`; everything left over is collected into `...`
+                    // (bound as a List of (name, value) under the key "...").
+                    let dots_pos = cl.params.iter().position(|p| p.dots);
+                    let mut used = vec![false; args.len()];
+                    for p in cl.params.iter().filter(|p| !p.dots) {
+                        if let Some(j) = (0..args.len()).find(|&j| !used[j] && args[j].name.as_deref() == Some(p.name.as_ref())) {
+                            used[j] = true;
+                            m.insert(p.name.clone(), args[j].value.clone());
+                        }
                     }
+                    let before = dots_pos.unwrap_or(cl.params.len());
+                    let mut pos = 0usize;
+                    for (i, p) in cl.params.iter().enumerate() {
+                        if p.dots || i >= before || m.contains_key(p.name.as_ref()) { continue; }
+                        while pos < args.len() && (used[pos] || args[pos].name.is_some()) { pos += 1; }
+                        if pos < args.len() { used[pos] = true; m.insert(p.name.clone(), args[pos].value.clone()); pos += 1; }
+                    }
+                    if dots_pos.is_some() {
+                        let dots: Vec<(Option<Arc<str>>, RVal)> = (0..args.len())
+                            .filter(|&j| !used[j])
+                            .map(|j| (args[j].name.clone(), args[j].value.clone()))
+                            .collect();
+                        m.insert(Arc::from("..."), RVal::List(dots));
+                    }
+                    // Record the call's argument count for nargs().
+                    m.insert(Arc::from(".nargs"), RVal::Integer(vec![Some(args.len() as i32)].into(), Attrs::default()));
                 }
-                let before = dots_pos.unwrap_or(cl.params.len());
-                let mut pos = 0usize;
-                for (i, p) in cl.params.iter().enumerate() {
-                    if p.dots || i >= before || m.bindings.contains_key(p.name.as_ref()) { continue; }
-                    while pos < args.len() && (used[pos] || args[pos].name.is_some()) { pos += 1; }
-                    if pos < args.len() { used[pos] = true; m.bindings.insert(p.name.clone(), args[pos].value.clone()); pos += 1; }
-                }
-                if dots_pos.is_some() {
-                    let dots: Vec<(Option<Arc<str>>, RVal)> = (0..args.len())
-                        .filter(|&j| !used[j])
-                        .map(|j| (args[j].name.clone(), args[j].value.clone()))
-                        .collect();
-                    m.bindings.insert(Arc::from("..."), RVal::List(dots));
-                }
-                // Record the call's argument count for nargs().
-                m.bindings.insert(Arc::from(".nargs"), RVal::Integer(vec![Some(args.len() as i32)].into(), Attrs::default()));
+                // Defaults evaluate OUTSIDE the write lock (they may recurse).
                 for p in cl.params.iter().filter(|p| !p.dots) {
-                    if !m.bindings.contains_key(p.name.as_ref()) {
+                    if !func_env.contains(p.name.as_ref()) {
                         let v = p.default.as_ref().and_then(|d| self.eval_in(d, env).ok()).unwrap_or(RVal::Null);
-                        m.bindings.insert(p.name.clone(), v);
+                        func_env.set(p.name.clone(), v);
                     }
                 }
-                let func_env = Arc::new(m.clone());
-                self.local_scopes.push(HashMap::new());
+                self.frames.push(func_env.clone());
                 let result = match self.eval_in(&cl.body, &func_env) { Err(R2Err { kind: ErrKind::CtrlReturn(v), .. }) => Ok(*v), r => r };
-                self.local_scopes.pop();
+                self.frames.pop();
                 result
             }
             RVal::TypeDef(td) => {
@@ -1354,11 +1295,8 @@ impl Engine {
     /// Resolve the captured `...` (a List of (name,value)) in the current
     /// scope, if any. Used to expand `...` / `..N` in function bodies.
     fn lookup_dots(&self, env: &EnvRef) -> Option<RVal> {
-        for scope in self.local_scopes.iter().rev() {
-            if let Some(v) = scope.get("...") { return Some(v.clone()); }
-        }
-        let key: Arc<str> = Arc::from("...");
-        env.lookup(&key).cloned()
+        // `...` is bound in the call frame, which heads the env chain.
+        env.lookup("...").or_else(|| self.frames.last().and_then(|f| f.lookup("...")))
     }
 
 }

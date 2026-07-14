@@ -604,7 +604,7 @@ pub(crate) fn bi_ave(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal
 }
 pub(crate) fn bi_nargs(_: &mut Engine, _a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let key: Arc<str> = Arc::from(".nargs");
-    Ok(env.lookup(&key).cloned().unwrap_or_else(|| rint(0)))
+    Ok(env.lookup(&key).unwrap_or_else(|| rint(0)))
 }
 
 // ── Tier-2 1-D numerical methods (function args) ───────────────────

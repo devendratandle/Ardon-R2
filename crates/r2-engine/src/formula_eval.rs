@@ -42,14 +42,13 @@ impl Engine {
             //   lm(Sepal.Width ~ factor(Species), data = iris)
             //   lm(y ~ I(x^2) + log(z), data = df)
             _ => {
-                let mut frame: HashMap<Arc<str>, RVal> = HashMap::new();
+                // Live child env shadowing the caller's scope with the data
+                // frame's columns (replaces the old side-stack frame).
+                let child = Env::new_child(env.clone(), Some(".formula.env"));
                 for (n, v) in &df.columns {
-                    frame.insert(n.clone(), v.clone());
+                    child.set(n.clone(), v.clone());
                 }
-                self.local_scopes.push(frame);
-                let result = self.eval_in(expr, env);
-                self.local_scopes.pop();
-                result
+                self.eval_in(expr, &child)
             }
         }
     }
