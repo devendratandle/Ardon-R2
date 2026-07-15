@@ -82,6 +82,11 @@ fn repl_main() {
     println!("Assignment: both <- and = work. Mode: strict.");
     println!("Type q() to quit.\n");
 
+    // Interactive session: allow dev.view() to launch the browser plot
+    // viewer (its daemon HTTP server stays alive with the REPL). Scripts
+    // never reach this path, so batch runs keep dev.view() a no-op.
+    r2_graphics::device::enable_autoview();
+
     let mut engine = Engine::new();
     // Interactive session only: opt in to the browser plot viewer so
     // `plot()` opens a live view (RGui-style). Script mode (run_script)

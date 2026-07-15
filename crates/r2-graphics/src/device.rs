@@ -72,7 +72,11 @@ pub fn display_present() -> bool {
 
 /// True when the interactive-CLI browser viewer is the active display.
 pub fn autoview_enabled() -> bool {
+    // `R2_AUTOVIEW=1` opts a SCRIPT into the browser viewer (e.g. long-
+    // running analyses that end with Sys.sleep to keep the server alive,
+    // and automated viewer testing). Interactive REPL/GUI set the flag.
     AUTOVIEW_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var("R2_AUTOVIEW").is_ok_and(|v| v == "1")
 }
 
 /// The current SCREEN-device plot, published here so the browser server
