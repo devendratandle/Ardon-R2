@@ -1005,4 +1005,80 @@ pub(crate) fn bi_sys_getenv(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
 
 
 // end of file
-
+
+// ── Memory-budget management (Pillar 2) ──────────────────────────────
+//
+// mem.budget("8G") / mem.budget()  — set/query the soft in-RAM budget.
+// mem.status()                     — live bytes, budget, spill count.
+// mem.spill(x, [dir])              — write a numeric vector to a packed
+//                                    mmap file; returns an `mmapcol` handle
+//                                    (composes with sum/mean/… unchanged).
+// mem.restore(h)                   — read an mmapcol back into a dense
+//                                    numeric vector.
+
+pub(crate) fn bi_mem_budget(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if a.is_empty() {
+        return Ok(RVal::Numeric(vec![Some(crate::membudget::budget() as f64)].into(), Attrs::default()));
+    }
+    let v = gv(a, 0);
+    let bytes = match &v {
+        RVal::Character(cs, _) => cs.first().and_then(|x| x.as_ref())
+            .and_then(|s| crate::membudget::parse_budget(s))
+            .ok_or_else(|| R2Err { msg: "mem.budget: could not parse size (try \"8G\", \"512M\", or a byte count)".into(), kind: ErrKind::Runtime })?,
+        _ => e.scalar_f64(&v)?.unwrap_or(0.0).max(0.0) as u64,
+    };
+    crate::membudget::set_budget(bytes);
+    Ok(RVal::Numeric(vec![Some(bytes as f64)].into(), Attrs::default()))
+}
+
+pub(crate) fn bi_mem_status(_e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let mk = |n: &str, v: f64| (Some(Arc::from(n)), RVal::Numeric(vec![Some(v)].into(), Attrs::default()));
+    Ok(RVal::List(vec![
+        mk("live.bytes",  crate::membudget::live_bytes() as f64),
+        mk("budget.bytes", crate::membudget::budget() as f64),
+        mk("spills",       crate::membudget::spill_count() as f64),
+        (Some(Arc::from("over.budget")), rbool(crate::membudget::over_budget())),
+    ]))
+}
+
+pub(crate) fn bi_mem_spill(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let data: Vec<f64> = e.as_reals(&gv(a, 0))?.into_iter().map(|o| o.unwrap_or(f64::NAN)).collect();
+    if data.is_empty() { return err!(Runtime, "mem.spill: needs a non-empty numeric vector"); }
+    // Spill target: given dir arg, else a unique temp file.
+    let dir = if a.len() > 1 { val_to_str(&gv(a, 1)) } else { std::env::temp_dir().to_string_lossy().into_owned() };
+    let fname = format!("r2spill_{}_{}.f64",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    let path = std::path::Path::new(&dir).join(fname);
+    let path_s = path.to_string_lossy().into_owned();
+
+    // Write BEFORE dropping the RAM copy — spill never loses data.
+    let mut w = r2_arrow::MmapWriter::create(&path_s)
+        .map_err(|m| R2Err { msg: format!("mem.spill: {}", m), kind: ErrKind::Runtime })?;
+    w.append(&data).map_err(|m| R2Err { msg: format!("mem.spill: {}", m), kind: ErrKind::Runtime })?;
+    let n = w.finish().map_err(|m| R2Err { msg: format!("mem.spill: {}", m), kind: ErrKind::Runtime })?;
+
+    // Account: the RAM copy is now spillable; note the transfer.
+    crate::membudget::sub((n as u64) * 8);
+    crate::membudget::note_spill();
+
+    let mut fields = HashMap::new();
+    fields.insert(Arc::from("path"), rstr_(&path_s));
+    fields.insert(Arc::from("length"), RVal::Numeric(vec![Some(n as f64)].into(), Attrs::default()));
+    fields.insert(Arc::from("spilled"), rbool(true));
+    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("mmapcol"), fields }))
+}
+
+pub(crate) fn bi_mem_restore(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let path = match &gv(a, 0) {
+        RVal::TypeInstance(i) if i.type_name.as_ref() == "mmapcol" =>
+            i.fields.get("path").map(val_to_str).unwrap_or_default(),
+        other => val_to_str(other),
+    };
+    if path.is_empty() { return err!(Runtime, "mem.restore: needs an mmapcol handle (from mem.spill)"); }
+    let col = r2_arrow::MmapColumnar::open(&path)
+        .map_err(|m| R2Err { msg: format!("mem.restore: {}", m), kind: ErrKind::Runtime })?;
+    let data: Vec<f64> = col.as_slice().to_vec();
+    crate::membudget::add((data.len() as u64) * 8); // back in RAM
+    Ok(RVal::Numeric(Reals::from_dense_f64(data), Attrs::default()))
+}

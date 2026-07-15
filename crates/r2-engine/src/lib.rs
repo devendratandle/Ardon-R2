@@ -84,6 +84,7 @@ pub use registry::{FunctionRegistry, PackageLayer, PackageTier};
 // pure module. Re-exported back into lib.rs's namespace via `use`
 // so the eval loop call sites are unchanged.
 mod na_bitmap;
+pub mod membudget;
 pub mod policy;
 pub use policy::Policy;
 
