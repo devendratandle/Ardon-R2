@@ -6,7 +6,7 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
-## Unreleased
+## v0.3.8 (July 2026)
 
 **New — mutable environments (R's environment semantics).** Environments
 are now live, shared objects rather than snapshots. Everything built on
