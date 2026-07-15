@@ -1282,14 +1282,22 @@ fn vectorize_indexed_loops(e: &r2_types::Expr) -> r2_types::Expr {
         }
     }
     fn rewrite_for(var: &std::sync::Arc<str>, iter: &r2_types::Expr, body: &r2_types::Expr,
-                   len_aliases: &std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>>) -> Option<r2_types::Expr> {
-        let ok_iter = if let Binary { op: r2_types::BinOp::Colon, lhs, rhs } = iter {
-            is_one(lhs) && (length_of(rhs).is_some()
-                || matches!(rhs.as_ref(), Symbol(n) if len_aliases.contains_key(n.as_ref())))
-        } else { false };
-        if !ok_iter { return None; }
+                   len_aliases: &std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>>,
+                   buf_aliases: &std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>>) -> Option<r2_types::Expr> {
+        // The vector the iterator spans: `1:length(v)` or `1:n`, n ≡ length(v).
+        let iter_vec: std::sync::Arc<str> = if let Binary { op: r2_types::BinOp::Colon, lhs, rhs } = iter {
+            if !is_one(lhs) { return None; }
+            match length_of(rhs) {
+                Some(v) => v,
+                None => match rhs.as_ref() {
+                    Symbol(n) => len_aliases.get(n.as_ref())?.clone(),
+                    _ => return None,
+                },
+            }
+        } else { return None; };
         let stmt = match body { Block(v) if v.len() == 1 => &v[0], b @ Assign { .. } => b, _ => return None };
         if let Assign { target, value, superassign: false } = stmt {
+            // Form 1 — accumulation: `s <- s + EXPR`  ⇒  `s <- s + sum(EXPR')`.
             if let (Symbol(s), Binary { op: r2_types::BinOp::Add, lhs, rhs }) = (target.as_ref(), value.as_ref()) {
                 if matches!(lhs.as_ref(), Symbol(l) if l == s) {
                     let mut hits = 0u32;
@@ -1304,25 +1312,81 @@ fn vectorize_indexed_loops(e: &r2_types::Expr) -> r2_types::Expr {
                         superassign: false });
                 }
             }
+            // Form 2 — store map: `y[i] <- EXPR`  ⇒  `y <- EXPR'`, only when
+            // `y` was allocated as `numeric(length(v))` over the SAME vector
+            // the iterator spans (so every element is written exactly once
+            // and whole-vector replacement is semantics-preserving).
+            if let Index { object, indices } = target.as_ref() {
+                if let (Symbol(y), [Some(Symbol(ix))]) = (object.as_ref(), indices.as_slice()) {
+                    if ix.as_ref() == var.as_ref()
+                        && buf_aliases.get(y.as_ref()).is_some_and(|v| v.as_ref() == iter_vec.as_ref()) {
+                        let mut hits = 0u32;
+                        let vecexpr = strip_index(value, var.as_ref(), y.as_ref(), &mut hits)?;
+                        if hits == 0 { return None; }
+                        return Some(Assign { target: Box::new(Symbol(y.clone())),
+                            value: Box::new(vecexpr), superassign: false });
+                    }
+                }
+            }
         }
         None
     }
     match e {
         Block(stmts) => {
             let mut aliases: std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>> = Default::default();
+            let mut bufs: std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>> = Default::default();
             let out = stmts.iter().map(|st| {
                 if let Assign { target, value, superassign: false } = st {
-                    if let (Symbol(n), Some(v)) = (target.as_ref(), length_of(value)) { aliases.insert(n.clone(), v); }
+                    if let Symbol(n) = target.as_ref() {
+                        if let Some(v) = length_of(value) { aliases.insert(n.clone(), v); }
+                        // `y <- numeric(length(v))` (or numeric(n), n ≡ length(v))
+                        if let Call { func, args } = value.as_ref() {
+                            if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "numeric") && args.len() == 1 {
+                                let vs = match length_of(&args[0].value) {
+                                    Some(v) => Some(v),
+                                    None => match &args[0].value {
+                                        Symbol(a) => aliases.get(a.as_ref()).cloned(),
+                                        _ => None,
+                                    },
+                                };
+                                if let Some(v) = vs { bufs.insert(n.clone(), v); }
+                            }
+                        }
+                    }
                 }
                 if let For { var, iter, body } = st {
-                    if let Some(r) = rewrite_for(var, iter, body, &aliases) { return r; }
+                    if let Some(r) = rewrite_for(var, iter, body, &aliases, &bufs) { return r; }
                 }
                 vectorize_indexed_loops(st)
+            }).collect::<Vec<_>>();
+            // A vectorized store-map fully overwrites its buffer, so the
+            // `y <- numeric(length(v))` allocation is dead — drop it (the
+            // kernels reject vector-valued alloc calls they can't lower).
+            let rewritten: std::collections::HashSet<std::sync::Arc<str>> = out.iter().filter_map(|st| {
+                if let Assign { target, value, superassign: false } = st {
+                    if let Symbol(n) = target.as_ref() {
+                        if bufs.contains_key(n.as_ref())
+                            && !matches!(value.as_ref(), Call { func, .. } if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "numeric")) {
+                            return Some(n.clone());
+                        }
+                    }
+                }
+                None
+            }).collect();
+            let out = out.into_iter().filter(|st| {
+                if let Assign { target, value, superassign: false } = st {
+                    if let (Symbol(n), Call { func, .. }) = (target.as_ref(), value.as_ref()) {
+                        if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "numeric") && rewritten.contains(n.as_ref()) {
+                            return false;
+                        }
+                    }
+                }
+                true
             }).collect();
             Block(out)
         }
         For { var, iter, body } => {
-            if let Some(r) = rewrite_for(var, iter, body, &Default::default()) { return r; }
+            if let Some(r) = rewrite_for(var, iter, body, &Default::default(), &Default::default()) { return r; }
             For { var: var.clone(), iter: iter.clone(), body: Box::new(vectorize_indexed_loops(body)) }
         }
         While { cond, body } => While { cond: cond.clone(), body: Box::new(vectorize_indexed_loops(body)) },

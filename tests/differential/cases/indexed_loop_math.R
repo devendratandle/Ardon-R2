@@ -22,3 +22,9 @@ z <- std2(x)
 cat("std.mean.iszero=", if (abs(vmean2(z)) < 1e-9) 1 else 0, "\n", sep = "")
 cat("std.sd=", vsd2(z), "\n", sep = "")
 cat("std.first=", z[1], "\n", sep = "")
+# Store-map loops: y[i] <- expr over a numeric(length(v)) buffer.
+sqdev <- function(x) { y <- numeric(length(x)); m <- sum(x)/length(x); for (i in 1:length(x)) y[i] <- (x[i] - m)^2; y }
+cat("store.sum=", sum(sqdev(x)), "\n", sep = "")
+cat("store.first=", sqdev(x)[1], "\n", sep = "")
+wprod <- function(a, b) { y <- numeric(length(a)); for (i in 1:length(a)) y[i] <- a[i] * b[i] + 1; sum(y) }
+cat("store.nested=", wprod(x, y), "\n", sep = "")
