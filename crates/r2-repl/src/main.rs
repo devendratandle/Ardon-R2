@@ -13,10 +13,117 @@ fn main() {
     // first eval error. Used for benchmarking and CI. Without arguments,
     // launches the interactive REPL.
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "--json" {
+        std::process::exit(json_main());
+    }
     if args.len() >= 2 && !args[1].starts_with('-') {
         std::process::exit(run_script(&args[1]));
     }
     repl_main();
+}
+
+// ── Agent mode: `r2 --json` ─────────────────────────────────────────────
+// Newline-delimited JSON protocol so agent frameworks and other programs
+// can drive the engine without screen-scraping a REPL. One request per
+// line on stdin: {"expr": "<R code>"}. One response per line on stdout:
+//   {"ok":true,"class":"numeric","length":3,"result":"[1] 1 2 3","output":"…"}
+//   {"ok":false,"error":"object 'x' not found"}
+// `result` is the value's display form; `output` is everything the code
+// printed (cat/print). State persists across lines (one engine session).
+fn json_main() -> i32 {
+    use std::io::{BufRead, Write};
+
+    // Minimal JSON string escaping for output (we emit only strings/nums).
+    fn esc(s: &str) -> String {
+        let mut o = String::with_capacity(s.len() + 8);
+        for c in s.chars() {
+            match c {
+                '"' => o.push_str("\\\""), '\\' => o.push_str("\\\\"),
+                '\n' => o.push_str("\\n"), '\r' => o.push_str("\\r"),
+                '\t' => o.push_str("\\t"),
+                c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+                c => o.push(c),
+            }
+        }
+        o
+    }
+    // Extract the "expr" string from a {"expr": "..."} request line —
+    // a tiny scanner (find the key, decode the JSON string after it), so
+    // the protocol needs no serde dependency.
+    fn parse_expr(line: &str) -> Option<String> {
+        let key = line.find("\"expr\"")?;
+        let colon = line[key + 6..].find(':')? + key + 6;
+        let rest = line[colon + 1..].trim_start();
+        let mut chars = rest.strip_prefix('"')?.chars();
+        let mut out = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => match chars.next()? {
+                    'n' => out.push('\n'), 't' => out.push('\t'), 'r' => out.push('\r'),
+                    '"' => out.push('"'), '\\' => out.push('\\'), '/' => out.push('/'),
+                    'u' => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) { out.push(ch); }
+                    }
+                    other => out.push(other),
+                },
+                c => out.push(c),
+            }
+        }
+        None
+    }
+
+    // Capture routed output (cat/print/summary…) per request.
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    {
+        let cap = captured.clone();
+        r2_types::out::set_output_hook(Some(Box::new(move |s, _is_err| {
+            cap.lock().unwrap().push_str(s);
+        })));
+    }
+
+    let mut engine = Engine::new();
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() { continue; }
+        let mut o = stdout.lock();
+        let Some(expr_src) = parse_expr(&line) else {
+            let _ = writeln!(o, "{{\"ok\":false,\"error\":\"malformed request: expected {{\\\"expr\\\": \\\"...\\\"}}\"}}");
+            let _ = o.flush();
+            continue;
+        };
+        captured.lock().unwrap().clear();
+        let reply = match Parser::parse(&expr_src) {
+            Err(e) => format!("{{\"ok\":false,\"error\":\"parse error: {}\"}}", esc(&e.to_string())),
+            Ok(stmts) => {
+                let mut last = r2_types::RVal::Null;
+                let mut err: Option<String> = None;
+                for st in &stmts {
+                    match engine.eval(st) {
+                        Ok(v) => last = v,
+                        Err(e) => { err = Some(e.msg.clone()); break; }
+                    }
+                }
+                match err {
+                    Some(m) => format!("{{\"ok\":false,\"error\":\"{}\",\"output\":\"{}\"}}",
+                                       esc(&m), esc(&captured.lock().unwrap())),
+                    None => {
+                        let class = last.type_name();
+                        let len = r2_types::rval_length(&last);
+                        let display = format!("{}", last);
+                        format!("{{\"ok\":true,\"class\":\"{}\",\"length\":{},\"result\":\"{}\",\"output\":\"{}\"}}",
+                                esc(class), len, esc(&display), esc(&captured.lock().unwrap()))
+                    }
+                }
+            }
+        };
+        let _ = writeln!(o, "{}", reply);
+        let _ = o.flush();
+    }
+    0
 }
 
 fn run_script(path: &str) -> i32 {

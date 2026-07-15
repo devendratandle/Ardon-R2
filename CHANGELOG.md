@@ -19,6 +19,17 @@ copy-on-write model cloned the global binding table on every top-level
 assignment: top-level loops run ~31× faster, function calls ~18× faster
 (release, measured on the same machine).
 
+**New — agent JSON mode.** `r2 --json` runs a newline-delimited JSON
+protocol on stdin/stdout ({"expr": "<R code>"} in; ok/class/length/
+result/output or error out), with session state persisting across
+requests — agent frameworks and other programs drive the engine without
+screen-scraping a REPL.
+
+**New — the interactive plot viewer works from the CLI.** dev.view() in
+the REPL launches the browser viewer (daemon HTTP server; auto-refreshes
+on plot(); prompt stays responsive). Scripts can opt in with
+R2_AUTOVIEW=1 (keep the process alive with Sys.sleep).
+
 **New — JIT compiles indexed-loop math (J.5).** Textbook loops like
 `for (i in 1:n) s <- s + (x[i] - mean(x))^2` now JIT-compile by
 normalizing to their vector form, reusing the same SIMD kernels as the
