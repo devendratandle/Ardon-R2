@@ -944,6 +944,13 @@ impl Engine {
     pub(crate) fn call_fn(&mut self, func: &RVal, args: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
         match func {
             RVal::BuiltinFn(name) => {
+                // Capability policy — the SINGLE security choke point for
+                // server-hosted (LLM-agent) sessions. Interactive engines
+                // run allow-all, so this is a no-op there.
+                let bare = name.rsplit("::").next().unwrap_or(name.as_ref());
+                if let Some(reason) = self.policy.deny_reason(bare) {
+                    return err!(Runtime, "{}", reason);
+                }
                 // Check for pkg::func namespaced call
                 if let Some(sep) = name.find("::") {
                     let pkg = &name[..sep];

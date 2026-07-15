@@ -84,6 +84,8 @@ pub use registry::{FunctionRegistry, PackageLayer, PackageTier};
 // pure module. Re-exported back into lib.rs's namespace via `use`
 // so the eval loop call sites are unchanged.
 mod na_bitmap;
+pub mod policy;
+pub use policy::Policy;
 
 // Formula-walking helpers (Error(...) splitter for repeated measures,
 // (1|group) random-intercept splitter, Expr→source deparser).
@@ -93,6 +95,8 @@ mod formula;  // deparse + Error()/(1|g) splitters; used by eval.rs & formula_ev
 
 pub struct Engine {
     pub global_env: EnvRef,
+    /// Capability policy — checked at builtin dispatch (see policy.rs).
+    pub policy: Policy,
     pub mode: ErrorMode,
     pub registry: FunctionRegistry,
     pub lib_paths: Vec<String>,                              // where to find packages on disk
@@ -216,6 +220,7 @@ impl Engine {
     pub fn fork_worker(&self) -> Engine {
         Engine {
             global_env: self.global_env.clone(),
+            policy: self.policy,
             mode: self.mode,
             registry: self.registry.clone(),
             lib_paths: self.lib_paths.clone(),
@@ -276,7 +281,7 @@ impl Engine {
     pub fn new() -> Self {
         let global = Env::new_global();
         let mut e = Engine {
-            global_env: global, mode: ErrorMode::Strict,
+            global_env: global, policy: Policy::allow_all(), mode: ErrorMode::Strict,
             registry: FunctionRegistry::new(),
             lib_paths: {
                 let mut paths = vec![];

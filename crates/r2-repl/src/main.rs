@@ -4,6 +4,8 @@ use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod serve;
+
 fn main() {
     // Stack size set to 64MB via .cargo/config.toml linker flags
     // This avoids issues with _getch() FFI on spawned threads.
@@ -13,6 +15,10 @@ fn main() {
     // first eval error. Used for benchmarking and CI. Without arguments,
     // launches the interactive REPL.
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "--serve" {
+        let addr = args.get(2).cloned().unwrap_or_else(|| "127.0.0.1:8787".into());
+        std::process::exit(serve::serve_main(&addr));
+    }
     if args.len() >= 2 && args[1] == "--json" {
         std::process::exit(json_main());
     }
