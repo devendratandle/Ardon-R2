@@ -25,17 +25,94 @@ fn arg_named(a: &[EvalArg], name: &str) -> Option<RVal> {
 // can drop the duplicated definitions.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Abramowitz & Stegun 7.1.26 polynomial approximation. Max error ≈ 1.5e-7.
-pub fn erf(x: f64) -> f64 {
-    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    let result = 1.0 - poly * (-x * x).exp();
-    if x >= 0.0 { result } else { -result }
+/// Cody's rational-Chebyshev approximation of `erf`/`erfc`
+/// (W. J. Cody, "Rational Chebyshev Approximation for the Error Function",
+/// Math. Comp. 23 (1969), 631–637). Full double precision — max relative
+/// error ≈ 1e-16, the same algorithm class R and Boost use. `jint`:
+/// 0 → erf(x), 1 → erfc(x), 2 → exp(x²)·erfc(x) (scaled, tail-stable).
+fn calerf(x: f64, jint: i32) -> f64 {
+    const A: [f64; 5] = [3.16112374387056560e0, 1.13864154151050156e2,
+        3.77485237685302021e2, 3.20937758913846947e3, 1.85777706184603153e-1];
+    const B: [f64; 4] = [2.36012909523441209e1, 2.44024637934444173e2,
+        1.28261652607737228e3, 2.84423683343917062e3];
+    const C: [f64; 9] = [5.64188496988670089e-1, 8.88314979438837594e0,
+        6.61191906371416295e1, 2.98635138197400131e2, 8.81952221241769090e2,
+        1.71204761263407058e3, 2.05107837782607147e3, 1.23033935479799725e3,
+        2.15311535474403846e-8];
+    const D: [f64; 8] = [1.57449261107098347e1, 1.17693950891312499e2,
+        5.37181101862009858e2, 1.62138957456669019e3, 3.29079923573345963e3,
+        4.36261909014324716e3, 3.43936767414372164e3, 1.23033935480374942e3];
+    const P: [f64; 6] = [3.05326634961232344e-1, 3.60344899949804439e-1,
+        1.25781726111229246e-1, 1.60837851487422766e-2, 6.58749161529837803e-4,
+        1.63153871373020978e-2];
+    const Q: [f64; 5] = [2.56852019228982242e0, 1.87295284992346047e0,
+        5.27905102951428412e-1, 6.05183413124413191e-2, 2.33520497626869185e-3];
+    const SQRPI: f64 = 5.6418958354775628695e-1; // 1/sqrt(pi)
+    const THRESH: f64 = 0.46875;
+    const XNEG: f64 = -26.628; // exp underflow bound region
+
+    let y = x.abs();
+    let mut result;
+    if y <= THRESH {
+        // erf on the central interval.
+        let z = if y > 1.11e-16 { y * y } else { 0.0 };
+        let mut xnum = A[4] * z; let mut xden = z;
+        for i in 0..3 { xnum = (xnum + A[i]) * z; xden = (xden + B[i]) * z; }
+        result = x * (xnum + A[3]) / (xden + B[3]);
+        if jint != 0 { result = 1.0 - result; }
+        if jint == 2 { result *= (z).exp(); }
+        return result;
+    } else if y <= 4.0 {
+        // erfc on the mid interval.
+        let mut xnum = C[8] * y; let mut xden = y;
+        for i in 0..7 { xnum = (xnum + C[i]) * y; xden = (xden + D[i]) * y; }
+        result = (xnum + C[7]) / (xden + D[7]);
+        let ysq = (y * 16.0).trunc() / 16.0;
+        let del = (y - ysq) * (y + ysq);
+        result *= (-ysq * ysq).exp() * (-del).exp();
+    } else {
+        // erfc on the tail via asymptotic series in 1/y².
+        result = 0.0;
+        if y < XNEG.abs() {
+            let z = 1.0 / (y * y);
+            let mut xnum = P[5] * z; let mut xden = z;
+            for i in 0..4 { xnum = (xnum + P[i]) * z; xden = (xden + Q[i]) * z; }
+            result = z * (xnum + P[4]) / (xden + Q[4]);
+            result = (SQRPI - result) / y;
+            let ysq = (y * 16.0).trunc() / 16.0;
+            let del = (y - ysq) * (y + ysq);
+            result *= (-ysq * ysq).exp() * (-del).exp();
+        }
+    }
+    // Assemble the requested function, honoring sign of x.
+    match jint {
+        0 => { let mut r = 0.5 - result + 0.5; if x < 0.0 { r = -r; } r }        // erf
+        1 => if x < 0.0 { 2.0 - result } else { result },                        // erfc
+        _ => { // scaled erfc
+            if x < 0.0 {
+                let ysq = (x * 16.0).trunc() / 16.0;
+                let del = (x - ysq) * (x + ysq);
+                2.0 * (ysq * ysq).exp() * (del).exp() - result
+            } else { result }
+        }
+    }
 }
 
-/// Standard normal CDF: P(Z ≤ x).
+/// Error function, full double precision (Cody 1969).
+pub fn erf(x: f64) -> f64 { calerf(x, 0) }
+/// Complementary error function, tail-stable to ~1e-16.
+pub fn erfc(x: f64) -> f64 { calerf(x, 1) }
+
+/// Standard normal CDF `P(Z ≤ x)`, full double precision. Uses `erfc` on
+/// the tails (avoids the catastrophic `1 - erf` cancellation that limited
+/// the old polynomial to ~7 digits), so both small and large |x| are
+/// accurate. Every p-value in the engine (t/z tests, lm, mixed) inherits
+/// this precision.
 #[inline]
-pub fn phi(x: f64) -> f64 { 0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2)) }
+pub fn phi(x: f64) -> f64 {
+    // Φ(x) = ½ erfc(-x/√2); the erfc form is stable in both tails.
+    0.5 * erfc(-x / std::f64::consts::SQRT_2)
+}
 
 /// Inverse standard-normal CDF via **Wichura's algorithm AS241**
 /// (`PPND16`) — the same rational approximation R uses. Accurate to
@@ -331,12 +408,40 @@ mod tests {
 
     #[test]
     fn pnorm_qnorm_round_trip() {
-        // qnorm then pnorm should return the input to ~1e-7 (pnorm is the
-        // limiting factor at ~1e-7; qnorm itself is ~1e-15).
-        for p in [0.1, 0.5, 0.975, 0.999] {
+        // Cody's erf makes pnorm full-precision, so the round trip is now
+        // tight to ~1e-14 (was ~1e-7 with the old polynomial).
+        for p in [0.1, 0.5, 0.975, 0.999, 1e-6, 0.999999] {
             let q = qnorm_approx(p);
             let back = phi(q);
-            assert!((back - p).abs() < 1e-7, "round-trip p={} -> {}", p, back);
+            assert!((back - p).abs() < 1e-13, "round-trip p={} -> {}", p, back);
+        }
+    }
+
+    #[test]
+    fn pnorm_matches_r_to_full_precision() {
+        // Reference values from R 4.5.3 pnorm(); Cody's algorithm must
+        // agree to ~1e-14 (the old A&S polynomial was only ~1e-7).
+        let cases = [
+            (0.0_f64,  0.5_f64),
+            (1.96,     0.97500210485177956),
+            (-3.0,     0.0013498980316300954),
+            (2.5,      0.99379033467422384),
+            (-1.0,     0.15865525393145705),
+            (5.0,      0.99999971334842808),
+        ];
+        for (x, want) in cases {
+            let got = phi(x);
+            assert!((got - want).abs() < 1e-13,
+                "pnorm({}) = {} want {} (err {:e})", x, got, want, (got - want).abs());
+        }
+    }
+
+    #[test]
+    fn erf_erfc_identities() {
+        assert!((erf(0.0)).abs() < 1e-16);            // erf(0) = 0 exactly
+        assert!((erfc(0.0) - 1.0).abs() < 1e-16);     // erfc(0) = 1
+        for x in [-2.0, -0.3, 0.5, 1.7, 3.0] {
+            assert!((erf(x) + erfc(x) - 1.0).abs() < 1e-14, "erf+erfc != 1 at {}", x);
         }
     }
 }

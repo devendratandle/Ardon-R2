@@ -104,15 +104,17 @@ computation, `benchmarks/v038/accuracy.r2`):
 | `sqrt(2)`, `qnorm(0.975)`, `sin(1)` | **bit-identical (17 sig figs)** |
 | `mean`, `sd`, `median`, `sum`, quantiles | 16–17 sig figs |
 | `var`, `cor`, `cov`, `prod`, `lm` coef/R², `exp`, `log` | 15–16 sig figs |
-| `pnorm` (normal CDF) | **~7 sig figs** — the one caveat |
+| `pnorm` (normal CDF), `erf`/`erfc` | **14–16 sig figs** |
 
-Almost everything is full double precision, differing only in the last 1–2
-ULP from summation order. The single exception is `pnorm`/the normal CDF:
-R2 uses the Abramowitz-Stegun erf polynomial (~1.5e-7 max error) where R
-uses a higher-precision algorithm — so probabilities agree to ~7 figures,
-not ~16. (`qnorm` — the *inverse* CDF — is bit-identical; it uses Wichura's
-AS241, the same algorithm R uses.) Accuracy is the release gate, not an
-afterthought.
+Everything is full double precision, differing only in the last 1–2 ULP
+from summation order. `pnorm`/`erf` use **Cody's rational-Chebyshev
+algorithm** (the ~1e-16 method R and Boost use) — via `erfc` on the tails
+to avoid the `1 - erf` cancellation — so the normal CDF and every p-value
+built on it (t/z tests, `lm`, mixed models) now agree with R to 14–16
+figures. (`qnorm`, the inverse CDF, is bit-identical — Wichura's AS241.)
+The only residual softness is the *extreme* tail beyond ~|8|σ, where the
+probability is ~1e-16 and statistically meaningless. Accuracy is the
+release gate, not an afterthought.
 
 ## Build
 

@@ -8,6 +8,13 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.3.8 (July 2026)
 
+**Accuracy — normal CDF upgraded to full double precision.** `pnorm`,
+`erf`, and `erfc` now use Cody's rational-Chebyshev algorithm (~1e-16, the
+method R and Boost use) instead of the Abramowitz-Stegun polynomial
+(~1.5e-7). The normal CDF and every p-value built on it (t/z tests, `lm`,
+mixed models) now match CRAN R to 14-16 significant figures, up from ~7.
+`erfc` is used on the tails to avoid the `1 - erf` cancellation.
+
 **New — mutable environments (R's environment semantics).** Environments
 are now live, shared objects rather than snapshots. Everything built on
 them works as in R: stateful closures (`make_counter()` factories,
