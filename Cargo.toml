@@ -24,6 +24,7 @@ members = [
     "crates/r2-ui",
     "crates/r2-repl",
     "crates/r2-gui",
+    "crates/r2-gpu",
 ]
 
 [workspace.dependencies]

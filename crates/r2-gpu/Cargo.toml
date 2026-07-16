@@ -1,0 +1,18 @@
+[package]
+name = "r2-gpu"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "GPU compute dispatcher for Ardon-R2 (wgpu, opt-in, f32-safe)."
+
+[features]
+# GPU is OFF by default: the crate compiles to CPU-only reference kernels
+# so the workspace, CI, and normal builds never pull the wgpu compute
+# stack. `--features gpu` turns on the real device path.
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+wgpu     = { version = "0.19", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }

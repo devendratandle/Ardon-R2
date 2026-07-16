@@ -21,6 +21,7 @@ r2-jit = { path = "../r2-jit" }
 r2-oracle = { path = "../r2-oracle" }
 r2-arrow = { path = "../r2-arrow", features = ["parquet"] }
 r2-kernel = { path = "../r2-kernel" }
+r2-gpu = { path = "../r2-gpu" }
 r2-stats = { path = "../r2-stats" }
 r2-ml = { path = "../r2-ml" }
 r2-data = { path = "../r2-data" }

@@ -1082,3 +1082,56 @@ pub(crate) fn bi_mem_restore(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resu
     crate::membudget::add((data.len() as u64) * 8); // back in RAM
     Ok(RVal::Numeric(Reals::from_dense_f64(data), Attrs::default()))
 }
+
+// ── GPU dispatcher surface (Pillar 1) ────────────────────────────────
+//
+// options(r2.gpu = TRUE/FALSE) → gpu.enable(); gpu.status() reports the
+// routing decision; gpu.map("relu", x) runs an f32-safe element map via
+// the dispatcher (GPU when enabled+eligible+available, else the CPU
+// reference — never a wrong answer). Statistics are never GPU-routed.
+
+fn gpu_op_by_name(name: &str, a: &[EvalArg], e: &mut Engine) -> Result<r2_gpu::Op, R2Err> {
+    Ok(match name.to_lowercase().as_str() {
+        "identity" | "id" => r2_gpu::Op::Identity,
+        "relu"            => r2_gpu::Op::Relu,
+        "sigmoid"         => r2_gpu::Op::Sigmoid,
+        "tanh"            => r2_gpu::Op::Tanh,
+        "exp"             => r2_gpu::Op::Exp,
+        "scale"           => {
+            let a2 = e.scalar_f64(&gv(a, 2))?.unwrap_or(1.0) as f32;
+            r2_gpu::Op::Scale(a2)
+        }
+        other => return err!(Runtime,
+            "gpu.map: unsupported op '{}' (identity/relu/sigmoid/tanh/exp/scale). Statistics are never GPU-routed.", other),
+    })
+}
+
+pub(crate) fn bi_gpu_enable(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let on = match &gv(a, 0) {
+        RVal::Logical(b, _) => b.first().copied().flatten().unwrap_or(false),
+        RVal::Null => true,
+        other => e.scalar_f64(other)?.unwrap_or(0.0) != 0.0,
+    };
+    r2_gpu::set_gpu_enabled(on);
+    Ok(rbool(r2_gpu::gpu_enabled()))
+}
+
+pub(crate) fn bi_gpu_status(_e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let mk = |n: &str, v: RVal| (Some(Arc::from(n)), v);
+    Ok(RVal::List(vec![
+        mk("enabled", rbool(r2_gpu::gpu_enabled())),
+        mk("min.elems", RVal::Numeric(vec![Some(r2_gpu::GPU_MIN_ELEMS as f64)].into(), Attrs::default())),
+        mk("report", rstr_(&r2_gpu::backend_report(r2_gpu::GPU_MIN_ELEMS, r2_gpu::Op::Relu))),
+    ]))
+}
+
+pub(crate) fn bi_gpu_map(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let name = val_to_str(&gv(a, 0));
+    let op = gpu_op_by_name(&name, a, e)?;
+    // f32 in/out at the GPU boundary; the result is promoted back to f64
+    // for the numeric vector (the CPU reference and GPU agree within f32).
+    let xs: Vec<f32> = e.as_reals(&gv(a, 1))?.into_iter().map(|o| o.unwrap_or(f64::NAN) as f32).collect();
+    if xs.is_empty() { return err!(Runtime, "gpu.map: needs a non-empty numeric vector"); }
+    let out = r2_gpu::dispatch(op, &xs);
+    Ok(RVal::Numeric(Reals::from_dense_f64(out.into_iter().map(|v| v as f64).collect()), Attrs::default()))
+}

@@ -2971,6 +2971,7 @@ dependencies = [
  "r2-base",
  "r2-console",
  "r2-data",
+ "r2-gpu",
  "r2-graphics",
  "r2-io",
  "r2-ir",
@@ -2986,6 +2987,15 @@ dependencies = [
  "r2-strings",
  "r2-types",
  "rayon",
+]
+
+[[package]]
+name = "r2-gpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]
