@@ -131,11 +131,37 @@ pub fn backend_report(n: usize, op: Op) -> String {
     )
 }
 
+/// Name/kind of the adapter that would serve GPU work, if any.
+/// Integrated GPUs (Intel UHD/Iris, AMD APU, Apple silicon) count fully —
+/// wgpu reaches them via Vulkan/DX12/Metal, so machines without discrete
+/// cards still get offload capability (slower, but the job completes).
+pub fn adapter_info() -> String {
+    #[cfg(feature = "gpu")]
+    { gpu::adapter_info() }
+    #[cfg(not(feature = "gpu"))]
+    { "gpu feature not compiled (build with --features gpu)".into() }
+}
+
 // ── Real GPU path (only under --features gpu) ───────────────────────────
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::Op;
     use wgpu::util::DeviceExt;
+
+    /// Report the adapter wgpu selects (name, backend, device type —
+    /// IntegratedGpu / DiscreteGpu / Cpu-software).
+    pub fn adapter_info() -> String {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            match instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await {
+                Some(a) => {
+                    let i = a.get_info();
+                    format!("{} ({:?}, backend {:?})", i.name, i.device_type, i.backend)
+                }
+                None => "no adapter (CPU fallback active)".into(),
+            }
+        })
+    }
 
     /// Try to run the op on a GPU. Returns None on ANY failure (no adapter,
     /// device request failed, etc.) so `dispatch` falls back to CPU.
