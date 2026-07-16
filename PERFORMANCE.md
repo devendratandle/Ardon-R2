@@ -93,8 +93,26 @@ Every release is gated by a differential harness that runs identical scripts
 under R2 and CRAN R and compares numerically (`tests/differential/run.sh`):
 **12/12 cases pass** at v0.3.8 (matrix arithmetic, indexing, statistics,
 lm/glm, data frames, strings, control flow, numeric edge semantics,
-closures/environments, default args, indexed-loop math). Accuracy is the
-release gate, not an afterthought.
+closures/environments, default args, indexed-loop math).
+
+**Digit-level agreement** on identical fixed input (not RNG — the two
+engines' random streams differ by design, so accuracy is measured on the
+computation, `benchmarks/v038/accuracy.r2`):
+
+| Quantity | R2 vs R agreement |
+|---|---|
+| `sqrt(2)`, `qnorm(0.975)`, `sin(1)` | **bit-identical (17 sig figs)** |
+| `mean`, `sd`, `median`, `sum`, quantiles | 16–17 sig figs |
+| `var`, `cor`, `cov`, `prod`, `lm` coef/R², `exp`, `log` | 15–16 sig figs |
+| `pnorm` (normal CDF) | **~7 sig figs** — the one caveat |
+
+Almost everything is full double precision, differing only in the last 1–2
+ULP from summation order. The single exception is `pnorm`/the normal CDF:
+R2 uses the Abramowitz-Stegun erf polynomial (~1.5e-7 max error) where R
+uses a higher-precision algorithm — so probabilities agree to ~7 figures,
+not ~16. (`qnorm` — the *inverse* CDF — is bit-identical; it uses Wichura's
+AS241, the same algorithm R uses.) Accuracy is the release gate, not an
+afterthought.
 
 ## Build
 
