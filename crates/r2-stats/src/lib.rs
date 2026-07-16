@@ -57,7 +57,7 @@ pub mod plssem;
 
 // Re-export numerical helpers for engine-side callers (model summaries
 // like lm/glm still print inline using these).
-pub use dist::{erf, phi, qnorm_approx};
+pub use dist::{erf, erfc, phi, phi_upper, qnorm_approx};
 pub use htest::{
     chi_sq_cdf, fmt_pval, gamma_approx, incomplete_beta, ln_gamma,
     signif_stars, t_cdf,

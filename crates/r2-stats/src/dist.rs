@@ -103,16 +103,80 @@ pub fn erf(x: f64) -> f64 { calerf(x, 0) }
 /// Complementary error function, tail-stable to ~1e-16.
 pub fn erfc(x: f64) -> f64 { calerf(x, 1) }
 
-/// Standard normal CDF `P(Z ≤ x)`, full double precision. Uses `erfc` on
-/// the tails (avoids the catastrophic `1 - erf` cancellation that limited
-/// the old polynomial to ~7 digits), so both small and large |x| are
-/// accurate. Every p-value in the engine (t/z tests, lm, mixed) inherits
-/// this precision.
-#[inline]
-pub fn phi(x: f64) -> f64 {
-    // Φ(x) = ½ erfc(-x/√2); the erfc form is stable in both tails.
-    0.5 * erfc(-x / std::f64::consts::SQRT_2)
+/// Standard normal CDF `P(Z ≤ x)`, full double precision — Cody's SPECFUN
+/// `pnorm_both` (the exact algorithm R uses in `pnorm.c`). Works DIRECTLY
+/// on the z-score `x` (never `erf(x/√2)`), which is what recovers the last
+/// two digits: no `÷√2` rounding of the argument, and the tail's
+/// `exp(-x²/2)` is split on the z-score itself so e.g. `x=8` uses
+/// `exp(-32)` exactly. Returns the lower tail. `phi_upper` returns the
+/// upper tail directly (no `1 - Φ` cancellation), so extreme-tail p-values
+/// keep full relative precision. Every p-value in the engine inherits this.
+fn pnorm_both(x: f64) -> (f64, f64) {  // (lower = Φ(x), upper = 1-Φ(x))
+    // R's pnorm.c coefficients — fitted SPECIFICALLY for the normal CDF
+    // (1/√(2π) baked in, exp(-x²/2) factor), NOT the generic erf set. This
+    // is what makes the direct z-score evaluation full-precision.
+    const A: [f64; 5] = [2.2352520354606839287, 161.02823106855587881,
+        1067.6894854603709582, 18154.981253343561249, 0.065682337918207449113];
+    const B: [f64; 4] = [47.20258190468824187, 976.09855173777669322,
+        10260.932208618978205, 45507.789335026729956];
+    const C: [f64; 9] = [0.39894151208813466764, 8.8831497943883759412,
+        93.506656132177855979, 597.27027639480026226, 2494.5375852903726711,
+        6848.1904505362823326, 11602.651437647350124, 9842.7148383839780218,
+        1.0765576773720192317e-8];
+    const D: [f64; 8] = [22.266688044328115691, 235.38790178262499861,
+        1519.377599407554805, 6485.558298266760755, 18615.571640885098091,
+        34900.952721145977266, 38912.003286093271411, 19685.429676859990727];
+    const P: [f64; 6] = [0.21589853405795699, 0.1274011611602473639,
+        0.022235277870649807, 0.001421619193227893466, 2.9112874951168792e-5,
+        0.02307344176494017303];
+    const Q: [f64; 5] = [1.28426009614491121, 0.468238212480865118,
+        0.0659881378689285515, 0.00378239633202758244, 7.29751555083966205e-5];
+    const M_1_SQRT_2PI: f64 = 0.398942280401432677939946059934; // 1/√(2π)
+    const M_SQRT_32: f64 = 5.656854249492380195206754896838;    // √32
+    let eps = f64::EPSILON * 0.5;
+
+    let y = x.abs();
+    if y <= 0.67448975 {
+        // Central region: rational approx gives Φ(x) - ½ directly.
+        let mut xsq = 0.0;
+        if y > eps { xsq = x * x; }
+        let mut xnum = A[4] * xsq; let mut xden = xsq;
+        for i in 0..3 { xnum = (xnum + A[i]) * xsq; xden = (xden + B[i]) * xsq; }
+        let temp = x * (xnum + A[3]) / (xden + B[3]);
+        return (0.5 + temp, 0.5 - temp);
+    }
+    let (mut cum, del, xsq);
+    if y <= M_SQRT_32 {
+        // Moderate tail: erfc-form rational approx on the z-score.
+        let mut xnum = C[8] * y; let mut xden = y;
+        for i in 0..7 { xnum = (xnum + C[i]) * y; xden = (xden + D[i]) * y; }
+        let temp = (xnum + C[7]) / (xden + D[7]);
+        xsq = (y * 16.0).trunc() / 16.0;
+        del = (y - xsq) * (y + xsq);
+        cum = (-xsq * xsq * 0.5).exp() * (-del * 0.5).exp() * temp;
+    } else {
+        // Extreme tail (|x| > √32): asymptotic series in 1/x².
+        let z = 1.0 / (x * x);
+        let mut xnum = P[5] * z; let mut xden = z;
+        for i in 0..4 { xnum = (xnum + P[i]) * z; xden = (xden + Q[i]) * z; }
+        let mut temp = z * (xnum + P[4]) / (xden + Q[4]);
+        temp = (M_1_SQRT_2PI - temp) / y;
+        xsq = (y * 16.0).trunc() / 16.0;      // split-exp on the z-score →
+        del = (y - xsq) * (y + xsq);          // exp(-32) exact at x=8, etc.
+        cum = (-xsq * xsq * 0.5).exp() * (-del * 0.5).exp() * temp;
+    }
+    // `cum` is the SMALL tail (mass beyond |x|); assign by sign of x.
+    if x > 0.0 { (1.0 - cum, cum) } else { (cum, 1.0 - cum) }
 }
+
+/// Standard normal CDF `P(Z ≤ x)` — full double precision.
+#[inline]
+pub fn phi(x: f64) -> f64 { pnorm_both(x).0 }
+
+/// Upper tail `P(Z > x)` directly — avoids the `1 - Φ(x)` cancellation, so
+/// small right-tail p-values keep full relative precision.
+#[inline]
+pub fn phi_upper(x: f64) -> f64 { pnorm_both(x).1 }
 
 /// Inverse standard-normal CDF via **Wichura's algorithm AS241**
 /// (`PPND16`) — the same rational approximation R uses. Accurate to
@@ -189,10 +253,10 @@ pub fn bi_dnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
 pub fn bi_pnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let (mean, sd) = mean_sd(a);
-    let result: Vec<Real> = x.iter().map(|v| v.map(|x| {
-        let z = (x - mean) / sd;
-        0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2))
-    })).collect();
+    // Use the full-precision direct CDF (`phi` = Cody SPECFUN pnorm_both),
+    // NOT `0.5*(1+erf(z/√2))` — the erf route loses ~1 ULP to the ÷√2 and
+    // mishandles the tail split-exp.
+    let result: Vec<Real> = x.iter().map(|v| v.map(|x| phi((x - mean) / sd))).collect();
     Ok(RVal::Numeric(result.into(), Attrs::default()))
 }
 
@@ -431,9 +495,24 @@ mod tests {
         ];
         for (x, want) in cases {
             let got = phi(x);
-            assert!((got - want).abs() < 1e-13,
-                "pnorm({}) = {} want {} (err {:e})", x, got, want, (got - want).abs());
+            // Full double precision now (direct z-score, R's pnorm coeffs):
+            // relative error at/under 1e-15.
+            let rel = (got - want).abs() / want.abs().max(f64::MIN_POSITIVE);
+            assert!(rel < 1e-15, "pnorm({}) = {:.17e} want {:.17e} (rel {:e})", x, got, want, rel);
         }
+    }
+
+    #[test]
+    fn pnorm_extreme_tail_full_relative_precision() {
+        // The tail that was ~2% wrong via erf(x/√2): direct z-score with
+        // exp(-32) exact at x=8. R: pnorm(-8) = 6.2209605742717405e-16.
+        let got = phi(-8.0);
+        let want = 6.2209605742717405e-16;
+        let rel = (got - want).abs() / want;
+        assert!(rel < 1e-12, "pnorm(-8) = {:e} want {:e} (rel {:e})", got, want, rel);
+        // Upper tail directly avoids 1-Φ cancellation.
+        let up = phi_upper(8.0);
+        assert!((up - want).abs() / want < 1e-12, "phi_upper(8) rel off: {:e}", up);
     }
 
     #[test]

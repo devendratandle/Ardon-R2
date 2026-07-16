@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use r2_types::{fmt_num, Attrs, ErrKind, EvalArg, Matrix, R2Err, RVal, TypeInstance};
 
-use crate::{dist::phi, fmt_pval, signif_stars};
+use crate::{dist::phi_upper, fmt_pval, signif_stars};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -426,7 +426,7 @@ pub fn bi_lmer(a: &[EvalArg]) -> Result<RVal, R2Err> {
         t_values[j] = if se[j] > 1e-15 { beta[j] / se[j] } else { 0.0 };
         // Two-tailed p-value via normal approximation (lme4's default for large n).
         let _ = dfe;
-        p_values[j] = 2.0 * (1.0 - phi(t_values[j].abs()));
+        p_values[j] = 2.0 * phi_upper(t_values[j].abs());
     }
 
     let blups = compute_blups(&y, &x_data, n, p, &groups, theta, &beta);

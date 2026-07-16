@@ -12,7 +12,7 @@
 //! engine NSE preprocessor flows through as a named arg `_call` and is
 //! stored on the returned TypeInstance.
 
-use crate::{fmt_pval, phi, signif_stars};
+use crate::{fmt_pval, phi_upper, signif_stars};
 use r2_types::{
     fmt_num, Attrs, ErrKind, EvalArg, Matrix, R2Err, RVal, TypeInstance,
 };
@@ -438,7 +438,7 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
             let var_j = inv[j * p + j] * dispersion;
             std_errors[j] = if var_j > 0.0 { var_j.sqrt() } else { 0.0 };
             z_values[j] = if std_errors[j] > 1e-15 { coeffs[j] / std_errors[j] } else { 0.0 };
-            p_values[j] = 2.0 * (1.0 - phi(z_values[j].abs()));
+            p_values[j] = 2.0 * phi_upper(z_values[j].abs());
         }
     }
 

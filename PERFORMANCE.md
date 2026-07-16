@@ -104,17 +104,22 @@ computation, `benchmarks/v038/accuracy.r2`):
 | `sqrt(2)`, `qnorm(0.975)`, `sin(1)` | **bit-identical (17 sig figs)** |
 | `mean`, `sd`, `median`, `sum`, quantiles | 16–17 sig figs |
 | `var`, `cor`, `cov`, `prod`, `lm` coef/R², `exp`, `log` | 15–16 sig figs |
-| `pnorm` (normal CDF), `erf`/`erfc` | **14–16 sig figs** |
+| `pnorm` (normal CDF), `erf`/`erfc` | **15–16 sig figs, incl. extreme tail** |
 
 Everything is full double precision, differing only in the last 1–2 ULP
-from summation order. `pnorm`/`erf` use **Cody's rational-Chebyshev
-algorithm** (the ~1e-16 method R and Boost use) — via `erfc` on the tails
-to avoid the `1 - erf` cancellation — so the normal CDF and every p-value
-built on it (t/z tests, `lm`, mixed models) now agree with R to 14–16
-figures. (`qnorm`, the inverse CDF, is bit-identical — Wichura's AS241.)
-The only residual softness is the *extreme* tail beyond ~|8|σ, where the
-probability is ~1e-16 and statistically meaningless. Accuracy is the
-release gate, not an afterthought.
+from summation order. `pnorm` uses **R's exact algorithm** — Cody's SPECFUN
+`pnorm_both`, evaluated *directly on the z-score* with R's own normal-CDF
+coefficient set (not a generic `erf(x/√2)`, which loses ~1 ULP to the `÷√2`
+rounding and mishandles the tail split-exp). The upper tail is returned
+directly (`phi_upper`), so right-tail p-values avoid the `1 − Φ`
+cancellation. Result: the normal CDF and every p-value built on it (t/z
+tests, `lm`, mixed models) agree with R to 15–16 figures **including the
+extreme tail** — `pnorm(-8)` is now correct to ~1e-13 relative (it was
+~2% wrong when routed through erf). `erf`/`erfc` themselves use Cody's 1969
+approximation (~1e-16). `qnorm`, the inverse CDF, is bit-identical
+(Wichura's AS241). Accuracy is the release gate, not an afterthought —
+there is no statistical function where R2 knowingly ships fewer digits
+than R.
 
 ## Build
 

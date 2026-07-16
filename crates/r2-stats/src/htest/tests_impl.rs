@@ -5,7 +5,7 @@ use super::*;
 use r2_types::{EvalArg, R2Err, RVal, TypeInstance};
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::dist::{phi, qnorm_approx};
+use crate::dist::{phi_upper, qnorm_approx};
 
 // ─────────────────────────────────────────────────────────────────────
 // Tests
@@ -577,7 +577,7 @@ pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let r = if sxx > 0.0 && syy > 0.0 { sxy / (sxx * syy).sqrt() } else { 0.0 };
     let df = (n - 2) as f64;
     let t_stat = if (1.0 - r * r).abs() > 1e-15 { r * (df / (1.0 - r * r)).sqrt() } else { f64::INFINITY };
-    let p_value = 2.0 * (1.0 - phi(t_stat.abs()));
+    let p_value = 2.0 * phi_upper(t_stat.abs());
 
     soutln!("\n  Pearson's product-moment correlation\n");
     soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), n - 2, fmt_pval(p_value));
@@ -621,7 +621,7 @@ pub fn bi_shapiro_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mu = 0.0038915 * ln_n.powi(3) - 0.083751 * ln_n.powi(2) - 0.31082 * ln_n - 1.5861;
     let sigma = (0.0030302 * ln_n.powi(2) - 0.082676 * ln_n - 0.4803).exp();
     let z = (ln_w - mu) / sigma;
-    let p_value = (1.0 - phi(z)).clamp(0.0, 1.0);
+    let p_value = phi_upper(z).clamp(0.0, 1.0);
 
     soutln!("\n  Shapiro-Wilk normality test\n");
     soutln!("W = {}, p-value = {}", fmt_n(w), fmt_pval(p_value));
@@ -660,7 +660,7 @@ pub fn bi_wilcox_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 let mean_u = (n * m) as f64 / 2.0;
                 let sd_u = ((n * m * (n + m + 1)) as f64 / 12.0).sqrt();
                 let z = if sd_u > 0.0 { (u - mean_u) / sd_u } else { 0.0 };
-                let p_value = 2.0 * (1.0 - phi(z.abs()));
+                let p_value = 2.0 * phi_upper(z.abs());
 
                 soutln!("\n  Wilcoxon rank sum test\n");
                 soutln!("W = {}, p-value = {}", fmt_n(u), fmt_pval(p_value));
@@ -687,7 +687,7 @@ pub fn bi_wilcox_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mean_w = (nd * (nd + 1)) as f64 / 4.0;
     let sd_w = ((nd * (nd + 1) * (2 * nd + 1)) as f64 / 24.0).sqrt();
     let z = if sd_w > 0.0 { (w_plus - mean_w) / sd_w } else { 0.0 };
-    let p_value = 2.0 * (1.0 - phi(z.abs()));
+    let p_value = 2.0 * phi_upper(z.abs());
 
     soutln!("\n  Wilcoxon signed rank test\n");
     soutln!("V = {}, p-value = {}", fmt_n(w_plus), fmt_pval(p_value));
