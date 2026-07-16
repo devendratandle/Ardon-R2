@@ -51,7 +51,8 @@ holds, and where to look next.
 | Install size | 200+ MB | 5–8 GB | **~6 MB** |
 | Setup time | minutes | hours (pip conflicts) | **0 seconds** |
 | ML packages needed | 5–10 installs | 3–5 installs | **0 (built-in)** |
-| Matrix multiply speed | 1× (ref BLAS) | 1× (NumPy) | **up to 22× faster** |
+| Matrix multiply (500²) | 1× (ref BLAS) | 1× (NumPy) | **3.6× faster** |
+| User loops / library code | 1× (interpreted) | 1× (interpreted) | **4×–38,000× (JIT-compiled)** |
 | Numerical accuracy vs R | — | — | **~7 sig figs (identical)** |
 | Cloud required? | No | Often yes | **No** |
 
@@ -71,7 +72,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 | Path | What you'll find |
 |------|------------------|
 | **[`samples/`](samples)** | Programs you can run to **test R2 on your machine and cross-check against R**. `smoke.r` runs on *both* R and R2 (compare the output); `capabilities.r2` tours the R2-specific features; `graph_gallery.r2` draws the plots above. **Found a mismatch or error? Please [open an issue](https://github.com/devendratandle/Ardon-R2/issues).** |
-| **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy. Accuracy is **identical to R to ~7 significant figures**; where R2 is faster it's typically **1.5×–25×** (matrix multiply, the apply family, fused math-JIT loops), with R winning some memory-bandwidth-bound single ops. |
+| **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy (v0.3.8, 2026-07-15). Accuracy **matches CRAN R (12/12 differential harness)**; at parity-or-better on R's C internals (up to 3.6× matmul), and **4×–38,000× faster on user loops and library code** the JIT compiles. Includes a CPU-vs-integrated-GPU table. |
 | **[`benchmarks/`](benchmarks)** | The runnable benchmark harness (tuned parallel `.R`/`.r2` files) behind PERFORMANCE.md — reproduce the numbers yourself. |
 | **[`FUNCTIONS.md`](FUNCTIONS.md)** | Complete reference for the 400+ built-in functions. |
 | **[`CHANGELOG.md`](CHANGELOG.md)** | Per-version history — what functions were added and what problems were fixed, release by release. |
