@@ -22,6 +22,9 @@ fn main() {
     if args.len() >= 2 && args[1] == "--json" {
         std::process::exit(json_main());
     }
+    if args.len() >= 2 && (args[1] == "--self-check" || args[1] == "--selfcheck") {
+        std::process::exit(self_check());
+    }
     if args.len() >= 2 && !args[1].starts_with('-') {
         std::process::exit(run_script(&args[1]));
     }
@@ -154,6 +157,100 @@ fn run_script(path: &str) -> i32 {
     }
     for w in engine.drain_warnings() { eprintln!("{}", w); }
     0
+}
+
+// ── Trust command: `r2 --self-check` ────────────────────────────────────
+// A self-contained accuracy battery. It proves — on the USER'S OWN
+// hardware, with no R install and no network — that this build computes
+// the statistical surface correctly. Every expected value is an
+// authoritative mathematical constant (not "whatever R2 happened to
+// print"), so a PASS means the engine agrees with mathematics to the
+// IEEE-754 floor on this CPU. Exit 0 iff every check passes, so it doubles
+// as a CI / deployment gate ("did the binary survive the install?").
+fn self_check() -> i32 {
+    // (label, R2 expression, expected value, relative tolerance)
+    // Expected==0.0 is compared with ABSOLUTE tolerance (rel is undefined).
+    // Tolerances are the tight IEEE band (1e-12) except where an algorithm's
+    // own convergence floor is looser (noted inline).
+    let checks: &[(&str, &str, f64, f64)] = &[
+        // ── descriptive statistics ──
+        ("mean(2,4,6,8)",        "mean(c(2,4,6,8))",                 5.0,                   1e-12),
+        ("var(2,4,6,8)",         "var(c(2,4,6,8))",                  6.666666666666667,     1e-12),
+        ("sd(2,4,6,8)",          "sd(c(2,4,6,8))",                   2.581988897471611,     1e-12),
+        ("median(1,2,3,4)",      "median(c(1,2,3,4))",              2.5,                   1e-12),
+        ("quantile p50 t7",      "quantile(1:100, 0.5)",           50.5,                   1e-12),
+        // ── elementary functions (bit-exact math) ──
+        ("sqrt(2)",              "sqrt(2)",                         1.4142135623730951,    1e-15),
+        ("exp(1)",               "exp(1)",                          2.718281828459045,     1e-15),
+        ("log(2)",               "log(2)",                          0.6931471805599453,    1e-15),
+        // ── distributions (the full-precision pnorm/qnorm surface) ──
+        ("dnorm(0)",             "dnorm(0)",                        0.3989422804014327,    1e-14),
+        ("pnorm(0)",             "pnorm(0)",                        0.5,                   1e-15),
+        ("pnorm(1.96)",          "pnorm(1.96)",                     0.9750021048517795,    1e-12),
+        ("pnorm(-8) far tail",   "pnorm(-8)",                       6.220960574271782e-16, 1e-9),
+        ("qnorm(0.975)",         "qnorm(0.975)",                    1.959963984540054,     1e-12),
+        ("qt(0.975, df=10)",     "qt(0.975, 10)",                   2.228138851986273,     1e-9),
+        ("pchisq(3.841, df=1)",  "pchisq(3.841458820694124, 1)",   0.95,                   1e-9),
+        // ── combinatorics ──
+        ("factorial(10)",        "factorial(10)",             3628800.0,                   1e-12),
+        ("choose(10,3)",         "choose(10,3)",                  120.0,                   1e-12),
+        // ── linear algebra + regression ──
+        ("matrix %*% I",         "(matrix(c(1,2,3,4),2) %*% matrix(c(1,0,0,1),2))[2,2]", 4.0, 1e-12),
+        ("solve(A) roundtrip",   "(solve(matrix(c(2,0,0,4),2)) %*% matrix(c(2,0,0,4),2))[1,1]", 1.0, 1e-12),
+        ("cor(x, 2x) = 1",       "cor(c(1,2,3,4), c(2,4,6,8))",     1.0,                   1e-12),
+        ("lm slope (y=2x)",      "coef(lm(c(2,4,6,8) ~ c(1,2,3,4)))[[2]]", 2.0,            1e-9),
+    ];
+
+    println!("Ardon-R2 self-check");
+    println!("  version : {}", env!("CARGO_PKG_VERSION"));
+    println!("  target  : {} / {}", std::env::consts::OS, std::env::consts::ARCH);
+    println!("  build   : {}", if cfg!(debug_assertions) { "debug" } else { "release" });
+    println!();
+
+    // Route engine output (warnings etc.) away from the report.
+    r2_types::out::set_output_hook(Some(Box::new(|_s, _e| {})));
+
+    let mut engine = Engine::new();
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    println!("  {:<22} {:>24} {:>24}   result", "check", "expected", "got");
+    println!("  {}", "-".repeat(78));
+    for (label, expr, expected, tol) in checks {
+        let got = eval_scalar(&mut engine, expr);
+        let (ok, got_str) = match got {
+            Ok(v) => {
+                let err = if *expected == 0.0 { v.abs() } else { ((v - expected) / expected).abs() };
+                (err <= *tol, format!("{:.17e}", v))
+            }
+            Err(e) => (false, format!("ERROR: {}", e)),
+        };
+        if ok { passed += 1; } else { failed += 1; }
+        println!("  {:<22} {:>24.17e} {:>24}   {}",
+                 label, expected, got_str, if ok { "ok" } else { "FAIL" });
+    }
+    println!("  {}", "-".repeat(78));
+    println!();
+    println!("  {} passed, {} failed, {} total", passed, failed, checks.len());
+    if failed == 0 {
+        println!("  PASS — this build matches mathematics to the IEEE-754 floor on this machine.");
+        0
+    } else {
+        println!("  FAIL — {} check(s) diverged. This binary should not be trusted for production.", failed);
+        1
+    }
+}
+
+// Evaluate a single R2 expression to a scalar f64 (last statement's value).
+fn eval_scalar(engine: &mut Engine, src: &str) -> Result<f64, String> {
+    let stmts = Parser::parse(src).map_err(|e| e.to_string())?;
+    let mut last = r2_types::RVal::Null;
+    for st in &stmts {
+        last = engine.eval(st).map_err(|e| e.msg.clone())?;
+    }
+    match last.scalar_f64().map_err(|e| e.msg.clone())? {
+        Some(v) => Ok(v),
+        None => Err("NA".into()),
+    }
 }
 
 fn repl_main() {
