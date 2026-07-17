@@ -1,0 +1,15 @@
+[package]
+name = "r2-panel"
+version = "0.3.8"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Declarative menu/dashboard apps for Ardon-R2 — buttons that run canned R2 tasks and show typed results (value / table / plot / text). Lets a non-user (QC operator, analyst on a shop floor) drive Ardon-R2 without learning it."
+
+[dependencies]
+# The panel runner executes actions through the real engine and classifies
+# the results — no separate interpreter. Rendering lives elsewhere (r2-gui
+# over r2-ui); this crate is the headless FOUNDATION: spec model + runner,
+# fully testable with no window and no GPU.
+r2-types  = { path = "../r2-types" }
+r2-parser = { path = "../r2-parser" }
+r2-engine = { path = "../r2-engine" }

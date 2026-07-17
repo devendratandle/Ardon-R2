@@ -1,0 +1,36 @@
+# Ardon-R2 panel manifest — shop-floor quality control.
+# An operator presses buttons; no R2 knowledge required to run these.
+# Author this file once; deploy the panel to the desk.
+title: Line 3 — Quality Control
+
+[panel]
+label: Batch Mean
+script: readings <- c(10.02, 9.98, 10.01, 9.97, 10.03, 9.99)
+    mean(readings)
+output: value
+unit: mm
+description: Mean of today's diameter readings
+
+[panel]
+label: Process Capability (Cpk)
+script: usl <- 10.05; lsl <- 9.95
+    cpk <- min(usl - mean(readings), mean(readings) - lsl) / (3 * sd(readings))
+    cpk
+output: value
+pass_if: x >= 1.33
+unit: Cpk
+description: PASS when Cpk >= 1.33 (4-sigma capable)
+
+[panel]
+label: In-Spec Rate
+script: mean(readings >= 9.95 & readings <= 10.05)
+output: value
+pass_if: x >= 0.99
+unit: fraction
+description: Fraction of readings within spec limits
+
+[panel]
+label: Readings Summary
+script: summary(readings)
+output: text
+description: Five-number summary of the batch
