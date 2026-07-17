@@ -32,6 +32,11 @@ enum Op {
     Silu(Var),
     /// RMSNorm over the last dim `d`, with weight and eps. Rows = len/d.
     Rmsnorm { x: Var, w: Var, d: usize, eps: f32 },
+    /// Transpose a rows×cols matrix → cols×rows.
+    Transpose { x: Var, rows: usize, cols: usize },
+    /// Softmax over each `d`-wide row (a differentiable op, distinct from
+    /// the fused SoftmaxCE loss — this one is used INSIDE attention).
+    SoftmaxRows { x: Var, d: usize },
     /// Σ of all elements → scalar.
     SumAll(Var),
     /// Mean squared error against a constant target (target has no grad).
@@ -102,6 +107,20 @@ impl Tape {
         let val = r2_tensor::ops::rmsnorm(&self.vals[x.0], &self.vals[w.0], eps);
         let req = self.requires[x.0] || self.requires[w.0];
         self.push(val, Op::Rmsnorm { x, w, d, eps }, req)
+    }
+
+    pub fn transpose(&mut self, x: Var, rows: usize, cols: usize) -> Var {
+        let vx = &self.vals[x.0];
+        let mut val = vec![0.0f32; rows * cols];
+        for i in 0..rows { for j in 0..cols { val[j * rows + i] = vx[i * cols + j]; } }
+        let req = self.requires[x.0];
+        self.push(val, Op::Transpose { x, rows, cols }, req)
+    }
+
+    pub fn softmax_rows(&mut self, x: Var, d: usize) -> Var {
+        let val = r2_tensor::ops::softmax(&self.vals[x.0], d);
+        let req = self.requires[x.0];
+        self.push(val, Op::SoftmaxRows { x, d }, req)
     }
 
     pub fn sum_all(&mut self, x: Var) -> Var {
@@ -199,6 +218,27 @@ impl Tape {
                             self.grads[xi][r * d + j] += gr[j] * vw[j] * rinv - coef * xr[j] * s;
                             // dL/dw_j = g_j * x_j * r
                             self.grads[wi][j] += gr[j] * xr[j] * rinv;
+                        }
+                    }
+                }
+                Op::Transpose { x, rows, cols } => {
+                    let (xi, rows, cols) = (x.0, *rows, *cols);
+                    // grad_x[i,j] += g[j,i]
+                    for i in 0..rows { for j in 0..cols {
+                        self.grads[xi][i * cols + j] += g[j * rows + i];
+                    }}
+                }
+                Op::SoftmaxRows { x, d } => {
+                    let (xi, d) = (x.0, *d);
+                    let y = self.vals[i].clone(); // this node's value = softmax
+                    let rows = y.len() / d;
+                    for r in 0..rows {
+                        let yr = &y[r * d..r * d + d];
+                        let gr = &g[r * d..r * d + d];
+                        // dot = Σ_j g_j y_j ; dL/dx_i = y_i (g_i − dot)
+                        let dot: f32 = (0..d).map(|j| gr[j] * yr[j]).sum();
+                        for j in 0..d {
+                            self.grads[xi][r * d + j] += yr[j] * (gr[j] - dot);
                         }
                     }
                 }
@@ -338,6 +378,30 @@ mod tests {
             let pred = t.leaf(p.to_vec(), true);
             let loss = t.mse(pred, vec![1.0, 0.0, -1.0]);
             (pred, loss)
+        });
+    }
+
+    #[test]
+    fn transpose_grad() {
+        check_grad(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], |t, p| {
+            let x = t.leaf(p.to_vec(), true);       // 2×3
+            let xt = t.transpose(x, 2, 3);          // 3×2
+            let c = t.leaf(vec![1.0, -2.0, 0.5, 1.5, -1.0, 2.0], false);
+            let prod = t.mul(xt, c);
+            let loss = t.sum_all(prod);
+            (x, loss)
+        });
+    }
+
+    #[test]
+    fn softmax_rows_grad() {
+        check_grad(&[1.0, 2.0, 0.5, -1.0, 0.3, 2.0], |t, p| {
+            let x = t.leaf(p.to_vec(), true);       // 2 rows × 3
+            let sm = t.softmax_rows(x, 3);
+            let c = t.leaf(vec![1.0, 0.0, -1.0, 2.0, 1.0, 0.5], false);
+            let prod = t.mul(sm, c);
+            let loss = t.sum_all(prod);
+            (x, loss)
         });
     }
 

@@ -7,3 +7,5 @@ description = "Training loop foundation: optimizer traits + the verified-innovat
 
 [dependencies]
 r2-mesh = { path = "../r2-mesh" }
+r2-tensor = { path = "../r2-tensor" }
+r2-autograd = { path = "../r2-autograd" }

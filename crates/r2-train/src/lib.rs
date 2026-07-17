@@ -23,6 +23,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod transformer;
+
 // ── The objective a training loop optimizes ────────────────────────────
 
 /// What the trainer needs from a model: loss + gradient on the TRAINING
