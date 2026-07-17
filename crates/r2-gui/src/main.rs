@@ -356,20 +356,22 @@ fn main() -> Result<(), String> {
                                        w: win_w, h: win_h - menu_h };
                 mdi.borrow_mut().set_workspace(workspace);
 
-                // ── One-time adaptive layout (R-style): position the
-                //    console PROPORTIONALLY to the actual workspace the
-                //    first time we know its size, instead of fixed
-                //    pixels. ~52% wide × 66% tall at the top-left, like
-                //    RGui's console. Done once; the user can then drag /
-                //    resize / maximize freely.
+                // ── One-time adaptive layout: the first time we know the
+                //    workspace size, open the console FILLING it (minus a
+                //    thin margin), so on launch the whole maximized window
+                //    is usable reading space instead of a small box in the
+                //    corner. Graphics windows open on top when the user
+                //    plots; the console can then be dragged / resized /
+                //    un-maximized freely. Done once.
                 if !*did_layout.borrow() && workspace.w > 0.0 {
                     *did_layout.borrow_mut() = true;
                     if let Some(w) = mdi.borrow_mut().window_mut(console_id) {
+                        let m = 8.0; // uniform margin
                         w.bounds = Rect {
-                            x: workspace.x + workspace.w * 0.015,
-                            y: workspace.y + workspace.h * 0.03,
-                            w: workspace.w * 0.52,
-                            h: workspace.h * 0.66,
+                            x: workspace.x + m,
+                            y: workspace.y + m,
+                            w: (workspace.w - 2.0 * m).max(200.0),
+                            h: (workspace.h - 2.0 * m).max(120.0),
                         };
                     }
                 }
@@ -567,6 +569,13 @@ fn main() -> Result<(), String> {
                                 full.chars().map(|c| Cell::plain(c, theme.console_input)).collect()
                             };
                             rows.push(prompt_row);
+                            // Wrap to the same width paint/selection use, so the
+                            // selection's (row,col) indices map to the same rows.
+                            let (cell_w, _) = renderer.cell_metrics(theme.fs());
+                            let ww = mdi.borrow().window(console_id)
+                                .map(|w| console_wrap_width(w.content_rect(theme).w, cell_w))
+                                .unwrap_or(0);
+                            let rows = wrap_rows(rows, ww);
                             if let Some(sel) = grid_state.borrow().selection {
                                 let text = r2_ui::grid::selection_to_text(&rows, sel);
                                 if !text.is_empty() {
@@ -626,6 +635,12 @@ fn main() -> Result<(), String> {
                         }
                         "edit.select_all" => {
                             let rows = rows_from_buffer(&buffer.lock().unwrap(), theme);
+                            // Wrap to match paint/selection row structure.
+                            let (cell_w, _) = renderer.cell_metrics(theme.fs());
+                            let ww = mdi.borrow().window(console_id)
+                                .map(|w| console_wrap_width(w.content_rect(theme).w, cell_w))
+                                .unwrap_or(0);
+                            let rows = wrap_rows(rows, ww);
                             if !rows.is_empty() {
                                 let last = rows.len() - 1;
                                 let last_col = rows[last].len().saturating_sub(1);
@@ -737,6 +752,10 @@ fn main() -> Result<(), String> {
                             w: content.w - 16.0 - sbt,
                             h: content.h - 16.0 - sbt,
                         };
+                        // Wrap to the console width so hit-testing indexes the
+                        // same physical rows paint draws (otherwise a click on
+                        // a wrapped line would select the wrong text).
+                        let rows = wrap_rows(rows, console_wrap_width(content.w, cell_w));
                         // Skip selection events on the frame a context
                         // menu was open / fired — the click that picked
                         // a menu item would otherwise also reach the
@@ -802,7 +821,7 @@ fn main() -> Result<(), String> {
                             h: sbt,
                         };
 
-                        let mut rows = rows_from_buffer(&buffer.lock().unwrap(), theme);
+                        let transcript_rows = rows_from_buffer(&buffer.lock().unwrap(), theme);
                         let input_ref = input.borrow();
                         // Build the live prompt row: "<prompt> <typed text>"
                         // in console-input color, appended to the transcript.
@@ -811,13 +830,31 @@ fn main() -> Result<(), String> {
                             let full = format!("{}{}", prefix, input_ref.current);
                             full.chars().map(|c| Cell::plain(c, theme.console_input)).collect()
                         };
-                        let prompt_row_index = rows.len();
-                        let cursor_col_in_row = input_ref.prompt.chars().count() + 1
+                        // Cursor position within the (unwrapped) prompt line.
+                        let cursor_col_logical = input_ref.prompt.chars().count() + 1
                             + input_ref.current[..input_ref.cursor].chars().count();
-                        rows.push(prompt_row);
+
+                        // ── Wrap long lines to the console width so output
+                        //    folds instead of running off the right edge. Wrap
+                        //    the transcript, then the prompt separately, so we
+                        //    can map the cursor into the wrapped grid: the
+                        //    prompt starts at `prompt_base`, and a caret that
+                        //    is `cursor_col_logical` chars in lands `/ wrap`
+                        //    rows down and `% wrap` cols across.
+                        let wrap = (grid_rect.w / cell_w).floor() as usize;
+                        let mut rows = wrap_rows(transcript_rows, wrap);
+                        let prompt_base = rows.len();
+                        let (prompt_row_index, cursor_col_in_row) = if wrap > 0 {
+                            (prompt_base + cursor_col_logical / wrap, cursor_col_logical % wrap)
+                        } else {
+                            (prompt_base, cursor_col_logical)
+                        };
+                        rows.extend(wrap_rows(vec![prompt_row], wrap));
 
                         // ── Drive the scrollbars from current content
-                        //     vs viewport sizes (in cell units).
+                        //     vs viewport sizes (in cell units). With wrapping
+                        //     on, no row exceeds `wrap`, so the horizontal bar
+                        //     stays inert (full thumb) — kept only as a no-op.
                         let total_rows  = rows.len();
                         let max_cols    = rows.iter().map(|r| r.len()).max().unwrap_or(0)
                                           .max(cursor_col_in_row + 1);

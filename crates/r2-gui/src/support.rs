@@ -44,6 +44,53 @@ pub(crate) fn rows_from_buffer(buf: &ConsoleBuffer, theme: &Theme) -> Vec<Vec<Ce
         .collect()
 }
 
+/// Wrap transcript rows to a fixed column `width`, so long output lines
+/// fold onto the next line instead of running off the right edge (which
+/// previously forced the user to resize the window or use the horizontal
+/// scrollbar to read). Any row longer than `width` is split into
+/// consecutive physical rows of at most `width` cells; empty and
+/// short-enough rows pass through unchanged. Char-level (not word-level)
+/// wrapping — the console is monospace and much of its output is aligned
+/// tables, where breaking mid-token preserves column alignment better than
+/// reflowing on spaces. `width == 0` (window too small to measure) is a
+/// no-op.
+pub(crate) fn wrap_rows(rows: Vec<Vec<Cell>>, width: usize) -> Vec<Vec<Cell>> {
+    if width == 0 {
+        return rows;
+    }
+    let mut out: Vec<Vec<Cell>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.len() <= width {
+            out.push(row);
+        } else {
+            let mut i = 0;
+            while i < row.len() {
+                let end = (i + width).min(row.len());
+                out.push(row[i..end].to_vec());
+                i = end;
+            }
+        }
+    }
+    out
+}
+
+/// The console's usable width in whole character cells, given the console
+/// window's content-rect width and the monospace cell width. Mirrors the
+/// `grid_rect.w = content.w - 16 - scrollbar` reservation used by paint and
+/// selection, so wrapping done with this value lines up exactly with where
+/// text is drawn. Returns 0 when the width can't be measured (too small /
+/// no metrics) — `wrap_rows(_, 0)` is then a safe no-op.
+pub(crate) fn console_wrap_width(content_w: f32, cell_w: f32) -> usize {
+    if cell_w <= 0.0 {
+        return 0;
+    }
+    let grid_w = content_w - 16.0 - r2_ui::SCROLLBAR_THICKNESS;
+    if grid_w <= 0.0 {
+        return 0;
+    }
+    (grid_w / cell_w).floor() as usize
+}
+
 /// Capture the engine's current SVG plot, if any. Returns `None` when
 /// no plot has been produced.
 pub(crate) fn take_engine_svg() -> Option<String> {

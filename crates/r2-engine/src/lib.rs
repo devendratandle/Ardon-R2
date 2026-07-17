@@ -977,15 +977,36 @@ pub(crate) fn bi_explain(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
     }
     // Data → size + architecture + how the Oracle will dispatch work on it.
     let hw = r2_oracle::hw();
-    let (n, shape, mm): (usize, String, Option<(usize, usize)>) = match v {
-        RVal::Matrix(m) => (m.nrow * m.ncol, format!("matrix {}x{}", m.nrow, m.ncol), Some((m.nrow, m.ncol))),
-        RVal::DataFrame(df) => (df.nrow() * df.columns.len(), format!("data.frame {}x{}", df.nrow(), df.columns.len()), None),
-        RVal::Numeric(x, _) => (x.len(), format!("numeric vector, length {}", x.len()), None),
-        RVal::Integer(x, _) => (x.len(), format!("integer vector, length {}", x.len()), None),
-        RVal::Logical(x, _) => (x.len(), format!("logical vector, length {}", x.len()), None),
-        RVal::Character(x, _) => (x.len(), format!("character vector, length {}", x.len()), None),
-        RVal::List(x) => (x.len(), format!("list, {} elements", x.len()), None),
-        other => (1, other.type_name().to_string(), None),
+    // A bare positive whole number is read as a HYPOTHETICAL vector length:
+    // `explain(1e8)` reports how the Oracle would dispatch 100M elements
+    // WITHOUT allocating them (`explain(rnorm(1e8))` hits the allocation cap
+    // first — the data must exist before explain sees it). Explaining an
+    // actual scalar is useless (n=1 is always serial), so this reading is
+    // strictly more informative and never surprising.
+    let hypothetical_n: Option<usize> = if r2_types::rval_length(v) == 1 {
+        match v {
+            RVal::Numeric(..) | RVal::Integer(..) => v
+                .scalar_f64().ok().flatten()
+                .filter(|f| f.is_finite() && *f >= 1.0 && f.fract() == 0.0)
+                .map(|f| f as usize),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let (n, shape, mm): (usize, String, Option<(usize, usize)>) = if let Some(hn) = hypothetical_n {
+        (hn, format!("hypothetical vector, length {} (not allocated)", hn), None)
+    } else {
+        match v {
+            RVal::Matrix(m) => (m.nrow * m.ncol, format!("matrix {}x{}", m.nrow, m.ncol), Some((m.nrow, m.ncol))),
+            RVal::DataFrame(df) => (df.nrow() * df.columns.len(), format!("data.frame {}x{}", df.nrow(), df.columns.len()), None),
+            RVal::Numeric(x, _) => (x.len(), format!("numeric vector, length {}", x.len()), None),
+            RVal::Integer(x, _) => (x.len(), format!("integer vector, length {}", x.len()), None),
+            RVal::Logical(x, _) => (x.len(), format!("logical vector, length {}", x.len()), None),
+            RVal::Character(x, _) => (x.len(), format!("character vector, length {}", x.len()), None),
+            RVal::List(x) => (x.len(), format!("list, {} elements", x.len()), None),
+            other => (1, other.type_name().to_string(), None),
+        }
     };
     // Smallest length at which `op` flips serial → parallel, by scanning a
     // doubling sequence (dispatch is O(1), so this is cheap). None → the

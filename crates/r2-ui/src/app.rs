@@ -189,6 +189,12 @@ impl R2Ui {
         };
         let window = WindowBuilder::new()
             .with_title(&self.title)
+            // Open MAXIMIZED — fill the screen on launch so the console and
+            // plot windows have room, instead of a small floating box the
+            // user must resize before anything is comfortably readable. The
+            // inner_size below is the *restore* size (what you get when you
+            // un-maximize), kept resolution-adaptive.
+            .with_maximized(true)
             .with_inner_size(winit::dpi::LogicalSize::new(init_w, init_h))
             .with_min_inner_size(winit::dpi::LogicalSize::new(600.0, 360.0))
             .build(&event_loop)
