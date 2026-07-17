@@ -957,7 +957,23 @@ pub(crate) fn bi_explain(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
     // A function → JIT execution plan.
     if let RVal::Closure(cl) = v {
         let verdict = r2_jit::explain_closure(cl);
-        return Ok(RVal::Character(vec![Some(Arc::from(verdict.as_str()))], Attrs::default()));
+        // The doc promise is a *feedback loop for writing fast libraries*, so
+        // when the JIT falls back, name the remedy — not just the blocker.
+        let mut out = verdict.clone();
+        if verdict.starts_with("interpreter") {
+            let hint = if verdict.contains("string") {
+                "  fix: keep the hot body numeric — strings run interpreted; do text work outside the loop."
+            } else if verdict.contains("call") || verdict.contains("builtin") {
+                "  fix: the JIT inlines arithmetic + a fixed math set; a called function/builtin blocks it — inline the math or precompute."
+            } else if verdict.contains("for") || verdict.contains("loop") {
+                "  fix: counted for(v in a:b) loops JIT; other control flow (repeat/tryCatch/break) falls back — restructure to a counted loop."
+            } else {
+                "  fix: the JIT compiles numeric bodies of arithmetic, counted loops, and a fixed math set; anything else runs interpreted (correct, just not compiled)."
+            };
+            out.push('\n');
+            out.push_str(hint);
+        }
+        return Ok(RVal::Character(vec![Some(Arc::from(out.as_str()))], Attrs::default()));
     }
     // Data → size + architecture + how the Oracle will dispatch work on it.
     let hw = r2_oracle::hw();
@@ -971,9 +987,30 @@ pub(crate) fn bi_explain(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
         RVal::List(x) => (x.len(), format!("list, {} elements", x.len()), None),
         other => (1, other.type_name().to_string(), None),
     };
-    let method = |op| if r2_oracle::dispatch(op, r2_oracle::Shape::n(n)) == r2_oracle::Backend::Rayon {
-        format!("PARALLEL ({} cores)", hw.cores)
-    } else { "serial".to_string() };
+    // Smallest length at which `op` flips serial → parallel, by scanning a
+    // doubling sequence (dispatch is O(1), so this is cheap). None → the
+    // Oracle never parallelizes this op on this machine at any size.
+    let crossover = |op| -> Option<usize> {
+        let mut probe = 1usize;
+        while probe <= (1usize << 34) {
+            if r2_oracle::dispatch(op, r2_oracle::Shape::n(probe)) == r2_oracle::Backend::Rayon {
+                return Some(probe);
+            }
+            probe = probe.saturating_mul(2);
+        }
+        None
+    };
+    // Verdict at the current size, plus WHERE the crossover is — the
+    // question a library author actually asks ("when does this go parallel?").
+    let method = |op| {
+        let parallel_now = r2_oracle::dispatch(op, r2_oracle::Shape::n(n)) == r2_oracle::Backend::Rayon;
+        match (parallel_now, crossover(op)) {
+            (true, Some(c)) => format!("PARALLEL ({} cores) — serial below n={}", hw.cores, c),
+            (true, None) => format!("PARALLEL ({} cores)", hw.cores),
+            (false, Some(c)) => format!("serial — parallel at n≥{}", c),
+            (false, None) => "serial (never parallelized on this machine)".to_string(),
+        }
+    };
     let simd = if hw.has_avx512 { " +AVX-512" } else if hw.has_avx2 { " +AVX2" } else if hw.has_fma { " +FMA" } else { "" };
     let mut s = String::new();
     s.push_str(&format!("data:     {shape}  (~{} KB in memory)\n", (n * 8) / 1024 + 1));
