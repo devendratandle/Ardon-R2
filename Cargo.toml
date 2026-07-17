@@ -28,6 +28,7 @@ members = [
     "crates/r2-mesh",
     "crates/r2-train",
     "crates/r2-tensor",
+    "crates/r2-autograd",
 ]
 
 [workspace.dependencies]

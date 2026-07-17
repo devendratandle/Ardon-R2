@@ -2940,6 +2940,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "r2-autograd"
+version = "0.1.0"
+dependencies = [
+ "r2-tensor",
+]
+
+[[package]]
 name = "r2-base"
 version = "0.1.1"
 dependencies = [

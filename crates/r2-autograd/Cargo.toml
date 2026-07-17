@@ -1,0 +1,9 @@
+[package]
+name = "r2-autograd"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Reverse-mode autograd over the r2-tensor transformer op set (Layer 4)."
+
+[dependencies]
+r2-tensor = { path = "../r2-tensor" }
