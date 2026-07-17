@@ -3144,6 +3144,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "r2-tensor"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+]
+
+[[package]]
 name = "r2-train"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,10 @@
+[package]
+name = "r2-tensor"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "LLM tensor substrate: f32/f16/bf16 + Q8/Q4 quantized dtypes, CPU reference kernels, mmap weights."
+
+[dependencies]
+# Raw-bytes memory mapping for weight files (same crate r2-arrow uses).
+memmap2 = "0.9"
