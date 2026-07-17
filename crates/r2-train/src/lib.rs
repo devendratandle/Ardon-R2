@@ -24,6 +24,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod transformer;
+pub mod distributed;
 
 // ── The objective a training loop optimizes ────────────────────────────
 
