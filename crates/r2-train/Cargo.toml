@@ -1,0 +1,9 @@
+[package]
+name = "r2-train"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Training loop foundation: optimizer traits + the verified-innovation (fuzzy) core."
+
+[dependencies]
+r2-mesh = { path = "../r2-mesh" }

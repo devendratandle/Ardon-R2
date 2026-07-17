@@ -3076,6 +3076,10 @@ name = "r2-memory"
 version = "0.1.1"
 
 [[package]]
+name = "r2-mesh"
+version = "0.1.0"
+
+[[package]]
 name = "r2-ml"
 version = "0.1.1"
 dependencies = [
@@ -3137,6 +3141,13 @@ version = "0.1.1"
 dependencies = [
  "r2-types",
  "regex-lite",
+]
+
+[[package]]
+name = "r2-train"
+version = "0.1.0"
+dependencies = [
+ "r2-mesh",
 ]
 
 [[package]]

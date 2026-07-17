@@ -1,0 +1,10 @@
+[package]
+name = "r2-mesh"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Hardware topology, collectives, and sharding for scalable LLM training (foundation)."
+
+[dependencies]
+# No transport deps yet: the reference Collective runs across threads.
+# NCCL/RCCL/MPI impls (Opus) will add optional, feature-gated deps.
