@@ -28,6 +28,7 @@
 
 pub mod runner;
 pub mod spec;
+pub mod ui;
 
 pub use runner::{PanelResult, PanelSession, Status};
 pub use spec::{OutputKind, Panel, PanelApp};
