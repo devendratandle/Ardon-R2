@@ -286,10 +286,12 @@ fn repl_main() {
         eprintln!();
     });
 
-    println!("\nArdon-R2 — Statistical Computing, Reimagined");
-    println!("Version {} (2026) | Inspired by R. Built on Rust.", env!("CARGO_PKG_VERSION"));
-    println!("Created by Devendra Tandale | An AI-Assisted Project");
-    println!("Assignment: both <- and = work. Mode: strict.");
+    // Canonical banner (shared with the GUI via r2-console) + the CLI's
+    // one host-specific hint line.
+    println!();
+    for line in r2_console::banner_lines(env!("CARGO_PKG_VERSION")) {
+        println!("{}", line);
+    }
     println!("Type q() to quit.\n");
 
     // Interactive session: allow dev.view() to launch the browser plot

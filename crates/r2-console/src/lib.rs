@@ -35,6 +35,23 @@
 
 use r2_types::{Expr, RVal};
 
+// ─── Canonical banner ─────────────────────────────────────────────────
+
+/// The ONE startup banner, shared verbatim by every frontend (CLI, GUI,
+/// and any future server/notebook host). R's own banner is identical
+/// across Rterm/RGui/RStudio — same product, same greeting. A frontend
+/// may append exactly one host-specific hint line AFTER these (e.g. the
+/// CLI's "Type q() to quit", the GUI's "plot(x,y) opens the Graphics
+/// window"), never edit or reorder them.
+pub fn banner_lines(version: &str) -> Vec<String> {
+    vec![
+        format!("Ardon-R2 {} — Statistical Computing, Reimagined", version),
+        "Pure Rust. Inspired by R. | Created by Devendra Tandale".to_string(),
+        "An AI-Assisted Project | AGPL-3.0".to_string(),
+        "Assignment: both <- and = work. Mode: strict.".to_string(),
+    ]
+}
+
 // ─── Transcript lines ─────────────────────────────────────────────────
 
 /// Semantic role of a transcript line. The renderer maps this to a

@@ -130,9 +130,17 @@ pub(crate) fn run_source(
                 }
             }
             Err(err) => {
-                buffer.lock().unwrap().push_error(&format!("Error: {:?}", err));
+                // Display formatting — the SAME text the CLI prints. Debug
+                // ({:?}) leaked `R2Err { msg: ..., kind: ... }` to users.
+                buffer.lock().unwrap().push_error(&format!("{}", err));
             }
         }
+    }
+    // Homogeneity with the CLI: accumulated warnings surface after the
+    // submission, on the error stream (the CLI prints them to stderr).
+    // Without this the GUI silently swallowed every warning() / NaN note.
+    for w in engine.drain_warnings() {
+        buffer.lock().unwrap().push_error(&w);
     }
 }
 

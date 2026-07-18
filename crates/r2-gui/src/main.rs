@@ -83,9 +83,12 @@ fn main() -> Result<(), String> {
     // ── Shared state ───────────────────────────────────────────────
     let buffer = Arc::new(Mutex::new(ConsoleBuffer::new()));
     {
+        // Canonical banner (shared with the CLI via r2-console) + the
+        // GUI's one host-specific hint line.
         let mut b = buffer.lock().unwrap();
-        b.push_banner(&format!("Ardon-R2 {} — pure-Rust R", env!("CARGO_PKG_VERSION")));
-        b.push_banner("Type expressions at the R2> prompt. Up/Down recalls history.");
+        for line in r2_console::banner_lines(env!("CARGO_PKG_VERSION")) {
+            b.push_banner(&line);
+        }
         b.push_banner("plot(x, y) opens the Graphics window. q() quits.");
         b.push_banner("");
     }
