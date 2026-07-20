@@ -36,6 +36,7 @@ pub mod table;
 pub mod meta;
 pub mod clean;
 pub mod order;
+pub mod store;
 
 use r2_types::{EvalArg, R2Err, RVal};
 
