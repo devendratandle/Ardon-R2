@@ -186,3 +186,16 @@ crates/*/*.svg
 !assets/**
 !screenshots/**
 samples/plssem_data.csv
+
+# Internal agent planning / Fable-vs-Opus work-distribution docs — never public.
+docs/AI_PLATFORM_PLAN.md
+docs/APP_FRAMEWORK_DESIGN.md
+docs/ARROW_DEFAULT_PLAN.md
+docs/DATASTORE_DESIGN.md
+docs/FRONTEND_IO_CONTRACT.md
+docs/GUI_THEME_SPEC.md
+docs/LLM_CAPABILITY_PLAN.md
+docs/LLM_TRILLION_ARCHITECTURE.md
+docs/MODULARITY_AUDIT.md
+docs/PANEL_ARCHITECTURE.md
+docs/SPRINT_TO_JULY19.md
