@@ -245,7 +245,8 @@ pub(crate) fn median_sorted(mut v: Vec<f64>) -> f64 {
 }
 pub(crate) fn map1(e: &mut Engine, a: &[EvalArg], f: impl Fn(f64) -> f64) -> Result<RVal, R2Err> {
     let xs = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(xs.into_iter().map(|o| o.map(&f)).collect::<Vec<_>>().into(), Attrs::default()))
+    let out: Vec<Option<f64>> = xs.into_iter().map(|o| o.map(&f)).collect();
+    Ok(math1_wrap(&gv(a,0), out))
 }
 pub(crate) fn bi_gamma(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { map1(e, a, gamma_fn) }
 pub(crate) fn bi_lgamma(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { map1(e, a, ln_gamma) }

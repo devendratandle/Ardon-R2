@@ -15,6 +15,7 @@
 #![allow(clippy::all)]
 
 use std::sync::Arc;
+use super::core::math1_wrap;
 
 use rayon::prelude::*;
 use r2_types::*;
@@ -498,11 +499,11 @@ pub(crate) fn bi_log(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
         let lb = base.ln();
         lns.into_iter().map(|x| x.map(|n| n / lb)).collect()
     };
-    Ok(RVal::Numeric(result.into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), result))
 }
 pub(crate) fn bi_exp(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Exp, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Exp, &v)))
 }
 
 // Phase R.M.1 — trig and transcendental builtins. Each is a thin
@@ -511,27 +512,27 @@ pub(crate) fn bi_exp(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 // variants automatically based on size).
 pub(crate) fn bi_sin   (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Sin, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Sin, &v)))
 }
 pub(crate) fn bi_cos   (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Cos, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Cos, &v)))
 }
 pub(crate) fn bi_tan   (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Tan, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Tan, &v)))
 }
 pub(crate) fn bi_asin  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Asin, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Asin, &v)))
 }
 pub(crate) fn bi_acos  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Acos, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Acos, &v)))
 }
 pub(crate) fn bi_atan  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Atan, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Atan, &v)))
 }
 pub(crate) fn bi_atan2 (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     // Two-argument atan2(y, x). Element-wise pairing; recycle shorter side
@@ -550,47 +551,49 @@ pub(crate) fn bi_atan2 (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 }
 pub(crate) fn bi_sinh  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Sinh, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Sinh, &v)))
 }
 pub(crate) fn bi_cosh  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Cosh, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Cosh, &v)))
 }
 pub(crate) fn bi_tanh  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Tanh, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Tanh, &v)))
 }
 pub(crate) fn bi_sign  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Sign, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Sign, &v)))
 }
 pub(crate) fn bi_trunc (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Trunc, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Trunc, &v)))
 }
 pub(crate) fn bi_expm1 (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Expm1, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Expm1, &v)))
 }
 pub(crate) fn bi_log1p (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Log1p, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Log1p, &v)))
 }
 pub(crate) fn bi_log2  (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Log2, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Log2, &v)))
 }
 pub(crate) fn bi_log10 (e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Log10, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Log10, &v)))
 }
 pub(crate) fn bi_ceiling(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| n.ceil())).collect(), Attrs::default()))
+    let out: Vec<Option<f64>> = v.into_iter().map(|x| x.map(|n| n.ceil())).collect();
+    Ok(math1_wrap(&gv(a,0), out))
 }
 pub(crate) fn bi_floor(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| n.floor())).collect(), Attrs::default()))
+    let out: Vec<Option<f64>> = v.into_iter().map(|x| x.map(|n| n.floor())).collect();
+    Ok(math1_wrap(&gv(a,0), out))
 }
 // Phase K.9 — rolling/window reductions
 pub(crate) fn bi_median(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

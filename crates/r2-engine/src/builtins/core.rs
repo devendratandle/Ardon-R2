@@ -224,16 +224,48 @@ pub(crate) fn bi_rep(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 
 pub(crate) fn bi_which(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Logical(v,_) => Ok(RVal::Integer(v.iter().enumerate().filter_map(|(i,x)| if *x==Some(true) { Some(Some((i+1) as i32)) } else { None }).collect(), Attrs::default())), _ => err!(Type, "which requires logical") } }
 // Phase K.2: map-kernel dispatch — Rayon decision lives below this layer.
+/// R "Math group" shape preservation: element-wise math keeps the input's
+/// structure. A matrix in → a matrix out (same nrow/ncol/dimnames); an
+/// array (a `dim` attribute) keeps its `dim`/`dimnames`; a named vector
+/// keeps its `names`. `out[i]` must correspond to the input's element `i`
+/// in storage order (column-major for a matrix — the order `as_reals`
+/// yields), so reconstruction is exact. Previously every math builtin
+/// returned a bare `Numeric` with `Attrs::default()`, which is why
+/// `sqrt(matrix)` collapsed to a flat vector.
+pub(crate) fn math1_wrap(input: &RVal, out: Vec<Option<f64>>) -> RVal {
+    match input {
+        RVal::Matrix(m) => RVal::Matrix(Matrix {
+            // Matrix stores dense f64 (NaN for missing), same column-major
+            // order as_reals flattened, so `out` maps straight back.
+            data: out.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect(),
+            nrow: m.nrow,
+            ncol: m.ncol,
+            col_names: m.col_names.clone(),
+            row_names: m.row_names.clone(),
+        }),
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) => {
+            let mut na = Attrs::default();
+            na.names = at.names.clone();  // named vector keeps names
+            na.dim = at.dim.clone();      // array keeps dim
+            if let Some(dn) = at.custom.get("dimnames") {
+                na.custom.insert(Arc::from("dimnames"), dn.clone());
+            }
+            RVal::Numeric(out.into(), na)
+        }
+        _ => RVal::Numeric(out.into(), Attrs::default()),
+    }
+}
+
 pub(crate) fn bi_abs(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Abs, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Abs, &v)))
 }
 pub(crate) fn bi_sqrt(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = e.as_reals(&gv(a,0))?;
-    Ok(RVal::Numeric(r2_kernel::map(r2_kernel::MapOp::Sqrt, &v).into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Sqrt, &v)))
 }
 // R rounds half to EVEN (IEC 60559 banker's rounding): round(2.5)=2, round(3.5)=4.
-pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = if a.len() > 1 { e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) } else { 0.0 } as i32; let f = 10f64.powi(d); Ok(RVal::Numeric(v.into_iter().map(|x| x.map(|n| (n*f).round_ties_even()/f)).collect(), Attrs::default())) }
+pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = if a.len() > 1 { e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) } else { 0.0 } as i32; let f = 10f64.powi(d); let out: Vec<Option<f64>> = v.into_iter().map(|x| x.map(|n| (n*f).round_ties_even()/f)).collect(); Ok(math1_wrap(&gv(a,0), out)) }
 pub(crate) fn bi_sort(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let mut n: Vec<f64> = v.into_iter().filter_map(|x| x).collect(); n.sort_by(|a,b| a.partial_cmp(b).unwrap()); Ok(rnums(&n)) }
 pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) {
     RVal::Numeric(v,_)   => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())),
@@ -297,7 +329,7 @@ pub(crate) fn bi_signif(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     let xs = e.as_reals(&gv(a,0))?;
     let d = e.scalar_f64(&gv(a,1))?.unwrap_or(6.0) as i32;
     let out: Vec<Option<f64>> = xs.into_iter().map(|o| o.map(|x| signif_one(x, d.max(1)))).collect();
-    Ok(RVal::Numeric(out.into(), Attrs::default()))
+    Ok(math1_wrap(&gv(a,0), out))
 }
 pub(crate) fn bi_inherits(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);

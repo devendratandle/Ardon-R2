@@ -602,7 +602,10 @@ pub(crate) fn pure_apply(name: &str, arg: &RVal) -> Option<Result<RVal, R2Err>> 
                 "log" => f64::ln, "log2" => f64::log2, "log10" => f64::log10,
                 _ => unreachable!(),
             };
-            Some(Ok(RVal::Numeric(v.iter().map(|x| x.map(f)).collect(), Attrs::default())))
+            // Preserve matrix/array shape (R Math group) — same helper the
+            // builtins use, so this fast path and the slow path agree.
+            let out: Vec<Option<f64>> = v.iter().map(|x| x.map(f)).collect();
+            Some(Ok(crate::builtins::core::math1_wrap(arg, out)))
         }
         _ => None,
     }
