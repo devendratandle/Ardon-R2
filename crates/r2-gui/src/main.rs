@@ -361,22 +361,25 @@ fn main() -> Result<(), String> {
                                        w: win_w, h: win_h - menu_h };
                 mdi.borrow_mut().set_workspace(workspace);
 
-                // ── One-time adaptive layout: the first time we know the
-                //    workspace size, open the console FILLING it (minus a
-                //    thin margin), so on launch the whole maximized window
-                //    is usable reading space instead of a small box in the
-                //    corner. Graphics windows open on top when the user
-                //    plots; the console can then be dragged / resized /
-                //    un-maximized freely. Done once.
+                // ── One-time adaptive layout: the OS window is maximized
+                //    (see r2-ui WindowBuilder), but the console deliberately
+                //    takes only the LEFT half of the workspace. Graphics
+                //    devices open at x = 55% (see DeviceEvent::Created), so
+                //    console and plots sit SIDE BY SIDE — no window
+                //    switching, no overlap, both readable at a glance.
+                //    Full height, since the vertical space is free: long
+                //    transcripts stay readable. Done once; the user can then
+                //    drag / resize / maximize any window freely.
                 if !*did_layout.borrow() && workspace.w > 0.0 {
                     *did_layout.borrow_mut() = true;
                     if let Some(w) = mdi.borrow_mut().window_mut(console_id) {
-                        let m = 8.0; // uniform margin
                         w.bounds = Rect {
-                            x: workspace.x + m,
-                            y: workspace.y + m,
-                            w: (workspace.w - 2.0 * m).max(200.0),
-                            h: (workspace.h - 2.0 * m).max(120.0),
+                            x: workspace.x + workspace.w * 0.015,
+                            y: workspace.y + workspace.h * 0.03,
+                            // Right edge lands at ~53.5%, clear of the 55%
+                            // where graphics windows start.
+                            w: (workspace.w * 0.52).max(200.0),
+                            h: (workspace.h * 0.90).max(120.0),
                         };
                     }
                 }
