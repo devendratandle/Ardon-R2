@@ -3103,6 +3103,15 @@ name = "r2-oracle"
 version = "0.1.1"
 
 [[package]]
+name = "r2-panel"
+version = "0.3.8"
+dependencies = [
+ "r2-engine",
+ "r2-parser",
+ "r2-types",
+]
+
+[[package]]
 name = "r2-parser"
 version = "0.1.1"
 dependencies = [
@@ -3161,7 +3170,9 @@ dependencies = [
 name = "r2-train"
 version = "0.1.0"
 dependencies = [
+ "r2-autograd",
  "r2-mesh",
+ "r2-tensor",
 ]
 
 [[package]]
