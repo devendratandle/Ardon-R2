@@ -17,6 +17,7 @@
 
 pub mod dtype;
 pub mod infer;
+pub mod model;
 pub mod ops;
 
 use std::fs::File;
