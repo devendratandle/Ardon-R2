@@ -101,7 +101,12 @@ pub(crate) struct Vertex {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct ScreenUniform {
     pub(crate) size: [f32; 2],
-    pub(crate) _pad: [f32; 2],
+    /// Glyph coverage exponent, from the active theme. <1 thickens stems
+    /// (dark text on a light background, which otherwise reads thin);
+    /// >1 thins them (light on dark, which otherwise blooms); 1.0 is
+    /// neutral. Applied in the fragment shader to glyph alpha only.
+    pub(crate) text_gamma: f32,
+    pub(crate) _pad: f32,
 }
 
 // ─── Glyph atlas ─────────────────────────────────────────────────────
@@ -226,19 +231,16 @@ impl Atlas {
             // Expand grayscale coverage → RGBA: white-with-alpha-coverage.
             // (R=255, G=255, B=255, A=cov) means `sample * tint` in the
             // fragment shader produces `tint.rgb` with `tint.a * cov`.
+            // Store fontdue's RAW coverage. The old code baked a
+            // `coverage^0.58` "stem darkening" curve in here, which was a
+            // counter-hack for the sRGB bug fixed in stage A — and being
+            // baked per-glyph it was identical for every theme, so it would
+            // make light-on-dark text bloom. The perceptual correction now
+            // lives in the fragment shader as a per-theme `text_gamma`
+            // uniform, where it can follow the theme's polarity.
             let mut rgba = Vec::with_capacity((w as usize) * (h as usize) * 4);
             for &c in &bitmap {
-                // Sharpen the anti-aliased coverage ramp ("stem darkening").
-                // fontdue emits a soft grey edge fringe; written straight to
-                // alpha it looks fuzzy at the small sizes the console/chrome
-                // use on a light background. A mild gamma < 1 pushes the
-                // partial-coverage edge pixels toward opaque, so stems read
-                // crisp and high-contrast — matching the sharpness of the
-                // resvg-rendered graphics-device text. 0.72 darkens without
-                // the blocky over-thickening a more aggressive curve causes.
-                let cov = c as f32 / 255.0;
-                let a = (cov.powf(0.58) * 255.0 + 0.5) as u8;
-                rgba.extend_from_slice(&[255, 255, 255, a]);
+                rgba.extend_from_slice(&[255, 255, 255, c]);
             }
             queue.write_texture(
                 wgpu::ImageCopyTexture {

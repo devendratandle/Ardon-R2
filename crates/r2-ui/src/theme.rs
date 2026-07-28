@@ -47,6 +47,15 @@ pub struct Theme {
     pub button_max:   Color,   // □  maximize/restore
     pub button_close: Color,   // ✕  close
 
+    // ── Glyph anti-aliasing correction ──────────────────────────
+    // Exponent applied to glyph coverage in the fragment shader. With a
+    // gamma-correct pipeline, AA text has a known perceptual asymmetry:
+    // dark-on-light reads slightly thin, light-on-dark slightly fat. This
+    // follows the theme's polarity — light themes (dark text) use <1 to
+    // thicken stems, dark themes (light text) use >1 to thin them.
+    // 1.0 = no correction.
+    pub text_gamma: f32,
+
     // ── Typography ──────────────────────────────────────────────
     // `font_size` / `line_height` are the EFFECTIVE (already DPI-scaled)
     // values — every widget reads these directly, so applying the scale
@@ -137,6 +146,7 @@ impl Theme {
             console_selection_bg: Color::rgb(61, 111, 217),   // royal blue, solid
             console_selection_fg: Color::WHITE,
             cursor:            Color::rgb(196, 40, 40),
+            text_gamma:  0.85,
             button_min:        Color::rgb(40,  160, 60),    // green
             button_max:        Color::rgb(40,  120, 200),   // blue
             button_close:      Color::rgb(210, 50, 50),     // red
@@ -169,6 +179,7 @@ impl Theme {
             console_selection_bg: Color::rgb(0, 84, 166),
             console_selection_fg: Color::WHITE,
             cursor:            Color::BLACK,
+            text_gamma:  0.85,
             button_min:        Color::rgb(40, 160, 60),
             button_max:        Color::rgb(40, 120, 200),
             button_close:      Color::rgb(210, 50, 50),

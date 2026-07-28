@@ -100,7 +100,9 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // VERTEX reads `size` for the NDC transform; FRAGMENT
+                    // reads `text_gamma` for the glyph AA correction.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -208,7 +210,9 @@ impl Renderer {
         // Update screen-size uniform.
         let su = ScreenUniform {
             size: [self.size.width as f32, self.size.height as f32],
-            _pad: [0.0; 2],
+            // Per-theme glyph AA correction (see ScreenUniform::text_gamma).
+            text_gamma: theme.text_gamma,
+            _pad: 0.0,
         };
         self.queue.write_buffer(&self.screen_uniform, 0, bytemuck::bytes_of(&su));
 
@@ -427,7 +431,7 @@ fn make_bind_group(
 // glyphs the texel is the rasterized coverage so antialiasing works.
 
 const WGSL: &str = r#"
-struct Screen { size: vec2<f32>, _pad: vec2<f32> };
+struct Screen { size: vec2<f32>, text_gamma: f32, _pad: f32 };
 @group(0) @binding(0) var<uniform> screen: Screen;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var samp:  sampler;
@@ -455,7 +459,15 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let s = textureSample(atlas, samp, in.uv);
+    var s = textureSample(atlas, samp, in.uv);
+    // Glyph quads sample white-with-coverage-in-alpha; image tiles carry
+    // real RGB. Applying the exponent to alpha only, and only where the
+    // sample is pure white, corrects glyph stem weight for the theme's
+    // polarity while leaving plot tiles untouched. The solid-fill pixel
+    // is white with alpha 1.0, and pow(1, g) == 1, so fills are unaffected.
+    if (s.r == 1.0 && s.g == 1.0 && s.b == 1.0) {
+        s.a = pow(s.a, screen.text_gamma);
+    }
     return s * in.color;
 }
 "#;
