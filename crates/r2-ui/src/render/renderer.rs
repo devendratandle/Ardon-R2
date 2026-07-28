@@ -59,6 +59,11 @@ impl Renderer {
         let format = caps.formats.iter().copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        // Tell the color converter which space the swapchain expects. On an
+        // sRGB surface the hardware encodes linear output, so theme colors
+        // must be converted sRGB→linear before the shader; on a non-sRGB
+        // fallback they must be passed through raw or they double-darken.
+        super::frame::SRGB_SURFACE.store(format.is_srgb(), std::sync::atomic::Ordering::Relaxed);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -238,11 +243,18 @@ impl Renderer {
             label: Some("r2-ui frame"),
         });
 
+        // The clear value goes through the same sRGB→linear conversion as
+        // every drawn color, otherwise the workspace background would be
+        // the one surface not matching its theme entry.
         let bg = theme.mdi_background;
+        let srgb = super::frame::SRGB_SURFACE.load(std::sync::atomic::Ordering::Relaxed);
+        let conv = |v: u8| -> f64 {
+            if srgb { super::frame::srgb_u8_to_linear(v) as f64 } else { v as f64 / 255.0 }
+        };
         let clear = wgpu::Color {
-            r: bg.0 as f64 / 255.0,
-            g: bg.1 as f64 / 255.0,
-            b: bg.2 as f64 / 255.0,
+            r: conv(bg.0),
+            g: conv(bg.1),
+            b: conv(bg.2),
             a: bg.3 as f64 / 255.0,
         };
         {

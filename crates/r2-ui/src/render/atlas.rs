@@ -146,7 +146,13 @@ impl Atlas {
             // RGBA8 so the same atlas + pipeline can carry both
             // grayscale glyphs (stored as white-with-alpha-coverage)
             // AND full-color image tiles (PlotPanel SVG output).
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            //
+            // sRGB-tagged: image tiles are 8-bit sRGB pixels, so the
+            // sampler must decode them to linear to match the linear
+            // vertex colors (see frame::color_to_f32). Glyphs are
+            // unaffected — their RGB is 255 (1.0 in both spaces) and the
+            // coverage lives in alpha, which sRGB never touches.
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });

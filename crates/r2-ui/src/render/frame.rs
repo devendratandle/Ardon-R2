@@ -205,11 +205,40 @@ impl Frame {
     }
 }
 
+/// Whether the swapchain is an sRGB format. Set once at renderer init.
+/// When true the hardware encodes linear shader output to sRGB on write,
+/// so colors must be fed to the shader in LINEAR space; when false the
+/// value is written through unchanged and must stay sRGB-encoded.
+pub(crate) static SRGB_SURFACE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// sRGB 8-bit channel → linear f32, using the exact piecewise
+/// IEC 61966-2-1 curve (not the pow(2.2) approximation — exactness is
+/// this project's brand, and the toe matters for dark UI colors).
+#[inline]
+pub(crate) fn srgb_u8_to_linear(v: u8) -> f32 {
+    let c = v as f32 / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Theme color → shader vertex color.
+///
+/// Previously this divided by 255 and handed the result to the shader as
+/// if it were linear. Because the surface is sRGB, the hardware then
+/// re-encoded it, so every color displayed LIGHTER than authored (a
+/// midtone authored at 0.5 landed near 0.73) — the root cause of the
+/// washed-out chrome and low-contrast text. Converting to linear here
+/// makes what is drawn match what the theme specifies.
+///
+/// Alpha is a coverage/opacity ratio, not a color channel: it is linear
+/// by definition and must NOT be gamma-converted.
 fn color_to_f32(c: Color) -> [f32; 4] {
-    [
-        c.0 as f32 / 255.0,
-        c.1 as f32 / 255.0,
-        c.2 as f32 / 255.0,
-        c.3 as f32 / 255.0,
-    ]
+    let a = c.3 as f32 / 255.0;
+    if SRGB_SURFACE.load(std::sync::atomic::Ordering::Relaxed) {
+        [srgb_u8_to_linear(c.0), srgb_u8_to_linear(c.1), srgb_u8_to_linear(c.2), a]
+    } else {
+        // Non-sRGB swapchain: the value is presented as written, so
+        // converting would double-darken. Keep the raw ratio.
+        [c.0 as f32 / 255.0, c.1 as f32 / 255.0, c.2 as f32 / 255.0, a]
+    }
 }
