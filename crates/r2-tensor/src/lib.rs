@@ -16,6 +16,7 @@
 //! the GPU kernels live in r2-gpu behind the accuracy contract.
 
 pub mod dtype;
+pub mod infer;
 pub mod ops;
 
 use std::fs::File;
