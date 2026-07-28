@@ -17,6 +17,8 @@
 
 pub mod dtype;
 pub mod infer;
+pub mod json;
+pub mod safetensors;
 pub mod model;
 pub mod ops;
 
