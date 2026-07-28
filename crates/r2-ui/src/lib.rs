@@ -65,7 +65,7 @@ pub use layout::{Layout, LayoutBuilder, Mdi};
 pub use mdi::{MdiHost, SubWindow, WindowId};
 pub use menu::{menu_bar_height, MenuBar, MenuBarState, MenuBuilder, MenuItem, MenuTopLevel, MENU_BAR_HEIGHT};
 pub use graph::GraphPanel;
-pub use render::{Frame, GlyphInfo, ImageHandle, Renderer};
+pub use render::{Face, Frame, GlyphInfo, ImageHandle, Renderer};
 pub use scrollbar::{Scrollbar, ScrollOrientation, SCROLLBAR_THICKNESS};
 pub use theme::{Color, Theme};
 pub use window::{Window as UiWindow, WindowBuilder};

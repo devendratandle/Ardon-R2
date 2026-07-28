@@ -28,7 +28,12 @@ pub struct Renderer {
     ibuf_cap: u64,
 
     atlas:   Atlas,
+    /// The monospace face — console, tables, numbers.
     pub font: fontdue::Font,
+    /// The proportional UI face — menus, window titles, labels, buttons.
+    /// `None` when no system UI font parsed; every lookup then falls back
+    /// to the mono face, so a missing font never stops the app.
+    pub ui_font: Option<fontdue::Font>,
 }
 
 impl Renderer {
@@ -79,6 +84,7 @@ impl Renderer {
         // ── Glyph atlas + font ──
         let atlas = Atlas::new(&device, &queue);
         let font = load_system_font()?;
+        let ui_font = load_ui_font();
 
         // ── Pipeline ──
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -187,7 +193,7 @@ impl Renderer {
             pipeline, sampler, screen_uniform,
             bind_group_layout, bind_group,
             vbuf, ibuf, vbuf_cap, ibuf_cap,
-            atlas, font,
+            atlas, font, ui_font,
         })
     }
 
@@ -392,7 +398,29 @@ impl Renderer {
     /// Public so the `Frame` builder methods can use it; widgets
     /// shouldn't typically call this directly.
     pub fn glyph_uv(&mut self, ch: char, size_pt: f32) -> (GlyphInfo, [f32; 4]) {
-        let g = self.atlas.glyph(&self.font, ch, size_pt, &self.queue);
+        self.glyph_uv_face(ch, size_pt, Face::Mono)
+    }
+
+    /// Width of a string in the proportional UI face — chrome painters
+    /// need this to centre menu labels and window titles.
+    pub fn measure_text_width_ui(&mut self, text: &str, size_pt: f32) -> f32 {
+        text.chars().fold(0.0, |w, ch| w + self.glyph_uv_face(ch, size_pt, Face::Ui).0.advance)
+    }
+
+    /// Glyph access for a specific typeface. `Face::Ui` falls back to the
+    /// mono face when no system UI font was found, so callers never have
+    /// to handle a missing font.
+    pub fn glyph_uv_face(&mut self, ch: char, size_pt: f32, face: Face)
+        -> (GlyphInfo, [f32; 4])
+    {
+        let (font, face) = match face {
+            Face::Ui => match self.ui_font.as_ref() {
+                Some(f) => (f, Face::Ui),
+                None    => (&self.font, Face::Mono), // key by what we RASTERIZED
+            },
+            Face::Mono => (&self.font, Face::Mono),
+        };
+        let g = self.atlas.glyph(font, ch, size_pt, face, &self.queue);
         let inv = 1.0 / ATLAS_SIZE as f32;
         let uv = [
             g.atlas_x as f32 * inv,

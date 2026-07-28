@@ -100,7 +100,6 @@ impl MenuBarState {
                          workspace: Rect,
                          renderer: &mut Renderer,
                          theme: &Theme) -> Option<String> {
-        let (cell_w, _) = renderer.cell_metrics(theme.font_size);
         let mut fired: Option<String> = None;
         for ev in events {
             match *ev {
@@ -110,7 +109,7 @@ impl MenuBarState {
                     let mut pen_x = workspace.x + 8.0;
                     let mut clicked_top: Option<usize> = None;
                     for (i, top) in self.bar.items.iter().enumerate() {
-                        let w = top.label.chars().count() as f32 * cell_w + 16.0;
+                        let w = top_w(renderer, &top.label, theme);
                         let r = Rect { x: pen_x, y: workspace.y, w, h: menu_bar_height(theme) };
                         if point_in(r, pos) { clicked_top = Some(i); break; }
                         pen_x += w;
@@ -141,15 +140,14 @@ impl MenuBarState {
                renderer: &mut Renderer, theme: &Theme,
                workspace: Rect) -> Option<String> {
         let top = self.bar.items.get(top_idx)?;
-        let (cell_w, _) = renderer.cell_metrics(theme.font_size);
         // Find this top-level's x position (sum widths of preceding entries).
         let mut popup_x = workspace.x + 8.0;
         for (i, t) in self.bar.items.iter().enumerate() {
             if i == top_idx { break; }
-            popup_x += t.label.chars().count() as f32 * cell_w + 16.0;
+            popup_x += top_w(renderer, &t.label, theme);
         }
         let popup_y = workspace.y + menu_bar_height(theme);
-        let popup_w = popup_width(top, cell_w, theme.px(160.0));
+        let popup_w = popup_width(top, renderer, theme, theme.px(160.0));
         for (j, item) in top.items.iter().enumerate() {
             let r = Rect { x: popup_x, y: popup_y + j as f32 * item_height(theme), w: popup_w, h: item_height(theme) };
             if point_in(r, pos) { return Some(item.action.clone()); }
@@ -167,17 +165,16 @@ impl MenuBarState {
         frame.paint_rect(workspace.x, workspace.y + menu_bar_height(theme) - 1.0,
                          workspace.w, 1.0, Color::rgba(0, 0, 0, 40));
 
-        let (cell_w, _) = renderer.cell_metrics(theme.font_size);
         let baseline = workspace.y + menu_bar_height(theme) * 0.74;
 
         let mut pen_x = workspace.x + 8.0;
         for (i, top) in self.bar.items.iter().enumerate() {
-            let w = top.label.chars().count() as f32 * cell_w + 16.0;
+            let w = top_w(renderer, &top.label, theme);
             if self.open == Some(i) {
                 frame.paint_rect(pen_x, workspace.y, w, menu_bar_height(theme),
                                  Color::rgba(70, 130, 180, 70));
             }
-            frame.paint_text(renderer, pen_x + 8.0, baseline,
+            frame.paint_text_ui(renderer, pen_x + 8.0, baseline,
                              &top.label, theme.font_size, theme.menu_text);
             pen_x += w;
         }
@@ -190,15 +187,14 @@ impl MenuBarState {
                        workspace: Rect, theme: &Theme) {
         let oi = match self.open { Some(i) => i, None => return };
         let top = match self.bar.items.get(oi) { Some(t) => t, None => return };
-        let (cell_w, _) = renderer.cell_metrics(theme.font_size);
 
         let mut popup_x = workspace.x + 8.0;
         for (i, t) in self.bar.items.iter().enumerate() {
             if i == oi { break; }
-            popup_x += t.label.chars().count() as f32 * cell_w + 16.0;
+            popup_x += top_w(renderer, &t.label, theme);
         }
         let popup_y = workspace.y + menu_bar_height(theme);
-        let popup_w = popup_width(top, cell_w, theme.px(160.0));
+        let popup_w = popup_width(top, renderer, theme, theme.px(160.0));
         let popup_h = top.items.len() as f32 * item_height(theme) + 4.0;
 
         // Background + 1-px border, drop a subtle shadow rectangle so
@@ -219,11 +215,11 @@ impl MenuBarState {
                                  Color::rgba(70, 130, 180, 70));
             }
             let baseline = row_y + item_height(theme) * 0.72;
-            frame.paint_text(renderer, popup_x + 12.0, baseline,
+            frame.paint_text_ui(renderer, popup_x + 12.0, baseline,
                              &item.label, theme.font_size, theme.menu_text);
             if !item.shortcut.is_empty() {
-                let sx = popup_x + popup_w - 12.0 - item.shortcut.chars().count() as f32 * cell_w;
-                frame.paint_text(renderer, sx, baseline,
+                let sx = popup_x + popup_w - 12.0 - renderer.measure_text_width_ui(&item.shortcut, theme.font_size);
+                frame.paint_text_ui(renderer, sx, baseline,
                                  &item.shortcut, theme.font_size,
                                  Color::rgba(80, 80, 90, 220));
             }
@@ -240,11 +236,24 @@ impl MenuBarState {
     }
 }
 
-fn popup_width(top: &MenuTopLevel, cell_w: f32, min_w: f32) -> f32 {
-    let max_label = top.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0);
-    let max_sc    = top.items.iter().map(|i| i.shortcut.chars().count()).max().unwrap_or(0);
-    let needed = (max_label + max_sc) as f32 * cell_w + 36.0;
-    needed.max(min_w)
+
+/// Width of one top-level menu label's clickable box, measured in the
+/// PROPORTIONAL UI face — the same face the label is painted in, so
+/// hit-testing, popup placement and painting cannot drift apart.
+fn top_w(renderer: &mut Renderer, label: &str, theme: &Theme) -> f32 {
+    renderer.measure_text_width_ui(label, theme.font_size) + 16.0
+}
+
+/// Popup width from the widest label + widest shortcut, both measured in
+/// the UI face (see `top_w`).
+fn popup_width(top: &MenuTopLevel, renderer: &mut Renderer, theme: &Theme, min_w: f32) -> f32 {
+    let max_label = top.items.iter()
+        .map(|i| renderer.measure_text_width_ui(&i.label, theme.font_size))
+        .fold(0.0f32, f32::max);
+    let max_sc = top.items.iter()
+        .map(|i| renderer.measure_text_width_ui(&i.shortcut, theme.font_size))
+        .fold(0.0f32, f32::max);
+    (max_label + max_sc + 36.0).max(min_w)
 }
 
 #[inline]

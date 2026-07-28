@@ -613,7 +613,7 @@ fn paint_window_titlebar(frame: &mut Frame, renderer: &mut Renderer,
         text_x = ix + icon_w + theme.px(6.0);
     }
     let baseline = w.bounds.y + tb * 0.78;
-    frame.paint_text(renderer, text_x, baseline,
+    frame.paint_text_ui(renderer, text_x, baseline,
                      &w.title, theme.font_size, theme.menu_text);
 
     // Traffic-light buttons — full color always so users see the

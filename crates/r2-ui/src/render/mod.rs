@@ -30,6 +30,6 @@ mod atlas;
 mod renderer;
 mod frame;
 
-pub use atlas::GlyphInfo;
+pub use atlas::{Face, GlyphInfo};
 pub use renderer::Renderer;
 pub use frame::Frame;

@@ -50,7 +50,19 @@ impl Frame {
                        x: f32, y_baseline: f32, ch: char,
                        size_pt: f32, color: Color, clip_max_x: f32)
     {
-        let (g, uv) = renderer.glyph_uv(ch, size_pt);
+        self.paint_glyph_clipped_face(renderer, x, y_baseline, ch, size_pt,
+                                      color, clip_max_x, crate::Face::Mono);
+    }
+
+    /// [`paint_glyph_clipped`] for an explicit typeface. Chrome (menus,
+    /// window titles) passes `Face::Ui` for the proportional face; the
+    /// console and tables stay on `Face::Mono` so columns keep aligning.
+    pub fn paint_glyph_clipped_face(&mut self, renderer: &mut Renderer,
+                       x: f32, y_baseline: f32, ch: char,
+                       size_pt: f32, color: Color, clip_max_x: f32,
+                       face: crate::Face)
+    {
+        let (g, uv) = renderer.glyph_uv_face(ch, size_pt, face);
         if g.width == 0 || g.height == 0 { return; }
         let c = color_to_f32(color);
         // Snap top-left of glyph quad to integer pixels so the
@@ -195,10 +207,30 @@ impl Frame {
                       x: f32, y_baseline: f32, text: &str,
                       size_pt: f32, color: Color) -> f32
     {
+        self.paint_text_face(renderer, x, y_baseline, text, size_pt, color,
+                             crate::Face::Mono)
+    }
+
+    /// Paint a string in the proportional UI face — for chrome: menu
+    /// labels, window titles, buttons, dialog text.
+    pub fn paint_text_ui(&mut self, renderer: &mut Renderer,
+                         x: f32, y_baseline: f32, text: &str,
+                         size_pt: f32, color: Color) -> f32
+    {
+        self.paint_text_face(renderer, x, y_baseline, text, size_pt, color,
+                             crate::Face::Ui)
+    }
+
+    /// [`paint_text`] for an explicit typeface.
+    pub fn paint_text_face(&mut self, renderer: &mut Renderer,
+                           x: f32, y_baseline: f32, text: &str,
+                           size_pt: f32, color: Color, face: crate::Face) -> f32
+    {
         let mut pen_x = x;
         for ch in text.chars() {
-            self.paint_glyph(renderer, pen_x, y_baseline, ch, size_pt, color);
-            let (g, _) = renderer.glyph_uv(ch, size_pt);
+            self.paint_glyph_clipped_face(renderer, pen_x, y_baseline, ch,
+                                          size_pt, color, f32::INFINITY, face);
+            let (g, _) = renderer.glyph_uv_face(ch, size_pt, face);
             pen_x += g.advance;
         }
         pen_x

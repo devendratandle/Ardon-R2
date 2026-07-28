@@ -59,6 +59,51 @@ pub(crate) fn load_system_font() -> Result<fontdue::Font, String> {
          DejaVu/Liberation/Noto/Ubuntu/FreeMono + a /usr/share/fonts scan)".into())
 }
 
+/// Which typeface a glyph belongs to. Two faces, by role:
+/// **Mono** for the console, tables and numbers (columns must align);
+/// **Ui** — proportional — for chrome: menus, window titles, labels and
+/// buttons, which read better and look native when not forced to a grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Face {
+    Mono,
+    Ui,
+}
+
+/// Load the proportional UI face, leading with each platform's native
+/// interface font so the app looks at home. Returns `None` if none parse —
+/// callers then fall back to the mono face, so a missing font can never
+/// stop the app from starting.
+pub(crate) fn load_ui_font() -> Option<fontdue::Font> {
+    const CANDIDATES: &[&str] = &[
+        // Windows — Segoe UI is the system interface font (Win Vista+).
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/tahoma.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        // macOS — SF Pro (modern), then Helvetica Neue.
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/SFNSText.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/HelveticaNeue.ttc",
+        // Linux — GNOME's Cantarell, then the ubiquitous fallbacks.
+        "/usr/share/fonts/cantarell/Cantarell-Regular.otf",
+        "/usr/share/fonts/truetype/cantarell/Cantarell-Regular.otf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+    ];
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(font) = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+                return Some(font);
+            }
+        }
+    }
+    None
+}
+
 /// Bounded recursive search (≤3 levels) for a parseable `*mono*.ttf`.
 #[cfg(not(target_os = "windows"))]
 fn scan_for_mono(dir: &std::path::Path, depth: u8) -> Option<fontdue::Font> {
@@ -131,9 +176,11 @@ pub struct GlyphInfo {
 pub(crate) struct Atlas {
     pub(crate) texture: wgpu::Texture,
     pub(crate) view:    wgpu::TextureView,
-    /// (size_in_pt × 100 as u32, char) → glyph info. Quantized size so
-    /// we don't make a new entry for every fractional pt.
-    glyphs:  HashMap<(u32, char), GlyphInfo>,
+    /// (size_in_pt × 100 as u32, char, face) → glyph info. Quantized size
+    /// so we don't make a new entry for every fractional pt. The face is
+    /// part of the key: the same character at the same size is a different
+    /// bitmap in the mono and UI typefaces.
+    glyphs:  HashMap<(u32, char, Face), GlyphInfo>,
     /// Next free position in the atlas (simple shelf packer).
     pen_x:   u32,
     pen_y:   u32,
@@ -196,9 +243,10 @@ impl Atlas {
         font: &fontdue::Font,
         ch: char,
         size_pt: f32,
+        face: Face,
         queue: &wgpu::Queue,
     ) -> GlyphInfo {
-        let key = ((size_pt * 100.0) as u32, ch);
+        let key = ((size_pt * 100.0) as u32, ch, face);
         if let Some(g) = self.glyphs.get(&key) {
             return *g;
         }
