@@ -8,6 +8,37 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.3.8 (July 2026)
 
+**New — `r2 --self-check`, verify accuracy on your own machine.** A
+self-contained battery of 21 checks (descriptive statistics, elementary
+functions, the distribution surface including the far normal tail,
+combinatorics, linear algebra, regression) compares this build against
+authoritative mathematical constants — no R install and no network
+needed. It prints a one-page report and exits non-zero if anything
+diverges, so it also works as a post-install or deployment gate.
+
+**Fixed — element-wise math kept matrix and array shape.** `sqrt()`,
+`exp()`, `log()`, the trig family, `floor`/`ceiling`/`round`/`signif`,
+`gamma`/`lgamma` and friends returned a flat vector when given a matrix
+(so `sqrt(t(x) %*% x)` lost its dimensions). As in R's Math group, they
+now preserve the input's structure: a matrix in yields a matrix out, an
+array keeps its `dim`, and a named vector keeps its names.
+
+**GUI — comfortable for long sessions.** The window now opens maximized
+with the console filling the workspace, instead of a small box that had
+to be resized before anything was readable. Long output lines wrap to the
+console width rather than running past the right edge (no horizontal
+scrolling to read a result). Console behaviour also matches the CLI more
+closely: engine errors are shown in their normal form (no internal debug
+text), warnings now appear after a command instead of being silently
+dropped, and both frontends share one startup banner.
+
+**Improved — `explain()` closes the loop.** When a function falls back to
+the interpreter, `explain()` now names the remedy, not just the blocker.
+For data it reports where the serial-to-parallel crossover lies on the
+current machine (for example "serial — parallel at n>=524288"), and
+`explain(1e8)` answers for a hypothetical vector length without
+allocating it.
+
 **Accuracy — normal CDF upgraded to full double precision.** `pnorm`,
 `erf`, and `erfc` now use Cody's rational-Chebyshev algorithm (~1e-16, the
 method R and Boost use) instead of the Abramowitz-Stegun polynomial
