@@ -23,14 +23,35 @@ diverges, so it also works as a post-install or deployment gate.
 now preserve the input's structure: a matrix in yields a matrix out, an
 array keeps its `dim`, and a named vector keeps its names.
 
-**GUI — comfortable for long sessions.** The window now opens maximized
-with the console filling the workspace, instead of a small box that had
-to be resized before anything was readable. Long output lines wrap to the
-console width rather than running past the right edge (no horizontal
-scrolling to read a result). Console behaviour also matches the CLI more
-closely: engine errors are shown in their normal form (no internal debug
-text), warnings now appear after a command instead of being silently
-dropped, and both frontends share one startup banner.
+**GUI — rebuilt for long sessions.**
+
+*Colour and contrast.* Colours were being displayed lighter than the
+theme specified, which is what made the interface look washed out and the
+text low-contrast. Colour handling is now correct end to end, so what a
+theme specifies is what appears on screen — and text is markedly crisper
+at every size and DPI.
+
+*A dark interface, now the default.* Ardon-R2 ships a dark theme built
+for hours in front of the screen: body text sits around 12:1 contrast
+(past the WCAG AAA bar), with the familiar scarlet prompt kept and
+distinct colours for input, output, errors and the banner. A refined
+light theme is included, and the classic khaki and RGui looks remain
+available. Glyph rendering adapts to whichever theme is active, so text
+never looks thin on a light background or bloomed on a dark one. Plots
+stay on a white canvas in every theme — a plot is a document, not
+chrome.
+
+*Layout that needs no window juggling.* The window opens maximized with
+the console on the left and graphics windows opening beside it, so a plot
+and the command that produced it are visible together — no switching, no
+overlap. Long output lines wrap to the console width instead of running
+past the right edge, so reading a wide result no longer means resizing
+the window or scrolling sideways.
+
+*Console behaviour matches the CLI.* Engine errors are shown in their
+normal form (no internal debug text), warnings appear after a command
+instead of being silently dropped, and both frontends share one startup
+banner.
 
 **Improved — `explain()` closes the loop.** When a function falls back to
 the interpreter, `explain()` now names the remedy, not just the blocker.
