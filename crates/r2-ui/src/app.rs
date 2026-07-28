@@ -91,7 +91,7 @@ impl R2Ui {
     pub fn app(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
-            theme: Theme::khaki(),
+            theme: Theme::default(),
             font_family: "Consolas".into(),
             font_size: 14.0,
             icon_bytes: None,

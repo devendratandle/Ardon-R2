@@ -78,7 +78,9 @@ fn main() -> Result<(), String> {
     // (save_plot() / the Save menu).
     r2_graphics::device::set_display_present(true);
 
-    let theme = Theme::khaki();
+    // Dark is the default (see Theme::default); khaki/rgui remain
+    // selectable for the classic R look.
+    let theme = Theme::default();
 
     // ── Shared state ───────────────────────────────────────────────
     let buffer = Arc::new(Mutex::new(ConsoleBuffer::new()));
@@ -795,9 +797,11 @@ fn main() -> Result<(), String> {
 
                     if id == console_id {
                         let (cell_w, line_h) = renderer.cell_metrics(theme.fs());
-                        // R Console convention: white body.
+                        // Console body follows the THEME (was hardcoded
+                        // white, which made the console the one surface a
+                        // dark theme couldn't reach).
                         frame.paint_rect(content.x, content.y, content.w, content.h,
-                                         Color::WHITE);
+                                         theme.window_background);
 
                         // Reserve a strip on the right edge (vertical
                         // scrollbar) and the bottom edge (horizontal
@@ -990,6 +994,9 @@ fn main() -> Result<(), String> {
                                 .find(|(_, (w, _))| *w == id)
                                 .map(|(dev_id, _)| *dev_id);
                         if let Some(dev_id) = device_for_window {
+                            // Plot canvases stay WHITE in every theme: a
+                            // plot is a document (it gets saved, printed
+                            // and published), not chrome. R does the same.
                             frame.paint_rect(content.x, content.y, content.w, content.h,
                                              Color::WHITE);
                             let inner = Rect {

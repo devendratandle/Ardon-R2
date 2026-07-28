@@ -190,8 +190,90 @@ impl Theme {
             dpi:         1.0,
         }
     }
+
+    /// **Dark — the default theme.** Near-black blue-grey surfaces with a
+    /// warm scarlet-coral prompt and a cool near-white output. Authored
+    /// against the gamma-correct pipeline (stages A/B), so these values
+    /// are what actually reaches the screen.
+    ///
+    /// Contrast (WCAG 2.1) against the console body `#1E2127`: output
+    /// ≈12:1 and menu text ≈11:1 (both past the 7:1 AAA bar for body
+    /// text); the coloured accents clear the 4.5:1 AA bar. That headroom
+    /// is the point — long sessions without eye strain.
+    pub fn dark() -> Self {
+        Theme {
+            // Three background steps = elevation without shadows:
+            // workspace (darkest) < window body < menu strip.
+            mdi_background:    Color::rgb(20, 22, 27),    // #14161B
+            window_background: Color::rgb(30, 33, 39),    // #1E2127
+            menu_background:   Color::rgb(38, 42, 49),    // #262A31
+            menu_text:         Color::rgb(214, 217, 223), // #D6D9DF ≈11:1
+            // Focused window reads as saturated steel blue; unfocused recedes.
+            titlebar_active:   Color::rgb(46, 61, 85),    // #2E3D55
+            titlebar_passive:  Color::rgb(37, 42, 51),    // #252A33
+            border_active:     Color::rgb(91, 132, 196),  // #5B84C4
+            border_passive:    Color::rgb(58, 65, 80),    // #3A4150
+            // The maintainer's scarlet signature, lightened to a coral so
+            // it stays legible on a dark surface instead of turning muddy.
+            console_input:     Color::rgb(255, 134, 114), // #FF8672 ≈6.5:1
+            console_output:    Color::rgb(216, 221, 230), // #D8DDE6 ≈12:1 (AAA)
+            console_error:     Color::rgb(255, 107, 129), // #FF6B81 — rose, distinct from input
+            console_banner:    Color::rgb(143, 166, 201), // #8FA6C9 — present, not shouting
+            console_selection_bg: Color::rgb(45, 92, 200),// #2D5CC8 solid royal blue
+            console_selection_fg: Color::WHITE,
+            cursor:            Color::rgb(255, 180, 165), // #FFB4A5 — kin to the prompt
+            button_min:        Color::rgb(63, 166, 92),   // slightly desaturated for dark
+            button_max:        Color::rgb(63, 126, 200),
+            button_close:      Color::rgb(209, 77, 77),
+            // Light text on dark blooms slightly under correct gamma —
+            // >1 thins the stems back to an even weight.
+            text_gamma:  1.15,
+            font_size:   14.0,
+            line_height: 18.0,
+            font_size_base:   14.0,
+            line_height_base: 18.0,
+            dpi:         1.0,
+        }
+    }
+
+    /// **Light** — the khaki identity re-authored for the gamma-correct
+    /// pipeline. The old values were tuned against the sRGB bug and now
+    /// render darker than intended; these are re-balanced to the same
+    /// character. Body text ≈13:1 on the warm paper background (AAA).
+    pub fn light() -> Self {
+        Theme {
+            mdi_background:    Color::rgb(154, 147, 126), // #9A937E
+            window_background: Color::rgb(251, 249, 244), // #FBF9F4 warm paper
+            menu_background:   Color::rgb(196, 188, 164), // #C4BCA4
+            menu_text:         Color::rgb(26, 26, 34),    // #1A1A22 ≈13:1
+            titlebar_active:   Color::rgb(188, 210, 234), // #BCD2EA
+            titlebar_passive:  Color::rgb(221, 229, 240), // #DDE5F0
+            border_active:     Color::rgb(110, 148, 188), // #6E94BC
+            border_passive:    Color::rgb(176, 192, 212), // #B0C0D4
+            console_input:     Color::rgb(200, 24, 12),   // #C8180C — the scarlet, now true
+            console_output:    Color::rgb(35, 32, 101),   // #232065 ≈13:1 (AAA)
+            console_error:     Color::rgb(168, 16, 24),   // #A81018 ≈8:1
+            console_banner:    Color::rgb(35, 32, 101),   // matches output (khaki convention)
+            console_selection_bg: Color::rgb(61, 111, 217),
+            console_selection_fg: Color::WHITE,
+            cursor:            Color::rgb(196, 40, 40),
+            button_min:        Color::rgb(40,  160, 60),
+            button_max:        Color::rgb(40,  120, 200),
+            button_close:      Color::rgb(210, 50, 50),
+            // Dark text on light reads thin — <1 thickens the stems.
+            text_gamma:  0.85,
+            font_size:   14.0,
+            line_height: 18.0,
+            font_size_base:   14.0,
+            line_height_base: 18.0,
+            dpi:         1.0,
+        }
+    }
 }
 
 impl Default for Theme {
-    fn default() -> Self { Theme::khaki() }
+    /// Dark is the default: modern tooling is dark-first, and it is the
+    /// kinder choice for the long sessions this console is built for.
+    /// `khaki()` and `rgui()` remain selectable for the classic R look.
+    fn default() -> Self { Theme::dark() }
 }
