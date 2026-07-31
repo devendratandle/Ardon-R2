@@ -281,6 +281,30 @@ impl Tape {
                 }
                 Op::MatMul { a, b, m, k, n } => {
                     let (ai, bi, m, k, n) = (a.0, b.0, *m, *k, *n);
+
+                    // Backward is ~2/3 of training FLOPs. When the Oracle
+                    // routes this shape to the GPU, express both gradients
+                    // as matmuls so they use the SAME accelerated kernel as
+                    // the forward pass — otherwise the GPU only ever sees a
+                    // third of the work and cannot pay for itself.
+                    //
+                    // grad_A = g·Bᵀ and grad_B = Aᵀ·g. The transposes are
+                    // O(size) against an O(m·k·n) multiply, so they are
+                    // cheap at exactly the sizes this branch is taken.
+                    if matches!(
+                        r2_oracle::dispatch(r2_oracle::Op::TensorMatMul,
+                                            r2_oracle::Shape::nmk(m, n, k)),
+                        r2_oracle::Backend::Gpu)
+                    {
+                        let bt = transpose_of(&self.vals[bi], k, n);   // n×k
+                        let ga = r2_tensor::ops::matmul(&g, &bt, m, n, k);
+                        for (dst, v) in self.grads[ai].iter_mut().zip(&ga) { *dst += v; }
+
+                        let at = transpose_of(&self.vals[ai], m, k);   // k×m
+                        let gb = r2_tensor::ops::matmul(&at, &g, k, m, n);
+                        for (dst, v) in self.grads[bi].iter_mut().zip(&gb) { *dst += v; }
+                        continue;
+                    }
                     // Borrow vals and grads as DISJOINT fields. The obvious
                     // `self.vals[ai].clone()` copies the whole weight matrix
                     // on every backward — for a 768×256 projection that is a
@@ -701,4 +725,14 @@ mod rope_tests {
         }
         assert_eq!(out, want, "training RoPE must equal the inference RoPE exactly");
     }
+}
+
+/// Transpose a row-major `rows × cols` matrix. Used by the GPU backward
+/// path to express both gradients as plain matmuls.
+fn transpose_of(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; rows * cols];
+    for i in 0..rows {
+        for j in 0..cols { out[j * rows + i] = x[i * cols + j]; }
+    }
+    out
 }

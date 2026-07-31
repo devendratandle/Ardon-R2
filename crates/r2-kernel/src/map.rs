@@ -87,6 +87,10 @@ impl MapBackend for RayonBackend {
 pub fn map(op: MapOp, data: &[Option<f64>]) -> Vec<Option<f64>> {
     match r2_oracle::dispatch(Op::PerElementMap, Shape::n(data.len())) {
         Backend::Serial => SerialBackend.map(op, data),
-        Backend::Rayon => RayonBackend.map(op, data),
+        // The Oracle only returns Gpu for matmul, never for these ops;
+
+        // if that ever changes, parallel CPU is the safe equivalent.
+
+        Backend::Gpu | Backend::Rayon => RayonBackend.map(op, data),
     }
 }

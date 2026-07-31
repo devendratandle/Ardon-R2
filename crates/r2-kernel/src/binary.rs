@@ -65,6 +65,10 @@ impl BinaryBackend for RayonBackend {
 pub fn binary(op: BinaryOp, a: &[Option<f64>], b: &[Option<f64>]) -> Vec<Option<f64>> {
     match r2_oracle::dispatch(Op::PerElementMap, Shape::n(a.len())) {
         Backend::Serial => SerialBackend.binary(op, a, b),
-        Backend::Rayon => RayonBackend.binary(op, a, b),
+        // The Oracle only returns Gpu for matmul, never for these ops;
+
+        // if that ever changes, parallel CPU is the safe equivalent.
+
+        Backend::Gpu | Backend::Rayon => RayonBackend.binary(op, a, b),
     }
 }

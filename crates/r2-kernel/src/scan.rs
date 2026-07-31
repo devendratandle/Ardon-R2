@@ -181,6 +181,10 @@ fn num_chunks(n: usize) -> usize {
 pub fn scan(op: ScanOp, data: &[Option<f64>]) -> Vec<Option<f64>> {
     match r2_oracle::dispatch(Op::Reduction, Shape::n(data.len())) {
         Backend::Serial => SerialBackend.scan(op, data),
-        Backend::Rayon => RayonBackend.scan(op, data),
+        // The Oracle only returns Gpu for matmul, never for these ops;
+
+        // if that ever changes, parallel CPU is the safe equivalent.
+
+        Backend::Gpu | Backend::Rayon => RayonBackend.scan(op, data),
     }
 }

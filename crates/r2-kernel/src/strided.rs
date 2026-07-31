@@ -191,6 +191,10 @@ pub fn reduce_strided(
 ) -> Option<f64> {
     match r2_oracle::dispatch(Op::Reduction, Shape::n(count)) {
         Backend::Serial => SerialBackend.reduce_strided(op, data, offset, stride, count),
-        Backend::Rayon => RayonBackend.reduce_strided(op, data, offset, stride, count),
+        // The Oracle only returns Gpu for matmul, never for these ops;
+
+        // if that ever changes, parallel CPU is the safe equivalent.
+
+        Backend::Gpu | Backend::Rayon => RayonBackend.reduce_strided(op, data, offset, stride, count),
     }
 }

@@ -61,6 +61,10 @@ impl TernaryBackend for RayonBackend {
 pub fn ternary(op: TernaryOp, a: &[Option<f64>], b: &[Option<f64>], c: &[Option<f64>]) -> Vec<Option<f64>> {
     match r2_oracle::dispatch(Op::PerElementMap, Shape::n(a.len())) {
         Backend::Serial => SerialBackend.ternary(op, a, b, c),
-        Backend::Rayon => RayonBackend.ternary(op, a, b, c),
+        // The Oracle only returns Gpu for matmul, never for these ops;
+
+        // if that ever changes, parallel CPU is the safe equivalent.
+
+        Backend::Gpu | Backend::Rayon => RayonBackend.ternary(op, a, b, c),
     }
 }

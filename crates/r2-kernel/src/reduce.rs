@@ -181,6 +181,10 @@ impl ReduceBackend for RayonBackend {
 pub fn reduce(op: ReduceOp, data: &[Option<f64>]) -> Option<f64> {
     match r2_oracle::dispatch(Op::Reduction, Shape::n(data.len())) {
         Backend::Serial => SerialBackend.reduce(op, data),
-        Backend::Rayon => RayonBackend.reduce(op, data),
+        // The Oracle only returns Gpu for matmul, never for these ops;
+
+        // if that ever changes, parallel CPU is the safe equivalent.
+
+        Backend::Gpu | Backend::Rayon => RayonBackend.reduce(op, data),
     }
 }

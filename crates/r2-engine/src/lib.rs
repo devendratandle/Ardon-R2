@@ -58,6 +58,7 @@ use builtins::data_apply::*;
 use builtins::sys_models::*;
 use builtins::ml_data::*;
 use builtins::misc::*;
+use builtins::llm::*;
 use builtins::data::*;
 use builtins::graphics::*;
 use builtins::io::*;

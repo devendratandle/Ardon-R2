@@ -26,7 +26,11 @@ where
 {
     match r2_oracle::dispatch(kind, Shape::n(n)) {
         Backend::Serial => (0..n).map(f).collect(),
-        Backend::Rayon => (0..n).into_par_iter().map(f).collect(),
+        // The Oracle only returns Gpu for matmul, never for these ops;
+
+        // if that ever changes, parallel CPU is the safe equivalent.
+
+        Backend::Gpu | Backend::Rayon => (0..n).into_par_iter().map(f).collect(),
     }
 }
 
