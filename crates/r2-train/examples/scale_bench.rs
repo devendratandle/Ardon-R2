@@ -86,6 +86,12 @@ fn main() -> Result<(), String> {
     run("100M", Config { dim: 768, n_heads: 12, n_kv_heads: 4, n_layers: 12, vocab: v,
                          ffn_hidden: 3072, max_seq: 64, rope_base: 10000.0, eps: 1e-5 },
         4, 2, 16)?;
+    // Same 10M model, but WIDER work per step: 16 sequences x 32 tokens
+    // instead of 4 x 16. Same arithmetic per token; far better matmul
+    // shape, which is what decides hardware utilization.
+    run("10M-wide", Config { dim: 384, n_heads: 6, n_kv_heads: 2, n_layers: 6, vocab: v,
+                             ffn_hidden: 1024, max_seq: 64, rope_base: 10000.0, eps: 1e-5 },
+        6, 16, 32)?;
     // ~1B — projected only; see the note printed below.
     let b1 = Config { dim: 2048, n_heads: 16, n_kv_heads: 4, n_layers: 24, vocab: v,
                       ffn_hidden: 8192, max_seq: 64, rope_base: 10000.0, eps: 1e-5 };

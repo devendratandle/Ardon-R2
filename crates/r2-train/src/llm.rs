@@ -140,26 +140,37 @@ impl Trainer {
     /// Returns the mean loss.
     pub fn train_step(&mut self, batch: &[(Vec<usize>, Vec<usize>)]) -> Result<f32, String> {
         if batch.is_empty() { return Err("train_step: empty batch".into()); }
-        let shapes = Self::block_shapes(&self.cfg);
-        let mut grads: Vec<Vec<f32>> = shapes.iter().map(|&n| vec![0.0; n]).collect();
-        let mut total = 0.0f32;
 
+        // ONE tape for the whole batch. The obvious loop builds a fresh
+        // tape per sequence, which copies every parameter and zeroes a
+        // matching gradient buffer EACH TIME — for a 100M model that is
+        // ~800 MB of memory traffic per sequence, and it dominated the
+        // profile far more than the arithmetic did.
+        //
+        // Summing the per-sequence losses into one scalar and calling
+        // backward once is mathematically identical (the gradient of a sum
+        // is the sum of gradients — the same identity gradient
+        // accumulation relies on), while cloning the parameters once.
+        let mut tape = Tape::new();
+        let leaves: Vec<Var> = self.params.iter()
+            .map(|p| tape.leaf(p.clone(), true)).collect();
+
+        let mut total = 0.0f32;
+        let mut sum_loss: Option<Var> = None;
         for (inp, tgt) in batch {
-            let mut tape = Tape::new();
-            let leaves: Vec<Var> = self.params.iter()
-                .map(|p| tape.leaf(p.clone(), true)).collect();
             let logits = self.forward(&mut tape, inp, &leaves);
             let loss = tape.softmax_ce(logits, self.cfg.vocab, tgt.clone());
             total += tape.value(loss)[0];
-            tape.backward(loss);
-            for (g, lv) in grads.iter_mut().zip(&leaves) {
-                for (a, b) in g.iter_mut().zip(tape.grad(*lv)) { *a += b; }
-            }
+            sum_loss = Some(match sum_loss {
+                None => loss,
+                Some(prev) => tape.add(prev, loss),
+            });
         }
+        tape.backward(sum_loss.expect("batch is non-empty"));
 
         let n = batch.len() as f32;
         let mut flat: Vec<f32> = Vec::with_capacity(self.opt.len());
-        for g in &grads { flat.extend(g.iter().map(|x| x / n)); }
+        for lv in &leaves { flat.extend(tape.grad(*lv).iter().map(|x| x / n)); }
         let mut params_flat: Vec<f32> = self.params.iter().flatten().copied().collect();
         self.opt.step(&mut params_flat, &flat)?;
 

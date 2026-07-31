@@ -6,4 +6,6 @@ license = "AGPL-3.0"
 description = "Reverse-mode autograd over the r2-tensor transformer op set (Layer 4)."
 
 [dependencies]
+# Data-parallel backward pass; pure Rust, already a workspace dependency.
+rayon = "1"
 r2-tensor = { path = "../r2-tensor" }

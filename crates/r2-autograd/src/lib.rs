@@ -252,16 +252,26 @@ impl Tape {
                     // grad_A(m×k) = g(m×n) · Bᵀ(n×k) — inner loop contiguous
                     // in both g and B.
                     {
+                        use rayon::prelude::*;
                         let vb = &vals[bi];
                         let ga = &mut grads[ai];
-                        for i2 in 0..m {
+                        // Each output row depends only on its own row of g,
+                        // so rows split cleanly across cores.
+                        let work = |i2: usize, arow: &mut [f32]| {
                             let grow = &g[i2 * n..i2 * n + n];
                             for p in 0..k {
                                 let brow = &vb[p * n..p * n + n];
                                 let mut acc = 0.0f32;
                                 for j in 0..n { acc += grow[j] * brow[j]; }
-                                ga[i2 * k + p] += acc;
+                                arow[p] += acc;
                             }
+                        };
+                        if m * k * n >= 1 << 15 {
+                            ga.par_chunks_mut(k).enumerate()
+                                .for_each(|(i2, arow)| work(i2, arow));
+                        } else {
+                            ga.chunks_mut(k).enumerate()
+                                .for_each(|(i2, arow)| work(i2, arow));
                         }
                     }
                     // grad_B(k×n) = Aᵀ(k×m) · g(m×n).
