@@ -34,6 +34,21 @@ enum Op {
     Rmsnorm { x: Var, w: Var, d: usize, eps: f32 },
     /// Transpose a rows×cols matrix → cols×rows.
     Transpose { x: Var, rows: usize, cols: usize },
+    /// Rotary position embedding over a `rows × (n_heads*head_dim)`
+    /// activation, row `r` rotated for position `r`. RoPE is an
+    /// ORTHOGONAL transform, so its backward is simply the rotation by
+    /// the negated angle — no Jacobian to store.
+    Rope { x: Var, rows: usize, n_heads: usize, head_dim: usize, base: f32 },
+    /// Take a contiguous column range from each row — how one attention
+    /// head is separated out of a packed multi-head activation.
+    SliceCols { x: Var, rows: usize, total: usize, start: usize, len: usize },
+    /// Concatenate equal-width column blocks — how heads are packed back
+    /// together before the output projection.
+    ConcatCols { xs: Vec<Var>, rows: usize, each: usize },
+    /// Scale attention scores and apply the causal mask in one step: a
+    /// masked position contributes nothing and receives no gradient,
+    /// which is what stops a token from learning to read its future.
+    ScaleMaskCausal { x: Var, t: usize, scale: f32 },
     /// Softmax over each `d`-wide row (a differentiable op, distinct from
     /// the fused SoftmaxCE loss — this one is used INSIDE attention).
     SoftmaxRows { x: Var, d: usize },
@@ -115,6 +130,58 @@ impl Tape {
         for i in 0..rows { for j in 0..cols { val[j * rows + i] = vx[i * cols + j]; } }
         let req = self.requires[x.0];
         self.push(val, Op::Transpose { x, rows, cols }, req)
+    }
+
+    /// Apply RoPE to each head of each row, using the row index as the
+    /// position. Matches r2_tensor::ops::rope_inplace exactly, so a model
+    /// trained here and served by r2-tensor share one definition.
+    pub fn rope(&mut self, x: Var, rows: usize, n_heads: usize, head_dim: usize, base: f32) -> Var {
+        let mut val = self.vals[x.0].clone();
+        for r in 0..rows {
+            for h in 0..n_heads {
+                let off = r * n_heads * head_dim + h * head_dim;
+                r2_tensor::ops::rope_inplace(&mut val[off..off + head_dim], r, base);
+            }
+        }
+        let req = self.requires[x.0];
+        self.push(val, Op::Rope { x, rows, n_heads, head_dim, base }, req)
+    }
+
+    /// Extract columns `[start, start+len)` from a `rows × total` matrix.
+    pub fn slice_cols(&mut self, x: Var, rows: usize, total: usize, start: usize, len: usize) -> Var {
+        let src = &self.vals[x.0];
+        let mut val = Vec::with_capacity(rows * len);
+        for r in 0..rows { val.extend_from_slice(&src[r * total + start..r * total + start + len]); }
+        let req = self.requires[x.0];
+        self.push(val, Op::SliceCols { x, rows, total, start, len }, req)
+    }
+
+    /// Concatenate equal-width blocks side by side.
+    pub fn concat_cols(&mut self, xs: &[Var], rows: usize, each: usize) -> Var {
+        let n = xs.len();
+        let mut val = vec![0.0f32; rows * n * each];
+        for (i, v) in xs.iter().enumerate() {
+            let src = &self.vals[v.0];
+            for r in 0..rows {
+                val[r * n * each + i * each..r * n * each + (i + 1) * each]
+                    .copy_from_slice(&src[r * each..(r + 1) * each]);
+            }
+        }
+        let req = xs.iter().any(|v| self.requires[v.0]);
+        self.push(val, Op::ConcatCols { xs: xs.to_vec(), rows, each }, req)
+    }
+
+    /// Scale scores by `scale` and mask out future positions.
+    pub fn scale_mask_causal(&mut self, x: Var, t: usize, scale: f32) -> Var {
+        let src = &self.vals[x.0];
+        let mut val = vec![0.0f32; t * t];
+        for i in 0..t {
+            for j in 0..t {
+                val[i * t + j] = if j <= i { src[i * t + j] * scale } else { f32::NEG_INFINITY };
+            }
+        }
+        let req = self.requires[x.0];
+        self.push(val, Op::ScaleMaskCausal { x, t, scale }, req)
     }
 
     pub fn softmax_rows(&mut self, x: Var, d: usize) -> Var {
@@ -226,6 +293,47 @@ impl Tape {
                     // grad_x[i,j] += g[j,i]
                     for i in 0..rows { for j in 0..cols {
                         self.grads[xi][i * cols + j] += g[j * rows + i];
+                    }}
+                }
+                Op::Rope { x, rows, n_heads, head_dim, base } => {
+                    // Rotation is orthogonal: the adjoint is the inverse
+                    // rotation, i.e. the same op at angle -theta.
+                    let (xi, rows, nh, hd, base) = (x.0, *rows, *n_heads, *head_dim, *base);
+                    for r in 0..rows {
+                        for h in 0..nh {
+                            let off = r * nh * hd + h * hd;
+                            for p in 0..hd / 2 {
+                                let freq = 1.0 / base.powf(2.0 * p as f32 / hd as f32);
+                                let theta = r as f32 * freq;
+                                let (s, c) = theta.sin_cos();
+                                let (ga, gb) = (g[off + 2 * p], g[off + 2 * p + 1]);
+                                // Inverse of [c -s; s c] is [c s; -s c].
+                                self.grads[xi][off + 2 * p]     += ga * c + gb * s;
+                                self.grads[xi][off + 2 * p + 1] += -ga * s + gb * c;
+                            }
+                        }
+                    }
+                }
+                Op::SliceCols { x, rows, total, start, len } => {
+                    let (xi, rows, total, start, len) = (x.0, *rows, *total, *start, *len);
+                    for r in 0..rows { for j in 0..len {
+                        self.grads[xi][r * total + start + j] += g[r * len + j];
+                    }}
+                }
+                Op::ConcatCols { xs, rows, each } => {
+                    let (rows, each, n) = (*rows, *each, xs.len());
+                    for (i, v) in xs.iter().enumerate() {
+                        for r in 0..rows { for j in 0..each {
+                            self.grads[v.0][r * each + j] += g[r * n * each + i * each + j];
+                        }}
+                    }
+                }
+                Op::ScaleMaskCausal { x, t, scale } => {
+                    let (xi, t, scale) = (x.0, *t, *scale);
+                    // Masked entries are constants (-inf), so they pass no
+                    // gradient back — a token cannot learn from its future.
+                    for i in 0..t { for j in 0..=i {
+                        self.grads[xi][i * t + j] += g[i * t + j] * scale;
                     }}
                 }
                 Op::SoftmaxRows { x, d } => {
@@ -438,5 +546,67 @@ mod tests {
             prev = l;
         }
         assert!(prev < 1.0, "final loss {}", prev);
+    }
+}
+
+#[cfg(test)]
+mod rope_tests {
+    use super::*;
+
+    /// RoPE must pass the same finite-difference gate as every other op:
+    /// the analytic backward has to match a numeric derivative, or a model
+    /// trains toward the wrong thing while still appearing to converge.
+    #[test]
+    fn rope_gradient_matches_finite_difference() {
+        let (rows, nh, hd, base) = (4usize, 2usize, 4usize, 10000.0f32);
+        let n = rows * nh * hd;
+        let x0: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.37).sin()).collect();
+        // Scalar objective: sum of squares after rotation.
+        let loss_of = |p: &[f32]| -> f32 {
+            let mut t = Tape::new();
+            let x = t.leaf(p.to_vec(), true);
+            let r = t.rope(x, rows, nh, hd, base);
+            let sq = t.mul(r, r);
+            let l = t.sum_all(sq);
+            t.vals[l.0][0]
+        };
+        let mut t = Tape::new();
+        let x = t.leaf(x0.clone(), true);
+        let r = t.rope(x, rows, nh, hd, base);
+        let sq = t.mul(r, r);
+        let l = t.sum_all(sq);
+        t.backward(l);
+        let analytic = t.grad(x).to_vec();
+        let numeric = finite_diff(&x0, loss_of);
+        for (i, (a, b)) in analytic.iter().zip(&numeric).enumerate() {
+            assert!((a - b).abs() < 2e-2, "elem {i}: analytic {a} vs numeric {b}");
+        }
+    }
+
+    /// A rotation preserves length — the property that lets RoPE encode
+    /// position without changing the scale of what flows through it.
+    #[test]
+    fn rope_preserves_norm_and_matches_the_inference_kernel() {
+        let (rows, nh, hd) = (3usize, 2usize, 4usize);
+        let n = rows * nh * hd;
+        let x0: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.21).cos()).collect();
+        let mut t = Tape::new();
+        let x = t.leaf(x0.clone(), false);
+        let r = t.rope(x, rows, nh, hd, 10000.0);
+        let out = t.vals[r.0].clone();
+
+        let norm = |v: &[f32]| v.iter().map(|a| a * a).sum::<f32>().sqrt();
+        assert!((norm(&out) - norm(&x0)).abs() < 1e-4, "RoPE must preserve norm");
+
+        // And it must agree bit-for-bit with the serving kernel, so a
+        // trained model behaves identically when served by r2-tensor.
+        let mut want = x0.clone();
+        for r_i in 0..rows {
+            for h in 0..nh {
+                let off = r_i * nh * hd + h * hd;
+                r2_tensor::ops::rope_inplace(&mut want[off..off + hd], r_i, 10000.0);
+            }
+        }
+        assert_eq!(out, want, "training RoPE must equal the inference RoPE exactly");
     }
 }

@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod optim;
 pub mod accumulate;
+pub mod llm;
 pub mod checkpoint;
 pub mod transformer;
 pub mod distributed;
