@@ -332,15 +332,50 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 "#, t = TILE, tt = TILE * TILE)
     }
 
+    /// A matrix that LIVES on the device across calls.
+    ///
+    /// The single biggest waste in a naive GPU path is re-uploading the
+    /// same weights every step. A training loop touches identical weight
+    /// matrices thousands of times; uploading them once and keeping the
+    /// buffer removes that traffic entirely. This is not an integrated-GPU
+    /// optimization — it matters MORE on a discrete card, where the
+    /// operands cross PCIe instead of shared memory.
+    pub struct Resident {
+        buf: wgpu::Buffer,
+        pub rows: usize,
+        pub cols: usize,
+    }
+
+    /// Upload a matrix once and keep it on the device.
+    pub fn upload(data: &[f32], rows: usize, cols: usize) -> Option<Resident> {
+        if data.len() != rows * cols { return None; }
+        let Ctx { device, .. } = ctx()?;
+        let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("r2gpu-resident"), contents: bytemuck::cast_slice(data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        Some(Resident { buf, rows, cols })
+    }
+
+    /// A(m×k) · B(k×n) where B is already on the device.
+    pub fn matmul_resident(a: &[f32], b: &Resident, m: usize) -> Option<Vec<f32>> {
+        let (k, n) = (b.rows, b.cols);
+        if a.len() != m * k { return None; }
+        let Ctx { device, .. } = ctx()?;
+        let buf_a = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("r2gpu-a"), contents: bytemuck::cast_slice(a),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        dispatch_matmul(&buf_a, &b.buf, m, k, n)
+    }
+
     /// A(m×k)·B(k×n) → C(m×n), row-major f32. `None` on any failure so the
     /// caller keeps its CPU path.
     pub fn try_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize)
         -> Option<Vec<f32>>
     {
         if a.len() != m * k || b.len() != k * n { return None; }
-        let Ctx { device, queue, pipeline } = ctx()?;
-
-        let out_bytes = (m * n * std::mem::size_of::<f32>()) as u64;
+        let Ctx { device, .. } = ctx()?;
         let buf_a = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("r2gpu-a"), contents: bytemuck::cast_slice(a),
             usage: wgpu::BufferUsages::STORAGE,
@@ -349,6 +384,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             label: Some("r2gpu-b"), contents: bytemuck::cast_slice(b),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        dispatch_matmul(&buf_a, &buf_b, m, k, n)
+    }
+
+    /// Bind, dispatch and read back. Shared by the resident and
+    /// upload-both paths so there is one copy of the launch logic.
+    fn dispatch_matmul(buf_a: &wgpu::Buffer, buf_b: &wgpu::Buffer,
+                       m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
+        let Ctx { device, queue, pipeline } = ctx()?;
+        let out_bytes = (m * n * std::mem::size_of::<f32>()) as u64;
         let buf_c = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("r2gpu-c"), size: out_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
@@ -463,4 +507,16 @@ mod tests {
         }
         set_gpu_enabled(false);
     }
+}
+
+/// Upload a matrix to the device and keep it there across calls.
+#[cfg(feature = "gpu")]
+pub fn upload(data: &[f32], rows: usize, cols: usize) -> Option<gpu::Resident> {
+    gpu::upload(data, rows, cols)
+}
+
+/// A(m×k) · B where B already lives on the device.
+#[cfg(feature = "gpu")]
+pub fn matmul_resident(a: &[f32], b: &gpu::Resident, m: usize) -> Option<Vec<f32>> {
+    gpu::matmul_resident(a, b, m)
 }
