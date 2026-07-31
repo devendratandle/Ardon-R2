@@ -6,16 +6,26 @@
 //! All compute is f32 (the neural type); shapes are row-major.
 
 /// Matrix multiply: A(m×k) · B(k×n) → C(m×n), all row-major f32.
+/// Loop order is i-k-j so the inner loop walks B and C contiguously and
+/// vectorizes; the j-inner form strides both and runs several times
+/// slower. Rows of C are independent, so the work splits across cores
+/// once it is large enough to pay for the hand-off — below that threshold
+/// thread setup costs more than the arithmetic saves.
 pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    use rayon::prelude::*;
     let mut c = vec![0.0f32; m * n];
-    for i in 0..m {
+    let row = |i: usize, crow: &mut [f32]| {
         for p in 0..k {
             let aik = a[i * k + p];
-            if aik == 0.0 { continue; }
+            if aik == 0.0 { continue; }   // one-hot embedding rows are mostly zero
             let brow = &b[p * n..p * n + n];
-            let crow = &mut c[i * n..i * n + n];
             for j in 0..n { crow[j] += aik * brow[j]; }
         }
+    };
+    if m * k * n >= 1 << 15 {
+        c.par_chunks_mut(n).enumerate().for_each(|(i, crow)| row(i, crow));
+    } else {
+        c.chunks_mut(n).enumerate().for_each(|(i, crow)| row(i, crow));
     }
     c
 }

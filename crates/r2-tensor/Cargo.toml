@@ -8,3 +8,6 @@ description = "LLM tensor substrate: f32/f16/bf16 + Q8/Q4 quantized dtypes, CPU 
 [dependencies]
 # Raw-bytes memory mapping for weight files (same crate r2-arrow uses).
 memmap2 = "0.9"
+# Data-parallel matmul. Already a workspace dependency (r2-kernel,
+# r2-engine); pure Rust, no C.
+rayon = "1"

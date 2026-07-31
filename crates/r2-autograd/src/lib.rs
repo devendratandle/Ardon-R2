@@ -243,20 +243,44 @@ impl Tape {
                 }
                 Op::MatMul { a, b, m, k, n } => {
                     let (ai, bi, m, k, n) = (a.0, b.0, *m, *k, *n);
-                    let va = self.vals[ai].clone();
-                    let vb = self.vals[bi].clone();
-                    // grad_A(m×k) = g(m×n) · B^T(n×k)
-                    for i2 in 0..m { for p in 0..k {
-                        let mut acc = 0.0f32;
-                        for j in 0..n { acc += g[i2 * n + j] * vb[p * n + j]; }
-                        self.grads[ai][i2 * k + p] += acc;
-                    }}
-                    // grad_B(k×n) = A^T(k×m) · g(m×n)
-                    for p in 0..k { for j in 0..n {
-                        let mut acc = 0.0f32;
-                        for i2 in 0..m { acc += va[i2 * k + p] * g[i2 * n + j]; }
-                        self.grads[bi][p * n + j] += acc;
-                    }}
+                    // Borrow vals and grads as DISJOINT fields. The obvious
+                    // `self.vals[ai].clone()` copies the whole weight matrix
+                    // on every backward — for a 768×256 projection that is a
+                    // 768 KB allocation per step per layer, and it dominated
+                    // the profile. Splitting the struct borrow removes it.
+                    let Tape { vals, grads, .. } = self;
+                    // grad_A(m×k) = g(m×n) · Bᵀ(n×k) — inner loop contiguous
+                    // in both g and B.
+                    {
+                        let vb = &vals[bi];
+                        let ga = &mut grads[ai];
+                        for i2 in 0..m {
+                            let grow = &g[i2 * n..i2 * n + n];
+                            for p in 0..k {
+                                let brow = &vb[p * n..p * n + n];
+                                let mut acc = 0.0f32;
+                                for j in 0..n { acc += grow[j] * brow[j]; }
+                                ga[i2 * k + p] += acc;
+                            }
+                        }
+                    }
+                    // grad_B(k×n) = Aᵀ(k×m) · g(m×n).
+                    // Written i-p-j, NOT p-j-i: the latter strides both A and
+                    // g on every inner step and misses cache constantly. Here
+                    // the inner loop walks g and grad_B contiguously.
+                    {
+                        let va = &vals[ai];
+                        let gb = &mut grads[bi];
+                        for i2 in 0..m {
+                            let grow = &g[i2 * n..i2 * n + n];
+                            for p in 0..k {
+                                let aip = va[i2 * k + p];
+                                if aip == 0.0 { continue; }
+                                let brow = &mut gb[p * n..p * n + n];
+                                for j in 0..n { brow[j] += aip * grow[j]; }
+                            }
+                        }
+                    }
                 }
                 Op::Silu(x) => {
                     let xi = x.0;
