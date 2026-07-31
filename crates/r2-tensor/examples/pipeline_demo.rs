@@ -14,7 +14,7 @@ fn main() -> Result<(), String> {
     println!("prompt {:?} -> {} tokens {:?}", prompt, ids.len(), &ids);
 
     // ── 2. Model sized to the tokenizer's vocab ──
-    let c = Config { dim: 64, n_heads: 8, n_layers: 4, vocab: tok.vocab_size(),
+    let c = Config { dim: 64, n_heads: 8, n_kv_heads: 4, n_layers: 4, vocab: tok.vocab_size(),
                      ffn_hidden: 128, max_seq: 128, rope_base: 10000.0, eps: 1e-5 };
     let mut m = Model::zeros(c);
     let f = |n: usize, s: f32| (0..n).map(|i| ((i as f32 * 0.0731 + s).sin()) * 0.25).collect::<Vec<f32>>();

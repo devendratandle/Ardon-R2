@@ -105,18 +105,39 @@ impl KvCache {
 /// output projection. Softmax is max-shifted for numerical stability, so
 /// long contexts cannot overflow the exponential.
 pub fn attend_step(q: &[f32], cache: &KvCache) -> Vec<f32> {
-    let (h, d, n) = (cache.n_heads, cache.head_dim, cache.len());
+    // Plain multi-head attention is the special case where every query
+    // head has its own K/V head.
+    attend_step_grouped(q, cache, cache.n_heads)
+}
+
+/// Grouped-query attention (GQA): `n_q_heads` query heads share the
+/// cache's `cache.n_heads` key/value heads, in contiguous groups.
+///
+/// Modern models (Llama-3, Mistral, 70B-class) do this because the KV
+/// cache — not the weights — dominates serving memory: 32 query heads
+/// over 8 K/V heads cuts the cache 4× at almost no quality cost. Query
+/// head `i` reads K/V head `i / (n_q_heads / n_kv_heads)`, which is the
+/// grouping the checkpoints are trained with.
+///
+/// With `n_q_heads == cache.n_heads` this is exactly multi-head attention
+/// (group size 1), so one code path serves both — proven by test.
+pub fn attend_step_grouped(q: &[f32], cache: &KvCache, n_q_heads: usize) -> Vec<f32> {
+    let (kvh, d, n) = (cache.n_heads, cache.head_dim, cache.len());
     let scale = 1.0 / (d as f32).sqrt();
-    let mut out = vec![0.0f32; h * d];
-    if n == 0 { return out; }
+    let mut out = vec![0.0f32; n_q_heads * d];
+    if n == 0 || kvh == 0 || n_q_heads == 0 { return out; }
+    // Queries per K/V head. Integer division: callers validate divisibility
+    // (Model::validate), and a non-divisible split would mis-group heads.
+    let group = (n_q_heads / kvh).max(1);
 
     let mut scores = vec![0.0f32; n];
-    for head in 0..h {
+    for head in 0..n_q_heads {
         let qh = &q[head * d..head * d + d];
+        let kv_head = (head / group).min(kvh - 1);
         // Scores against every cached position (causal by construction:
         // the cache only ever holds positions <= current).
         for (p, s) in scores.iter_mut().enumerate() {
-            let kh = cache.key(p, head);
+            let kh = cache.key(p, kv_head);
             *s = qh.iter().zip(kh).map(|(a, b)| a * b).sum::<f32>() * scale;
         }
         // Max-shifted softmax.
@@ -128,7 +149,7 @@ pub fn attend_step(q: &[f32], cache: &KvCache) -> Vec<f32> {
         let o = &mut out[head * d..head * d + d];
         for (p, &w) in scores.iter().enumerate() {
             let w = w * inv;
-            let vh = cache.value(p, head);
+            let vh = cache.value(p, kv_head);
             for (oi, &vi) in o.iter_mut().zip(vh) { *oi += w * vi; }
         }
     }
@@ -293,6 +314,45 @@ mod tests {
             }
         }
         assert_eq!(cache.len(), steps);
+    }
+
+    #[test]
+    fn gqa_with_one_kv_head_per_query_head_is_plain_attention() {
+        // Group size 1 must reduce EXACTLY to multi-head attention, so
+        // one code path can serve both without a behaviour difference.
+        let (h, d) = (4usize, 8usize);
+        let mut cache = KvCache::new(h, d, 8);
+        for t in 0..4 {
+            cache.append(&vecf(h * d, t as f32), &vecf(h * d, t as f32 + 0.5)).unwrap();
+        }
+        let q = vecf(h * d, 9.0);
+        assert_eq!(attend_step(&q, &cache), attend_step_grouped(&q, &cache, h));
+    }
+
+    #[test]
+    fn gqa_shares_kv_heads_in_contiguous_groups() {
+        // 4 query heads over 2 K/V heads: queries 0,1 read K/V head 0 and
+        // queries 2,3 read K/V head 1. Verified by making the two K/V
+        // heads carry distinguishable values — if the grouping were wrong
+        // (e.g. interleaved, or head-index reuse) the outputs would swap.
+        let (n_q, n_kv, d) = (4usize, 2usize, 4usize);
+        let mut cache = KvCache::new(n_kv, d, 4);
+        // K/V head 0 → value all 1.0 ; K/V head 1 → value all 5.0
+        let k = vecf(n_kv * d, 1.0);
+        let mut v = vec![1.0f32; n_kv * d];
+        for x in v[d..].iter_mut() { *x = 5.0; }
+        cache.append(&k, &v).unwrap();
+
+        let out = attend_step_grouped(&vecf(n_q * d, 2.0), &cache, n_q);
+        // Single cached position ⇒ output is exactly the value vector of
+        // whichever K/V head that query head reads.
+        for head in 0..n_q {
+            let want = if head < 2 { 1.0 } else { 5.0 };
+            for i in 0..d {
+                assert!((out[head * d + i] - want).abs() < 1e-6,
+                    "query head {head} must read K/V head {}", head / 2);
+            }
+        }
     }
 
     #[test]

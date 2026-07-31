@@ -16,7 +16,7 @@
 //! no autograd tape, no graph, no builder ceremony. A loader fills them;
 //! `forward_step` reads them.
 
-use crate::infer::{attend_step, KvCache, Sampler};
+use crate::infer::{attend_step_grouped, KvCache, Sampler};
 use crate::ops::{matmul, rmsnorm, rope_inplace, swiglu};
 
 /// Model shape. Everything the forward pass needs to know.
@@ -25,6 +25,11 @@ pub struct Config {
     /// Model width (embedding size).
     pub dim: usize,
     pub n_heads: usize,
+    /// Key/value heads. Equal to `n_heads` for classic multi-head
+    /// attention; FEWER for grouped-query attention (Llama-3, Mistral,
+    /// 70B-class), where several query heads share one K/V head and the
+    /// KV cache shrinks by that ratio.
+    pub n_kv_heads: usize,
     pub n_layers: usize,
     pub vocab: usize,
     /// FFN inner width (typically ~8/3 × dim in Llama-family models).
@@ -42,13 +47,46 @@ impl Config {
     /// [`Model::validate`].
     #[inline] pub fn head_dim(&self) -> usize { self.dim / self.n_heads }
 
+    /// Width of the key/value projections — `n_kv_heads * head_dim`,
+    /// which is smaller than `dim` under GQA.
+    #[inline] pub fn kv_dim(&self) -> usize { self.n_kv_heads * self.head_dim() }
+
+    /// Query heads per key/value head (1 = plain multi-head attention).
+    #[inline] pub fn kv_group(&self) -> usize { self.n_heads / self.n_kv_heads.max(1) }
+
+    /// Check the invariants that depend only on the SHAPE — no
+    /// allocation. Vital: a caller reading a 70B config must be able to
+    /// check it without materializing 130 GB of zeros.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.dim == 0 || self.n_heads == 0 || self.vocab == 0 {
+            return Err("Config: dim, n_heads and vocab must be non-zero".into());
+        }
+        if self.dim % self.n_heads != 0 {
+            return Err(format!("Config: dim {} not divisible by n_heads {}", self.dim, self.n_heads));
+        }
+        if self.n_kv_heads == 0 || self.n_heads % self.n_kv_heads != 0 {
+            return Err(format!(
+                "Config: n_heads {} must be a non-zero multiple of n_kv_heads {} \n                 (query heads share K/V heads in equal groups)",
+                self.n_heads, self.n_kv_heads));
+        }
+        if self.n_kv_heads > self.n_heads {
+            return Err(format!("Config: n_kv_heads {} exceeds n_heads {}", self.n_kv_heads, self.n_heads));
+        }
+        if self.head_dim() % 2 != 0 {
+            return Err(format!("Config: head_dim {} must be even (RoPE rotates pairs)", self.head_dim()));
+        }
+        Ok(())
+    }
+
     /// Total parameter count — the honest measure of model size, and what
     /// makes "how big can this get" a concrete question rather than a
     /// claim. Reported in the same units people quote (7B, 70B, 1T).
     pub fn n_params(&self) -> usize {
         let d = self.dim;
+        let kv = self.kv_dim();
         let per_layer = 2 * d            // two RMSNorm weight vectors
-            + 4 * d * d                  // Wq, Wk, Wv, Wo
+            + 2 * d * d                  // Wq, Wo  (full width)
+            + 2 * d * kv                 // Wk, Wv  (narrower under GQA)
             + 3 * d * self.ffn_hidden;   // W1, W2, W3
         self.vocab * d                   // token embedding
             + self.n_layers * per_layer
@@ -64,7 +102,8 @@ impl Config {
 pub struct Layer {
     /// RMSNorm weight before attention. `[dim]`
     pub attn_norm: Vec<f32>,
-    /// Query/key/value/output projections. `[dim × dim]` each.
+    /// Query and output projections `[dim × dim]`; key and value
+    /// projections `[dim × kv_dim]`, which is narrower under GQA.
     pub wq: Vec<f32>,
     pub wk: Vec<f32>,
     pub wv: Vec<f32>,
@@ -82,8 +121,8 @@ impl Layer {
         let (d, h) = (cfg.dim, cfg.ffn_hidden);
         Layer {
             attn_norm: vec![0.0; d],
-            wq: vec![0.0; d * d], wk: vec![0.0; d * d],
-            wv: vec![0.0; d * d], wo: vec![0.0; d * d],
+            wq: vec![0.0; d * d], wk: vec![0.0; d * cfg.kv_dim()],
+            wv: vec![0.0; d * cfg.kv_dim()], wo: vec![0.0; d * d],
             ffn_norm: vec![0.0; d],
             w1: vec![0.0; d * h], w2: vec![0.0; h * d], w3: vec![0.0; d * h],
         }
@@ -121,15 +160,7 @@ impl Model {
     /// a mis-shaped weight otherwise shows up as silent garbage output.
     pub fn validate(&self) -> Result<(), String> {
         let c = &self.cfg;
-        if c.dim == 0 || c.n_heads == 0 || c.vocab == 0 {
-            return Err("Config: dim, n_heads and vocab must be non-zero".into());
-        }
-        if c.dim % c.n_heads != 0 {
-            return Err(format!("Config: dim {} not divisible by n_heads {}", c.dim, c.n_heads));
-        }
-        if c.head_dim() % 2 != 0 {
-            return Err(format!("Config: head_dim {} must be even (RoPE rotates pairs)", c.head_dim()));
-        }
+        c.validate()?;
         if self.tok_embed.len() != c.vocab * c.dim {
             return Err(format!("tok_embed: expected {}, got {}", c.vocab * c.dim, self.tok_embed.len()));
         }
@@ -140,11 +171,11 @@ impl Model {
             return Err(format!("layers: expected {}, got {}", c.n_layers, self.layers.len()));
         }
         for (i, l) in self.layers.iter().enumerate() {
-            let (d, h) = (c.dim, c.ffn_hidden);
+            let (d, h, kv) = (c.dim, c.ffn_hidden, c.kv_dim());
             for (name, got, want) in [
                 ("attn_norm", l.attn_norm.len(), d), ("ffn_norm", l.ffn_norm.len(), d),
-                ("wq", l.wq.len(), d * d), ("wk", l.wk.len(), d * d),
-                ("wv", l.wv.len(), d * d), ("wo", l.wo.len(), d * d),
+                ("wq", l.wq.len(), d * d), ("wk", l.wk.len(), d * kv),
+                ("wv", l.wv.len(), d * kv), ("wo", l.wo.len(), d * d),
                 ("w1", l.w1.len(), d * h), ("w2", l.w2.len(), h * d), ("w3", l.w3.len(), d * h),
             ] {
                 if got != want {
@@ -161,7 +192,8 @@ impl Model {
         self.validate()?;
         let c = &self.cfg;
         Ok((0..c.n_layers)
-            .map(|_| KvCache::new(c.n_heads, c.head_dim(), c.max_seq))
+            // Sized by K/V heads, not query heads — that IS the GQA saving.
+            .map(|_| KvCache::new(c.n_kv_heads, c.head_dim(), c.max_seq))
             .collect())
     }
 
@@ -181,7 +213,7 @@ impl Model {
         if caches.len() != c.n_layers {
             return Err(format!("caches: expected {}, got {}", c.n_layers, caches.len()));
         }
-        let (d, hd) = (c.dim, c.head_dim());
+        let (d, hd, kv) = (c.dim, c.head_dim(), c.kv_dim());
 
         // Embedding row for this token.
         let mut x = self.tok_embed[token * d..token * d + d].to_vec();
@@ -197,8 +229,9 @@ impl Model {
             // ── Attention (pre-norm) ──
             let h = rmsnorm(&x, &layer.attn_norm, c.eps);
             let mut q = matmul(&h, &layer.wq, 1, d, d);
-            let mut k = matmul(&h, &layer.wk, 1, d, d);
-            let v = matmul(&h, &layer.wv, 1, d, d);
+            // K/V project into kv_dim (narrower than dim under GQA).
+            let mut k = matmul(&h, &layer.wk, 1, d, kv);
+            let v = matmul(&h, &layer.wv, 1, d, kv);
 
             // RoPE encodes position by ROTATING q and k, per head. Because
             // the rotation is applied before caching, cached keys already
@@ -206,13 +239,15 @@ impl Model {
             // stays valid for every later query.
             for head in 0..c.n_heads {
                 rope_inplace(&mut q[head * hd..(head + 1) * hd], pos, c.rope_base);
+            }
+            for head in 0..c.n_kv_heads {
                 rope_inplace(&mut k[head * hd..(head + 1) * hd], pos, c.rope_base);
             }
 
             // Cache THEN attend, so the token attends to itself as well —
             // the causal mask, expressed structurally.
             cache.append(&k, &v)?;
-            let a = attend_step(&q, cache);
+            let a = attend_step_grouped(&q, cache, c.n_heads);
             let o = matmul(&a, &layer.wo, 1, d, d);
             for (xi, oi) in x.iter_mut().zip(&o) { *xi += oi; }   // residual
 
@@ -281,7 +316,7 @@ mod tests {
     use crate::infer::SamplerConfig;
 
     fn cfg() -> Config {
-        Config { dim: 16, n_heads: 4, n_layers: 3, vocab: 11,
+        Config { dim: 16, n_heads: 4, n_kv_heads: 4, n_layers: 3, vocab: 11,
                  ffn_hidden: 24, max_seq: 32, rope_base: 10000.0, eps: 1e-5 }
     }
 
@@ -302,8 +337,8 @@ mod tests {
             l.attn_norm = vec![1.0; c.dim];
             l.ffn_norm = vec![1.0; c.dim];
             l.wq = fill(c.dim * c.dim, s + 0.2);
-            l.wk = fill(c.dim * c.dim, s + 0.5);
-            l.wv = fill(c.dim * c.dim, s + 0.9);
+            l.wk = fill(c.dim * c.kv_dim(), s + 0.5);
+            l.wv = fill(c.dim * c.kv_dim(), s + 0.9);
             l.wo = fill(c.dim * c.dim, s + 1.3);
             l.w1 = fill(c.dim * c.ffn_hidden, s + 1.7);
             l.w2 = fill(c.ffn_hidden * c.dim, s + 2.1);
@@ -395,9 +430,13 @@ mod tests {
         bad.layers[1].wq.truncate(3);
         assert!(bad.validate().unwrap_err().contains("layer 1 wq"));
 
-        let mut odd = Model::zeros(Config { n_heads: 5, dim: 15, ..cfg() });
-        odd.cfg.n_heads = 5; odd.cfg.dim = 15;
+        let odd = Model::zeros(Config { n_heads: 5, n_kv_heads: 5, dim: 15, ..cfg() });
         assert!(odd.validate().is_err(), "odd head_dim must be rejected (RoPE pairs)");
+
+        // GQA grouping must divide evenly, or query heads would be
+        // mis-assigned to K/V heads.
+        let bad_group = Model::zeros(Config { n_heads: 4, n_kv_heads: 3, ..cfg() });
+        assert!(bad_group.validate().unwrap_err().contains("multiple of n_kv_heads"));
     }
 
     #[test]
