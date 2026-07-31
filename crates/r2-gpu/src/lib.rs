@@ -241,6 +241,177 @@ mod gpu {
         staging.unmap();
         Ok(out)
     }
+
+    // ── Matrix multiply ────────────────────────────────────────────────
+    //
+    // This is the op that decides training and inference throughput —
+    // everything else in a transformer is small beside it.
+
+    const TILE: usize = 16;
+
+    /// Device, queue and compiled pipeline, created ONCE.
+    ///
+    /// Building them per call cost ~420 ms, hundreds of times the actual
+    /// arithmetic at any size a transformer uses, which made the GPU look
+    /// useless when the kernel was fine. Adapter enumeration, device
+    /// creation and shader compilation are one-time costs; only buffers
+    /// are genuinely per-call.
+    struct Ctx {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        pipeline: wgpu::ComputePipeline,
+    }
+    static CTX: std::sync::OnceLock<Option<Ctx>> = std::sync::OnceLock::new();
+
+    fn ctx() -> Option<&'static Ctx> {
+        CTX.get_or_init(|| pollster::block_on(build_ctx())).as_ref()
+    }
+
+    async fn build_ctx() -> Option<Ctx> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default()).await?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default(), None).await.ok()?;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("r2gpu-matmul"),
+            source: wgpu::ShaderSource::Wgsl(matmul_wgsl().into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("r2gpu-matmul-pipe"), layout: None,
+            module: &module, entry_point: "main",
+        });
+        Some(Ctx { device, queue, pipeline })
+    }
+
+    /// Tiled matmul kernel. Each workgroup stages a TILE×TILE block of A
+    /// and B into shared memory so every loaded value is reused by TILE
+    /// threads instead of being re-fetched from global memory. On an
+    /// integrated GPU — which shares bandwidth with the CPU — that reuse is
+    /// the whole game. Bounds are checked per access so dimensions that are
+    /// not multiples of TILE read as zero rather than past the buffer.
+    fn matmul_wgsl() -> String {
+        format!(r#"
+struct Dims {{ m: u32, k: u32, n: u32, pad: u32 }};
+@group(0) @binding(0) var<storage, read> A: array<f32>;
+@group(0) @binding(1) var<storage, read> B: array<f32>;
+@group(0) @binding(2) var<storage, read_write> C: array<f32>;
+@group(0) @binding(3) var<uniform> d: Dims;
+
+var<workgroup> tileA: array<f32, {tt}u>;
+var<workgroup> tileB: array<f32, {tt}u>;
+
+@compute @workgroup_size({t}, {t})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {{
+    let row = gid.y;
+    let col = gid.x;
+    var acc = 0.0;
+    let tiles = (d.k + {t}u - 1u) / {t}u;
+    for (var t0 = 0u; t0 < tiles; t0 = t0 + 1u) {{
+        let aCol = t0 * {t}u + lid.x;
+        let bRow = t0 * {t}u + lid.y;
+        if (row < d.m && aCol < d.k) {{
+            tileA[lid.y * {t}u + lid.x] = A[row * d.k + aCol];
+        }} else {{
+            tileA[lid.y * {t}u + lid.x] = 0.0;
+        }}
+        if (bRow < d.k && col < d.n) {{
+            tileB[lid.y * {t}u + lid.x] = B[bRow * d.n + col];
+        }} else {{
+            tileB[lid.y * {t}u + lid.x] = 0.0;
+        }}
+        workgroupBarrier();
+        for (var i = 0u; i < {t}u; i = i + 1u) {{
+            acc = acc + tileA[lid.y * {t}u + i] * tileB[i * {t}u + lid.x];
+        }}
+        workgroupBarrier();
+    }}
+    if (row < d.m && col < d.n) {{ C[row * d.n + col] = acc; }}
+}}
+"#, t = TILE, tt = TILE * TILE)
+    }
+
+    /// A(m×k)·B(k×n) → C(m×n), row-major f32. `None` on any failure so the
+    /// caller keeps its CPU path.
+    pub fn try_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize)
+        -> Option<Vec<f32>>
+    {
+        if a.len() != m * k || b.len() != k * n { return None; }
+        let Ctx { device, queue, pipeline } = ctx()?;
+
+        let out_bytes = (m * n * std::mem::size_of::<f32>()) as u64;
+        let buf_a = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("r2gpu-a"), contents: bytemuck::cast_slice(a),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let buf_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("r2gpu-b"), contents: bytemuck::cast_slice(b),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let buf_c = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("r2gpu-c"), size: out_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let dims: [u32; 4] = [m as u32, k as u32, n as u32, 0];
+        let buf_d = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("r2gpu-dims"), contents: bytemuck::cast_slice(&dims),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("r2gpu-staging-mm"), size: out_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buf_c.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: buf_d.as_entire_binding() },
+            ],
+        });
+
+        let mut enc = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(
+                ((n + TILE - 1) / TILE) as u32,
+                ((m + TILE - 1) / TILE) as u32, 1);
+        }
+        enc.copy_buffer_to_buffer(&buf_c, 0, &staging, 0, out_bytes);
+        queue.submit(Some(enc.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range();
+        let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        Some(out)
+    }
+}
+
+/// Matrix multiply on the GPU when enabled and available, else `None` so
+/// the caller keeps its CPU path. Behind the same opt-in switch as the
+/// element-wise ops: correctness never depends on a device being present.
+#[cfg(feature = "gpu")]
+pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
+    if !gpu_enabled() { return None; }
+    gpu::try_matmul(a, b, m, k, n)
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn matmul(_a: &[f32], _b: &[f32], _m: usize, _k: usize, _n: usize) -> Option<Vec<f32>> {
+    None
 }
 
 #[cfg(test)]
