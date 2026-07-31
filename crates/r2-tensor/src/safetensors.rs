@@ -318,6 +318,66 @@ mod tests {
     }
 }
 
+/// Write named f32 tensors as a safetensors file.
+///
+/// R2 uses this as its OWN model format, not as an interop concession:
+/// the container is open, trivially parseable, executes no code on load,
+/// and — the practical reason — is **memory-mappable**, so a 30 GB model
+/// can be served without ever reading it into RAM. Any tool that reads
+/// safetensors can read an R2 model, which is what makes "download a
+/// model and run it" free of lock-in.
+///
+/// Writes atomically (temp file → fsync → rename), so an interrupted save
+/// cannot leave a half-written model that loads as garbage.
+pub fn save(path: impl AsRef<Path>, tensors: &[(String, Vec<usize>, Vec<f32>)])
+    -> Result<(), String>
+{
+    use std::io::Write;
+
+    let mut header = String::from("{");
+    let mut offset = 0usize;
+    for (i, (name, shape, data)) in tensors.iter().enumerate() {
+        let n: usize = shape.iter().product();
+        if n != data.len() {
+            return Err(format!(
+                "safetensors::save: '{}' shape {:?} implies {} values, got {}",
+                name, shape, n, data.len()));
+        }
+        if i > 0 { header.push(','); }
+        let bytes = data.len() * 4;
+        header.push_str(&format!(
+            r#""{}":{{"dtype":"F32","shape":{:?},"data_offsets":[{},{}]}}"#,
+            name, shape, offset, offset + bytes));
+        offset += bytes;
+    }
+    header.push('}');
+
+    let path = path.as_ref();
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("safetensors::save: {}", e))?;
+        }
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        let f = std::fs::File::create(&tmp)
+            .map_err(|e| format!("safetensors::save: create: {}", e))?;
+        let mut w = std::io::BufWriter::new(f);
+        w.write_all(&(header.len() as u64).to_le_bytes())
+            .and_then(|_| w.write_all(header.as_bytes()))
+            .map_err(|e| format!("safetensors::save: header: {}", e))?;
+        for (_, _, data) in tensors {
+            for x in data {
+                w.write_all(&x.to_le_bytes())
+                    .map_err(|e| format!("safetensors::save: data: {}", e))?;
+            }
+        }
+        let f = w.into_inner().map_err(|e| format!("safetensors::save: flush: {}", e))?;
+        f.sync_all().map_err(|e| format!("safetensors::save: sync: {}", e))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("safetensors::save: commit: {}", e))
+}
+
 impl std::fmt::Debug for SafeTensors {
     /// Show the index, not the mapping — the tensor list is what a
     /// diagnostic needs, and the payload could be gigabytes.
