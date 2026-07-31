@@ -100,6 +100,14 @@ impl Tape {
         self.push(val, Op::Leaf, requires_grad)
     }
 
+    /// Number of nodes recorded. Each node owns a value buffer AND a
+    /// gradient buffer, so this is also an allocation count — the figure
+    /// that matters when small ops dominate a step.
+    pub fn len(&self) -> usize { self.vals.len() }
+    pub fn is_empty(&self) -> bool { self.vals.is_empty() }
+    /// Total elements held across all node buffers.
+    pub fn elements(&self) -> usize { self.vals.iter().map(|v| v.len()).sum() }
+
     pub fn value(&self, v: Var) -> &[f32] { &self.vals[v.0] }
     pub fn grad(&self, v: Var) -> &[f32] { &self.grads[v.0] }
 
@@ -264,8 +272,13 @@ impl Tape {
         // Nodes were pushed in topological order → reverse index order is
         // a valid reverse-topological walk.
         for i in (0..self.ops.len()).rev() {
-            // Take this node's incoming grad (clone: we index other nodes).
-            let g = self.grads[i].clone();
+            // MOVE this node's accumulated gradient out rather than cloning
+            // it. A tape has thousands of nodes and every one was being
+            // deep-copied here — allocation, not arithmetic, dominated the
+            // backward pass. Nothing writes to node i during its own arm
+            // (a node's inputs always have lower indices in a DAG), so the
+            // buffer is safe to borrow away and hand back.
+            let g = std::mem::take(&mut self.grads[i]);
             match &self.ops[i] {
                 Op::Leaf => {}
                 Op::Add(a, b) => {
@@ -493,6 +506,8 @@ impl Tape {
                     }
                 }
             }
+            // Return the buffer so grad() still reports this node.
+            self.grads[i] = g;
         }
     }
 }

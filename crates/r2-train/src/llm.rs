@@ -440,3 +440,20 @@ mod fusion_tests {
         let _ = uneven;
     }
 }
+
+impl Trainer {
+    /// Tape statistics for one batch — how many nodes a step records, and
+    /// how big they are. Small ops dominate transformer training on CPU,
+    /// so the node COUNT is often the real cost, not the arithmetic.
+    pub fn tape_stats(&self, batch: &[(Vec<usize>, Vec<usize>)]) -> (usize, usize) {
+        let mut tape = Tape::new();
+        let leaves: Vec<Var> = self.params.iter()
+            .map(|p| tape.leaf(p.clone(), true)).collect();
+        let seq = batch[0].0.len();
+        let mut toks = Vec::new();
+        for (i, _) in batch { toks.extend_from_slice(i); }
+        let logits = self.forward_fused(&mut tape, &toks, seq, &leaves);
+        let _ = tape.softmax_ce(logits, self.cfg.vocab, vec![0; toks.len()]);
+        (tape.len(), tape.elements())
+    }
+}
