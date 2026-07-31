@@ -20,6 +20,7 @@ pub mod infer;
 pub mod store;
 pub mod json;
 pub mod safetensors;
+pub mod segment;
 pub mod tokenizer;
 pub mod model;
 pub mod ops;
