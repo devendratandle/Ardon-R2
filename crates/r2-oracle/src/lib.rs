@@ -28,6 +28,13 @@ pub enum Op {
     /// Dense matrix multiply (`A·B`). Work ≈ m·n·k; parallelised across
     /// disjoint column bands of C above the threshold.
     MatMul,
+    /// Matrix multiply from the ML tensor path (`r2-tensor`). Separate
+    /// from [`Op::MatMul`] because it is a DIFFERENT kernel with a
+    /// different crossover: it does no packing, so it has none of the
+    /// per-band buffer cost that pushes the linalg GEMM's threshold out to
+    /// 32M, and it parallelises profitably far earlier. Two kernels, two
+    /// crossovers — modelled honestly rather than sharing one number.
+    TensorMatMul,
     /// Tree construction (random forest, gbm one tree).
     TreeBuild,
     /// K-fold cross-validation (each fold independent).
@@ -73,6 +80,13 @@ pub enum Backend {
     Serial,
     /// Rayon work-stealing thread pool.
     Rayon,
+    /// GPU compute (r2-gpu). Only ever chosen when the caller has enabled
+    /// GPU routing, the op is f32-safe, and the work is large enough for
+    /// the transfer to amortize — see [`dispatch`]. A caller that gets
+    /// `Gpu` must still handle the GPU path returning `None` (no adapter,
+    /// device lost) by falling back; the Oracle decides *policy*, it does
+    /// not guarantee a device.
+    Gpu,
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -193,6 +207,14 @@ pub fn dispatch(op: Op, shape: Shape) -> Backend {
         // (≈350³ after core scaling) so only clearly-net-positive sizes
         // parallelise. GEMM scales well above that (3.7× at 2048³/6 cores).
         Op::MatMul            => 32_000_000,
+        // TensorMatMul: the dense ML kernel (r2-tensor), which does NO
+        // packing — so it has none of the per-band buffer cost that pushes
+        // the linalg GEMM crossover out to 32M, and parallelises
+        // profitably far earlier. Measured: routing the 9.4M-work shapes a
+        // transformer uses to Serial cost 14% of training throughput.
+        // Two kernels, two crossovers — the Oracle models that instead of
+        // pretending one number fits both.
+        Op::TensorMatMul      => 500_000,
         Op::TreeBuild         => 1,
         Op::KFoldCV           => 2,
         // ListMap: aggregate-work threshold. Set lower than PerElementMap
@@ -207,7 +229,49 @@ pub fn dispatch(op: Op, shape: Shape) -> Backend {
     } else {
         scale_threshold(base, hw().cores)
     };
+
+    // ── GPU tier ────────────────────────────────────────────────────
+    // Checked before Rayon because when it applies it is the bigger win
+    // (measured 67 GFLOP/s on an integrated Radeon vs 10-20 on 6 CPU
+    // cores at 1024³). Deliberately narrow:
+    //
+    //  * MatMul only. It is the one op with enough arithmetic per byte
+    //    transferred to pay for the round trip. Element-wise maps and
+    //    reductions move as much data as they compute, so the PCIe/shared-
+    //    bus cost swamps any gain — and reductions must stay on the f64
+    //    CPU path for accuracy regardless (see r2-gpu's header).
+    //  * Opt-in. `gpu_enabled` is set by the caller; the default is off,
+    //    so nothing silently migrates onto f32 hardware.
+    //  * A high work threshold. Below ~64M MAC the transfer and dispatch
+    //    dominate; the measured crossover on this class of integrated GPU
+    //    is around 512³ (134M), so 64M is a deliberately conservative bar.
+    if gpu_enabled() && matches!(op, Op::MatMul | Op::TensorMatMul)
+        && work >= GPU_MATMUL_MIN_WORK
+    {
+        return Backend::Gpu;
+    }
+
     if work >= threshold { Backend::Rayon } else { Backend::Serial }
+}
+
+/// Minimum matmul work (m·n·k) before the GPU is considered.
+pub const GPU_MATMUL_MIN_WORK: usize = 64_000_000;
+
+// ── GPU routing switch ──────────────────────────────────────────────
+// Owned by the Oracle so there is ONE place that decides where work
+// runs. r2-gpu keeps its own enable flag for its direct API; the engine
+// sets both from `options(r2.gpu = TRUE)`.
+static GPU_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Allow the Oracle to route eligible work to the GPU.
+pub fn set_gpu_enabled(on: bool) {
+    GPU_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is GPU routing enabled?
+pub fn gpu_enabled() -> bool {
+    GPU_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Scale a base threshold by the actual core count. 8-core machine is

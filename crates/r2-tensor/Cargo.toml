@@ -11,3 +11,7 @@ memmap2 = "0.9"
 # Data-parallel matmul. Already a workspace dependency (r2-kernel,
 # r2-engine); pure Rust, no C.
 rayon = "1"
+# Backend policy (CPU serial / CPU parallel / GPU) is decided by the
+# Oracle, never by thresholds hidden in kernels.
+r2-oracle = { path = "../r2-oracle" }
+r2-gpu    = { path = "../r2-gpu" }

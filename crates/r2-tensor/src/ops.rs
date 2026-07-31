@@ -11,7 +11,34 @@
 /// slower. Rows of C are independent, so the work splits across cores
 /// once it is large enough to pay for the hand-off — below that threshold
 /// thread setup costs more than the arithmetic saves.
+/// Backend choice comes from the ORACLE, not from a threshold hidden in
+/// this function. One component decides where work runs, for every op in
+/// the system, so tuning is a single edit rather than a hunt through
+/// kernels — and `explain()` can report the same decision the code makes.
 pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    use rayon::prelude::*;
+    match r2_oracle::dispatch(r2_oracle::Op::TensorMatMul, r2_oracle::Shape::nmk(m, n, k)) {
+        r2_oracle::Backend::Gpu => {
+            // The Oracle decides policy; the device may still be absent or
+            // fail, so a `None` falls through to the CPU path below rather
+            // than erroring. Correctness never depends on a GPU existing.
+            if let Some(out) = r2_gpu::matmul(a, b, m, k, n) {
+                return out;
+            }
+            matmul_cpu(a, b, m, k, n, true)
+        }
+        r2_oracle::Backend::Rayon  => matmul_cpu(a, b, m, k, n, true),
+        r2_oracle::Backend::Serial => matmul_cpu(a, b, m, k, n, false),
+    }
+}
+
+/// CPU matmul. Loop order is i-k-j so the inner loop walks B and C
+/// contiguously and vectorizes; the j-inner form strides both and runs
+/// several times slower. Rows of C are independent, so they split across
+/// cores when `parallel`.
+fn matmul_cpu(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, parallel: bool)
+    -> Vec<f32>
+{
     use rayon::prelude::*;
     let mut c = vec![0.0f32; m * n];
     let row = |i: usize, crow: &mut [f32]| {
@@ -22,7 +49,7 @@ pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
             for j in 0..n { crow[j] += aik * brow[j]; }
         }
     };
-    if m * k * n >= 1 << 15 {
+    if parallel {
         c.par_chunks_mut(n).enumerate().for_each(|(i, crow)| row(i, crow));
     } else {
         c.chunks_mut(n).enumerate().for_each(|(i, crow)| row(i, crow));
