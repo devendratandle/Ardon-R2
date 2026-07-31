@@ -15,3 +15,8 @@ rayon = "1"
 # Oracle, never by thresholds hidden in kernels.
 r2-oracle = { path = "../r2-oracle" }
 r2-gpu    = { path = "../r2-gpu" }
+
+[features]
+# Pass the GPU switch down to r2-gpu. Off by default: a normal build
+# compiles no wgpu at all.
+gpu = ["r2-gpu/gpu"]

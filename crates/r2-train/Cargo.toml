@@ -8,4 +8,9 @@ description = "Training loop foundation: optimizer traits + the verified-innovat
 [dependencies]
 r2-mesh = { path = "../r2-mesh" }
 r2-tensor = { path = "../r2-tensor" }
+r2-oracle = { path = "../r2-oracle" }
+r2-gpu    = { path = "../r2-gpu" }
 r2-autograd = { path = "../r2-autograd" }
+
+[features]
+gpu = ["r2-tensor/gpu"]

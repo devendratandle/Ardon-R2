@@ -38,7 +38,18 @@ enum Op {
     /// activation, row `r` rotated for position `r`. RoPE is an
     /// ORTHOGONAL transform, so its backward is simply the rotation by
     /// the negated angle — no Jacobian to store.
-    Rope { x: Var, rows: usize, n_heads: usize, head_dim: usize, base: f32 },
+    /// `period` is the sequence length in a fused batch: B sequences of T
+    /// tokens stacked as B·T rows rotate with position = row % T, so every
+    /// sequence sees positions 0..T exactly as it would alone.
+    Rope { x: Var, rows: usize, period: usize, n_heads: usize, head_dim: usize, base: f32 },
+    /// Contiguous row range of a `rows × cols` matrix. Rows are contiguous
+    /// in memory, so this is how one sequence is cut out of a fused batch
+    /// for attention (which must never see across sequence boundaries).
+    SliceRows { x: Var, cols: usize, start: usize, len: usize },
+    /// Stack matrices with the same column count vertically — the inverse
+    /// of SliceRows, reassembling per-sequence attention outputs into the
+    /// fused activation.
+    ConcatRows { xs: Vec<Var> },
     /// Take a contiguous column range from each row — how one attention
     /// head is separated out of a packed multi-head activation.
     SliceCols { x: Var, rows: usize, total: usize, start: usize, len: usize },
@@ -136,15 +147,42 @@ impl Tape {
     /// position. Matches r2_tensor::ops::rope_inplace exactly, so a model
     /// trained here and served by r2-tensor share one definition.
     pub fn rope(&mut self, x: Var, rows: usize, n_heads: usize, head_dim: usize, base: f32) -> Var {
+        self.rope_seq(x, rows, rows, n_heads, head_dim, base)
+    }
+
+    /// RoPE for a FUSED batch: B sequences of length `period` stacked as
+    /// `rows = B * period` rows. Position restarts at each sequence
+    /// boundary (row % period), so every sequence is rotated exactly as it
+    /// would be alone — which is what makes fused-batch logits equal
+    /// per-sequence logits.
+    pub fn rope_seq(&mut self, x: Var, rows: usize, period: usize,
+                    n_heads: usize, head_dim: usize, base: f32) -> Var {
         let mut val = self.vals[x.0].clone();
         for r in 0..rows {
+            let pos = r % period;
             for h in 0..n_heads {
                 let off = r * n_heads * head_dim + h * head_dim;
-                r2_tensor::ops::rope_inplace(&mut val[off..off + head_dim], r, base);
+                r2_tensor::ops::rope_inplace(&mut val[off..off + head_dim], pos, base);
             }
         }
         let req = self.requires[x.0];
-        self.push(val, Op::Rope { x, rows, n_heads, head_dim, base }, req)
+        self.push(val, Op::Rope { x, rows, period, n_heads, head_dim, base }, req)
+    }
+
+    /// Cut rows `[start, start+len)` out of a `? × cols` matrix. Rows are
+    /// contiguous, so the slice is one memcpy.
+    pub fn slice_rows(&mut self, x: Var, cols: usize, start: usize, len: usize) -> Var {
+        let val = self.vals[x.0][start * cols..(start + len) * cols].to_vec();
+        let req = self.requires[x.0];
+        self.push(val, Op::SliceRows { x, cols, start, len }, req)
+    }
+
+    /// Stack matrices with equal column counts vertically.
+    pub fn concat_rows(&mut self, xs: &[Var]) -> Var {
+        let mut val = Vec::new();
+        for v in xs { val.extend_from_slice(&self.vals[v.0]); }
+        let req = xs.iter().any(|v| self.requires[v.0]);
+        self.push(val, Op::ConcatRows { xs: xs.to_vec() }, req)
     }
 
     /// Extract columns `[start, start+len)` from a `rows × total` matrix.
@@ -329,16 +367,20 @@ impl Tape {
                         self.grads[xi][i * cols + j] += g[j * rows + i];
                     }}
                 }
-                Op::Rope { x, rows, n_heads, head_dim, base } => {
+                Op::Rope { x, rows, period, n_heads, head_dim, base } => {
                     // Rotation is orthogonal: the adjoint is the inverse
                     // rotation, i.e. the same op at angle -theta.
-                    let (xi, rows, nh, hd, base) = (x.0, *rows, *n_heads, *head_dim, *base);
+                    let (xi, rows, period, nh, hd, base) =
+                        (x.0, *rows, *period, *n_heads, *head_dim, *base);
                     for r in 0..rows {
+                        // Same position mapping as the forward pass: in a
+                        // fused batch the angle restarts each sequence.
+                        let pos = (r % period.max(1)) as f32;
                         for h in 0..nh {
                             let off = r * nh * hd + h * hd;
                             for p in 0..hd / 2 {
                                 let freq = 1.0 / base.powf(2.0 * p as f32 / hd as f32);
-                                let theta = r as f32 * freq;
+                                let theta = pos * freq;
                                 let (s, c) = theta.sin_cos();
                                 let (ga, gb) = (g[off + 2 * p], g[off + 2 * p + 1]);
                                 // Inverse of [c -s; s c] is [c s; -s c].
@@ -346,6 +388,22 @@ impl Tape {
                                 self.grads[xi][off + 2 * p + 1] += -ga * s + gb * c;
                             }
                         }
+                    }
+                }
+                Op::SliceRows { x, cols, start, len } => {
+                    // Rows are contiguous: the adjoint scatters the
+                    // incoming gradient back into its row range.
+                    let (xi, cols, start, len) = (x.0, *cols, *start, *len);
+                    let base = start * cols;
+                    for i in 0..len * cols { self.grads[xi][base + i] += g[i]; }
+                }
+                Op::ConcatRows { xs } => {
+                    // Each input owns a contiguous slab of the output.
+                    let mut off = 0usize;
+                    for v in xs {
+                        let n = self.grads[v.0].len();
+                        for i in 0..n { self.grads[v.0][i] += g[off + i]; }
+                        off += n;
                     }
                 }
                 Op::SliceCols { x, rows, total, start, len } => {
