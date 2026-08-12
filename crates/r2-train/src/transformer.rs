@@ -66,6 +66,7 @@ impl Model {
         Model { d, t, vocab, h, params }
     }
 
+    #[allow(dead_code)] // superseded by llm::Trainer; kept for the older demo path
     fn n_params(&self) -> usize { self.params.iter().map(|p| p.len()).sum() }
 
     /// Build the forward graph on a fresh tape for input token ids `ids`

@@ -145,7 +145,7 @@ fn pnorm_both(x: f64) -> (f64, f64) {  // (lower = Φ(x), upper = 1-Φ(x))
         let temp = x * (xnum + A[3]) / (xden + B[3]);
         return (0.5 + temp, 0.5 - temp);
     }
-    let (mut cum, del, xsq);
+    let (cum, del, xsq);
     if y <= M_SQRT_32 {
         // Moderate tail: erfc-form rational approx on the z-score.
         let mut xnum = C[8] * y; let mut xden = y;

@@ -16,7 +16,6 @@
 /// the system, so tuning is a single edit rather than a hunt through
 /// kernels — and `explain()` can report the same decision the code makes.
 pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    use rayon::prelude::*;
     match r2_oracle::dispatch(r2_oracle::Op::TensorMatMul, r2_oracle::Shape::nmk(m, n, k)) {
         r2_oracle::Backend::Gpu => {
             // The Oracle decides policy; the device may still be absent or

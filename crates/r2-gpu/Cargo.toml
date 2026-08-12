@@ -16,3 +16,11 @@ gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 wgpu     = { version = "0.19", optional = true }
 pollster = { version = "0.3", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }
+
+# `upload` / `matmul_resident` exist only under the `gpu` feature (they
+# hand back a device buffer, which has no CPU meaning). Declaring the
+# requirement here keeps a default `cargo test --workspace` — which builds
+# every example — from trying to compile them.
+[[example]]
+name = "residency"
+required-features = ["gpu"]

@@ -1,5 +1,5 @@
 //! Show the Oracle deciding the backend for each matmul shape.
-use r2_oracle::{dispatch, Op, Shape, Backend};
+use r2_oracle::{dispatch, Op, Shape};
 fn main() {
     for enabled in [false, true] {
         r2_oracle::set_gpu_enabled(enabled);

@@ -416,7 +416,7 @@ mod fusion_tests {
         uneven.push((vec![1, 2, 3], vec![2, 3, 4]));
 
         let mut a = Trainer::new(c, 0.02, 9).unwrap();
-        let mut b = Trainer::new(c, 0.02, 9).unwrap();
+        let b = Trainer::new(c, 0.02, 9).unwrap();
         let la = a.train_step(&batch).unwrap();          // fused
         // Same batch, but routed through the unfused path by construction:
         // temporarily make it non-uniform-free by calling forward per seq.

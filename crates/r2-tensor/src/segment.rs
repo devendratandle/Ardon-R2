@@ -163,7 +163,7 @@ mod tests {
     use crate::infer::attend_step_grouped;
 
     fn vecf(n: usize, seed: f32) -> Vec<f32> {
-        (0..n).map(|i| ((i as f32 * 0.37 + seed).sin())).collect()
+        (0..n).map(|i| (i as f32 * 0.37 + seed).sin()).collect()
     }
 
     #[test]
