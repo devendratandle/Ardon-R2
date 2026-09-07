@@ -34,6 +34,26 @@ enum Slot {
     Serving(Box<Model>),
 }
 
+/// The tokenizer a handle was created with.
+///
+/// Held BESIDE the model rather than rebuilt at each call site. `llm.train`
+/// and `llm.generate` used to each construct their own `byte_level()`, which
+/// is only safe because both happened to pick the same one; the moment a
+/// model has a learned vocabulary, a generate that rebuilt a byte tokenizer
+/// would decode the model's ids against the wrong table and emit plausible
+/// nonsense. Pairing the tokenizer with the handle makes that unrepresentable.
+type Toks = std::collections::HashMap<u32, Tokenizer>;
+fn with_tokenizers<R>(f: impl FnOnce(&mut Toks) -> R) -> R {
+    use std::sync::{Mutex, OnceLock};
+    static T: OnceLock<Mutex<Toks>> = OnceLock::new();
+    f(&mut T.get_or_init(|| Mutex::new(Toks::new())).lock().unwrap())
+}
+
+/// The tokenizer for `id`, or byte-level if none was attached.
+fn tokenizer_for(id: u32) -> Tokenizer {
+    with_tokenizers(|t| t.get(&id).cloned()).unwrap_or_else(Tokenizer::byte_level)
+}
+
 impl Slot {
     fn config(&self) -> Config {
         match self {
@@ -98,7 +118,21 @@ pub(crate) fn bi_llm_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
         n_heads,
         n_kv_heads: num_arg(a, "kv.heads", n_heads as f64) as usize,
         n_layers: num_arg(a, "layers", 4.0) as usize,
-        vocab: 256,
+        // `vocab` is the tokenizer's size. 256 keeps the byte-level
+        // default (every byte is a token); anything larger makes
+        // `llm.train` learn a BPE of that size from the training text on
+        // its first call, which is when the text is first available.
+        //
+        // Measured on 0.33 MB of prose, 4-layer dim-256 model
+        // (`--example tokenizer_tradeoff`):
+        //     256   1.000 tok/byte  5.42 bits/byte   752 text bytes/s
+        //    1000   0.439            3.92           1516
+        //    4000   0.311            3.31           1588  <- throughput peak
+        //   14492   0.250            2.89            790
+        // Bigger vocabularies keep improving quality per byte, but the
+        // output projection is dim*vocab per token, so on a SMALL model it
+        // starts costing more than the shorter sequence saves.
+        vocab: num_arg(a, "vocab", 256.0) as usize,
         ffn_hidden: num_arg(a, "ffn", (dim * 3) as f64) as usize,
         max_seq: num_arg(a, "ctx", 64.0) as usize,
         rope_base: 10000.0,
@@ -122,7 +156,43 @@ pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     let max_batch = num_arg(a, "batch", 8.0) as usize;
     let report = num_arg(a, "report", 0.0) as usize;
 
-    let tok = Tokenizer::byte_level();
+    // Attach a tokenizer to this handle the first time it trains. A model
+    // asked for vocab > 256 learns a BPE from THIS text — the merges have
+    // to come from somewhere, and the training text is the only corpus the
+    // builtin is given.
+    let want_vocab = with_registry(|r| r.get(&id).map(|s| s.config().vocab))
+        .unwrap_or(256);
+    if with_tokenizers(|t| !t.contains_key(&id)) {
+        let tok = if want_vocab > 256 {
+            Tokenizer::from_trained(&r2_tensor::bpe::train(&text, want_vocab))
+        } else {
+            Tokenizer::byte_level()
+        };
+        // The LEARNED vocabulary can be smaller than the one requested: a
+        // corpus only contains so many useful merges, and a short one runs
+        // out early (0.33 MB of prose caps out near 14,500 however much you
+        // ask for). Resize the model to match rather than leaving it with a
+        // wider output layer than the tokenizer has tokens — that costs
+        // `dim * unused` per token forever, and lets the model emit ids the
+        // tokenizer cannot decode, which drops characters silently.
+        //
+        // Safe here and only here: this is the first train call, so the
+        // model has seen no data and nothing is discarded.
+        let actual = tok.vocab_size();
+        if actual != want_vocab {
+            let mut cfg = with_registry(|r| r.get(&id).map(|s| s.config()))
+                .ok_or_else(|| R2Err { msg: format!("llm.train: unknown model handle {}", id),
+                                       kind: ErrKind::Runtime })?;
+            cfg.vocab = actual;
+            let lr = num_arg(a, "lr", 0.003) as f32;
+            let rebuilt = Trainer::new(cfg, lr, num_arg(a, "seed", 42.0) as u64)
+                .map_err(|e| R2Err { msg: format!("llm.train: {}", e),
+                                     kind: ErrKind::Runtime })?;
+            with_registry(|r| { r.insert(id, Slot::Training(Box::new(rebuilt))); });
+        }
+        with_tokenizers(|t| t.insert(id, tok));
+    }
+    let tok = tokenizer_for(id);
     let ids: Vec<usize> = tok.encode(&text)
         .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?
         .iter().map(|&i| i as usize).collect();
@@ -177,7 +247,9 @@ pub(crate) fn bi_llm_generate(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
         None => Err(R2Err { msg: format!("llm.generate: unknown model handle {}", id), kind: ErrKind::Runtime }),
     })?;
 
-    let tok = Tokenizer::byte_level();
+    // The handle's own tokenizer — see `Toks`. Rebuilding a byte-level one
+    // here would decode a BPE model's ids against the wrong table.
+    let tok = tokenizer_for(id);
     let ids: Vec<usize> = tok.encode(&prompt)
         .map_err(|e| R2Err { msg: format!("llm.generate: {}", e), kind: ErrKind::Runtime })?
         .iter().map(|&i| i as usize).collect();
