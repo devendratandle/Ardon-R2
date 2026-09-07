@@ -106,11 +106,13 @@ impl Trainer {
         let (d, kv, hd, t) = (c.dim, c.kv_dim(), c.head_dim(), tokens.len());
         let nseq = if seq == 0 { 1 } else { t / seq };
 
-        // Embedding as a one-hot matmul, so gradients reach the table.
-        let mut onehot = vec![0.0f32; t * c.vocab];
-        for (i, &tok) in tokens.iter().enumerate() { onehot[i * c.vocab + tok] = 1.0; }
-        let oh = tape.leaf(onehot, false);
-        let mut x = tape.matmul(oh, leaves[0], t, c.vocab, d);
+        // Embedding as a GATHER. This was a one-hot matmul —
+        // `matmul(onehot[t x vocab], table, t, vocab, d)` — which computes
+        // the same rows by doing `vocab` times the arithmetic and building
+        // a t x vocab buffer every forward pass (65.5 MB at vocab 8,000).
+        // Tolerable while the vocabulary was 256; not once BPE made it
+        // 8,000+. See `Op::Embed` for the measurements.
+        let mut x = tape.embed(leaves[0], tokens, d);
 
         for l in 0..c.n_layers {
             let b = |p: usize| leaves[self.layer_block(l, p)];

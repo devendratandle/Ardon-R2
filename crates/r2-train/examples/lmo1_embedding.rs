@@ -58,10 +58,12 @@ fn main() {
 
     println!("LMO-1 — embedding step only, R2's one-hot matmul");
     println!("  {t} tokens, dim {d}, microseconds, median of 9\n");
-    println!("{:>7} {:>12} {:>9} {:>10} {:>11} {:>12} {:>12}",
-             "vocab", "onehot MB", "leaf", "build", "forward", "fwd+bwd", "MFLOP fwd");
-    println!("  (leaf is the table copy onto the tape, SUBTRACTED from the two right columns)");
-    println!("{}", "-".repeat(80));
+    println!("{:>7} {:>10} {:>8} {:>11} {:>12} {:>10} {:>10} {:>10}",
+             "vocab", "onehot MB", "leaf", "OH fwd", "OH fwd+bwd",
+             "GA fwd", "GA fwd+bwd", "speedup");
+    println!("  OH = the one-hot matmul this replaces; GA = the gather that ships.");
+    println!("  The table's leaf copy is measured and SUBTRACTED from all four.");
+    println!("{}", "-".repeat(84));
 
     for &vocab in &vocabs {
         // Total work per rep is O(t*vocab*d), so hold it roughly fixed.
@@ -117,12 +119,32 @@ fn main() {
             std::hint::black_box(tb.grad(w).len());
         });
 
+        // ── the GATHER, which is what ships now ────────────────────────
+        let g_fwd = (t_us(reps, || {
+            let mut tg = Tape::new();
+            let w = tg.leaf(table.clone(), true);
+            let x = tg.embed(w, &tokens, d);
+            std::hint::black_box(tg.value(x).len());
+        }) - leaf_only).max(0.0);
+        let g_fb = (t_us(reps, || {
+            let mut tg = Tape::new();
+            let w = tg.leaf(table.clone(), true);
+            let x = tg.embed(w, &tokens, d);
+            let s = tg.leaf(g.clone(), false);
+            let p = tg.mul(x, s);
+            let l = tg.sum_all(p);
+            tg.backward(l);
+            std::hint::black_box(tg.grad(w).len());
+        }) - leaf_only).max(0.0);
+
         let mflop = 2.0 * t as f64 * vocab as f64 * d as f64 / 1e6;
         // Table leaf subtracted from both, so what remains is the
         // embedding: build the one-hot, multiply, and its backward.
         let fwd_net = (fwd - leaf_only).max(0.0);
         let fb_net = (fb - leaf_only).max(0.0);
-        println!("{vocab:>7} {:>12.1} {leaf_only:>9.1} {build:>10.1} {fwd_net:>11.1} {fb_net:>12.1} {mflop:>12.1}", (t * vocab * 4) as f64 / 1e6);
+        println!("{vocab:>7} {:>10.1} {leaf_only:>8.1} {fwd_net:>11.1} {fb_net:>12.1} {g_fwd:>10.1} {g_fb:>10.1} {:>9.0}x", (t * vocab * 4) as f64 / 1e6,
+                 if g_fb > 0.0 { fb_net / g_fb } else { 0.0 });
+        let _ = (build, mflop);
     }
 
     println!("\nA gather does t*d = {} element copies for ANY vocabulary.", t * d);

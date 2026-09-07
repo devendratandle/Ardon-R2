@@ -29,6 +29,30 @@ enum Op {
     Add(Var, Var),
     Mul(Var, Var),
     MatMul { a: Var, b: Var, m: usize, k: usize, n: usize },
+    /// Token embedding: row `tokens[i]` of a `vocab x d` table becomes row
+    /// `i` of the output. A GATHER forward, a SCATTER-ADD backward — the
+    /// same decomposition PyTorch uses (`aten::embedding` dispatches to
+    /// `index_select`; its backward is `embedding_dense_backward`).
+    ///
+    /// Replaces `matmul(onehot, table, t, vocab, d)`, which computes the
+    /// identical result by doing `vocab` times the necessary arithmetic and
+    /// materialising a `t x vocab` buffer every forward pass. Measured at
+    /// 2,048 tokens and dim 256, forward plus backward:
+    ///
+    /// ```text
+    /// vocab      one-hot matmul     gather (PyTorch)
+    ///   256           24,283 us              413 us
+    /// 8,000          722,659 us            1,594 us
+    /// 32,000       3,416,475 us            5,173 us
+    /// ```
+    ///
+    /// A gather's cost is FLAT in the vocabulary, as it must be: it copies
+    /// `t*d` elements whatever the table's height. The one-hot form's grows
+    /// linearly, which was tolerable at vocab 256 and is not at 8,000.
+    ///
+    /// The tokens are stored so the backward can scatter into the rows the
+    /// forward touched.
+    Embed { table: Var, tokens: Vec<usize>, d: usize },
     Silu(Var),
     /// RMSNorm over the last dim `d`, with weight and eps. Rows = len/d.
     Rmsnorm { x: Var, w: Var, d: usize, eps: f32 },
@@ -123,6 +147,30 @@ impl Tape {
         let val: Vec<f32> = self.vals[a.0].iter().zip(&self.vals[b.0]).map(|(x, y)| x * y).collect();
         let req = self.requires[a.0] || self.requires[b.0];
         self.push(val, Op::Mul(a, b), req)
+    }
+
+    /// Gather rows `tokens` out of the `vocab x d` `table`.
+    ///
+    /// Panics on an out-of-range token rather than reading a neighbouring
+    /// row. The one-hot form silently produced a row of zeros for such a
+    /// token, which trains a subtly wrong model instead of failing.
+    pub fn embed(&mut self, table: Var, tokens: &[usize], d: usize) -> Var {
+        let table_len = self.vals[table.0].len();
+        assert_eq!(table_len % d, 0,
+                   "embed: table length {table_len} is not a multiple of d={d}");
+        let vocab = table_len / d;
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= vocab) {
+            panic!("embed: token {bad} out of range for vocab {vocab}");
+        }
+        let mut val = vec![0.0f32; tokens.len() * d];
+        {
+            let vt = &self.vals[table.0];
+            for (dst, &tok) in val.chunks_exact_mut(d).zip(tokens) {
+                dst.copy_from_slice(&vt[tok * d..tok * d + d]);
+            }
+        }
+        let req = self.requires[table.0];
+        self.push(val, Op::Embed { table, tokens: tokens.to_vec(), d }, req)
     }
 
     pub fn matmul(&mut self, a: Var, b: Var, m: usize, k: usize, n: usize) -> Var {
@@ -291,6 +339,22 @@ impl Tape {
                     let (va, vb) = (self.vals[a].clone(), self.vals[b].clone());
                     for (ga, (gi, vbi)) in self.grads[a].iter_mut().zip(g.iter().zip(&vb)) { *ga += gi * vbi; }
                     for (gb, (gi, vai)) in self.grads[b].iter_mut().zip(g.iter().zip(&va)) { *gb += gi * vai; }
+                }
+                Op::Embed { table, tokens, d } => {
+                    // The adjoint of a gather is a SCATTER-ADD. `+=`, never
+                    // `=`: a token appearing twice must accumulate both
+                    // contributions, and dropping one is a silent error on
+                    // exactly the commonest tokens.
+                    let (ti, d) = (table.0, *d);
+                    if self.requires[ti] {
+                        let gt = &mut self.grads[ti];
+                        for (i, &tok) in tokens.iter().enumerate() {
+                            let dst = &mut gt[tok * d..tok * d + d];
+                            for (o, s) in dst.iter_mut().zip(&g[i * d..i * d + d]) {
+                                *o += s;
+                            }
+                        }
+                    }
                 }
                 Op::MatMul { a, b, m, k, n } => {
                     let (ai, bi, m, k, n) = (a.0, b.0, *m, *k, *n);
