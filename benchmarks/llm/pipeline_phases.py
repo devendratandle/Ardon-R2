@@ -9,10 +9,16 @@ happening silently.
     R2_CORPUS=corpus.txt R2_STEPS=40 R2_SEQ=64 R2_BATCH=32 \
       R2_VOCABS=256,8000 python benchmarks/llm/pipeline_phases.py
 
-The tokenizer arm uses `tokenizers`' own BPE trainer for the BPE case and a
-byte identity map for vocab 256, so each side uses ITS OWN ecosystem's
-tokenizer — which is the comparison that matters. Neither is asked to load
-the other's file.
+Each side uses ITS OWN ecosystem's tokenizer — R2 its BPE trainer, PyTorch
+the HuggingFace one — which is the comparison a user actually faces.
+Neither is asked to load the other's file.
+
+Because the two vocabularies then differ, raw cross-entropy is NOT
+comparable between them: it is per token, and guessing 1 of 8,000 tokens
+is a harder question than 1 of 8,143, so the lower loss can belong to the
+worse model. BITS PER BYTE is reported alongside and is the comparable
+quantity — how much information the model needs per byte of the original
+text, independent of how that text was chopped up.
 """
 
 import math
@@ -122,7 +128,14 @@ def main():
 
     for v in vocabs:
         t0 = time.perf_counter()
-        if v <= 256:
+        shared = os.environ.get("R2_TOKENIZER_JSON")
+        if shared:
+            # The SAME vocabulary R2 used. Without this the two sides have
+            # different token streams and their losses are not comparable —
+            # only the speed numbers would mean anything.
+            from tokenizers import Tokenizer
+            enc = Tokenizer.from_file(shared)
+        elif v <= 256:
             enc = None                      # raw bytes are the ids
         else:
             from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
@@ -153,6 +166,7 @@ def main():
         opt = torch.optim.Adam(model.parameters(), lr=3e-4)
 
         cursor, loss_v = 0, 0.0
+        first, step, traj = float("nan"), 0, []
         t0 = time.perf_counter()
         for _ in range(steps):
             xs, ys = [], []
@@ -167,7 +181,12 @@ def main():
             loss = F.cross_entropy(model(xb).view(-1, vocab_actual), yb.view(-1))
             loss.backward()
             opt.step()
-            loss_v = float(loss)
+            loss_v = float(loss.detach())
+            step += 1
+            if step == 1:
+                first = loss_v
+            if step % max(steps // 5, 1) == 0:
+                traj.append(f"{step}:{loss_v:.4f}")
         train_s = time.perf_counter() - t0
 
         total = read_s + learn_s + tokenize_s + train_s
@@ -179,6 +198,10 @@ def main():
         print(f"{'  share':<12}{'':>8}{learn_s/total*100:>7.1f}%"
               f"{tokenize_s/total*100:>9.1f}%{train_s/total*100:>9.1f}%"
               f"{'':>10}{'':>10}{'':>12}{'loss '+format(loss_v,'.3f'):>11}")
+        # bits/byte: comparable across vocabularies where raw loss is not.
+        bpb = loss_v * tpb / math.log(2)
+        print(f"  loss {first:.4f} -> {loss_v:.4f}  [{'  '.join(traj)}]"
+              f"  bits/byte {bpb:.4f}")
 
 
 if __name__ == "__main__":

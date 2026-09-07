@@ -240,6 +240,41 @@ impl Trainer {
         Ok(total / n)
     }
 
+    /// One forward and backward WITHOUT the optimizer step: the loss, the
+    /// logits, and the gradient of every parameter block.
+    ///
+    /// For differential testing against an independent implementation.
+    /// `train_step` cannot serve that purpose because it applies Adam,
+    /// which folds the optimizer's state into the comparison and turns a
+    /// disagreement in one operator into a difference in every parameter.
+    /// Comparing RAW gradients localises a mismatch to the block that
+    /// produced it.
+    ///
+    /// Takes `&self`: nothing here mutates the model, which is what makes
+    /// it safe to call repeatedly on the same weights.
+    pub fn loss_logits_grads(&self, batch: &[(Vec<usize>, Vec<usize>)])
+        -> Result<(f32, Vec<f32>, Vec<Vec<f32>>), String>
+    {
+        if batch.is_empty() { return Err("loss_logits_grads: empty batch".into()); }
+        let seq = batch[0].0.len();
+        if !batch.iter().all(|(i, t)| i.len() == seq && t.len() == seq) {
+            return Err("loss_logits_grads: needs a uniform batch".into());
+        }
+        let mut tape = Tape::new();
+        let leaves: Vec<Var> = self.params.iter()
+            .map(|p| tape.leaf(p.clone(), true)).collect();
+        let mut toks = Vec::with_capacity(batch.len() * seq);
+        let mut tgts = Vec::with_capacity(batch.len() * seq);
+        for (i, t) in batch { toks.extend_from_slice(i); tgts.extend_from_slice(t); }
+        let logits_v = self.forward_fused(&mut tape, &toks, seq, &leaves);
+        let logits = tape.value(logits_v).to_vec();
+        let loss_v = tape.softmax_ce(logits_v, self.cfg.vocab, tgts);
+        let loss = tape.value(loss_v)[0];
+        tape.backward(loss_v);
+        let grads = leaves.iter().map(|&lv| tape.grad(lv).to_vec()).collect();
+        Ok((loss, logits, grads))
+    }
+
     /// Export into the model R2 serves. This is the whole point: the
     /// trained parameters go straight into the serving struct with no
     /// reshaping, because they were trained in that layout.

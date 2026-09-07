@@ -67,12 +67,27 @@ fn main() {
     for &v in &vocabs {
         // ── learn ──────────────────────────────────────────────────────
         let t0 = std::time::Instant::now();
-        let tok = if v <= 256 {
+        // A SHARED tokenizer file makes the two sides' losses comparable:
+        // different vocabularies mean different token streams and different
+        // loss scales, and then only the speed numbers mean anything.
+        let shared = std::env::var("R2_TOKENIZER_JSON").ok();
+        let tok = if let Some(ref p) = shared {
+            let src = std::fs::read_to_string(p)
+                .unwrap_or_else(|e| { eprintln!("cannot read {p}: {e}"); std::process::exit(1) });
+            Tokenizer::from_tokenizer_json(&src)
+                .unwrap_or_else(|e| { eprintln!("cannot parse {p}: {e}"); std::process::exit(1) })
+        } else if v <= 256 {
             Tokenizer::byte_level()
         } else {
             let mut cut = corpus.len().min(learn_cap);
             while cut > 0 && !corpus.is_char_boundary(cut) { cut -= 1; }
-            Tokenizer::from_trained(&bpe::train(&corpus[..cut], v))
+            let t = Tokenizer::from_trained(&bpe::train(&corpus[..cut], v));
+            // Export so the other side can load exactly this vocabulary.
+            if let Ok(out) = std::env::var("R2_TOKENIZER_OUT") {
+                std::fs::write(&out, t.to_tokenizer_json()).expect("write tokenizer.json");
+                eprintln!("wrote {out} ({} tokens)", t.vocab_size());
+            }
+            t
         };
         let learn_s = t0.elapsed().as_secs_f64();
 
@@ -99,6 +114,9 @@ fn main() {
         let mut tr = Trainer::new(cfg, 3e-4, 1).expect("trainer");
         let mut cursor = 0usize;
         let mut loss = 0.0f32;
+        let mut first = f32::NAN;
+        let mut step = 0usize;
+        let mut traj: Vec<String> = Vec::new();
         let t0 = std::time::Instant::now();
         for _ in 0..steps {
             let mut batch = Vec::with_capacity(bn);
@@ -109,6 +127,11 @@ fn main() {
                 cursor += seq;
             }
             loss = tr.train_step(&batch).expect("step");
+            step += 1;
+            if step == 1 { first = loss; }
+            if step % (steps / 5).max(1) == 0 {
+                traj.push(format!("{step}:{loss:.4}"));
+            }
         }
         let train_s = t0.elapsed().as_secs_f64();
 
@@ -125,6 +148,13 @@ fn main() {
                  "  share", "", learn_s / total * 100.0,
                  tokenize_s / total * 100.0, train_s / total * 100.0,
                  "", "", "", format!("loss {loss:.3}"));
+        // BITS PER BYTE, so two arms with different vocabularies stay
+        // comparable. Raw cross-entropy is per TOKEN, and guessing 1 of 256
+        // is an easier question than 1 of 8000 — the lower loss can be the
+        // worse model. bpb = nats/token * tokens/byte / ln2.
+        let bpb = loss as f64 * tpb / std::f64::consts::LN_2;
+        println!("  loss {first:.4} -> {loss:.4}  [{}]  bits/byte {bpb:.4}",
+                 traj.join("  "));
     }
 
     println!("\ntext bytes/s over the WHOLE pipeline is the honest figure:");
