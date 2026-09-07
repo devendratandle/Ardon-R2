@@ -122,6 +122,22 @@ pub struct Tokenizer {
     /// GPT-2 alphabet tables, built once when `encoding` is ByteLevel.
     byte_to_char: Vec<char>,
     char_to_byte: HashMap<char, u8>,
+    /// SentencePiece `byte_fallback`: ids for the 256 `<0xNN>` tokens, when
+    /// the vocabulary declares them.
+    ///
+    /// The OTHER zero-OOV mechanism, and not the one GPT-2 uses. GPT-2's
+    /// ByteLevel converts all text to a byte alphabet BEFORE merging, so an
+    /// unknown piece cannot arise. SentencePiece (Llama-2, Mistral) keeps a
+    /// normal word vocabulary and, when a piece is not in it, decomposes
+    /// that piece into its UTF-8 bytes and emits one `<0xNN>` token per
+    /// byte. Both guarantee that nothing is unrepresentable; they get there
+    /// differently, and a tokenizer that implements only one cannot load
+    /// the other family's files faithfully.
+    ///
+    /// Without this, a Llama-2 vocabulary hits the `<unk>` path for any
+    /// character it lacks — the model receives a token that says only
+    /// "something was here", and the text is unrecoverable on decode.
+    byte_fallback: Option<Box<[u32; 256]>>,
     /// Unknown-token id, if the vocabulary declares one. SentencePiece
     /// vocabularies do NOT contain all 256 bytes, so a piece with no
     /// entry has to become <unk> — erroring there would reject text the
@@ -211,7 +227,24 @@ impl Tokenizer {
             }
             ByteEncoding::Metaspace => {
                 match std::str::from_utf8(raw) {
-                    Ok(s) => s.replace('▁', " ").into_bytes(),
+                    Ok(s) => {
+                        let mut t = s.replace('▁', " ");
+                        // STRIP the word marker `to_vocab_space` prepended.
+                        //
+                        // Encoding adds a leading `▁` when the text does not
+                        // already start with a space — SentencePiece's
+                        // `add_dummy_prefix`, which is what makes "hello"
+                        // and " hello" segment alike. Decoding mapped every
+                        // `▁` back to a space including that one, so
+                        // `decode(encode(s))` returned " " + s for every
+                        // input not already starting with a space. Silent:
+                        // the text was all there, just shifted by one space,
+                        // which a model then learns as real leading
+                        // whitespace. The two halves must be symmetric —
+                        // whatever encoding adds, decoding removes.
+                        if t.starts_with(' ') { t.remove(0); }
+                        t.into_bytes()
+                    }
                     Err(_) => raw.to_vec(),
                 }
             }
@@ -373,6 +406,27 @@ impl Tokenizer {
         }
         // Unknown token: named in model.unk_token, else the conventional
         // "<unk>" entry if the vocabulary has one.
+        // `<0xNN>` byte tokens. Present iff the file declares byte_fallback
+        // AND carries all 256 — a partial set would silently drop the bytes
+        // it lacks, so it is all or nothing.
+        {
+            // Accepted whenever all 256 `<0xNN>` tokens are present, whether
+            // or not the file sets `byte_fallback: true`. Some exports omit
+            // the flag while still shipping the tokens, and using them is
+            // strictly better than emitting <unk> for a byte the vocabulary
+            // demonstrably has a token for. A PARTIAL set is refused: it
+            // would carry some bytes and silently drop others, which is
+            // worse than a consistent <unk>.
+            let mut ids = [0u32; 256];
+            let mut complete = true;
+            for b in 0usize..256 {
+                match t.vocab.get(format!("<0x{:02X}>", b).as_bytes()) {
+                    Some(&id) => ids[b] = id,
+                    None => { complete = false; break; }
+                }
+            }
+            if complete { t.byte_fallback = Some(Box::new(ids)); }
+        }
         t.unk = model.get("unk_token").and_then(|u| u.as_str())
             .and_then(|s| t.vocab.get(s.as_bytes()).copied())
             .or_else(|| t.vocab.get(&b"<unk>"[..]).copied());
@@ -470,8 +524,18 @@ impl Tokenizer {
     /// its pieces per merge, so it is quadratic in the span; bounding each
     /// run to one short word makes encoding linear in the text.
     ///
-    /// Raw and Metaspace keep the whole-span path: Metaspace's leading-`▁`
-    /// rule is defined over the span, not per word.
+    /// Metaspace pre-tokenizes too, at each `▁`. SentencePiece defines a
+    /// piece as one word carrying its leading space marker, so this is its
+    /// split, not an approximation of it.
+    ///
+    /// That half was missed when ByteLevel was fixed, and the consequence
+    /// was not subtle: loading Mistral-7B's real 32,000-token vocabulary
+    /// and encoding 570 KB did not finish in NINE MINUTES, because BPE was
+    /// running across the whole document as one span. The ByteLevel fix had
+    /// made the quadratic path invisible on the tokenizers being tested
+    /// while leaving it in place for an entire model family.
+    ///
+    /// Raw keeps the whole-span path: it has no word concept to split on.
     fn encode_text(&self, span: &str, out: &mut Vec<u32>) -> Result<(), String> {
         if span.is_empty() { return Ok(()); }
         match self.encoding {
@@ -492,7 +556,33 @@ impl Tokenizer {
                 }
                 Ok(())
             }
-            _ => {
+            ByteEncoding::Metaspace => {
+                // Map once — this is where spaces become the marker and the
+                // leading one is added — then cut at each marker. Splitting
+                // AFTER mapping keeps the rule in one place: whatever
+                // `to_vocab_space` decides about the leading marker is what
+                // the first piece gets.
+                let mapped = self.to_vocab_space(span);
+                let text = match std::str::from_utf8(&mapped) {
+                    Ok(t) => t,
+                    // Not valid UTF-8 after mapping: one span, correct but
+                    // slow, rather than splitting mid-character.
+                    Err(_) => return self.encode_span(&mapped, out),
+                };
+                let mark = '\u{2581}'; // ▁
+                let mut start = 0usize;
+                for (i, c) in text.char_indices() {
+                    if c == mark && i > start {
+                        self.encode_span(text[start..i].as_bytes(), out)?;
+                        start = i;
+                    }
+                }
+                if start < text.len() {
+                    self.encode_span(text[start..].as_bytes(), out)?;
+                }
+                Ok(())
+            }
+            ByteEncoding::Raw => {
                 let mapped = self.to_vocab_space(span);
                 self.encode_span(&mapped, out)
             }
@@ -557,6 +647,9 @@ impl Tokenizer {
                 // Only a vocabulary offering neither is a real error.
                 None => for &byte in p {
                     if let Some(&id) = self.vocab.get(&vec![byte][..]) { out.push(id); continue; }
+                    // SentencePiece byte_fallback: emit <0xNN> rather than
+                    // <unk>, so the byte survives and decode can recover it.
+                    if let Some(bf) = &self.byte_fallback { out.push(bf[byte as usize]); continue; }
                     match self.unk {
                         Some(u) => out.push(u),
                         None => return Err(format!(
@@ -572,8 +665,21 @@ impl Tokenizer {
     /// panicking — a model can emit an out-of-range id and a serving loop
     /// must survive it.
     pub fn decode_bytes(&self, ids: &[u32]) -> Vec<u8> {
+        // Reverse of the byte_fallback table. Built per call rather than
+        // stored: 256 entries is nothing against the decode itself, and a
+        // second copy of the mapping is a second thing to keep in sync.
+        let rev: Option<HashMap<u32, u8>> = self.byte_fallback.as_ref().map(|bf| {
+            bf.iter().enumerate().map(|(b, &id)| (id, b as u8)).collect()
+        });
         let mut out = Vec::new();
         for &id in ids {
+            // A `<0xNN>` token stands for the BYTE NN, not for the six
+            // characters that spell it. Emitting its literal text would put
+            // "<0x41>" into the output where "A" belongs — silently, and
+            // only for the rare characters byte_fallback exists to carry.
+            if let Some(r) = &rev {
+                if let Some(&b) = r.get(&id) { out.push(b); continue; }
+            }
             if let Some(b) = self.id_to_token(id) { out.extend_from_slice(b); }
         }
         // Concatenate first, THEN unmap: a multi-byte symbol can be split
@@ -733,6 +839,94 @@ mod encoding_tests {
         assert_eq!(b2c[b'\n' as usize], 'Ċ');
     }
 
+    /// Metaspace round-trips text that does not start with whitespace, and
+    /// LOSES one leading space when it does. That is not a defect: it is
+    /// SentencePiece's `add_dummy_prefix`, and HuggingFace's real Mistral-7B
+    /// tokenizer does exactly the same —
+    ///
+    ///     'hello world' -> 'hello world'   (round-trips)
+    ///     ' hello'      -> 'hello'         (leading space lost)
+    ///     '  leading'   -> ' leading'
+    ///
+    /// Pinned so the asymmetry stays deliberate. It was once accidental:
+    /// decoding mapped the prepended marker back to a space and returned
+    /// " " + text for EVERY input, which is the opposite error and a much
+    /// worse one.
+    #[test]
+    fn metaspace_round_trip_matches_sentencepiece_semantics() {
+        let src = r#"{
+          "decoder":{"type":"Metaspace","replacement":"▁"},
+          "model":{"unk_token":"<unk>",
+            "vocab":{"<unk>":0,"▁":1,"a":2,"b":3,"c":4},
+            "merges":[]}}"#;
+        let t = Tokenizer::from_tokenizer_json(src).unwrap();
+        for s in ["abc", "a b c", "ab c"] {
+            assert_eq!(t.decode(&t.encode(s).unwrap()), s,
+                       "text not starting with a space must round-trip: {s:?}");
+        }
+        // One leading space is consumed by the dummy prefix, exactly as in
+        // the reference implementation.
+        assert_eq!(t.decode(&t.encode(" abc").unwrap()), "abc");
+        assert_eq!(t.decode(&t.encode("  abc").unwrap()), " abc");
+    }
+
+    /// SentencePiece `byte_fallback` — the OTHER zero-OOV mechanism.
+    ///
+    /// A Llama-2/Mistral vocabulary is a word vocabulary, not a byte one.
+    /// When a piece is not in it, the piece decomposes into its UTF-8 bytes
+    /// and each byte becomes a `<0xNN>` token. Without this the tokenizer
+    /// emits `<unk>` and the text is gone: the model sees only "something
+    /// was here", and decode cannot put it back.
+    fn byte_fallback_json() -> String {
+        // A deliberately tiny word vocabulary plus all 256 byte tokens, the
+        // shape SentencePiece exports.
+        let mut v = String::from(r#"{"model":{"type":"BPE","byte_fallback":true,"unk_token":"<unk>","vocab":{"<unk>":0,"a":1,"b":2,"ab":3"#);
+        for b in 0..256 {
+            v.push_str(&format!(",\"<0x{:02X}>\":{}", b, 4 + b));
+        }
+        v.push_str(r#"},"merges":["a b"]}}"#);
+        v
+    }
+
+    #[test]
+    fn byte_fallback_carries_characters_the_vocabulary_lacks() {
+        let t = Tokenizer::from_tokenizer_json(&byte_fallback_json())
+            .expect("a byte_fallback vocabulary must load");
+        // "ab" is in the vocabulary; the rest is not and must survive as
+        // bytes rather than collapsing to <unk>.
+        for s in ["ab", "z", "日本", "🙂", "ab z 🙂"] {
+            let ids = t.encode(s).expect("encode");
+            assert!(!ids.contains(&0),
+                    "{s:?} produced <unk> — byte_fallback was not used: {ids:?}");
+            assert_eq!(t.decode(&ids), s,
+                       "{s:?} did not survive a byte_fallback round-trip");
+        }
+    }
+
+    #[test]
+    fn byte_fallback_decodes_to_bytes_not_to_its_own_spelling() {
+        let t = Tokenizer::from_tokenizer_json(&byte_fallback_json()).expect("load");
+        // 'A' is 0x41, absent from this word vocabulary, so it must encode
+        // as the <0x41> token and decode back to "A" — never to the literal
+        // six characters "<0x41>".
+        let ids = t.encode("A").expect("encode");
+        assert_eq!(ids.len(), 1, "one byte should be one byte token: {ids:?}");
+        let out = t.decode(&ids);
+        assert_eq!(out, "A", "decoded to {out:?} instead of the byte it stands for");
+        assert!(!out.contains("0x"), "decode emitted the token's spelling: {out:?}");
+    }
+
+    /// A vocabulary WITHOUT byte tokens must still take the `<unk>` path —
+    /// byte_fallback is opt-in by the file, not assumed.
+    #[test]
+    fn no_byte_tokens_means_no_byte_fallback() {
+        let t = Tokenizer::from_tokenizer_json(
+            r#"{"model":{"unk_token":"<unk>","vocab":{"<unk>":0,"a":1},"merges":[]}}"#)
+            .expect("load");
+        let ids = t.encode("z").expect("encode");
+        assert_eq!(ids, vec![0], "expected <unk> when the file has no byte tokens");
+    }
+
     /// A GPT-2/Llama-3 shaped file: vocabulary written in the ByteLevel
     /// alphabet ("Ġthe", not " the").
     fn bytelevel_json() -> &'static str {
@@ -771,7 +965,19 @@ mod encoding_tests {
         // SentencePiece marks the start of text as a word boundary, and the
         // merges build ▁+the into the single token ▁the.
         assert_eq!(t.encode("the").unwrap(), vec![7], "leading word gets the ▁ marker");
-        assert_eq!(t.decode(&[7]), " the");
+        // Decoding STRIPS the marker's space. This assertion previously
+        // expected " the", and it was wrong: checked against HuggingFace's
+        // real Mistral-7B tokenizer, `decode` of the `▁the` token returns
+        // "the", and `decode(encode("hello world"))` returns "hello world"
+        // rather than " hello world".
+        //
+        // The two halves have to be symmetric. Encoding prepends the marker
+        // (SentencePiece's `add_dummy_prefix`, which is what makes "hello"
+        // and " hello" segment alike), so decoding must remove it. Leaving
+        // it in returned " " + text for every input not already starting
+        // with a space — silent, and a model trained on it learns real
+        // leading whitespace that was never in the corpus.
+        assert_eq!(t.decode(&[7]), "the");
         // A character outside this small vocabulary becomes <unk> rather
         // than failing — SentencePiece vocabularies are not byte-complete.
         // "z" becomes ▁ (the word-start marker) followed by <unk>, which is
