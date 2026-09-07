@@ -115,6 +115,20 @@ pub struct Tokenizer {
     /// earlier version of this comment claimed 12.8 MB/s from a figure that
     /// had never been run.
     merges: HashMap<Vec<u8>, HashMap<Vec<u8>, u32>>,
+    /// The SAME merge table keyed by the CONCATENATED result instead of by
+    /// the pair — `merge_rank["th"] = rank of merging "t" with "h"`.
+    ///
+    /// This is the shape tiktoken's inner loop needs, and it is what lets
+    /// the rank of each position be CACHED. R2's original loop looked up
+    /// every adjacent pair on every iteration: O(n) hash lookups per merge,
+    /// O(n^2) per word. With ranks cached in a parallel vector, a merge
+    /// invalidates only its two neighbours, so the scan compares plain u32s
+    /// and the whole word costs O(n) lookups total.
+    ///
+    /// Both tables are kept: the nested one answers "can these two merge",
+    /// which `new` needs while building, and this one answers "what does
+    /// this span merge to", which encoding needs.
+    merge_rank: HashMap<Vec<u8>, u32>,
     /// Special tokens matched verbatim before BPE (e.g. end-of-sequence).
     specials: Vec<(Vec<u8>, u32)>,
     /// How bytes are represented in `vocab` (see [`ByteEncoding`]).
@@ -162,6 +176,9 @@ impl Tokenizer {
             t.vocab.insert(bytes, id);
         }
         for (rank, (l, r)) in merges.into_iter().enumerate() {
+            let mut joined = l.clone();
+            joined.extend_from_slice(&r);
+            t.merge_rank.insert(joined, rank as u32);
             t.merges.entry(l).or_default().insert(r, rank as u32);
         }
         Ok(t)
@@ -619,23 +636,44 @@ impl Tokenizer {
                 Err(_) => parts.extend((0..span.len()).map(|i| (i, i + 1))),
             },
         }
-        loop {
-            let mut best: Option<(usize, u32)> = None;
-            for w in 0..parts.len().saturating_sub(1) {
-                let (a0, a1) = parts[w];
-                let (b0, b1) = parts[w + 1];
-                if let Some(&rank) = self.merges.get(&span[a0..a1])
-                    .and_then(|m| m.get(&span[b0..b1]))
-                {
-                    // Strictly lower rank wins; ties keep the leftmost.
-                    if best.map_or(true, |(_, r)| rank < r) {
-                        best = Some((w, rank));
-                    }
-                }
+        // CACHED-RANK merge loop, the structure tiktoken uses.
+        //
+        // `ranks[i]` is the rank of merging piece `i` with piece `i+1`, or
+        // MAX for "these cannot merge". The naive form this replaces did a
+        // hash lookup for every adjacent pair on every iteration — O(n)
+        // lookups per merge. Merging at `i` can only change the rank at `i`
+        // and at `i-1`, so recomputing those two leaves the scan comparing
+        // plain integers and costs O(n) lookups for the whole word.
+        //
+        // The algorithm is tiktoken's, reimplemented rather than copied:
+        // tiktoken is MIT and R2 is AGPL-3.0, so vendoring its source would
+        // put third-party code with its own copyright inside this crate.
+        // The published method carries no such condition.
+        let rank_at = |parts: &Vec<(usize, usize)>, i: usize| -> u32 {
+            if i + 1 < parts.len() {
+                self.merge_rank.get(&span[parts[i].0..parts[i + 1].1])
+                    .copied().unwrap_or(u32::MAX)
+            } else {
+                u32::MAX
             }
-            let Some((w, _)) = best else { break };
-            parts[w].1 = parts[w + 1].1;
-            parts.remove(w + 1);
+        };
+        let mut ranks: Vec<u32> = (0..parts.len()).map(|i| rank_at(&parts, i)).collect();
+        loop {
+            // Lowest rank wins; ties keep the LEFTMOST, which `<` gives
+            // because the scan runs left to right. Merge order is the whole
+            // correctness property here — a different order is still
+            // decodable but is not the segmentation the model was trained on.
+            let mut best = u32::MAX;
+            let mut at = usize::MAX;
+            for (i, &r) in ranks.iter().enumerate() {
+                if r < best { best = r; at = i; }
+            }
+            if best == u32::MAX { break; }
+            parts[at].1 = parts[at + 1].1;
+            parts.remove(at + 1);
+            ranks.remove(at + 1);
+            ranks[at] = rank_at(&parts, at);
+            if at > 0 { ranks[at - 1] = rank_at(&parts, at - 1); }
         }
         for (a, b) in parts {
             let p = &span[a..b];
