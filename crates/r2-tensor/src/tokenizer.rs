@@ -56,6 +56,7 @@ pub enum ByteEncoding {
     Metaspace,
 }
 
+
 /// GPT-2's byte↔character alphabet.
 ///
 /// Returns `(byte → char, char → byte)`. The construction is fixed by the
@@ -91,6 +92,23 @@ fn byte_level_alphabet() -> (Vec<char>, HashMap<char, u8>) {
 /// uses, so learned merges are in the alphabet the vocabulary is written in.
 pub(crate) fn byte_level_alphabet_pub() -> (Vec<char>, HashMap<char, u8>) {
     byte_level_alphabet()
+}
+
+/// Working buffers for one `encode` call, reused across every word in it.
+#[derive(Default)]
+pub(crate) struct BpeScratch {
+    /// Pieces as (start, end) ranges into the word being merged.
+    parts: Vec<(usize, usize)>,
+    /// `ranks[i]` = rank of merging piece i with piece i+1, or MAX.
+    ranks: Vec<u32>,
+}
+
+/// Everything one `encode` call needs to allocate, allocated once.
+#[derive(Default)]
+pub(crate) struct EncodeScratch {
+    /// The word remapped into the vocabulary's alphabet.
+    mapped: Vec<u8>,
+    bpe: BpeScratch,
 }
 
 /// A byte-level BPE tokenizer: a vocabulary plus a ranked merge table.
@@ -505,6 +523,8 @@ impl Tokenizer {
         // CHARACTER so every slice below lands on a boundary.
         let bytes = text.as_bytes();
         let mut out = Vec::new();
+        // Allocated ONCE for the whole call and reused for every word.
+        let mut sb = EncodeScratch::default();
         let mut i = 0usize;
         while i < text.len() {
             let mut matched = false;
@@ -523,7 +543,7 @@ impl Tokenizer {
             {
                 i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
             }
-            self.encode_text(&text[start..i], &mut out)?;
+            self.encode_text(&text[start..i], &mut out, &mut sb)?;
         }
         Ok(out)
     }
@@ -553,23 +573,25 @@ impl Tokenizer {
     /// while leaving it in place for an entire model family.
     ///
     /// Raw keeps the whole-span path: it has no word concept to split on.
-    fn encode_text(&self, span: &str, out: &mut Vec<u32>) -> Result<(), String> {
+    fn encode_text(&self, span: &str, out: &mut Vec<u32>,
+                   sb: &mut EncodeScratch) -> Result<(), String> {
         if span.is_empty() { return Ok(()); }
         match self.encoding {
             ByteEncoding::ByteLevel => {
-                // ONE scratch buffer reused across every word. `to_vocab_space`
-                // returns an owned Vec, which on 2 MB of text is ~730,000
-                // allocations for nothing — the mapped word is consumed
-                // immediately and never outlives the iteration.
-                let mut scratch: Vec<u8> = Vec::with_capacity(64);
                 for word in crate::bpe::pretokenize(span) {
-                    scratch.clear();
+                    // Remap the word into the byte-stand-in alphabet using
+                    // the SHARED buffer — `to_vocab_space` would return an
+                    // owned Vec per word, and the mapped word never outlives
+                    // this iteration.
+                    sb.mapped.clear();
                     for &b in word.as_bytes() {
                         let mut buf = [0u8; 4];
-                        scratch.extend_from_slice(
+                        sb.mapped.extend_from_slice(
                             self.byte_to_char[b as usize].encode_utf8(&mut buf).as_bytes());
                     }
-                    self.encode_span(&scratch, out)?;
+                    // Split the borrow: `mapped` is read, `bpe` is written.
+                    let EncodeScratch { mapped, bpe } = sb;
+                    self.encode_span(mapped, out, bpe)?;
                 }
                 Ok(())
             }
@@ -584,30 +606,37 @@ impl Tokenizer {
                     Ok(t) => t,
                     // Not valid UTF-8 after mapping: one span, correct but
                     // slow, rather than splitting mid-character.
-                    Err(_) => return self.encode_span(&mapped, out),
+                    Err(_) => return self.encode_span(&mapped, out, &mut sb.bpe),
                 };
                 let mark = '\u{2581}'; // ▁
                 let mut start = 0usize;
                 for (i, c) in text.char_indices() {
                     if c == mark && i > start {
-                        self.encode_span(text[start..i].as_bytes(), out)?;
+                        self.encode_span(text[start..i].as_bytes(), out, &mut sb.bpe)?;
                         start = i;
                     }
                 }
                 if start < text.len() {
-                    self.encode_span(text[start..].as_bytes(), out)?;
+                    self.encode_span(text[start..].as_bytes(), out, &mut sb.bpe)?;
                 }
                 Ok(())
             }
             ByteEncoding::Raw => {
                 let mapped = self.to_vocab_space(span);
-                self.encode_span(&mapped, out)
+                self.encode_span(&mapped, out, &mut sb.bpe)
             }
         }
     }
 
     /// BPE over one span of bytes.
-    fn encode_span(&self, span: &[u8], out: &mut Vec<u32>) -> Result<(), String> {
+    /// `scratch` carries the two working vectors so they are allocated ONCE
+    /// per call to `encode`, not once per word.
+    ///
+    /// They were locals. At 128,001 words in a 570 KB body that is 256,002
+    /// allocations, and the merge loop is 95.3% of encode time — the
+    /// allocations, not the hashing, which was measured and found neutral.
+    fn encode_span(&self, span: &[u8], out: &mut Vec<u32>,
+                   scratch: &mut BpeScratch) -> Result<(), String> {
         if span.is_empty() { return Ok(()); }
         // Pieces are (start, end) RANGES into `span`, not owned Vecs.
         //
@@ -617,7 +646,9 @@ impl Tokenizer {
         // routine allocates nothing per symbol and nothing per merge. The
         // owned form allocated a `Vec<u8>` for EVERY CHARACTER of every
         // word, which on 2 MB of text is millions of allocations.
-        let mut parts: Vec<(usize, usize)> = Vec::with_capacity(span.len());
+        let parts = &mut scratch.parts;
+        parts.clear();
+        parts.reserve(span.len());
         match self.encoding {
             // Raw: the alphabet IS the byte set, so one piece per byte.
             ByteEncoding::Raw => parts.extend((0..span.len()).map(|i| (i, i + 1))),
@@ -649,7 +680,7 @@ impl Tokenizer {
         // tiktoken is MIT and R2 is AGPL-3.0, so vendoring its source would
         // put third-party code with its own copyright inside this crate.
         // The published method carries no such condition.
-        let rank_at = |parts: &Vec<(usize, usize)>, i: usize| -> u32 {
+        let rank_at = |parts: &[(usize, usize)], i: usize| -> u32 {
             if i + 1 < parts.len() {
                 self.merge_rank.get(&span[parts[i].0..parts[i + 1].1])
                     .copied().unwrap_or(u32::MAX)
@@ -657,7 +688,9 @@ impl Tokenizer {
                 u32::MAX
             }
         };
-        let mut ranks: Vec<u32> = (0..parts.len()).map(|i| rank_at(&parts, i)).collect();
+        let ranks = &mut scratch.ranks;
+        ranks.clear();
+        for i in 0..parts.len() { let r = rank_at(parts, i); ranks.push(r); }
         loop {
             // Lowest rank wins; ties keep the LEFTMOST, which `<` gives
             // because the scan runs left to right. Merge order is the whole
@@ -672,10 +705,10 @@ impl Tokenizer {
             parts[at].1 = parts[at + 1].1;
             parts.remove(at + 1);
             ranks.remove(at + 1);
-            ranks[at] = rank_at(&parts, at);
-            if at > 0 { ranks[at - 1] = rank_at(&parts, at - 1); }
+            ranks[at] = rank_at(parts, at);
+            if at > 0 { ranks[at - 1] = rank_at(parts, at - 1); }
         }
-        for (a, b) in parts {
+        for &(a, b) in parts.iter() {
             let p = &span[a..b];
             match self.vocab.get(p) {
                 Some(&id) => out.push(id),

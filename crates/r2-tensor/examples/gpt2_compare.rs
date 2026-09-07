@@ -77,6 +77,23 @@ fn main() {
                  body.len(), secs, body.len() as f64 / secs / 1e6, ids.len());
     }
 
+    // PHASE SPLIT: how much of encode is the pre-tokenizer, and how much
+    // is the merge loop? Optimising the wrong half is the standing risk.
+    {
+        let body = CASES.join(" ").repeat(2000);
+        let reps = 5;
+        let t0 = std::time::Instant::now();
+        let mut words = 0usize;
+        for _ in 0..reps { words = r2_tensor::bpe::pretokenize(&body).len(); }
+        let pre = t0.elapsed().as_secs_f64() / reps as f64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps { std::hint::black_box(tok.encode(&body).unwrap().len()); }
+        let full = t0.elapsed().as_secs_f64() / reps as f64;
+        println!("PHASES bytes={} words={words} pretokenize={:.4}s ({:.1}%) rest={:.4}s ({:.1}%) total={:.4}s",
+                 body.len(), pre, pre / full * 100.0,
+                 full - pre, (full - pre) / full * 100.0, full);
+    }
+
     // Throughput on a larger body, and the round-trip that makes it usable.
     let body = CASES.join(" ").repeat(2000);
     let t0 = std::time::Instant::now();
