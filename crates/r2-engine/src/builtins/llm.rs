@@ -118,10 +118,20 @@ pub(crate) fn bi_llm_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
         n_heads,
         n_kv_heads: num_arg(a, "kv.heads", n_heads as f64) as usize,
         n_layers: num_arg(a, "layers", 4.0) as usize,
-        // `vocab` is the tokenizer's size. 256 keeps the byte-level
-        // default (every byte is a token); anything larger makes
-        // `llm.train` learn a BPE of that size from the training text on
-        // its first call, which is when the text is first available.
+        // `vocab` is the tokenizer's size, and the DEFAULT IS BPE.
+        //
+        // 8,000 measures 0.242 tokens per byte on TinyStories — 4.13 bytes
+        // per token, which is the ~4x compression a real tokenizer is
+        // supposed to deliver. The 256 byte values remain INSIDE that
+        // vocabulary as the fallback, so nothing is unrepresentable: an
+        // emoji no merge covers still decomposes into its UTF-8 bytes.
+        //
+        // `vocab = 256` is still accepted and gives a pure byte-level
+        // tokenizer — one token per byte, no merges. That is a fallback
+        // for the rare case where merges are unwanted, NOT the default it
+        // used to be. A byte-level default makes every sequence ~4x longer
+        // than it needs to be, and attention is O(seq^2), so it was costing
+        // roughly 16x the attention work for the same text.
         //
         // Measured on 0.33 MB of prose, 4-layer dim-256 model
         // (`--example tokenizer_tradeoff`):
@@ -132,7 +142,7 @@ pub(crate) fn bi_llm_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
         // Bigger vocabularies keep improving quality per byte, but the
         // output projection is dim*vocab per token, so on a SMALL model it
         // starts costing more than the shorter sequence saves.
-        vocab: num_arg(a, "vocab", 256.0) as usize,
+        vocab: num_arg(a, "vocab", 8000.0) as usize,
         ffn_hidden: num_arg(a, "ffn", (dim * 3) as f64) as usize,
         max_seq: num_arg(a, "ctx", 64.0) as usize,
         rope_base: 10000.0,

@@ -7,7 +7,13 @@ use r2_tensor::tokenizer::Tokenizer;
 use r2_train::llm::Trainer;
 
 fn main() -> Result<(), String> {
-    let tok = Tokenizer::byte_level();
+    // The corpus this sample trains on, defined before the tokenizer so
+    // the tokenizer can be LEARNED from it. Byte-level (vocab 256) would
+    // make every sequence ~4x longer for the same text, and attention is
+    // O(seq^2) — the sample's ctx=64 would be 64 BYTES, about 11 words,
+    // which is too little context to learn anything from.
+    let corpus_text = "ardon r2 is a statistical runtime. ".repeat(400);
+    let tok = Tokenizer::from_trained(&r2_tensor::bpe::train(&corpus_text, 512));
     let cfg = Config {
         dim: 128, n_heads: 4, n_kv_heads: 2, n_layers: 5,
         vocab: tok.vocab_size(), ffn_hidden: 384, max_seq: 64,
@@ -17,7 +23,7 @@ fn main() -> Result<(), String> {
              cfg.n_params(), cfg.n_params() as f64 / 1e6, cfg.n_layers,
              cfg.n_heads, cfg.n_kv_heads);
 
-    let corpus = "ardon r2 is a statistical runtime. ";
+    let corpus = corpus_text.as_str();
     let ids: Vec<usize> = tok.encode(corpus)?.iter().map(|&i| i as usize).collect();
     let seq = 16usize;
     let mut batch = Vec::new();
@@ -25,8 +31,11 @@ fn main() -> Result<(), String> {
         batch.push((ids[start..start + seq].to_vec(),
                     ids[start + 1..start + seq + 1].to_vec()));
     }
-    println!("corpus: {:?} -> {} training sequences of length {}\n",
-             corpus, batch.len(), seq);
+    // Print a PREFIX. The sentence is repeated a few hundred times so the
+    // BPE trainer has merges to find; dumping all of it is noise.
+    println!("corpus: {:?}... ({} bytes, {} tokens) -> {} sequences of length {}\n",
+             &corpus[..corpus.len().min(60)], corpus.len(), ids.len(),
+             batch.len(), seq);
 
     let mut tr = Trainer::new(cfg, 0.003, 42)?;
     assert_eq!(tr.n_params(), cfg.n_params());

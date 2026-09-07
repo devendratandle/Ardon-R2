@@ -40,21 +40,39 @@ fn text(v: &RVal) -> String {
 /// Repetitive enough for BPE to find merges, long enough to fill a batch.
 const CORPUS: &str = "txt <- paste(rep(\"the cat sat on the mat and the dog ran to the mat. \", 60), collapse=\"\")\n";
 
-/// Default is byte-level: vocab 256, one token per byte. Unchanged, so
-/// existing scripts keep working.
+/// The DEFAULT is BPE, not byte-level.
+///
+/// A byte-level default makes every sequence about four times longer than
+/// it needs to be for the same text, and attention is O(seq^2), so it cost
+/// roughly sixteen times the attention work. `ctx=64` meant 64 BYTES —
+/// about eleven words. The 256 byte values remain INSIDE the learned
+/// vocabulary as the fallback, so nothing became unrepresentable.
 #[test]
-fn default_is_byte_level_and_still_trains() {
+fn default_is_bpe_not_byte_level() {
+    let v = run(&format!("{CORPUS}\
+        m <- llm.new(dim=32, layers=1, ctx=16)\n\
+        llm.info(m)$vocab\n"));
+    assert!(scalar(&v) > 256.0,
+            "default vocabulary is {} — byte-level is a FALLBACK, not the default",
+            scalar(&v));
+
     let v = run(&format!("{CORPUS}\
         m <- llm.new(dim=32, layers=1, ctx=16)\n\
         llm.train(m, txt, steps=3, seq=16, batch=4)\n"));
     let loss = scalar(&v);
-    assert!(loss.is_finite() && loss > 0.0, "byte-level training gave loss {loss}");
-    assert!(loss < 8.0, "loss {loss} is not plausible for vocab 256");
+    assert!(loss.is_finite() && loss > 0.0, "default training gave loss {loss}");
+}
 
+/// `vocab = 256` is still available and still gives pure byte-level
+/// tokenization — one token per byte, no merges. It is the fallback for a
+/// caller who wants no merges, which is why it must keep working.
+#[test]
+fn vocab_256_still_gives_byte_level() {
     let v = run(&format!("{CORPUS}\
-        m <- llm.new(dim=32, layers=1, ctx=16)\n\
+        m <- llm.new(dim=32, layers=1, ctx=16, vocab=256)\n\
+        invisible(llm.train(m, txt, steps=1, seq=16, batch=4))\n\
         llm.info(m)$vocab\n"));
-    assert_eq!(scalar(&v), 256.0, "the byte-level default changed");
+    assert_eq!(scalar(&v), 256.0, "vocab=256 must stay byte-level");
 }
 
 /// `vocab=` must reach the model configuration.
@@ -122,7 +140,7 @@ fn bpe_generation_runs_on_its_own_handle() {
 #[test]
 fn two_models_keep_separate_tokenizers() {
     let v = run(&format!("{CORPUS}\
-        a <- llm.new(dim=32, layers=1, ctx=16)\n\
+        a <- llm.new(dim=32, layers=1, ctx=16, vocab=256)\n\
         b <- llm.new(dim=32, layers=1, ctx=16, vocab=600)\n\
         invisible(llm.train(a, txt, steps=1, seq=16, batch=4))\n\
         invisible(llm.train(b, txt, steps=1, seq=16, batch=4))\n\
