@@ -11,6 +11,10 @@ r2-tensor = { path = "../r2-tensor" }
 r2-oracle = { path = "../r2-oracle" }
 r2-gpu    = { path = "../r2-gpu" }
 r2-autograd = { path = "../r2-autograd" }
+# Out-of-core token storage (src/tokens.rs). ~10 KB compiled; the same
+# crate r2-arrow already uses for its memory-mapped columns, so this adds
+# no new third party to the workspace.
+memmap2 = "0.9"
 
 [features]
 gpu = ["r2-tensor/gpu"]

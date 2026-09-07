@@ -3177,6 +3177,7 @@ dependencies = [
 name = "r2-train"
 version = "0.1.0"
 dependencies = [
+ "memmap2",
  "r2-autograd",
  "r2-gpu",
  "r2-mesh",

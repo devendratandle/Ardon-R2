@@ -199,3 +199,6 @@ docs/LLM_TRILLION_ARCHITECTURE.md
 docs/MODULARITY_AUDIT.md
 docs/PANEL_ARCHITECTURE.md
 docs/SPRINT_TO_JULY19.md
+
+# training token files (out-of-core storage)
+*.tokens

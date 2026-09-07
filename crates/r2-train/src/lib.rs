@@ -27,6 +27,7 @@ pub mod optim;
 pub mod accumulate;
 pub mod llm;
 pub mod checkpoint;
+pub mod tokens;
 pub mod transformer;
 pub mod distributed;
 
