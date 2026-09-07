@@ -2943,7 +2943,9 @@ dependencies = [
 name = "r2-autograd"
 version = "0.1.0"
 dependencies = [
+ "r2-oracle",
  "r2-tensor",
+ "rayon",
 ]
 
 [[package]]
@@ -2992,6 +2994,8 @@ dependencies = [
  "r2-pkg",
  "r2-stats",
  "r2-strings",
+ "r2-tensor",
+ "r2-train",
  "r2-types",
  "rayon",
 ]
@@ -3164,6 +3168,9 @@ name = "r2-tensor"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+ "r2-gpu",
+ "r2-oracle",
+ "rayon",
 ]
 
 [[package]]
@@ -3171,7 +3178,9 @@ name = "r2-train"
 version = "0.1.0"
 dependencies = [
  "r2-autograd",
+ "r2-gpu",
  "r2-mesh",
+ "r2-oracle",
  "r2-tensor",
 ]
 

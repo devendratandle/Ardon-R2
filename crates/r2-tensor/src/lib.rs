@@ -22,6 +22,7 @@ pub mod json;
 pub mod safetensors;
 pub mod segment;
 pub mod tokenizer;
+pub mod bpe;
 pub mod model;
 pub mod ops;
 
