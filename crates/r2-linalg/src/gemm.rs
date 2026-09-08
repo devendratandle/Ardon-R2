@@ -106,6 +106,11 @@ impl Trans {
     }
 }
 
+/// Element count above which the packing passes thread. Lower than the
+/// compute threshold: packing is a pure map, so the fork-join is the only
+/// cost and there is no reassociation to worry about.
+const PACK_PAR_MIN: usize = 1 << 13;
+
 /// Rows per register tile. See the module docs.
 const MR: usize = 6;
 
@@ -209,26 +214,44 @@ macro_rules! blocked_gemm_for {
         }
 
         /// Pack a `kc x nc` slab of B into `NR`-wide strips, zero-padded.
+        ///
+        /// THREADED, and it matters more than it looks. This runs OUTSIDE
+        /// the parallel region — the panel is packed once and then read by
+        /// every row-block — so while it was serial it was pure Amdahl
+        /// drag. This machine's parallel ceiling is 5.53x on six cores
+        /// (`--example scaling_ceiling`, 92% efficient on register-resident
+        /// work), but `sgemm` was reaching only 1.9-2.8x. A serial fraction
+        /// of ~22% predicts 1/(0.22 + 0.78/6) = 2.85x, which is what was
+        /// measured — the arithmetic pointed here before any code changed.
+        ///
+        /// Strips write disjoint slices of `out` and each output element
+        /// comes from exactly one input element, so this is bit-identical
+        /// however it is split.
         fn pack_b(b: &[$ty], k: usize, n: usize, trans: Trans,
                   pc: usize, kc: usize, jc: usize, nc: usize, out: &mut Vec<$ty>) {
             let strips = nc.div_ceil(NR);
             out.clear();
             out.resize(strips * kc * NR, 0 as $ty);
-            for s in 0..strips {
+            let fill = |s: usize, strip: &mut [$ty]| {
                 let j0 = jc + s * NR;
-                let base = s * kc * NR;
                 for p in 0..kc {
-                    let row = base + p * NR;
+                    let row = p * NR;
                     for jj in 0..NR {
                         let j = j0 + jj;
                         if j < jc + nc && j < n {
-                            out[row + jj] = match trans {
+                            strip[row + jj] = match trans {
                                 Trans::No => b[(pc + p) * n + j],
                                 Trans::Yes => b[j * k + (pc + p)],
                             };
                         }
                     }
                 }
+            };
+            if strips * kc * NR >= PACK_PAR_MIN {
+                use rayon::prelude::*;
+                out.par_chunks_mut(kc * NR).enumerate().for_each(|(s, st)| fill(s, st));
+            } else {
+                out.chunks_mut(kc * NR).enumerate().for_each(|(s, st)| fill(s, st));
             }
         }
 
@@ -423,7 +446,7 @@ macro_rules! blocked_gemm_for {
 /// The f32 kernel. A block 96x256x4B = 96 KB (L2), B panel
 /// 256x1024x4B = 1 MB (L3).
 pub mod f32 {
-    use super::{nthreads, Trans, MR};
+    use super::{nthreads, Trans, MR, PACK_PAR_MIN};
     blocked_gemm_for!(f32, 16, 256, 96, 1024, "fma");
 }
 

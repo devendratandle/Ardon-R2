@@ -23,14 +23,14 @@ config   dim 256, 4 layers, vocab 8,000, ffn 768, 30 steps x 32 x 64
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
 | read | 0.02 s | 0.03 s | — |
-| learn BPE merges | 1.39 s | 1.71 s | R2 1.23x |
-| **tokenize 19.4 MB** | **1.56 s** | 15.96 s | **R2 10.2x faster** |
-| **train** | 21.61 s | **16.82 s** | **PyTorch 1.28x faster** |
-| **TOTAL** | **24.59 s** | 34.52 s | **R2 1.40x faster** |
+| learn BPE merges | 1.38 s | 1.70 s | R2 1.23x |
+| **tokenize 19.4 MB** | **1.53 s** | 16.68 s | **R2 10.9x faster** |
+| **train** | 20.78 s | **16.47 s** | **PyTorch 1.26x faster** |
+| **TOTAL** | **23.76 s** | 34.86 s | **R2 1.47x faster** |
 
-Two interleaved pairs giving 1.33x and 1.28x on training (22.44/16.82 and
-21.61/16.82). **Training is 1.3x behind; the whole pipeline is ahead**,
-because R2 tokenises about 10x faster.
+Two interleaved pairs giving 1.26x and 1.29x on training (20.78/16.47 and
+21.30/16.53). **Training is 1.3x behind; the whole pipeline is ahead**,
+because R2 tokenises about 11x faster.
 
 **Learning is at parity.** Bits per byte is the comparable metric — the
 vocabularies differ (8,000 vs 8,143) and cross-entropy is per token:
@@ -91,13 +91,13 @@ and both are hand-written assembly R2 does not ship.
 
 | block | m x k x n | calls/step | NN | NT (`grad_A`) | TN (`grad_B`) |
 |---|---|---:|---:|---:|---:|
-| output head | 2048x256x8000 | 1 | 162.8 | 181.2 | 209.6 |
-| ffn w1/w3 | 2048x256x768 | 8 | 230.5 | 224.0 | 155.4 |
-| ffn w2 | 2048x768x256 | 4 | 221.8 | 240.8 | 192.7 |
-| q/o proj | 2048x256x256 | 8 | 203.5 | 209.3 | 143.6 |
-| k/v proj | 2048x256x128 | 8 | 187.1 | 158.1 | 123.1 |
+| output head | 2048x256x8000 | 1 | 199.9 | 257.7 | 221.4 |
+| ffn w1/w3 | 2048x256x768 | 8 | 240.3 | 233.2 | 168.7 |
+| ffn w2 | 2048x768x256 | 4 | 226.0 | 238.4 | 196.0 |
+| q/o proj | 2048x256x256 | 8 | 192.1 | 204.0 | 159.5 |
+| k/v proj | 2048x256x128 | 8 | 182.9 | 142.8 | 126.8 |
 
-Weighted by calls per step, **189.0 GFLOP/s**. MKL measures 171-286 on the
+Weighted by calls per step, **196.7 GFLOP/s**. MKL measures 171-286 on the
 same shapes, so several are now inside its range; the i-k-j loop this
 replaced managed 27-73.
 
@@ -148,12 +148,14 @@ Ranked by the census above, not by how interesting they are.
 1. **`sgemm` is 45% of a step and everything else is now single digits.**
    Past this point the remaining wins are small and many, not few and
    large. See item 2 for the one structural lever left on it.
-2. **`sgemm` parallel efficiency is 1.9-2.8x on six cores** — now the
-   whole of the remaining GEMM gap. The serial kernel is hand-written and
-   competitive; the threading is not. Every row-block re-streams the whole
-   packed B panel and A is re-packed once per column panel, so more threads
-   buy less than they should. A thread mesh over `jc` x `ic`, as BLIS uses,
-   is the fix.
+2. **`sgemm` scales 2.7-3.8x against a machine ceiling of 5.53x.**
+   `--example scaling_ceiling` measures what this machine can actually give
+   a perfectly parallel workload — 5.53x on six cores, 92% efficient — so
+   the bar is that, not 6.00x. Threading `pack_b` took scaling from 1.9-2.8
+   to 2.7-3.8; the remaining serial fraction is `pack_a` (per row-block, so
+   already inside the parallel region but repeated per column panel) and
+   the fork-joins themselves. A BLIS-style thread mesh over `jc` x `ic`
+   would let threads sharing a B panel avoid re-packing it.
 3. **Attention is 1.5-2.7x behind `scaled_dot_product_attention`**, which
    blocks over keys and keeps the running softmax in registers. Only 5% of
    a step, so closing it entirely buys about 3%.
@@ -185,6 +187,8 @@ Ranked by the census above, not by how interesting they are.
 | Materialising transposes to feed a naive kernel | 393 ms vs 326 ms. Materialising only the RESULT of a transposed GEMM, to fix parallelism, is a different thing and does pay — see `gemm.rs` |
 | Flash blocking with an online softmax | No measurable change; the K/V re-reads it removes were already served from L1. Kept: right structure, and what makes long contexts survivable |
 | Sparse embedding gradient | 37x on the op, **0.07%** of a step. Measure the share before optimising |
+| Assuming the 6-core scaling ceiling is 6.00x | It is **5.53x** here, measured on register-resident work with no memory traffic (`--example scaling_ceiling`). Judge every parallel speedup against that. The first version of that probe used constant inputs, LLVM folded the whole loop away, and it reported 0.00x — seed through `black_box` |
+| Assuming poor GEMM scaling meant a bad thread mesh | It meant a SERIAL `pack_b` outside the parallel region. A ~22% serial fraction predicts 1/(0.22 + 0.78/6) = 2.85x by Amdahl, and 1.9-2.8x was measured. Threading the pack fixed it without touching the mesh — do the arithmetic before building the complicated thing |
 | Threading `add` and `mul` | No change (35.8 -> 35.4 ms, 23.3 -> 23.1). Three memory streams per flop makes them bandwidth-bound, and bandwidth does not thread. `silu`, which has a real `exp` per element, went 68 -> 36 ms on the same change — the difference between the two IS the diagnosis |
 | Storing `silu`'s sigmoid to skip the backward's `exp` | Not attempted: 6.3 MB per node, ~25 MB a step, to save compute on a machine already bound by memory traffic. Wrong direction |
 | Recomputing RoPE's angles per element | 138.9 ms/step, 14.5%, for two multiplies and two adds per pair. `powf` + `sin_cos` were being evaluated per (row, head, pair) when the angle depends only on (position, pair): 262,144 transcendental pairs where 2,048 are distinct. A precomputed table made it 22.1 ms, 6.3x, bit-identical |
