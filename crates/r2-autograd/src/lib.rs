@@ -283,12 +283,17 @@ impl Tape {
     /// one core.
     pub fn silu(&mut self, x: Var) -> Var {
         let vx = &self.vals[x.0];
-        let val: Vec<f32> = if vx.len() >= PAR_MIN {
+        // `silu_into` carries a vectorised `exp`; the scalar `f32::exp` is
+        // a libm call and cannot vectorise at all.
+        let mut val = vec![0.0f32; vx.len()];
+        if vx.len() >= PAR_MIN {
             use rayon::prelude::*;
-            vx.par_iter().map(|&v| r2_tensor::ops::silu(v)).collect()
+            const C: usize = 1 << 14;
+            val.par_chunks_mut(C).zip(vx.par_chunks(C))
+                .for_each(|(d, s)| r2_tensor::ops::silu_into(s, d));
         } else {
-            vx.iter().map(|&v| r2_tensor::ops::silu(v)).collect()
-        };
+            r2_tensor::ops::silu_into(vx, &mut val);
+        }
         let req = self.requires[x.0];
         self.push(val, Op::Silu(x), req)
     }
@@ -495,9 +500,7 @@ impl Tape {
             let row = &x[r * d..r * d + d];
             debug_assert!(t < d, "softmax_ce: target {t} out of range for d={d}");
             let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for &v in row { sum += (v - m).exp(); }
-            let l = m + sum.ln();
+            let l = m + r2_tensor::ops::exp_shift_sum_only(row, m).ln();
             lse[r] = l;
             loss += l - row[t];
         }
@@ -764,12 +767,10 @@ impl Tape {
                         // shape, four times a step, to read it once.
                         let Tape { vals, grads, .. } = self;
                         let vx = &vals[xi];
+                        // d/dv [v*s] = s + v*s*(1-s), with the sigmoid's
+                        // `exp` vectorised — same reason as the forward.
                         let work = |gx: &mut [f32], gi: &[f32], v: &[f32]| {
-                            for ((gx, gi), &v) in gx.iter_mut().zip(gi).zip(v) {
-                                let s = 1.0 / (1.0 + (-v).exp());
-                                // d/dv [v*s] = s + v*s*(1-s)
-                                *gx += gi * (s + v * s * (1.0 - s));
-                            }
+                            r2_tensor::ops::silu_bwd(v, gi, gx);
                         };
                         if g.len() >= PAR_MIN {
                             use rayon::prelude::*;
@@ -984,13 +985,8 @@ impl Tape {
                     let Tape { vals, grads, .. } = self;
                     let xs = &vals[li];
                     let work = |r: usize, grow: &mut [f32]| {
-                        let t = targets[r];
-                        let l = lse[r];
-                        let xrow = &xs[r * d..r * d + d];
-                        for j in 0..d {
-                            let p = (xrow[j] - l).exp();
-                            grow[j] += inv * (p - if j == t { 1.0 } else { 0.0 });
-                        }
+                        r2_tensor::ops::softmax_ce_grad(
+                            &xs[r * d..r * d + d], lse[r], targets[r], inv, grow);
                     };
                     if targets.len() * d >= PAR_MIN {
                         use rayon::prelude::*;

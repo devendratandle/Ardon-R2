@@ -43,6 +43,20 @@ fn main() {
              cfg.dim, cfg.n_layers, cfg.vocab);
     println!("{} params in {} blocks\n", tr.n_params(), tr.params.len());
 
+    // WARM TO THE SUSTAINED CLOCK BEFORE MEASURING ANYTHING.
+    //
+    // This is a 15 W part: the first measurement of a run gets boost clock
+    // and everything after it does not. An earlier version timed the full
+    // step first and the stages afterwards, and the stages summed to 155%
+    // of the step -- not because the accounting was wrong but because the
+    // step had been timed fast and the stages slow. Shares taken that way
+    // are biased toward whatever is measured last.
+    {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs_f64() < 8.0 {
+            let _ = tr.train_step(&batch).expect("warmup");
+        }
+    }
     let full = t_ms(2, || { let _ = tr.train_step(&batch).expect("step"); });
     let fb = t_ms(2, || { let _ = tr.loss_logits_grads(&batch).expect("fb"); });
 
@@ -221,6 +235,11 @@ fn main() {
     println!("{}", "-".repeat(54));
     println!("{:>34} {:>10.1} {:>7.1}%", "accounted for", named, pct(named));
     println!("{:>34} {:>10.1} {:>7.1}%", "STILL UNATTRIBUTED", full - named, pct(full - named));
+    // Re-take the step total AFTER the stage timings, so a run that drifted
+    // anyway is visible instead of silently wrong.
+    let full_end = t_ms(2, || { let _ = tr.train_step(&batch).expect("step"); });
+    println!("  step total {full:.1} ms before the stage timings, {full_end:.1} ms after ({:+.1}% drift)",
+             (full_end - full) / full * 100.0);
     println!("\n  tape holds {elems} elements; backward() zeroes every one of");
     println!("  them before it starts, and PyTorch has no equivalent step.");
 }

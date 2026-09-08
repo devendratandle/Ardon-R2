@@ -131,7 +131,19 @@ macro_rules! blocked_gemm_for {
         /// Rows of A per L2-resident block.
         const MC: usize = $mc;
         /// Columns of B per L3-resident panel.
-        const NC: usize = $nc;
+        const NC_DEFAULT: usize = $nc;
+        /// Panel width. Overridable via `R2_GEMM_NC` for the sweep in
+        /// `--example gemm_nc_sweep`; the default is what ships.
+        fn nc_width() -> usize {
+            use std::sync::OnceLock;
+            static W: OnceLock<usize> = OnceLock::new();
+            *W.get_or_init(|| {
+                std::env::var("R2_GEMM_NC").ok()
+                    .and_then(|v| v.parse().ok())
+                    .map(|v: usize| v.max(NR))
+                    .unwrap_or(NC_DEFAULT)
+            })
+        }
 
         /// One `MR x NR` register tile, accumulated over `kc`.
         ///
@@ -375,15 +387,16 @@ macro_rules! blocked_gemm_for {
                 //
                 // So shrink only while the panel still fits L2 and
                 // re-streaming it is cheap.
-                let panel_bytes = KC.min(k) * NC.min(n) * std::mem::size_of::<$ty>();
+                let panel_bytes = KC.min(k) * nc_width().min(n) * std::mem::size_of::<$ty>();
                 if panel_bytes <= (1 << 19) { want } else { MC }
             } else {
                 MC
             };
             let mut bpack: Vec<$ty> = Vec::new();
             // ── L3 loop: a panel of B's columns ────────────────────────
-            for jc in (0..n).step_by(NC) {
-                let nc = NC.min(n - jc);
+            let ncw = nc_width();
+            for jc in (0..n).step_by(ncw) {
+                let nc = ncw.min(n - jc);
                 // ── depth loop: a KC-deep slab ─────────────────────────
                 for pc in (0..k).step_by(KC) {
                     let kc = KC.min(k - pc);
