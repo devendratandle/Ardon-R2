@@ -135,11 +135,38 @@ after `sgemm`.
 
 Ranked by the census in section 4, not by how interesting they are.
 
-1. **`sgemm` is 46% of the step.** Its TN case (`grad_B = Aᵀ·g`) is the
-   weakest of the three: `M` there is the weight's *input* dim, so it has
-   the fewest row-blocks to spread across cores. `grad_A` + `grad_B`
-   together are 2.6x behind the best reference. Halving this is worth ~23%
-   of a step — more than everything below combined.
+1. **`sgemm` is 46% of the step, and the deficit is PARALLELISM, not the
+   kernel.** `--example gemm_scaling` separates the two:
+
+   | block | case | M | 1 thread | 6 threads | scale |
+   |---|---|---:|---:|---:|---:|
+   | output head | NN | 2048 | 55.9 GF/s | 150.5 | 2.69x |
+   | output head | NT | 2048 | 60.6 | 148.0 | 2.44x |
+   | output head | **TN** | **256** | **58.4** | **68.3** | **1.17x** |
+   | ffn w1/w3 | NN | 2048 | 63.3 | 198.4 | 3.14x |
+   | ffn w1/w3 | **TN** | **256** | **62.3** | **85.6** | **1.37x** |
+   | ffn w2 | TN | 768 | 62.9 | 167.3 | 2.66x |
+
+   **Single-threaded, all three cases are identical — 56-64 GF/s.** The
+   micro-kernel does not care about the transpose. Threaded, they diverge
+   entirely by `M`, because parallelism runs over ROW-BLOCKS of C and TN's
+   `M` is the weight's input dim (256), not the token count (2048). At
+   `MC = 96` that is 3 blocks for 6 cores; `ffn w2`, whose `M` is 768,
+   scales 2.66x instead of 1.17x, which is the same explanation confirming
+   itself.
+
+   Two things follow. **(a)** TN needs parallelism over a second loop —
+   MKL and BLIS use a thread mesh over `jc` x `ic` chosen per shape, while
+   R2 threads one loop. Row-major C makes column bands non-contiguous, so
+   it needs either an unsafe disjoint split or computing `Cᵀ = Bᵀ·Aᵀ`.
+   **(b)** Even the healthy cases scale only 2.4-3.3x on 6 cores, so half
+   the machine is unused everywhere — the packed B panel is re-streamed by
+   every row-block, and A is re-packed once per column panel.
+
+   At ~60 GF/s single-thread against ~77 GF/s of single-core peak, the
+   kernel itself is at 78% — that last stretch is MKL's hand-written
+   assembly, software pipelining and explicit prefetch, and it is the part
+   that is genuinely hard in safe Rust. **The parallelism is not.**
 2. **A third of the step is unattributed** and has never been broken down:
    elementwise ops and their backwards. `silu` backward alone is an `exp`
    per element over 6.3M elements. Nobody has looked, which by this
