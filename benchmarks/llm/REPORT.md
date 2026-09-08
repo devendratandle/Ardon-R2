@@ -23,14 +23,14 @@ config   dim 256, 4 layers, vocab 8,000, ffn 768, 30 steps x 32 x 64
 |---|---:|---:|---|
 | read | 0.02 s | 0.03 s | — |
 | learn BPE merges | 1.46 s | 1.70 s | R2 1.16x |
-| **tokenize 19.4 MB** | **1.62 s** | 15.58 s | **R2 9.6x faster** |
-| **train** | 32.82 s | **18.04 s** | **PyTorch 1.82x faster** |
-| **TOTAL** | 35.92 s | **35.35 s** | **PyTorch 1.02x — a dead heat** |
+| **tokenize 19.4 MB** | **1.57 s** | 15.63 s | **R2 10.0x faster** |
+| **train** | 31.23 s | **17.23 s** | **PyTorch 1.81x faster** |
+| **TOTAL** | **34.26 s** | 34.56 s | **a dead heat** |
 
-Three interleaved pairs on the training phase: R2/PyTorch = 1.92x, 1.80x,
-1.82x. **Training is 1.8x behind. The whole pipeline is level**, because
-R2 tokenises 9.6x faster and training is no longer far enough behind for
-that to be irrelevant.
+Five interleaved pairs on the training phase: 1.92x, 1.80x, 1.82x, 1.67x,
+1.90x. **Training is 1.8x behind. The whole pipeline is level**, because R2
+tokenises 10x faster and training is no longer far enough behind for that
+to be irrelevant.
 
 **Learning is at parity.** Bits per byte is the comparable metric — the
 vocabularies differ (8,000 vs 8,143) and cross-entropy is per token:
@@ -70,13 +70,14 @@ block far above the rest** means that operator is.
 
 | stage | standing vs the best of PyTorch and JAX | what closed it |
 |---|---|---|
-| Tokenizer | **R2 9.6x AHEAD** | — |
+| Tokenizer | **R2 10x AHEAD** | — |
 | Accuracy | **at parity or better** | — |
 | Projections / matmul forward | 1.0-1.7x behind MKL, **ahead of Eigen at some shapes** | `r2_linalg::gemm::sgemm` — blocked and packed Goto/BLIS, `MR x NR = 6 x 16`, `KC/MC/NC = 256/96/1024`, AVX2 micro-kernel chosen at runtime. 27-73 -> 118-195 GFLOP/s |
 | `grad_A` (NT) | folded into the above | became `sgemm`'s NT case; 676 -> 77 ms on the output-head shape |
 | `grad_B` (TN) | folded into the above | was the one gradient never parallelised; then became `sgemm`'s TN case; 465 -> 110 ms |
 | Attention forward | 1.5-2.3x behind; **beats torch-explicit and JAX at 4,096 tokens** | `Op::Attention` — one tape node instead of 1,156, no slices, no materialised score matrix; plus a 4-accumulator dot and runtime AVX2 |
 | Attention fwd+bwd | 2.1-2.7x behind | as above; backward recomputes probabilities rather than storing a quadratic buffer |
+| `softmax_ce` | 155.6 -> 66.4 ms, 2.3x | fused around the log-sum-exp. `-ln(softmax(x)[t])` is `lse - x[t]`, so the loss needs a per-row max and sum and never the probabilities. It had been materialising the whole `2048 x 8000` probability matrix — 64 MB — to read 2,048 values out of it, and building it a SECOND time in the backward. `lse` is now kept from the forward. Also better conditioned: the old form clamped with `.max(1e-30)`, capping a confidently-wrong prediction at a loss of 69 |
 | Embedding | gather, not one-hot matmul | `Op::Embed`; and `requires` guards stopped an 8.4 GFLOP `grad_A` being computed into a leaf that needs no gradient |
 
 Training went from **10.4x behind to 1.8x**. The single largest cause was
@@ -98,17 +99,55 @@ assembly, and Eigen matches or beats MKL here. The gap was structure.
 
 ---
 
-## 4. Open
+## 4. Where a step goes now
 
-Ranked by what each is worth at the shipping shape.
+`cargo run --release -p r2-train --example step_census`, at the shipping
+shape. This is the map for anything done next; every target picked without
+it this session was picked wrongly.
 
-1. **`grad_B` (TN) is the slowest of the three GEMM cases.** Its `M` is the
-   weight's *input* dim, so it has the fewest row-blocks to spread across
-   cores. `grad_A` + `grad_B` together are 2.6x behind the best reference,
-   weighted by calls per step — the largest remaining item.
-2. **Attention is 1.5-2.7x behind `scaled_dot_product_attention`**, which
-   blocks over keys and keeps the running softmax in registers. R2 already
-   beats torch's explicit form and JAX; only the fused kernel leads.
+| stage | ms/step | share |
+|---|---:|---:|
+| `sgemm` x3 (forward, grad_A, grad_B) | 500 | **46%** |
+| **unattributed** | **359** | **33%** |
+| `softmax_ce` fwd+bwd | 66 | 6% |
+| attention, 4 layers | 50 | 5% |
+| `backward()`'s blanket gradient zeroing | 31 | 3% |
+| silu forward x4 | 22 | 2% |
+| tape's copy of every parameter | 12 | 1% |
+| rmsnorm forward x8 | 6 | 1% |
+| optimizer + flatten + writeback | 4 | <1% |
+
+The step's tape holds **71.9M elements across 3,000-odd nodes for a 7.2M
+parameter model** — 10x the model, each node owning a value buffer and a
+gradient buffer. Allocation churn was measured and is NOT the cost (10 ms);
+the buffers are lazily paged, so the fault cost is bundled into whichever
+op writes them.
+
+**The unattributed third is elementwise work and its backward** — `add`,
+`mul`, `silu` backward (an `exp` per element over 6.3M elements), `rmsnorm`
+backward, RoPE, and the memory traffic of writing every intermediate. It
+has not been broken down further, and it is the largest unexamined item
+after `sgemm`.
+
+---
+
+## 5. Open
+
+Ranked by the census in section 4, not by how interesting they are.
+
+1. **`sgemm` is 46% of the step.** Its TN case (`grad_B = Aᵀ·g`) is the
+   weakest of the three: `M` there is the weight's *input* dim, so it has
+   the fewest row-blocks to spread across cores. `grad_A` + `grad_B`
+   together are 2.6x behind the best reference. Halving this is worth ~23%
+   of a step — more than everything below combined.
+2. **A third of the step is unattributed** and has never been broken down:
+   elementwise ops and their backwards. `silu` backward alone is an `exp`
+   per element over 6.3M elements. Nobody has looked, which by this
+   session's record makes it the most likely place for a surprise.
+3. **Attention is 1.5-2.7x behind `scaled_dot_product_attention`**, which
+   blocks over keys and keeps the running softmax in registers — but it is
+   only 5% of a step, so closing it entirely buys ~3%. R2 already beats
+   torch's explicit form and JAX; only the fused kernel leads.
 3. **`level3::dgemm` is 11-28 GFLOP/s**, 5-12% of the f64 ceiling — it did
    not benefit from any of this. `sgemm` is a per-type macro, so f64 is a
    one-line instantiation; a column-major `C = A·B` is the row-major
@@ -123,7 +162,7 @@ Ranked by what each is worth at the shipping shape.
 
 ---
 
-## 5. Closed by measurement — do not retry
+## 6. Closed by measurement — do not retry
 
 | attempt | result |
 |---|---|
@@ -138,13 +177,19 @@ Ranked by what each is worth at the shipping shape.
 | Flash blocking with an online softmax | No change — the K/V re-reads it removes were already served from L1. Kept anyway: right structure, and what makes long contexts survivable |
 | Sparse embedding gradient (37x on the op) | Worth **0.07%** of a training step. Measure the share before optimising |
 
+Fusing `softmax_ce` belongs in this table as much as in the closed one: it
+is a real 2.3x on the op and removes 128 MB of per-step allocation, but 89
+ms of a 1,065 ms step is 8%, under this machine's drift, and it did **not**
+measurably move the training ratio (1.82x before, 1.81x after). Kept for
+the allocation and the conditioning, not claimed as a speedup.
+
 Two rules out of these. A dependency chain costs nothing when something
 else is already the bottleneck. And "serial float reduction" is not one
 problem — `+` cannot be reassociated by the compiler and `max` can.
 
 ---
 
-## 6. Reproducing
+## 7. Reproducing
 
 ```
 # the headline

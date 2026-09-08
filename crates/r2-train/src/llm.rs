@@ -159,6 +159,15 @@ impl Trainer {
         tape.matmul(xn, leaves[2], t, d, c.vocab)
     }
 
+    /// Census hook: the fused forward, so `--example step_census` can build
+    /// the exact tape a step builds and ask how big it is. Not part of the
+    /// training API.
+    #[doc(hidden)]
+    pub fn forward_fused_census(&self, tape: &mut Tape, tokens: &[usize], seq: usize,
+                                leaves: &[Var]) -> Var {
+        self.forward_fused(tape, tokens, seq, leaves)
+    }
+
     /// One optimizer step over a batch of (input, target) sequences.
     /// Returns the mean loss.
     pub fn train_step(&mut self, batch: &[(Vec<usize>, Vec<usize>)]) -> Result<f32, String> {

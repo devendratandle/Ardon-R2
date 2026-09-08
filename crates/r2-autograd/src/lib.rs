@@ -130,7 +130,14 @@ enum Op {
     Mse { pred: Var, target: Vec<f32> },
     /// Softmax over `d`-wide rows then cross-entropy against per-row class
     /// indices. Scalar loss; the classic fused backward (softmax − onehot).
-    SoftmaxCE { logits: Var, d: usize, targets: Vec<usize> },
+    ///
+    /// `lse` is the per-row log-sum-exp, computed once in the forward and
+    /// kept so the backward needs neither the probability matrix nor a
+    /// second reduction pass over it. At vocab 8,000 and 2,048 rows that
+    /// matrix is 16.4M floats — 64 MB — and the previous implementation
+    /// built it TWICE per step: once in the forward, to read 2,048 values
+    /// out of it, and again in the backward.
+    SoftmaxCE { logits: Var, d: usize, targets: Vec<usize>, lse: Vec<f32> },
 }
 
 /// The autograd tape: values + grads + the op that produced each node.
@@ -403,15 +410,37 @@ impl Tape {
         self.push(vec![s / n], Op::Mse { pred, target }, req)
     }
 
+    /// Fused softmax + cross-entropy, via the log-sum-exp.
+    ///
+    /// `-ln(softmax(x)[t])` is `lse(x) - x[t]` exactly, so the loss needs
+    /// only a per-row max and a per-row sum — never the probabilities
+    /// themselves. The previous form materialised the whole `rows x d`
+    /// probability matrix to read one value per row out of it: 64 MB
+    /// written and 8 KB used, at vocab 8,000.
+    ///
+    /// It is also better conditioned. The old form computed
+    /// `-ln(p.max(1e-30))`, which silently clamps a confidently-wrong
+    /// prediction to a loss of 69 instead of reporting it; `lse - x[t]`
+    /// has no such floor and no division.
     pub fn softmax_ce(&mut self, logits: Var, d: usize, targets: Vec<usize>) -> Var {
-        let sm = r2_tensor::ops::softmax(&self.vals[logits.0], d);
+        let x = &self.vals[logits.0];
+        let rows = targets.len();
+        assert_eq!(x.len(), rows * d, "softmax_ce: logits are not rows x d");
+        let mut lse = vec![0.0f32; rows];
         let mut loss = 0.0f32;
         for (r, &t) in targets.iter().enumerate() {
-            loss += -(sm[r * d + t].max(1e-30)).ln();
+            let row = &x[r * d..r * d + d];
+            debug_assert!(t < d, "softmax_ce: target {t} out of range for d={d}");
+            let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for &v in row { sum += (v - m).exp(); }
+            let l = m + sum.ln();
+            lse[r] = l;
+            loss += l - row[t];
         }
-        loss /= targets.len() as f32;
+        loss /= rows as f32;
         let req = self.requires[logits.0];
-        self.push(vec![loss], Op::SoftmaxCE { logits, d, targets }, req)
+        self.push(vec![loss], Op::SoftmaxCE { logits, d, targets, lse }, req)
     }
 
     // ── backward: reverse-mode gradient accumulation ───────────────────
@@ -421,6 +450,13 @@ impl Tape {
     pub fn backward(&mut self, loss: Var) {
         assert_eq!(self.vals[loss.0].len(), 1, "backward() expects a scalar loss");
         self.backward_from(loss, &[1.0]);
+    }
+
+    /// Census hook: just the blanket zeroing `backward()` opens with, so it
+    /// can be timed on its own. Not part of the differentiation API.
+    #[doc(hidden)]
+    pub fn zero_grads_census(&mut self) {
+        for gb in self.grads.iter_mut() { gb.fill(0.0); }
     }
 
     /// Seed an output of ANY shape with a supplied gradient and propagate.
@@ -820,17 +856,39 @@ impl Tape {
                         *gp += g[0] * 2.0 * (p - t) / n;
                     }
                 }
-                Op::SoftmaxCE { logits, d, targets } => {
-                    let (li, d, targets) = (logits.0, *d, targets.clone());
-                    let sm = r2_tensor::ops::softmax(&self.vals[li], d);
+                Op::SoftmaxCE { logits, d, targets, lse } => {
+                    let (li, d) = (logits.0, *d);
                     let inv = g[0] / targets.len() as f32;
                     // grad = (softmax − onehot) / batch, scaled by upstream g.
-                    for (r, &t) in targets.iter().enumerate() {
+                    //
+                    // `softmax(x)[j]` is `exp(x[j] - lse)`, and `lse` was
+                    // computed in the forward — so this needs no probability
+                    // matrix and no second reduction pass. It used to call
+                    // `ops::softmax` again here, allocating and filling a
+                    // second 64 MB buffer at vocab 8,000.
+                    //
+                    // Rows are independent and write disjoint slices of the
+                    // gradient, so they split across cores with no
+                    // coordination.
+                    let (targets, lse) = (targets.clone(), lse.clone());
+                    let Tape { vals, grads, .. } = self;
+                    let xs = &vals[li];
+                    let work = |r: usize, grow: &mut [f32]| {
+                        let t = targets[r];
+                        let l = lse[r];
+                        let xrow = &xs[r * d..r * d + d];
                         for j in 0..d {
-                            let mut val = sm[r * d + j];
-                            if j == t { val -= 1.0; }
-                            self.grads[li][r * d + j] += inv * val;
+                            let p = (xrow[j] - l).exp();
+                            grow[j] += inv * (p - if j == t { 1.0 } else { 0.0 });
                         }
+                    };
+                    if targets.len() * d >= PAR_MIN {
+                        use rayon::prelude::*;
+                        grads[li].par_chunks_mut(d).enumerate()
+                            .for_each(|(r, grow)| work(r, grow));
+                    } else {
+                        grads[li].chunks_mut(d).enumerate()
+                            .for_each(|(r, grow)| work(r, grow));
                     }
                 }
             }
