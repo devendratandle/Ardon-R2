@@ -20,17 +20,24 @@ config   dim 256, 4 layers, vocab 8,000, ffn 768, 30 steps x 32 x 64
 
 ## 1. Result
 
+**Training is 1.05x behind PyTorch; the whole pipeline is well ahead.**
+
+Three interleaved pairs in one window gave 1.04x, 1.07x, 1.05x on the
+training phase. Read the RATIOS, not the seconds: this machine was
+power-throttled to 1700 MHz against a 2375 MHz base while these were
+taken, which depresses both sides together — PyTorch's own training time
+was 27.2 s in this window against 16.5 s in a cool one, on identical code.
+
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
-| read | 0.02 s | 0.03 s | — |
-| learn BPE merges | 1.38 s | 1.70 s | R2 1.23x |
-| **tokenize 19.4 MB** | **1.53 s** | 16.68 s | **R2 10.9x faster** |
-| **train** | 20.78 s | **16.47 s** | **PyTorch 1.26x faster** |
-| **TOTAL** | **23.76 s** | 34.86 s | **R2 1.47x faster** |
+| **tokenize 19.4 MB** | **4.04 s** | 31.21 s | **R2 7.7x faster** |
+| **train** | 28.48 s | **27.23 s** | **PyTorch 1.05x faster** |
+| **TOTAL** | **36.29 s** | 62.16 s | **R2 1.71x faster** |
 
-Two interleaved pairs giving 1.26x and 1.29x on training (20.78/16.47 and
-21.30/16.53). **Training is 1.3x behind; the whole pipeline is ahead**,
-because R2 tokenises about 11x faster.
+For a sense of the same work on a cool machine, an earlier window put R2
+at 20.78 s train / 23.76 s total against PyTorch's 16.47 / 34.86 — a 1.26x
+training gap before `exp` was vectorised. The op-level gain that closed
+most of the remainder is measured below and is clock-independent.
 
 **Learning is at parity.** Bits per byte is the comparable metric — the
 vocabularies differ (8,000 vs 8,143) and cross-entropy is per token:
@@ -115,29 +122,35 @@ registers, not a foreign library.
 `cargo run --release -p r2-train --example step_census`. **This is the map
 for anything done next.** Every target picked without it was picked wrongly.
 
-Every stage is measured forward AND backward, at the count a step runs it.
+The census warms to the sustained clock before measuring and re-takes the
+step total at the end, printing the drift — an earlier version timed the
+step at boost clock and the stages under throttle, and the stages summed
+to 155%. Shares are only meaningful while that drift is small; this run
+reported +3.2%.
 
 | stage | ms/step | share |
 |---|---:|---:|
-| `sgemm` x3 (forward, `grad_A`, `grad_B`) | 371 | **45%** |
-| unattributed | 96 | 12% |
-| `softmax_ce` | 67 | 8% |
-| attention, 4 layers | 50 | 6% |
-| silu x4 | 36 | 4% |
-| rmsnorm x8 | 36 | 4% |
-| mul x4 | 35 | 4% |
-| `backward()`'s blanket gradient zeroing | 27 | 3% |
-| add x8 | 23 | 3% |
-| RoPE x8 | 22 | 3% |
-| tape's copy of every parameter | 12 | 1% |
-| tape allocation churn | 9 | 1% |
-| embed | 6 | 1% |
+| `sgemm` x3 (forward, `grad_A`, `grad_B`) | 527 | **57%** |
+| rmsnorm x8 | 65 | 7% |
+| `softmax_ce` | 61 | 7% |
+| mul x4 | 50 | 5% |
+| attention, 4 layers | 50 | 5% |
+| silu x4 | 48 | 5% |
+| RoPE x8 | 37 | 4% |
+| add x8 | 33 | 4% |
+| `backward()`'s blanket gradient zeroing | 31 | 3% |
+| tape's copy of every parameter | 20 | 2% |
+| tape allocation churn | 19 | 2% |
+| embed | 10 | 1% |
 
 The step's tape holds **71.9M elements across ~3,000 nodes for a 7.2M
 parameter model** — 10x the model, every node owning a value buffer and a
-gradient buffer. Allocation churn was measured and is NOT the cost (10 ms):
+gradient buffer. Allocation churn was measured and is NOT the cost;
 the buffers are lazily paged, so the fault cost sits inside whichever op
 writes them.
+
+**`sgemm` is now 57% of a step and nothing else is above 7%.** The
+remaining work is one large item and a long thin tail.
 
 ---
 
@@ -145,9 +158,9 @@ writes them.
 
 Ranked by the census above, not by how interesting they are.
 
-1. **`sgemm` is 45% of a step and everything else is now single digits.**
-   Past this point the remaining wins are small and many, not few and
-   large. See item 2 for the one structural lever left on it.
+1. **`sgemm` is 57% of a step**, and after it nothing is above 7%. It
+   scales 2.7-3.8x against a measured machine ceiling of 5.53x, so roughly
+   another 1.4-2x of parallel efficiency is available — see item 2.
 2. **`sgemm` scales 2.7-3.8x against a machine ceiling of 5.53x.**
    `--example scaling_ceiling` measures what this machine can actually give
    a perfectly parallel workload — 5.53x on six cores, 92% efficient — so
@@ -192,6 +205,7 @@ Ranked by the census above, not by how interesting they are.
 | Threading `add` and `mul` | No change (35.8 -> 35.4 ms, 23.3 -> 23.1). Three memory streams per flop makes them bandwidth-bound, and bandwidth does not thread. `silu`, which has a real `exp` per element, went 68 -> 36 ms on the same change — the difference between the two IS the diagnosis |
 | Storing `silu`'s sigmoid to skip the backward's `exp` | Not attempted: 6.3 MB per node, ~25 MB a step, to save compute on a machine already bound by memory traffic. Wrong direction |
 | Recomputing RoPE's angles per element | 138.9 ms/step, 14.5%, for two multiplies and two adds per pair. `powf` + `sin_cos` were being evaluated per (row, head, pair) when the angle depends only on (position, pair): 262,144 transcendental pairs where 2,048 are distinct. A precomputed table made it 22.1 ms, 6.3x, bit-identical |
+| Leaving `exp` to libm | 32.8M scalar `exp` calls a step in `softmax_ce` and 12.6M in `silu`, none of which vectorise, because a call is a call. A hand-written AVX2 Cephes reduction took `softmax_ce` 149.3 -> 61.4 ms and `silu` 59.1 -> 48.2. Watch the underflow: `2^n` written into the exponent field wraps into the sign bit below x = -87.34 and returns **-inf**, which the accuracy test caught before it reached the trainer |
 | Fusing `softmax_ce` | 2.3x on the op (155.6 -> 66.4 ms) but no measurable change to the training ratio — 89 ms of a 1,065 ms step is under this machine's drift. Kept for the 128 MB it stops allocating and for better conditioning, not claimed as a speedup |
 
 Two rules out of these. **A dependency chain costs nothing when something
