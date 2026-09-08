@@ -177,6 +177,34 @@ pub fn swiglu(gate: &[f32], up: &[f32]) -> Vec<f32> {
     gate.iter().zip(up).map(|(&g, &u)| silu(g) * u).collect()
 }
 
+/// Every `(cos, sin)` a RoPE pass needs, indexed `[pos * (head_dim/2) + p]`.
+///
+/// The angle `pos / base^(2p/head_dim)` depends only on the POSITION and
+/// the PAIR — never on the data. [`rope_inplace`] recomputes a `powf` and a
+/// `sin_cos` for every element it touches, which is correct and, called
+/// per row per head, enormously redundant: at 2,048 rows, 4 heads and
+/// head_dim 64 that is 262,144 transcendental pairs where only 2,048 are
+/// distinct. Measured, RoPE was 138.9 ms of a ~957 ms training step —
+/// 14.5%, the second-largest item after the GEMM — for arithmetic that is
+/// two multiplies and two adds per pair.
+///
+/// Build this once per call and the inner loop becomes exactly that.
+/// The values are computed by the same expressions in the same order as
+/// `rope_inplace`, so a table-driven pass is bit-identical to it.
+pub fn rope_table(period: usize, head_dim: usize, base: f32) -> Vec<(f32, f32)> {
+    let half = head_dim / 2;
+    let mut t = Vec::with_capacity(period.max(1) * half);
+    for pos in 0..period.max(1) {
+        for p in 0..half {
+            let freq = 1.0 / base.powf(2.0 * p as f32 / head_dim as f32);
+            let theta = pos as f32 * freq;
+            let (s, c) = theta.sin_cos();
+            t.push((c, s));
+        }
+    }
+    t
+}
+
 /// Rotary position embedding (RoPE) applied in place to one head vector
 /// of even dim `d` at position `pos`. Rotates (x[2i], x[2i+1]) pairs by
 /// θ = pos / base^(2i/d). The de-facto positional scheme for modern LLMs.

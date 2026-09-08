@@ -132,6 +132,69 @@ fn main() {
             (nn + nt + tn) * cnt as f64
         }).sum();
 
+    // ── the elementwise ops, forward AND backward, at the per-step counts
+    // a step actually runs. This is the unattributed remainder.
+    let d = cfg.dim;
+    let h = cfg.ffn_hidden;
+    // one op on the tape, timed with its backward, minus the leaf cost
+    let op = |n: usize, build: &dyn Fn(&mut Tape, r2_autograd::Var, r2_autograd::Var) -> r2_autograd::Var| -> f64 {
+        let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.001).sin()).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.002).cos()).collect();
+        let seed: Vec<f32> = (0..n).map(|i| (i as f32 * 0.003).sin()).collect();
+        let whole = t_ms(5, || {
+            let mut tp = Tape::new();
+            let x = tp.leaf(a.clone(), true);
+            let y = tp.leaf(b.clone(), true);
+            let o = build(&mut tp, x, y);
+            tp.backward_from(o, &seed);
+            std::hint::black_box(tp.grad(x).len());
+        });
+        let bare = t_ms(5, || {
+            let mut tp = Tape::new();
+            std::hint::black_box((tp.leaf(a.clone(), true), tp.leaf(b.clone(), true)));
+        });
+        (whole - bare).max(0.0)
+    };
+    let add_ms  = op(t * d, &|tp, x, y| tp.add(x, y)) * 8.0;
+    let mul_ms  = op(t * h, &|tp, x, y| { let _ = y; tp.mul(x, x) }) * 4.0;
+    let silu_ms = op(t * h, &|tp, x, y| { let _ = y; tp.silu(x) }) * 4.0;
+    let rms_ms = {
+        let xv: Vec<f32> = (0..t * d).map(|i| (i as f32 * 0.001).sin()).collect();
+        let wv: Vec<f32> = (0..d).map(|i| (i as f32 * 0.01).cos()).collect();
+        let seed: Vec<f32> = (0..t * d).map(|i| (i as f32 * 0.003).sin()).collect();
+        t_ms(5, || {
+            let mut tp = Tape::new();
+            let x = tp.leaf(xv.clone(), true);
+            let w = tp.leaf(wv.clone(), true);
+            let o = tp.rmsnorm(x, w, d, 1e-5);
+            tp.backward_from(o, &seed);
+            std::hint::black_box(tp.grad(x).len());
+        }) * 8.0
+    };
+    let rope_ms = {
+        let qv: Vec<f32> = (0..t * d).map(|i| (i as f32 * 0.001).sin()).collect();
+        let seed: Vec<f32> = (0..t * d).map(|i| (i as f32 * 0.003).sin()).collect();
+        t_ms(5, || {
+            let mut tp = Tape::new();
+            let q = tp.leaf(qv.clone(), true);
+            let o = tp.rope_seq(q, t, seq, cfg.n_heads, cfg.head_dim(), 10000.0);
+            tp.backward_from(o, &seed);
+            std::hint::black_box(tp.grad(q).len());
+        }) * 8.0
+    };
+    let embed_ms = {
+        let tab = tr.params[0].clone();
+        let toks: Vec<usize> = batch.iter().flat_map(|(i, _)| i.clone()).collect();
+        let seed: Vec<f32> = (0..t * d).map(|i| (i as f32 * 0.003).sin()).collect();
+        t_ms(5, || {
+            let mut tp = Tape::new();
+            let w = tp.leaf(tab.clone(), true);
+            let o = tp.embed(w, &toks, d);
+            tp.backward_from(o, &seed);
+            std::hint::black_box(tp.grad(w).len());
+        })
+    };
+
     let pct = |x: f64| x / full * 100.0;
     println!("{:>34} {:>10} {:>8}", "stage", "ms/step", "share");
     println!("{}", "-".repeat(54));
@@ -145,10 +208,16 @@ fn main() {
     println!("{:>34} {:>10.1} {:>7.1}%", "softmax_ce fwd+bwd", ce - ce_leaf, pct(ce - ce_leaf));
     println!("{:>34} {:>10.1} {:>7.1}%", "tape's copy of every parameter", leaves, pct(leaves));
     println!("{:>34} {:>10.1} {:>7.1}%", "backward()'s blanket grad zeroing", zero_ms, pct(zero_ms));
-    println!("{:>34} {:>10.1} {:>7.1}%", "rmsnorm fwd x8 (one measured x8)", rms * 8.0, pct(rms * 8.0));
-    println!("{:>34} {:>10.1} {:>7.1}%", "silu fwd x4", silu * 4.0, pct(silu * 4.0));
     println!("{:>34} {:>10.1} {:>7.1}%", "tape alloc churn (2 Vecs/node)", churn, pct(churn));
-    let named = gemm_ms + 50.0 + (ce - ce_leaf) + (full - fb) + zero_ms + rms * 8.0 + silu * 4.0 + churn;
+    println!("  -- elementwise, fwd+bwd, at per-step counts --");
+    println!("{:>34} {:>10.1} {:>7.1}%", "silu x4", silu_ms, pct(silu_ms));
+    println!("{:>34} {:>10.1} {:>7.1}%", "mul x4", mul_ms, pct(mul_ms));
+    println!("{:>34} {:>10.1} {:>7.1}%", "add x8", add_ms, pct(add_ms));
+    println!("{:>34} {:>10.1} {:>7.1}%", "rmsnorm x8", rms_ms, pct(rms_ms));
+    println!("{:>34} {:>10.1} {:>7.1}%", "rope_seq x8", rope_ms, pct(rope_ms));
+    println!("{:>34} {:>10.1} {:>7.1}%", "embed x1", embed_ms, pct(embed_ms));
+    let named = gemm_ms + 50.0 + (ce - ce_leaf) + (full - fb) + zero_ms + churn
+        + silu_ms + mul_ms + add_ms + rms_ms + rope_ms + embed_ms;
     println!("{}", "-".repeat(54));
     println!("{:>34} {:>10.1} {:>7.1}%", "accounted for", named, pct(named));
     println!("{:>34} {:>10.1} {:>7.1}%", "STILL UNATTRIBUTED", full - named, pct(full - named));

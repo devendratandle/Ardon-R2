@@ -283,11 +283,35 @@ impl Tape {
     pub fn rope_seq(&mut self, x: Var, rows: usize, period: usize,
                     n_heads: usize, head_dim: usize, base: f32) -> Var {
         let mut val = self.vals[x.0].clone();
-        for r in 0..rows {
-            let pos = r % period;
-            for h in 0..n_heads {
-                let off = r * n_heads * head_dim + h * head_dim;
-                r2_tensor::ops::rope_inplace(&mut val[off..off + head_dim], pos, base);
+        // The angles depend only on (position, pair), so they are built
+        // ONCE and then reused by every row and every head. Calling
+        // `rope_inplace` per row per head recomputed a `powf` and a
+        // `sin_cos` for each element: 262,144 transcendental pairs where
+        // 2,048 are distinct, and 138.9 ms of a training step.
+        //
+        // Rows are independent, so they also split across cores.
+        let half = head_dim / 2;
+        let per = period.max(1);
+        let tab = r2_tensor::ops::rope_table(per, head_dim, base);
+        {
+            let row = |r: usize, vrow: &mut [f32]| {
+                let trow = &tab[(r % per) * half..(r % per) * half + half];
+                for h in 0..n_heads {
+                    let off = h * head_dim;
+                    for p in 0..half {
+                        let (c, s) = trow[p];
+                        let (a, b) = (vrow[off + 2 * p], vrow[off + 2 * p + 1]);
+                        vrow[off + 2 * p] = a * c - b * s;
+                        vrow[off + 2 * p + 1] = a * s + b * c;
+                    }
+                }
+            };
+            let w = n_heads * head_dim;
+            if rows * w >= PAR_MIN {
+                use rayon::prelude::*;
+                val.par_chunks_mut(w).enumerate().for_each(|(r, vrow)| row(r, vrow));
+            } else {
+                val.chunks_mut(w).enumerate().for_each(|(r, vrow)| row(r, vrow));
             }
         }
         let req = self.requires[x.0];
@@ -717,22 +741,34 @@ impl Tape {
                     // rotation, i.e. the same op at angle -theta.
                     let (xi, rows, period, nh, hd, base) =
                         (x.0, *rows, *period, *n_heads, *head_dim, *base);
-                    for r in 0..rows {
+                    // Same table as the forward, and for the same reason:
+                    // the angle is a function of (position, pair) alone.
+                    let (half, per) = (hd / 2, period.max(1));
+                    let tab = r2_tensor::ops::rope_table(per, hd, base);
+                    let w = nh * hd;
+                    let row = |r: usize, grow: &mut [f32]| {
                         // Same position mapping as the forward pass: in a
                         // fused batch the angle restarts each sequence.
-                        let pos = (r % period.max(1)) as f32;
+                        let trow = &tab[(r % per) * half..(r % per) * half + half];
+                        let gsrc = &g[r * w..r * w + w];
                         for h in 0..nh {
-                            let off = r * nh * hd + h * hd;
-                            for p in 0..hd / 2 {
-                                let freq = 1.0 / base.powf(2.0 * p as f32 / hd as f32);
-                                let theta = pos * freq;
-                                let (s, c) = theta.sin_cos();
-                                let (ga, gb) = (g[off + 2 * p], g[off + 2 * p + 1]);
+                            let off = h * hd;
+                            for p in 0..half {
+                                let (c, s) = trow[p];
+                                let (ga, gb) = (gsrc[off + 2 * p], gsrc[off + 2 * p + 1]);
                                 // Inverse of [c -s; s c] is [c s; -s c].
-                                self.grads[xi][off + 2 * p]     += ga * c + gb * s;
-                                self.grads[xi][off + 2 * p + 1] += -ga * s + gb * c;
+                                grow[off + 2 * p] += ga * c + gb * s;
+                                grow[off + 2 * p + 1] += -ga * s + gb * c;
                             }
                         }
+                    };
+                    if rows * w >= PAR_MIN {
+                        use rayon::prelude::*;
+                        self.grads[xi].par_chunks_mut(w).enumerate()
+                            .for_each(|(r, grow)| row(r, grow));
+                    } else {
+                        self.grads[xi].chunks_mut(w).enumerate()
+                            .for_each(|(r, grow)| row(r, grow));
                     }
                 }
                 Op::SliceRows { x, cols, start, len } => {

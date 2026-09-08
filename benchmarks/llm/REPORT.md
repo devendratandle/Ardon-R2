@@ -22,15 +22,15 @@ config   dim 256, 4 layers, vocab 8,000, ffn 768, 30 steps x 32 x 64
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
-| read | 0.02 s | 0.04 s | — |
-| learn BPE merges | 1.48 s | 1.69 s | R2 1.14x |
-| **tokenize 19.4 MB** | **1.73 s** | 16.79 s | **R2 9.7x faster** |
-| **train** | 28.40 s | **18.55 s** | **PyTorch 1.53x faster** |
-| **TOTAL** | **31.63 s** | 37.07 s | **R2 1.17x faster** |
+| read | 0.02 s | 0.03 s | — |
+| learn BPE merges | 1.41 s | 1.71 s | R2 1.21x |
+| **tokenize 19.4 MB** | **1.54 s** | 17.01 s | **R2 11.0x faster** |
+| **train** | 24.52 s | **17.05 s** | **PyTorch 1.44x faster** |
+| **TOTAL** | **27.47 s** | 35.75 s | **R2 1.30x faster** |
 
-Two interleaved pairs, both giving 1.53x on training (28.40/18.55 and
-28.81/18.46). **Training is 1.5x behind; the whole pipeline is ahead**,
-because R2 tokenises about 10x faster.
+Two interleaved pairs, both giving 1.44x on training (24.52/17.05 and
+24.88/17.22). **Training is 1.4x behind; the whole pipeline is ahead**,
+because R2 tokenises about 11x faster.
 
 **Learning is at parity.** Bits per byte is the comparable metric — the
 vocabularies differ (8,000 vs 8,143) and cross-entropy is per token:
@@ -107,17 +107,23 @@ managed 27-73.
 `cargo run --release -p r2-train --example step_census`. **This is the map
 for anything done next.** Every target picked without it was picked wrongly.
 
+Every stage is measured forward AND backward, at the count a step runs it.
+
 | stage | ms/step | share |
 |---|---:|---:|
-| `sgemm` x3 (forward, `grad_A`, `grad_B`) | 367 | **39%** |
-| **unattributed** | **362** | **39%** |
-| `softmax_ce` fwd+bwd | 66 | 7% |
-| attention, 4 layers | 50 | 5% |
-| `backward()`'s blanket gradient zeroing | 28 | 3% |
-| silu forward x4 | 21 | 2% |
+| `sgemm` x3 (forward, `grad_A`, `grad_B`) | 371 | **44%** |
+| unattributed | 111 | 13% |
+| silu x4 | 68 | 8% |
+| `softmax_ce` | 67 | 8% |
+| attention, 4 layers | 50 | 6% |
+| mul x4 | 36 | 4% |
+| rmsnorm x8 | 35 | 4% |
+| `backward()`'s blanket gradient zeroing | 27 | 3% |
+| add x8 | 23 | 3% |
+| RoPE x8 | 22 | 3% |
 | tape's copy of every parameter | 12 | 1% |
 | tape allocation churn | 10 | 1% |
-| rmsnorm forward x8 | 5 | 1% |
+| embed | 6 | 1% |
 
 The step's tape holds **71.9M elements across ~3,000 nodes for a 7.2M
 parameter model** — 10x the model, every node owning a value buffer and a
@@ -131,12 +137,11 @@ writes them.
 
 Ranked by the census above, not by how interesting they are.
 
-1. **The unattributed 39% has never been broken down.** Elementwise ops and
-   their backwards — `add`, `mul`, `silu` backward (an `exp` per element
-   across 6.3M elements), `rmsnorm` backward, RoPE, and the traffic of
-   writing every intermediate. Nobody has looked, which by this project's
-   record makes it the most likely place for a surprise. It is now tied
-   with `sgemm` for the largest item.
+1. **`silu` is 8% of a step** — its backward computes an `exp` per element
+   across 6.3M elements, and the forward another 6.3M. That is the largest
+   remaining item after the GEMM, and the same shape of problem RoPE turned
+   out to be: transcendental functions in an inner loop where the maths does
+   not require them per element.
 2. **`sgemm` parallel efficiency is 2.6-3.4x on six cores.** Serially the
    kernel runs 56-67 GFLOP/s against ~77 of single-core peak — 78%, and
    that last stretch is MKL's hand-written assembly, software pipelining
@@ -153,7 +158,10 @@ Ranked by the census above, not by how interesting they are.
    is a one-line instantiation; a column-major `C = A·B` is the row-major
    `Cᵀ = Bᵀ·Aᵀ`, i.e. the same kernel with operands swapped. That would
    lift `%*%` and every blocked LAPACK algorithm built on it.
-5. **`pipeline_phases` does not auto-join** the way the LMO benchmarks do.
+5. **13% of a step is still unattributed** — the memory traffic of writing
+   every intermediate value and gradient buffer, spread across ops rather
+   than concentrated anywhere.
+6. **`pipeline_phases` does not auto-join** the way the LMO benchmarks do.
    Pairing its halves by hand across two windows produced a wrong claim
    once already.
 
@@ -173,6 +181,7 @@ Ranked by the census above, not by how interesting they are.
 | Materialising transposes to feed a naive kernel | 393 ms vs 326 ms. Materialising only the RESULT of a transposed GEMM, to fix parallelism, is a different thing and does pay — see `gemm.rs` |
 | Flash blocking with an online softmax | No measurable change; the K/V re-reads it removes were already served from L1. Kept: right structure, and what makes long contexts survivable |
 | Sparse embedding gradient | 37x on the op, **0.07%** of a step. Measure the share before optimising |
+| Recomputing RoPE's angles per element | 138.9 ms/step, 14.5%, for two multiplies and two adds per pair. `powf` + `sin_cos` were being evaluated per (row, head, pair) when the angle depends only on (position, pair): 262,144 transcendental pairs where 2,048 are distinct. A precomputed table made it 22.1 ms, 6.3x, bit-identical |
 | Fusing `softmax_ce` | 2.3x on the op (155.6 -> 66.4 ms) but no measurable change to the training ratio — 89 ms of a 1,065 ms step is under this machine's drift. Kept for the 128 MB it stops allocating and for better conditioning, not claimed as a speedup |
 
 Two rules out of these. **A dependency chain costs nothing when something
