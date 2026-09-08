@@ -191,14 +191,38 @@ impl Tape {
 
     // ── forward ops (each records enough for backward) ─────────────────
 
+    // ── elementwise forwards ───────────────────────────────────────────
+    //
+    // These were serial iterator chains over millions of elements. At the
+    // shipping shape `mul` runs over 1.57M elements four times a step and
+    // `add` over 524k eight times, all on one core of six.
+    //
+    // An elementwise map parallelises BIT-IDENTICALLY: every output depends
+    // only on the input at the same index, so splitting the range changes
+    // no arithmetic and no ordering. That is not true of a reduction, where
+    // splitting changes the summation order — which is why those need the
+    // fixed-chain treatment in `r2_tensor::ops` instead.
+
     pub fn add(&mut self, a: Var, b: Var) -> Var {
-        let val: Vec<f32> = self.vals[a.0].iter().zip(&self.vals[b.0]).map(|(x, y)| x + y).collect();
+        let (va, vb) = (&self.vals[a.0], &self.vals[b.0]);
+        let val: Vec<f32> = if va.len() >= PAR_MIN {
+            use rayon::prelude::*;
+            va.par_iter().zip(vb.par_iter()).map(|(x, y)| x + y).collect()
+        } else {
+            va.iter().zip(vb).map(|(x, y)| x + y).collect()
+        };
         let req = self.requires[a.0] || self.requires[b.0];
         self.push(val, Op::Add(a, b), req)
     }
 
     pub fn mul(&mut self, a: Var, b: Var) -> Var {
-        let val: Vec<f32> = self.vals[a.0].iter().zip(&self.vals[b.0]).map(|(x, y)| x * y).collect();
+        let (va, vb) = (&self.vals[a.0], &self.vals[b.0]);
+        let val: Vec<f32> = if va.len() >= PAR_MIN {
+            use rayon::prelude::*;
+            va.par_iter().zip(vb.par_iter()).map(|(x, y)| x * y).collect()
+        } else {
+            va.iter().zip(vb).map(|(x, y)| x * y).collect()
+        };
         let req = self.requires[a.0] || self.requires[b.0];
         self.push(val, Op::Mul(a, b), req)
     }
@@ -248,8 +272,23 @@ impl Tape {
         self.push(val, Op::MatMul { a, b, m, k, n }, req)
     }
 
+    /// SiLU, `x * sigmoid(x)`.
+    ///
+    /// One `exp` per element is irreducible here — unlike RoPE, whose
+    /// angles were redundant, every element's sigmoid is genuinely
+    /// different. The backward could skip its own `exp` by storing the
+    /// sigmoid computed here, but that is 6.3 MB per node and ~25 MB a
+    /// step, which is the wrong trade on a machine already bound by memory
+    /// traffic. What was actually wrong was that both directions ran on
+    /// one core.
     pub fn silu(&mut self, x: Var) -> Var {
-        let val: Vec<f32> = self.vals[x.0].iter().map(|&v| r2_tensor::ops::silu(v)).collect();
+        let vx = &self.vals[x.0];
+        let val: Vec<f32> = if vx.len() >= PAR_MIN {
+            use rayon::prelude::*;
+            vx.par_iter().map(|&v| r2_tensor::ops::silu(v)).collect()
+        } else {
+            vx.iter().map(|&v| r2_tensor::ops::silu(v)).collect()
+        };
         let req = self.requires[x.0];
         self.push(val, Op::Silu(x), req)
     }
@@ -530,11 +569,19 @@ impl Tape {
                 Op::Leaf => {}
                 Op::Add(a, b) => {
                     let (a, b) = (a.0, b.0);
-                    if self.requires[a] {
-                        for (ga, gi) in self.grads[a].iter_mut().zip(&g) { *ga += gi; }
-                    }
-                    if self.requires[b] {
-                        for (gb, gi) in self.grads[b].iter_mut().zip(&g) { *gb += gi; }
+                    const C: usize = 1 << 14;
+                    let par = g.len() >= PAR_MIN;
+                    for side in [a, b] {
+                        if !self.requires[side] { continue; }
+                        if par {
+                            use rayon::prelude::*;
+                            self.grads[side].par_chunks_mut(C).zip(g.par_chunks(C))
+                                .for_each(|(gd, gi)| {
+                                    for (d, s) in gd.iter_mut().zip(gi) { *d += s; }
+                                });
+                        } else {
+                            for (gd, gi) in self.grads[side].iter_mut().zip(&g) { *gd += gi; }
+                        }
                     }
                 }
                 Op::Mul(a, b) => {
@@ -551,13 +598,22 @@ impl Tape {
                     // was getting a full gradient computed into a buffer
                     // nothing would ever read.
                     let Tape { vals, grads, requires, .. } = self;
-                    if requires[a] {
-                        let vb = &vals[b];
-                        for (ga, (gi, vbi)) in grads[a].iter_mut().zip(g.iter().zip(vb)) { *ga += gi * vbi; }
-                    }
-                    if requires[b] {
-                        let va = &vals[a];
-                        for (gb, (gi, vai)) in grads[b].iter_mut().zip(g.iter().zip(va)) { *gb += gi * vai; }
+                    const C: usize = 1 << 14;
+                    let par = g.len() >= PAR_MIN;
+                    // grad of `a` reads the value of `b`, and vice versa.
+                    for (dst, src) in [(a, b), (b, a)] {
+                        if !requires[dst] { continue; }
+                        let other = &vals[src];
+                        if par {
+                            use rayon::prelude::*;
+                            grads[dst].par_chunks_mut(C).zip(g.par_chunks(C))
+                                .zip(other.par_chunks(C))
+                                .for_each(|((gd, gi), o)| {
+                                    for ((d, s), o) in gd.iter_mut().zip(gi).zip(o) { *d += s * o; }
+                                });
+                        } else {
+                            for ((d, s), o) in grads[dst].iter_mut().zip(&g).zip(other) { *d += s * o; }
+                        }
                     }
                 }
                 Op::Embed { table, tokens, d } => {
@@ -701,11 +757,29 @@ impl Tape {
                 }
                 Op::Silu(x) => {
                     let xi = x.0;
-                    let vx = self.vals[xi].clone();
-                    for (gx, (gi, &v)) in self.grads[xi].iter_mut().zip(g.iter().zip(&vx)) {
-                        let s = 1.0 / (1.0 + (-v).exp());
-                        // d/dv [v*s] = s + v*s*(1-s)
-                        *gx += gi * (s + v * s * (1.0 - s));
+                    if self.requires[xi] {
+                        // `vals` and `grads` are DISJOINT fields, so borrow
+                        // them as such. This used to `clone()` the whole
+                        // input first — 6.3 MB per call at the shipping
+                        // shape, four times a step, to read it once.
+                        let Tape { vals, grads, .. } = self;
+                        let vx = &vals[xi];
+                        let work = |gx: &mut [f32], gi: &[f32], v: &[f32]| {
+                            for ((gx, gi), &v) in gx.iter_mut().zip(gi).zip(v) {
+                                let s = 1.0 / (1.0 + (-v).exp());
+                                // d/dv [v*s] = s + v*s*(1-s)
+                                *gx += gi * (s + v * s * (1.0 - s));
+                            }
+                        };
+                        if g.len() >= PAR_MIN {
+                            use rayon::prelude::*;
+                            const C: usize = 1 << 14;
+                            grads[xi].par_chunks_mut(C).zip(g.par_chunks(C))
+                                .zip(vx.par_chunks(C))
+                                .for_each(|((gx, gi), v)| work(gx, gi, v));
+                        } else {
+                            work(&mut grads[xi], &g, vx);
+                        }
                     }
                 }
                 Op::Rmsnorm { x, w, d, eps } => {

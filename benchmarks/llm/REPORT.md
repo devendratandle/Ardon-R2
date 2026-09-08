@@ -23,13 +23,13 @@ config   dim 256, 4 layers, vocab 8,000, ffn 768, 30 steps x 32 x 64
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
 | read | 0.02 s | 0.03 s | — |
-| learn BPE merges | 1.41 s | 1.71 s | R2 1.21x |
-| **tokenize 19.4 MB** | **1.54 s** | 17.01 s | **R2 11.0x faster** |
-| **train** | 24.52 s | **17.05 s** | **PyTorch 1.44x faster** |
-| **TOTAL** | **27.47 s** | 35.75 s | **R2 1.30x faster** |
+| learn BPE merges | 1.40 s | 1.72 s | R2 1.23x |
+| **tokenize 19.4 MB** | **1.54 s** | 16.41 s | **R2 10.7x faster** |
+| **train** | 23.51 s | **16.69 s** | **PyTorch 1.4x faster** |
+| **TOTAL** | **26.78 s** | 34.15 s | **R2 1.28x faster** |
 
-Two interleaved pairs, both giving 1.44x on training (24.52/17.05 and
-24.88/17.22). **Training is 1.4x behind; the whole pipeline is ahead**,
+Two interleaved pairs giving 1.34x and 1.41x on training (24.05/17.99 and
+23.51/16.69). **Training is 1.4x behind; the whole pipeline is ahead**,
 because R2 tokenises about 11x faster.
 
 **Learning is at parity.** Bits per byte is the comparable metric — the
@@ -111,18 +111,18 @@ Every stage is measured forward AND backward, at the count a step runs it.
 
 | stage | ms/step | share |
 |---|---:|---:|
-| `sgemm` x3 (forward, `grad_A`, `grad_B`) | 371 | **44%** |
-| unattributed | 111 | 13% |
-| silu x4 | 68 | 8% |
+| `sgemm` x3 (forward, `grad_A`, `grad_B`) | 371 | **45%** |
+| unattributed | 96 | 12% |
 | `softmax_ce` | 67 | 8% |
 | attention, 4 layers | 50 | 6% |
-| mul x4 | 36 | 4% |
-| rmsnorm x8 | 35 | 4% |
+| silu x4 | 36 | 4% |
+| rmsnorm x8 | 36 | 4% |
+| mul x4 | 35 | 4% |
 | `backward()`'s blanket gradient zeroing | 27 | 3% |
 | add x8 | 23 | 3% |
 | RoPE x8 | 22 | 3% |
 | tape's copy of every parameter | 12 | 1% |
-| tape allocation churn | 10 | 1% |
+| tape allocation churn | 9 | 1% |
 | embed | 6 | 1% |
 
 The step's tape holds **71.9M elements across ~3,000 nodes for a 7.2M
@@ -137,11 +137,9 @@ writes them.
 
 Ranked by the census above, not by how interesting they are.
 
-1. **`silu` is 8% of a step** — its backward computes an `exp` per element
-   across 6.3M elements, and the forward another 6.3M. That is the largest
-   remaining item after the GEMM, and the same shape of problem RoPE turned
-   out to be: transcendental functions in an inner loop where the maths does
-   not require them per element.
+1. **`sgemm` is 45% of a step and everything else is now single digits.**
+   Past this point the remaining wins are small and many, not few and
+   large. See item 2 for the one structural lever left on it.
 2. **`sgemm` parallel efficiency is 2.6-3.4x on six cores.** Serially the
    kernel runs 56-67 GFLOP/s against ~77 of single-core peak — 78%, and
    that last stretch is MKL's hand-written assembly, software pipelining
@@ -181,6 +179,8 @@ Ranked by the census above, not by how interesting they are.
 | Materialising transposes to feed a naive kernel | 393 ms vs 326 ms. Materialising only the RESULT of a transposed GEMM, to fix parallelism, is a different thing and does pay — see `gemm.rs` |
 | Flash blocking with an online softmax | No measurable change; the K/V re-reads it removes were already served from L1. Kept: right structure, and what makes long contexts survivable |
 | Sparse embedding gradient | 37x on the op, **0.07%** of a step. Measure the share before optimising |
+| Threading `add` and `mul` | No change (35.8 -> 35.4 ms, 23.3 -> 23.1). Three memory streams per flop makes them bandwidth-bound, and bandwidth does not thread. `silu`, which has a real `exp` per element, went 68 -> 36 ms on the same change — the difference between the two IS the diagnosis |
+| Storing `silu`'s sigmoid to skip the backward's `exp` | Not attempted: 6.3 MB per node, ~25 MB a step, to save compute on a machine already bound by memory traffic. Wrong direction |
 | Recomputing RoPE's angles per element | 138.9 ms/step, 14.5%, for two multiplies and two adds per pair. `powf` + `sin_cos` were being evaluated per (row, head, pair) when the angle depends only on (position, pair): 262,144 transcendental pairs where 2,048 are distinct. A precomputed table made it 22.1 ms, 6.3x, bit-identical |
 | Fusing `softmax_ce` | 2.3x on the op (155.6 -> 66.4 ms) but no measurable change to the training ratio — 89 ms of a 1,065 ms step is under this machine's drift. Kept for the 128 MB it stops allocating and for better conditioning, not claimed as a speedup |
 
