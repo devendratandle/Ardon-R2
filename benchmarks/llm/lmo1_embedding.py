@@ -18,6 +18,7 @@ the difference is visible rather than inferred.
       python benchmarks/llm/lmo1_embedding.py
 """
 
+import json
 import os
 import statistics
 import time
@@ -56,6 +57,7 @@ def main():
           f" {'fwd+bwd':>11} {'MFLOP fwd':>13}")
     print("-" * 70)
 
+    torch_rows = {}
     for vocab in vocabs:
         reps = max(3, min(200, int(2e9 / (t * vocab * d)) + 1))
         idx = torch.tensor([(i * 7919) % vocab for i in range(t)], dtype=torch.long)
@@ -80,10 +82,68 @@ def main():
         # A gather does t*d element copies; there is no multiply-add at all.
         print(f"{vocab:>7} {0.0:>12.1f} {0.0:>11.1f} {f_us:>11.1f}"
               f" {fb_us:>11.1f} {0.0:>13.1f}")
+        torch_rows[vocab] = (f_us, fb_us)
 
     print(f"\nPyTorch's gather does t*d = {t*d} element copies for ANY")
     print("vocabulary and zero multiply-adds, so its cost is flat in vocab")
     print("while the one-hot form's grows linearly.")
+
+    verdict(torch_rows, t, d)
+
+
+def verdict(torch_rows, t, d):
+    """Join R2's numbers with PyTorch's and say who is ahead, per row.
+
+    THE POINT OF THE WHOLE FILE. R2 improving against its own past is not
+    a result — the only question is whether R2 is at or above PyTorch on
+    this stage. Two programs printing two tables leaves that join to a
+    human, and it got skipped. It does not get skipped now.
+
+    Reads `lmo1_r2.json`, written by
+    `cargo run --release -p r2-train --example lmo1_embedding`.
+    """
+    try:
+        r2 = json.load(open("lmo1_r2.json"))
+    except FileNotFoundError:
+        print("\nlmo1_r2.json not found — run the R2 half first:")
+        print("  cargo run --release -p r2-train --example lmo1_embedding")
+        print("without it there is no verdict, only PyTorch's numbers.")
+        return
+    if (r2["tokens"], r2["dim"]) != (t, d):
+        print(f"\nlmo1_r2.json is for {r2['tokens']} tokens x dim {r2['dim']},")
+        print(f"this run is {t} x {d}. Re-run the R2 half at the same shape.")
+        return
+
+    print("\n" + "=" * 74)
+    print("LMO-1 VERDICT — R2 against PyTorch, same shape, same window")
+    print("  GA = the gather both sides ship. fwd+bwd is `.backward(g)` on")
+    print("  both: R2 seeds the gradient with `backward_from`, not a")
+    print("  manufactured scalar loss.")
+    print("=" * 74)
+    print(f"{'vocab':>7} {'phase':>9} {'R2 us':>10} {'torch us':>10}"
+          f" {'ratio':>8}  verdict")
+    print("-" * 74)
+    worst = 0.0
+    for row in r2["rows"]:
+        v = row["vocab"]
+        if v not in torch_rows:
+            continue
+        for phase, r2_us, pt_us in (
+            ("fwd", row["ga_fwd"], torch_rows[v][0]),
+            ("fwd+bwd", row["ga_fb"], torch_rows[v][1]),
+        ):
+            ratio = r2_us / pt_us if pt_us > 0 else float("inf")
+            worst = max(worst, ratio)
+            mark = "R2 AHEAD" if ratio <= 1.0 else f"R2 BEHIND {ratio:.2f}x"
+            print(f"{v:>7} {phase:>9} {r2_us:>10.1f} {pt_us:>10.1f}"
+                  f" {ratio:>7.2f}x  {mark}")
+    print("-" * 74)
+    if worst <= 1.0:
+        print("LMO-1 PASSES: R2 is at or above PyTorch on every row.")
+    else:
+        print(f"LMO-1 NOT DONE: worst row is {worst:.2f}x behind PyTorch.")
+        print("An R2-versus-R2 speedup does not close this. Only a row at")
+        print("or under 1.00x does.")
 
 
 if __name__ == "__main__":

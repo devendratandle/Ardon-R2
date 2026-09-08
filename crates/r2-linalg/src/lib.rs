@@ -17,6 +17,7 @@
 //!   - decomp: LU, Cholesky, QR factorizations
 //!   - solve:  linear system solvers
 
+pub mod gemm;
 pub mod level1;
 pub mod level2;
 pub mod level3;

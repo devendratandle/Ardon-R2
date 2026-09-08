@@ -14,6 +14,8 @@ rayon = "1"
 # Backend policy (CPU serial / CPU parallel / GPU) is decided by the
 # Oracle, never by thresholds hidden in kernels.
 r2-oracle = { path = "../r2-oracle" }
+# BLAS lives in the BLAS crate: `ops::matmul` is `r2_linalg::gemm::sgemm`.
+r2-linalg = { path = "../r2-linalg" }
 r2-gpu    = { path = "../r2-gpu" }
 
 [features]

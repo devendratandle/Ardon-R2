@@ -79,12 +79,14 @@ impl Model {
         let leaves: Vec<Var> = self.params.iter()
             .map(|p| tape.leaf(p.clone(), true)).collect();
 
-        // Embedding via one-hot matmul (differentiable, reuses matmul):
-        // onehot(t×vocab) · tok_embed(vocab×d) = (t×d).
-        let mut onehot = vec![0.0f32; t * vocab];
-        for (i, &id) in ids.iter().enumerate() { onehot[i * vocab + id] = 1.0; }
-        let oh = tape.leaf(onehot, false);
-        let tok = tape.matmul(oh, leaves[0], t, vocab, d);
+        // Embedding by GATHER, not by one-hot matmul. The two give the
+        // same rows; the one-hot form built a t x vocab buffer every
+        // forward and did `vocab` times the arithmetic, and its backward
+        // computed a t x vocab grad_A into a leaf that requires no
+        // gradient. Measured at 2,048 tokens, dim 256, vocab 8,000:
+        // 49.3 ms forward+backward one-hot against 7.0 ms gathered.
+        // `llm.rs` made this switch already; this module had not.
+        let tok = tape.embed(leaves[0], ids, d);
         let mut x = tape.add(tok, leaves[1]); // + pos_embed (t×d)
 
         // Causal mask constant (t×t): 0 on allowed, big-negative on future.
@@ -163,10 +165,7 @@ impl Model {
         let (d, t, vocab, h) = (self.d, self.t, self.vocab, self.h);
         let mut tape = Tape::new();
         let leaves: Vec<Var> = self.params.iter().map(|p| tape.leaf(p.clone(), false)).collect();
-        let mut onehot = vec![0.0f32; t * vocab];
-        for (i, &id) in ids.iter().enumerate() { onehot[i * vocab + id] = 1.0; }
-        let oh = tape.leaf(onehot, false);
-        let tok = tape.matmul(oh, leaves[0], t, vocab, d);
+        let tok = tape.embed(leaves[0], ids, d);
         let mut x = tape.add(tok, leaves[1]);
         let mut mask = vec![0.0f32; t * t];
         for i in 0..t { for j in 0..t { if j > i { mask[i * t + j] = -1e9; } } }

@@ -87,6 +87,43 @@ enum Op {
     /// Softmax over each `d`-wide row (a differentiable op, distinct from
     /// the fused SoftmaxCE loss — this one is used INSIDE attention).
     SoftmaxRows { x: Var, d: usize },
+    /// Grouped-query causal attention over a whole batch, FUSED.
+    ///
+    /// Replaces this, which is what `llm.rs` used to build per sequence
+    /// per head — `nseq * n_heads` times, 128 at the shipping shape:
+    ///
+    /// ```text
+    /// slice_rows x3 -> slice_cols x3 -> transpose -> matmul
+    ///   -> scale_mask_causal -> softmax_rows -> matmul -> concat_cols
+    /// ```
+    ///
+    /// That decomposition is correct and was ~10x slower than PyTorch's
+    /// EXPLICIT form — not because of the arithmetic. Measured at batch 32
+    /// x seq 64 (`--example lmo15_breakdown`), forward:
+    ///
+    /// ```text
+    /// slice rows          11,132 us   47%
+    /// softmax rows         4,982       21%
+    /// transpose k          2,979       13%
+    /// slice cols           2,558       11%
+    /// scale & mask           972        4%
+    /// QK matmul              385      1.6%   <- the arithmetic
+    /// AV matmul + concat     662      2.8%   <- the arithmetic
+    /// ```
+    ///
+    /// The two matmuls are 4.4% of the block. The rest is chopping the
+    /// data into 128 fragments of 64x64 so those matmuls can run on it,
+    /// and putting 1,156 nodes — 2,312 Vec allocations — on the tape to
+    /// hold the pieces. This op is ONE node: no slices, no transposes, no
+    /// materialised score matrix, and the inner loops walk contiguous
+    /// memory.
+    ///
+    /// Layout matches the projections that feed it: `q` is
+    /// `(nseq*seq) x (n_heads*head_dim)`, `k` and `v` are
+    /// `(nseq*seq) x (n_kv*head_dim)`, row `s*seq + i` is position `i` of
+    /// sequence `s`. Query head `qh` reads kv head `qh / (n_heads/n_kv)`.
+    Attention { q: Var, k: Var, v: Var, nseq: usize, seq: usize,
+                nh: usize, nkv: usize, hd: usize, scale: f32 },
     /// Σ of all elements → scalar.
     SumAll(Var),
     /// Mean squared error against a constant target (target has no grad).
@@ -103,6 +140,16 @@ pub struct Tape {
     ops: Vec<Op>,
     requires: Vec<bool>,
 }
+
+/// Element count below which an op stays SERIAL.
+///
+/// A rayon fork-join on this machine costs tens of microseconds and, worse,
+/// returns only when its slowest worker does — one preempted worker stalls
+/// the whole join (see `perf-measurement-law`: isolated parallel kernel
+/// timings scatter up to 21x for exactly this reason). Paying that on a
+/// 4 KB copy is a loss. 32,768 elements is where the copy is large enough
+/// to absorb it.
+const PAR_MIN: usize = 1 << 15;
 
 impl Tape {
     pub fn new() -> Self {
@@ -165,8 +212,23 @@ impl Tape {
         let mut val = vec![0.0f32; tokens.len() * d];
         {
             let vt = &self.vals[table.0];
-            for (dst, &tok) in val.chunks_exact_mut(d).zip(tokens) {
-                dst.copy_from_slice(&vt[tok * d..tok * d + d]);
+            // Rows are independent, so the gather splits cleanly across
+            // cores — and it needs to. Measured at 2,048 tokens x dim 256,
+            // vocab 8,000: 686 us serial, 62 us on six threads. PyTorch's
+            // `index_select` runs under `at::parallel_for` and costs 49 us
+            // here; forcing torch to one thread puts it at 316, which is
+            // the whole of the forward gap. Below the threshold the
+            // fork-join costs more than the copy saves.
+            if tokens.len() * d >= PAR_MIN {
+                use rayon::prelude::*;
+                val.par_chunks_exact_mut(d).zip(tokens.par_iter())
+                    .for_each(|(dst, &tok)| {
+                        dst.copy_from_slice(&vt[tok * d..tok * d + d]);
+                    });
+            } else {
+                for (dst, &tok) in val.chunks_exact_mut(d).zip(tokens) {
+                    dst.copy_from_slice(&vt[tok * d..tok * d + d]);
+                }
             }
         }
         let req = self.requires[table.0];
@@ -284,6 +346,50 @@ impl Tape {
         self.push(val, Op::SoftmaxRows { x, d }, req)
     }
 
+    /// Fused grouped-query causal attention. See [`Op::Attention`].
+    ///
+    /// `scale` is applied to the scores before the mask, matching
+    /// `scale_mask_causal` — for standard attention pass
+    /// `1.0 / (head_dim as f32).sqrt()`.
+    ///
+    /// Softmax is taken over `j <= i` only. That is exactly equivalent to
+    /// masking with `-inf` and softmaxing the full row, since
+    /// `exp(-inf - max) == 0`, but it never writes the masked half: the
+    /// score row is `i+1` long, not `seq` long, so the block does half the
+    /// score work the decomposition did and materialises none of it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention(&mut self, q: Var, k: Var, v: Var, nseq: usize, seq: usize,
+                     nh: usize, nkv: usize, hd: usize, scale: f32) -> Var {
+        assert!(nh % nkv == 0, "attention: {nh} query heads is not a multiple of {nkv} kv heads");
+        let rows = nseq * seq;
+        assert_eq!(self.vals[q.0].len(), rows * nh * hd, "attention: q has the wrong length");
+        assert_eq!(self.vals[k.0].len(), rows * nkv * hd, "attention: k has the wrong length");
+        assert_eq!(self.vals[v.0].len(), rows * nkv * hd, "attention: v has the wrong length");
+
+        let mut out = vec![0.0f32; rows * nh * hd];
+        {
+            let (vq, vk, vv) = (&self.vals[q.0], &self.vals[k.0], &self.vals[v.0]);
+            // Split by SEQUENCE. Sequence `s` reads and writes only its own
+            // `seq` rows of q/k/v/out, so the workers are disjoint without
+            // any coordination — and a token still cannot see another
+            // example's tokens, which is the property the whole block
+            // exists to preserve.
+            let work = |s: usize, oblk: &mut [f32]| {
+                attn_forward_seq(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale);
+            };
+            if nseq > 1 && rows * nh * hd >= PAR_MIN {
+                use rayon::prelude::*;
+                out.par_chunks_mut(seq * nh * hd).enumerate()
+                    .for_each(|(s, oblk)| work(s, oblk));
+            } else {
+                out.chunks_mut(seq * nh * hd).enumerate()
+                    .for_each(|(s, oblk)| work(s, oblk));
+            }
+        }
+        let req = self.requires[q.0] || self.requires[k.0] || self.requires[v.0];
+        self.push(out, Op::Attention { q, k, v, nseq, seq, nh, nkv, hd, scale }, req)
+    }
+
     pub fn sum_all(&mut self, x: Var) -> Var {
         let s: f32 = self.vals[x.0].iter().sum();
         let req = self.requires[x.0];
@@ -314,8 +420,41 @@ impl Tape {
     /// `requires_grad` leaves. `loss` must be a length-1 node.
     pub fn backward(&mut self, loss: Var) {
         assert_eq!(self.vals[loss.0].len(), 1, "backward() expects a scalar loss");
-        for g in self.grads.iter_mut() { for x in g.iter_mut() { *x = 0.0; } }
-        self.grads[loss.0][0] = 1.0;
+        self.backward_from(loss, &[1.0]);
+    }
+
+    /// Seed an output of ANY shape with a supplied gradient and propagate.
+    ///
+    /// This is PyTorch's `y.backward(g)`. Training uses [`Tape::backward`] —
+    /// a scalar loss seeded with 1 — but a BENCHMARK of one op must not
+    /// have to invent a scalar to get a gradient flowing. LMO-1 used to
+    /// build `mul(x, g)` then `sum_all` for that, which put an extra
+    /// elementwise multiply, an extra leaf, a reduction and their backwards
+    /// on R2's side of a comparison whose other side was a bare
+    /// `.backward(g)`. That tail measured ~4 ms of a ~6.6 ms reading: the
+    /// benchmark was reporting R2's harness, not R2's embedding.
+    ///
+    /// `seed` must match `v`'s length.
+    pub fn backward_from(&mut self, v: Var, seed: &[f32]) {
+        assert_eq!(self.vals[v.0].len(), seed.len(),
+                   "backward_from: seed is {} long, node is {}",
+                   seed.len(), self.vals[v.0].len());
+        // `fill` is a memset; the scalar loop this replaces was not always
+        // recognised as one. Big buffers get threaded: at vocab 8,000 this
+        // blanket zeroing measured 1,569 us on a FIVE-node tape, and it
+        // scales with the whole model's tape rather than with the op being
+        // differentiated. (PyTorch has no equivalent step at all — its
+        // gradients are freshly-allocated outputs and `w.grad = None` lets
+        // AccumulateGrad take ownership. Removing this loop rather than
+        // speeding it up is the real fix and is a tape-wide change; see
+        // LMO-1's notes.)
+        // SERIAL, deliberately. Threading this was tried and measured
+        // WORSE: a fork-join per gradient buffer, on a tape with hundreds
+        // of them, costs more than a memset over a shared memory
+        // controller can win back (187.5 s -> 191.5 s on the 30-step
+        // BPE arm). `perf-measurement-law` again: the join is the cost.
+        for gb in self.grads.iter_mut() { gb.fill(0.0); }
+        self.grads[v.0].copy_from_slice(seed);
 
         // Nodes were pushed in topological order → reverse index order is
         // a valid reverse-topological walk.
@@ -331,14 +470,35 @@ impl Tape {
                 Op::Leaf => {}
                 Op::Add(a, b) => {
                     let (a, b) = (a.0, b.0);
-                    for (ga, gi) in self.grads[a].iter_mut().zip(&g) { *ga += gi; }
-                    for (gb, gi) in self.grads[b].iter_mut().zip(&g) { *gb += gi; }
+                    if self.requires[a] {
+                        for (ga, gi) in self.grads[a].iter_mut().zip(&g) { *ga += gi; }
+                    }
+                    if self.requires[b] {
+                        for (gb, gi) in self.grads[b].iter_mut().zip(&g) { *gb += gi; }
+                    }
                 }
                 Op::Mul(a, b) => {
                     let (a, b) = (a.0, b.0);
-                    let (va, vb) = (self.vals[a].clone(), self.vals[b].clone());
-                    for (ga, (gi, vbi)) in self.grads[a].iter_mut().zip(g.iter().zip(&vb)) { *ga += gi * vbi; }
-                    for (gb, (gi, vai)) in self.grads[b].iter_mut().zip(g.iter().zip(&va)) { *gb += gi * vai; }
+                    // `vals` and `grads` are DISJOINT fields, so borrow them
+                    // as such instead of cloning both operands — the same
+                    // trick the MatMul arm already uses. Those two clones
+                    // were a full copy of each input on every backward
+                    // (2 MB each at 2,048 tokens x dim 256).
+                    //
+                    // The `requires` guards skip a side whose subtree holds
+                    // no parameter at all. A constant multiplier — an
+                    // attention mask, an upstream gradient fed in as data —
+                    // was getting a full gradient computed into a buffer
+                    // nothing would ever read.
+                    let Tape { vals, grads, requires, .. } = self;
+                    if requires[a] {
+                        let vb = &vals[b];
+                        for (ga, (gi, vbi)) in grads[a].iter_mut().zip(g.iter().zip(vb)) { *ga += gi * vbi; }
+                    }
+                    if requires[b] {
+                        let va = &vals[a];
+                        for (gb, (gi, vai)) in grads[b].iter_mut().zip(g.iter().zip(va)) { *gb += gi * vai; }
+                    }
                 }
                 Op::Embed { table, tokens, d } => {
                     // The adjoint of a gather is a SCATTER-ADD. `+=`, never
@@ -348,16 +508,68 @@ impl Tape {
                     let (ti, d) = (table.0, *d);
                     if self.requires[ti] {
                         let gt = &mut self.grads[ti];
-                        for (i, &tok) in tokens.iter().enumerate() {
-                            let dst = &mut gt[tok * d..tok * d + d];
-                            for (o, s) in dst.iter_mut().zip(&g[i * d..i * d + d]) {
-                                *o += s;
+                        // Threading a scatter-add needs care: two tokens can
+                        // hit the SAME row, so splitting the tokens across
+                        // workers would race. Split the TABLE instead — each
+                        // worker owns a disjoint block of rows and scans the
+                        // token list for the ones landing in it. No locks, no
+                        // atomics, and because each row's contributions are
+                        // still applied in ascending token order the result is
+                        // BIT-IDENTICAL to the serial loop; float addition is
+                        // not associative, so anything less would make the
+                        // gradient depend on the thread count.
+                        //
+                        // The redundant scan is `threads * tokens` integer
+                        // compares — 12k at 2,048 tokens — against a copy of
+                        // `tokens * d` floats. Measured at vocab 8,000:
+                        // 1,293 us serial, 519 us on six threads, versus
+                        // PyTorch's `embedding_dense_backward` at 336 us
+                        // threaded and 1,541 us on one thread.
+                        let nthreads = rayon::current_num_threads();
+                        if tokens.len() * d >= PAR_MIN && nthreads > 1 {
+                            use rayon::prelude::*;
+                            let vocab = gt.len() / d;
+                            let rows_per = vocab.div_ceil(nthreads);
+                            gt.par_chunks_mut(rows_per * d).enumerate()
+                                .for_each(|(w, blk)| {
+                                    let lo = w * rows_per;
+                                    let hi = lo + blk.len() / d;
+                                    for (i, &tok) in tokens.iter().enumerate() {
+                                        if tok >= lo && tok < hi {
+                                            let off = (tok - lo) * d;
+                                            for (o, s) in blk[off..off + d].iter_mut()
+                                                .zip(&g[i * d..i * d + d]) { *o += s; }
+                                        }
+                                    }
+                                });
+                        } else {
+                            for (i, &tok) in tokens.iter().enumerate() {
+                                let dst = &mut gt[tok * d..tok * d + d];
+                                for (o, s) in dst.iter_mut().zip(&g[i * d..i * d + d]) {
+                                    *o += s;
+                                }
                             }
                         }
                     }
                 }
                 Op::MatMul { a, b, m, k, n } => {
                     let (ai, bi, m, k, n) = (a.0, b.0, *m, *k, *n);
+                    // Neither gradient is worth computing into a subtree
+                    // that holds no parameter. This is not a micro-saving:
+                    // the one-hot embedding form is `matmul(onehot, table)`
+                    // with `requires(onehot) == false`, and grad_A there is
+                    // `g . tableT` — a t x vocab matrix costing
+                    // 2*t*vocab*d = 8.4 GFLOP at 2,048 tokens and vocab
+                    // 8,000, roughly HALF that path's 658 ms, written into a
+                    // buffer nothing reads. Every frozen input — embedded
+                    // constants, a masked score matrix, a distillation
+                    // teacher's activations — gets the same relief.
+                    // NB: no early `continue` here — the end of this loop
+                    // body hands `g` back to `self.grads[i]`, and skipping
+                    // that leaves the node's gradient an empty Vec. The two
+                    // guards below skip the work without skipping the
+                    // hand-back.
+                    let (need_a, need_b) = (self.requires[ai], self.requires[bi]);
 
                     // Backward is ~2/3 of training FLOPs. When the Oracle
                     // routes this shape to the GPU, express both gradients
@@ -373,62 +585,58 @@ impl Tape {
                                             r2_oracle::Shape::nmk(m, n, k)),
                         r2_oracle::Backend::Gpu)
                     {
-                        let bt = transpose_of(&self.vals[bi], k, n);   // n×k
-                        let ga = r2_tensor::ops::matmul(&g, &bt, m, n, k);
-                        for (dst, v) in self.grads[ai].iter_mut().zip(&ga) { *dst += v; }
-
-                        let at = transpose_of(&self.vals[ai], m, k);   // k×m
-                        let gb = r2_tensor::ops::matmul(&at, &g, k, m, n);
-                        for (dst, v) in self.grads[bi].iter_mut().zip(&gb) { *dst += v; }
+                        if need_a {
+                            let bt = transpose_of(&self.vals[bi], k, n);   // n×k
+                            let ga = r2_tensor::ops::matmul(&g, &bt, m, n, k);
+                            for (dst, v) in self.grads[ai].iter_mut().zip(&ga) { *dst += v; }
+                        }
+                        if need_b {
+                            let at = transpose_of(&self.vals[ai], m, k);   // k×m
+                            let gb = r2_tensor::ops::matmul(&at, &g, k, m, n);
+                            for (dst, v) in self.grads[bi].iter_mut().zip(&gb) { *dst += v; }
+                        }
+                        // Hand the buffer back before skipping the rest —
+                        // `continue` used to jump over the assignment at the
+                        // bottom of the loop, leaving this node's gradient an
+                        // EMPTY Vec. A second `backward()` on the same tape
+                        // then read zero gradient out of it, and `grad()`
+                        // returned an empty slice, both silently.
+                        self.grads[i] = g;
                         continue;
                     }
-                    // Borrow vals and grads as DISJOINT fields. The obvious
-                    // `self.vals[ai].clone()` copies the whole weight matrix
-                    // on every backward — for a 768×256 projection that is a
-                    // 768 KB allocation per step per layer, and it dominated
-                    // the profile. Splitting the struct borrow removes it.
-                    let Tape { vals, grads, .. } = self;
-                    // grad_A(m×k) = g(m×n) · Bᵀ(n×k) — inner loop contiguous
-                    // in both g and B.
-                    {
-                        use rayon::prelude::*;
-                        let vb = &vals[bi];
-                        let ga = &mut grads[ai];
-                        // Each output row depends only on its own row of g,
-                        // so rows split cleanly across cores.
-                        let work = |i2: usize, arow: &mut [f32]| {
-                            let grow = &g[i2 * n..i2 * n + n];
-                            for p in 0..k {
-                                let brow = &vb[p * n..p * n + n];
-                                let mut acc = 0.0f32;
-                                for j in 0..n { acc += grow[j] * brow[j]; }
-                                arow[p] += acc;
-                            }
-                        };
-                        if m * k * n >= 1 << 15 {
-                            ga.par_chunks_mut(k).enumerate()
-                                .for_each(|(i2, arow)| work(i2, arow));
-                        } else {
-                            ga.chunks_mut(k).enumerate()
-                                .for_each(|(i2, arow)| work(i2, arow));
-                        }
-                    }
+                    // grad_A(m×k) = g(m×n) · Bᵀ(n×k) and
                     // grad_B(k×n) = Aᵀ(k×m) · g(m×n).
-                    // Written i-p-j, NOT p-j-i: the latter strides both A and
-                    // g on every inner step and misses cache constantly. Here
-                    // the inner loop walks g and grad_B contiguously.
-                    {
-                        let va = &vals[ai];
-                        let gb = &mut grads[bi];
-                        for i2 in 0..m {
-                            let grow = &g[i2 * n..i2 * n + n];
-                            for p in 0..k {
-                                let aip = va[i2 * k + p];
-                                if aip == 0.0 { continue; }
-                                let brow = &mut gb[p * n..p * n + n];
-                                for j in 0..n { brow[j] += aip * grow[j]; }
-                            }
-                        }
+                    //
+                    // These are the NT and TN cases of one GEMM, and they
+                    // are now CALLS to it rather than two hand-written
+                    // loop nests. What was here before was ~200 lines of
+                    // blocking-free triple loops, and it showed: measured
+                    // against the best of PyTorch and JAX on the shapes
+                    // this model runs, grad_A was 12.6-25.4x behind and
+                    // grad_B 3.0-14.6x. On the output-head shape alone,
+                    // grad_A took 676 ms and grad_B 465 ms, against 77 ms
+                    // and 110 ms for the same arithmetic through `gemm`.
+                    //
+                    // Neither transpose is materialised. `gemm`'s packing
+                    // pass already moves every element, so it reads the
+                    // operand transposed for free — which is why
+                    // `REPORT.md` records materialising them as a
+                    // REJECTED attempt at 393 ms against 326.
+                    use r2_linalg::gemm::{sgemm_into as gemm_into, Trans};
+                    let par = m * k * n >= PAR_MIN;
+                    if need_a {
+                        // (M, K, N) = (m, n, k); B is stored k×n, which IS
+                        // the N×K the transposed read wants.
+                        let Tape { vals, grads, .. } = self;
+                        gemm_into(&g, Trans::No, &vals[bi], Trans::Yes,
+                                  m, n, k, &mut grads[ai], par);
+                    }
+                    if need_b {
+                        // (M, K, N) = (k, m, n); A is stored m×k, which IS
+                        // the K×M the transposed read wants.
+                        let Tape { vals, grads, .. } = self;
+                        gemm_into(&vals[ai], Trans::Yes, &g, Trans::No,
+                                  k, m, n, &mut grads[bi], par);
                     }
                 }
                 Op::Silu(x) => {
@@ -448,10 +656,10 @@ impl Tape {
                     for r in 0..rows {
                         let xr = &vx[r * d..r * d + d];
                         let gr = &g[r * d..r * d + d];
-                        let ms = xr.iter().map(|v| v * v).sum::<f32>() / d as f32;
+                        let ms = r2_tensor::ops::sum_sq4(xr) / d as f32;
                         let rinv = 1.0 / (ms + eps).sqrt();
                         // s = Σ_j g_j w_j x_j
-                        let s: f32 = (0..d).map(|j| gr[j] * vw[j] * xr[j]).sum();
+                        let s = r2_tensor::ops::dot3_4(gr, &vw, xr);
                         let coef = rinv * rinv * rinv / d as f32;
                         for j in 0..d {
                             // dL/dx_i = g_i w_i r  -  r³ x_i/d * s
@@ -537,10 +745,66 @@ impl Tape {
                         let yr = &y[r * d..r * d + d];
                         let gr = &g[r * d..r * d + d];
                         // dot = Σ_j g_j y_j ; dL/dx_i = y_i (g_i − dot)
-                        let dot: f32 = (0..d).map(|j| gr[j] * yr[j]).sum();
+                        let dot = dot4(gr, yr);
                         for j in 0..d {
                             self.grads[xi][r * d + j] += yr[j] * (gr[j] - dot);
                         }
+                    }
+                }
+                Op::Attention { q, k, v, nseq, seq, nh, nkv, hd, scale } => {
+                    let (qi, ki, vi) = (q.0, k.0, v.0);
+                    let (nseq, seq, nh, nkv, hd, scale) =
+                        (*nseq, *seq, *nh, *nkv, *hd, *scale);
+                    let rows = nseq * seq;
+                    let (need_q, need_k, need_v) =
+                        (self.requires[qi], self.requires[ki], self.requires[vi]);
+                    if need_q || need_k || need_v {
+                        // The probabilities are RECOMPUTED rather than
+                        // stored. Storing them costs nseq*nh*seq*seq floats
+                        // — 2 MB at the shipping shape and quadratic in the
+                        // context — for one saved QK pass. Recompute is
+                        // what flash-attention does and for the same
+                        // reason: the memory is worth more than the flops.
+                        //
+                        // Accumulate into local buffers, then add into the
+                        // tape's gradients. Three entries of `self.grads`
+                        // cannot be borrowed mutably at once, and the adds
+                        // are O(size) against an O(nseq*nh*seq^2*hd)
+                        // backward.
+                        let mut gq = vec![0.0f32; rows * nh * hd];
+                        let mut gk = vec![0.0f32; rows * nkv * hd];
+                        let mut gv = vec![0.0f32; rows * nkv * hd];
+                        {
+                            let (vq, vk, vv) = (&self.vals[qi], &self.vals[ki], &self.vals[vi]);
+                            // Same disjoint-by-sequence split as the
+                            // forward. Within a worker the query heads run
+                            // in order, so several heads sharing one kv
+                            // head accumulate into it serially — grouped
+                            // query attention needs that and it is free
+                            // here.
+                            let work = |s: usize, gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32]| {
+                                attn_backward_seq(vq, vk, vv, &g, gqb, gkb, gvb,
+                                                  s, seq, nh, nkv, hd, scale);
+                            };
+                            if nseq > 1 && rows * nh * hd >= PAR_MIN {
+                                use rayon::prelude::*;
+                                gq.par_chunks_mut(seq * nh * hd)
+                                    .zip(gk.par_chunks_mut(seq * nkv * hd))
+                                    .zip(gv.par_chunks_mut(seq * nkv * hd))
+                                    .enumerate()
+                                    .for_each(|(s, ((gqb, gkb), gvb))| work(s, gqb, gkb, gvb));
+                            } else {
+                                for s in 0..nseq {
+                                    let (a, b, c) = (seq * nh * hd, seq * nkv * hd, seq * nkv * hd);
+                                    work(s, &mut gq[s * a..(s + 1) * a],
+                                         &mut gk[s * b..(s + 1) * b],
+                                         &mut gv[s * c..(s + 1) * c]);
+                                }
+                            }
+                        }
+                        if need_q { for (d, x) in self.grads[qi].iter_mut().zip(&gq) { *d += x; } }
+                        if need_k { for (d, x) in self.grads[ki].iter_mut().zip(&gk) { *d += x; } }
+                        if need_v { for (d, x) in self.grads[vi].iter_mut().zip(&gv) { *d += x; } }
                     }
                 }
                 Op::SumAll(x) => {
@@ -599,6 +863,167 @@ pub fn finite_diff<F: Fn(&[f32]) -> f32>(params: &[f32], f: F) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build attention the OLD way — slice, transpose, matmul, mask,
+    /// softmax, matmul, concat — exactly as `llm.rs::forward_fused` did
+    /// before `Op::Attention` existed. The fused op has to agree with this
+    /// or it is not a refactor, it is a different model.
+    #[allow(clippy::too_many_arguments)]
+    fn attention_decomposed(tape: &mut Tape, q: Var, k: Var, v: Var, nseq: usize,
+                            seq: usize, nh: usize, nkv: usize, hd: usize) -> Var {
+        let group = nh / nkv;
+        let mut seq_ctx: Vec<Var> = Vec::with_capacity(nseq);
+        for s in 0..nseq {
+            let (q_s, k_s, v_s) = if nseq == 1 {
+                (q, k, v)
+            } else {
+                (tape.slice_rows(q, nh * hd, s * seq, seq),
+                 tape.slice_rows(k, nkv * hd, s * seq, seq),
+                 tape.slice_rows(v, nkv * hd, s * seq, seq))
+            };
+            let mut heads: Vec<Var> = Vec::with_capacity(nh);
+            for qh in 0..nh {
+                let kvh = qh / group;
+                let qs = tape.slice_cols(q_s, seq, nh * hd, qh * hd, hd);
+                let ks = tape.slice_cols(k_s, seq, nkv * hd, kvh * hd, hd);
+                let vs = tape.slice_cols(v_s, seq, nkv * hd, kvh * hd, hd);
+                let kt = tape.transpose(ks, seq, hd);
+                let sc = tape.matmul(qs, kt, seq, hd, seq);
+                let sc = tape.scale_mask_causal(sc, seq, 1.0 / (hd as f32).sqrt());
+                let at = tape.softmax_rows(sc, seq);
+                heads.push(tape.matmul(at, vs, seq, seq, hd));
+            }
+            seq_ctx.push(tape.concat_cols(&heads, seq, hd));
+        }
+        if nseq == 1 { seq_ctx[0] } else { tape.concat_rows(&seq_ctx) }
+    }
+
+    /// The fused op must compute the SAME function as the decomposition it
+    /// replaces — value and all three gradients — or the 1,156 tape nodes
+    /// it deletes were carrying meaning.
+    ///
+    /// Tolerance is f32 rounding, not equality: the fused form sums over
+    /// `j <= i` while the decomposition softmaxes a full row containing
+    /// `-inf`, so the two do the same arithmetic in a different order.
+    #[test]
+    fn attention_matches_the_decomposition() {
+        for &(nseq, seq, nh, nkv, hd) in &[
+            (1usize, 4usize, 2usize, 1usize, 4usize),   // MQA, one sequence
+            (3, 5, 4, 2, 6),                            // GQA, ragged-ish
+            (2, 6, 3, 3, 4),                            // MHA, no grouping
+        ] {
+            let rows = nseq * seq;
+            let mk = |n: usize, ph: f32| -> Vec<f32> {
+                (0..n).map(|i| ((i as f32) * 0.37 + ph).sin() * 0.8).collect()
+            };
+            let (qv, kv_, vv) = (mk(rows * nh * hd, 0.0), mk(rows * nkv * hd, 1.3),
+                                 mk(rows * nkv * hd, 2.7));
+            let g = mk(rows * nh * hd, 0.9);
+            let scale = 1.0 / (hd as f32).sqrt();
+
+            let mut ta = Tape::new();
+            let (qa, ka, va) = (ta.leaf(qv.clone(), true), ta.leaf(kv_.clone(), true),
+                                ta.leaf(vv.clone(), true));
+            let oa = ta.attention(qa, ka, va, nseq, seq, nh, nkv, hd, scale);
+            ta.backward_from(oa, &g);
+
+            let mut tb = Tape::new();
+            let (qb, kb, vb) = (tb.leaf(qv.clone(), true), tb.leaf(kv_.clone(), true),
+                                tb.leaf(vv.clone(), true));
+            let ob = attention_decomposed(&mut tb, qb, kb, vb, nseq, seq, nh, nkv, hd);
+            tb.backward_from(ob, &g);
+
+            let close = |a: &[f32], b: &[f32], what: &str| {
+                assert_eq!(a.len(), b.len(), "{what}: length differs");
+                for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                    assert!((x - y).abs() <= 2e-5 * (1.0 + y.abs()),
+                            "{what}[{i}] fused {x} vs decomposed {y} \
+                             (nseq {nseq} seq {seq} nh {nh} nkv {nkv} hd {hd})");
+                }
+            };
+            close(ta.value(oa), tb.value(ob), "value");
+            close(ta.grad(qa), tb.grad(qb), "grad_q");
+            close(ta.grad(ka), tb.grad(kb), "grad_k");
+            close(ta.grad(va), tb.grad(vb), "grad_v");
+        }
+    }
+
+    /// And it must pass the same finite-difference gate as every other op,
+    /// independently of the decomposition — if both were wrong the test
+    /// above would still pass.
+    #[test]
+    fn attention_gradient_matches_finite_difference() {
+        let (nseq, seq, nh, nkv, hd) = (2usize, 4usize, 2usize, 1usize, 3usize);
+        let rows = nseq * seq;
+        let scale = 1.0 / (hd as f32).sqrt();
+        let mk = |n: usize, ph: f32| -> Vec<f32> {
+            (0..n).map(|i| ((i as f32) * 0.41 + ph).sin() * 0.7).collect()
+        };
+        let kv_ = mk(rows * nkv * hd, 1.1);
+        let vv = mk(rows * nkv * hd, 2.2);
+        // Differentiate w.r.t. q, with k and v fixed: a scalar loss so
+        // finite differences apply.
+        let qv = mk(rows * nh * hd, 0.0);
+        check_grad(&qv, |t: &mut Tape, p: &[f32]| {
+            let q = t.leaf(p.to_vec(), true);
+            let k = t.leaf(kv_.clone(), false);
+            let v = t.leaf(vv.clone(), false);
+            let o = t.attention(q, k, v, nseq, seq, nh, nkv, hd, scale);
+            let l = t.sum_all(o);
+            (q, l)
+        });
+        // And w.r.t. v, which reaches the loss by a different path.
+        check_grad(&vv, |t: &mut Tape, p: &[f32]| {
+            let q = t.leaf(qv.clone(), false);
+            let k = t.leaf(kv_.clone(), false);
+            let v = t.leaf(p.to_vec(), true);
+            let o = t.attention(q, k, v, nseq, seq, nh, nkv, hd, scale);
+            let l = t.sum_all(o);
+            (v, l)
+        });
+    }
+
+    /// A token must not see its future. Perturbing position `i` of k or v
+    /// may change outputs at positions >= i and must leave every earlier
+    /// position bit-identical — the causal mask is the one property whose
+    /// failure trains a model that cheats and still looks healthy.
+    #[test]
+    fn attention_is_causal() {
+        let (nseq, seq, nh, nkv, hd) = (1usize, 6usize, 2usize, 1usize, 4usize);
+        let rows = nseq * seq;
+        let scale = 1.0 / (hd as f32).sqrt();
+        let mk = |n: usize, ph: f32| -> Vec<f32> {
+            (0..n).map(|i| ((i as f32) * 0.29 + ph).sin()).collect()
+        };
+        let qv = mk(rows * nh * hd, 0.0);
+        let kv_ = mk(rows * nkv * hd, 1.0);
+        let vv = mk(rows * nkv * hd, 2.0);
+        let run = |k: &[f32], v: &[f32]| -> Vec<f32> {
+            let mut t = Tape::new();
+            let (a, b, c) = (t.leaf(qv.clone(), false), t.leaf(k.to_vec(), false),
+                             t.leaf(v.to_vec(), false));
+            let o = t.attention(a, b, c, nseq, seq, nh, nkv, hd, scale);
+            t.value(o).to_vec()
+        };
+        let base = run(&kv_, &vv);
+        for pos in 1..seq {
+            let mut k2 = kv_.clone();
+            let mut v2 = vv.clone();
+            for c in 0..nkv * hd {
+                k2[pos * nkv * hd + c] += 3.0;
+                v2[pos * nkv * hd + c] += 3.0;
+            }
+            let got = run(&k2, &v2);
+            for i in 0..pos {
+                for c in 0..nh * hd {
+                    let (a, b) = (base[i * nh * hd + c], got[i * nh * hd + c]);
+                    assert_eq!(a, b,
+                        "changing position {pos} changed output at EARLIER position {i} \
+                         (col {c}): {a} -> {b}. Attention is not causal.");
+                }
+            }
+        }
+    }
 
     /// Assert analytic grad (from a fresh tape built by `build`) matches
     /// the finite-difference grad of the same scalar function.
@@ -804,6 +1229,299 @@ mod rope_tests {
         }
         assert_eq!(out, want, "training RoPE must equal the inference RoPE exactly");
     }
+}
+
+/// Dot product with four independent accumulators — see the note beside
+/// the same helpers in `r2_tensor::ops`, which is where the shared copies
+/// live.
+///
+/// This one is deliberately LOCAL rather than imported from there. It is
+/// called from inside `#[target_feature(enable = "avx2")]` kernels, and a
+/// function defined in another crate is not reliably inlined across that
+/// boundary — when it is not, the hottest loop in attention silently loses
+/// the wide codegen it was given. Measured: importing it cost the training
+/// step 31.05 -> 33.29 s, with no other change.
+#[inline(always)]
+fn dot4(x: &[f32], y: &[f32]) -> f32 {
+    let n = x.len().min(y.len());
+    let mut a = [0.0f32; 4];
+    let full = n - n % 4;
+    let mut i = 0;
+    while i < full {
+        a[0] += x[i] * y[i];
+        a[1] += x[i + 1] * y[i + 1];
+        a[2] += x[i + 2] * y[i + 2];
+        a[3] += x[i + 3] * y[i + 3];
+        i += 4;
+    }
+    let mut t = 0.0f32;
+    while i < n { t += x[i] * y[i]; i += 1; }
+    (a[0] + a[1]) + (a[2] + a[3]) + t
+}
+
+/// Is the wide kernel usable here? Resolved once per process.
+///
+/// The workspace sets no `target-cpu`, so this crate compiles for baseline
+/// x86-64 — SSE2, and no FMA. `r2_linalg::gemm` already dispatches an
+/// AVX2 micro-kernel at runtime for exactly this reason and gained 4x from
+/// it; the attention kernels had been left on the baseline path.
+#[inline]
+fn have_avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::sync::OnceLock;
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| {
+            std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+        })
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// One sequence of fused causal attention, forward — flash-style.
+///
+/// `oblk` is that sequence's `seq x (nh*hd)` slice of the output; `vq`,
+/// `vk`, `vv` are the WHOLE tensors and `s` selects the rows. Reading the
+/// full tensors rather than slices of them is the point of the op: a slice
+/// would be a copy.
+///
+/// # Why it is blocked and why the softmax is online
+///
+/// The straightforward form walks one query at a time: compute its whole
+/// score row, find the max, exponentiate, normalise, then accumulate the
+/// output. That is three passes over the row, and — the expensive part —
+/// EVERY query re-reads all of K and all of V. Per head-pass that is
+/// `seq^2 * hd` element reads; at seq 64, hd 64 it is 1 MB per head-pass
+/// and 134 MB for one attention block.
+///
+/// Blocking the queries fixes the traffic: a `BC`-wide block of K and V is
+/// loaded once and used by `BR` queries, so K/V traffic falls by `BR`.
+/// What makes that legal is the ONLINE softmax (Milakov & Gimelshein; the
+/// same identity flash-attention is built on) — a running max `m` and
+/// running denominator `l` per query, with the accumulator rescaled by
+/// `exp(m_old - m_new)` whenever a block raises the max:
+///
+/// ```text
+///   m' = max(m, max(block))
+///   acc = acc * exp(m - m')  +  Σ_j exp(s_j - m') · v_j
+///   l   = l   * exp(m - m')  +  Σ_j exp(s_j - m')
+/// ```
+///
+/// so the result is the ordinary softmax, computed in one pass over the
+/// keys with nothing quadratic ever materialised.
+///
+/// The causal mask is structural, not a `-inf` fill: key blocks entirely
+/// above the diagonal are never visited, and only the diagonal block needs
+/// a per-element check. A token cannot read its future because the loop
+/// bound stops it, not because a large negative number was added.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn attn_forward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
+                    s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
+    /// Queries per block: how many times each loaded K/V block is reused.
+    const BR: usize = 4;
+    /// Keys per block.
+    const BC: usize = 64;
+
+    let group = nh / nkv;
+    let (qw, kw) = (nh * hd, nkv * hd);
+    let base = s * seq;
+    // Scratch, allocated once for the whole sequence rather than per tile.
+    let mut acc = vec![0.0f32; BR * hd];
+    let mut sc = vec![0.0f32; BR * BC];
+    let mut mrun = [0.0f32; BR];
+    let mut lrun = [0.0f32; BR];
+
+    for qh in 0..nh {
+        let kvh = qh / group;
+        for i0 in (0..seq).step_by(BR) {
+            let br = BR.min(seq - i0);
+            for x in acc[..br * hd].iter_mut() { *x = 0.0; }
+            for ii in 0..br { mrun[ii] = f32::NEG_INFINITY; lrun[ii] = 0.0; }
+            // Causality: the last query in this block is the furthest one
+            // that can see anything, so keys beyond it are never touched.
+            let jmax = i0 + br - 1;
+
+            for j0 in (0..=jmax).step_by(BC) {
+                let bc = BC.min(jmax + 1 - j0);
+                // ── scores for this tile ──
+                for ii in 0..br {
+                    let qi = i0 + ii;
+                    let qoff = (base + qi) * qw + qh * hd;
+                    let qrow = &vq[qoff..qoff + hd];
+                    for jj in 0..bc {
+                        let j = j0 + jj;
+                        sc[ii * BC + jj] = if j > qi {
+                            f32::NEG_INFINITY
+                        } else {
+                            let koff = (base + j) * kw + kvh * hd;
+                            dot4(qrow, &vk[koff..koff + hd]) * scale
+                        };
+                    }
+                }
+                // ── online softmax update, per query in the block ──
+                for ii in 0..br {
+                    let row = &sc[ii * BC..ii * BC + bc];
+                    let mut mb = f32::NEG_INFINITY;
+                    for &x in row { if x > mb { mb = x; } }
+                    if mb == f32::NEG_INFINITY { continue; }  // wholly masked
+                    let mnew = if mrun[ii] > mb { mrun[ii] } else { mb };
+                    // Rescale what is already accumulated onto the new max.
+                    // exp(-inf) == 0, which is exactly right on the first
+                    // block, where acc and l are zero anyway.
+                    let corr = (mrun[ii] - mnew).exp();
+                    if corr != 1.0 {
+                        let a = &mut acc[ii * hd..ii * hd + hd];
+                        for x in a.iter_mut() { *x *= corr; }
+                        lrun[ii] *= corr;
+                    }
+                    let a = &mut acc[ii * hd..ii * hd + hd];
+                    for jj in 0..bc {
+                        let x = row[jj];
+                        if x == f32::NEG_INFINITY { continue; }
+                        let e = (x - mnew).exp();
+                        lrun[ii] += e;
+                        let voff = (base + j0 + jj) * kw + kvh * hd;
+                        let vrow = &vv[voff..voff + hd];
+                        for c in 0..hd { a[c] += e * vrow[c]; }
+                    }
+                    mrun[ii] = mnew;
+                }
+            }
+            // ── normalise and write out ──
+            for ii in 0..br {
+                let inv = 1.0 / lrun[ii];
+                let src = &acc[ii * hd..ii * hd + hd];
+                let dst = &mut oblk[(i0 + ii) * qw + qh * hd..(i0 + ii) * qw + qh * hd + hd];
+                for (d, v) in dst.iter_mut().zip(src) { *d = v * inv; }
+            }
+        }
+    }
+}
+
+/// One sequence of fused causal attention, backward.
+///
+/// `d out[i] = Σ_j p[i,j] v[j]` gives, with `s[i,j] = scale · q[i]·k[j]`:
+///
+/// ```text
+/// grad_v[j] += Σ_i p[i,j] g[i]
+/// grad_p[i,j] = g[i]·v[j]
+/// grad_s[i,j] = p[i,j] (grad_p[i,j] − Σ_l p[i,l] grad_p[i,l])   (softmax)
+/// grad_q[i] += scale Σ_j grad_s[i,j] k[j]
+/// grad_k[j] += scale Σ_i grad_s[i,j] q[i]
+/// ```
+///
+/// Masked positions (`j > i`) never enter any sum, which is what stops a
+/// token receiving gradient from its future.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
+                     gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
+                     s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
+    let group = nh / nkv;
+    let (qw, kw) = (nh * hd, nkv * hd);
+    let base = s * seq;
+    let mut p = vec![0.0f32; seq];
+    let mut gs = vec![0.0f32; seq];
+    for qh in 0..nh {
+        let kvh = qh / group;
+        for i in 0..seq {
+            let qoff = (base + i) * qw + qh * hd;
+            let qrow = &vq[qoff..qoff + hd];
+            // ── recompute p[i, 0..=i] ──
+            let mut m = f32::NEG_INFINITY;
+            for j in 0..=i {
+                let koff = (base + j) * kw + kvh * hd;
+                let x = dot4(qrow, &vk[koff..koff + hd]) * scale;
+                p[j] = x;
+                if x > m { m = x; }
+            }
+            let mut sum = 0.0f32;
+            for j in 0..=i { let e = (p[j] - m).exp(); p[j] = e; sum += e; }
+            let inv = 1.0 / sum;
+            for j in 0..=i { p[j] *= inv; }
+
+            let grow = &g[qoff..qoff + hd];
+            // ── grad_p, its softmax pullback, and grad_v in one pass ──
+            let mut dot = 0.0f32;
+            for j in 0..=i {
+                let voff = (base + j) * kw + kvh * hd;
+                let gp = dot4(grow, &vv[voff..voff + hd]);
+                gs[j] = gp;
+                dot += p[j] * gp;
+                // grad_v[j] += p[i,j] * g[i]
+                let gvo = j * kw + kvh * hd;
+                for c in 0..hd { gvb[gvo + c] += p[j] * grow[c]; }
+            }
+            // ── grad_s, then grad_q and grad_k ──
+            let gqo = i * qw + qh * hd;
+            for j in 0..=i {
+                let d = p[j] * (gs[j] - dot) * scale;
+                if d == 0.0 { continue; }
+                let koff = (base + j) * kw + kvh * hd;
+                let gko = j * kw + kvh * hd;
+                for c in 0..hd {
+                    gqb[gqo + c] += d * vk[koff + c];
+                    gkb[gko + c] += d * qrow[c];
+                }
+            }
+        }
+    }
+}
+
+/// AVX2+FMA build of the forward kernel.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn attn_forward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
+                                s: usize, seq: usize, nh: usize, nkv: usize,
+                                hd: usize, scale: f32) {
+    attn_forward_seq_impl(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale)
+}
+
+/// AVX2+FMA build of the backward kernel.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn attn_backward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
+                                 gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
+                                 s: usize, seq: usize, nh: usize, nkv: usize,
+                                 hd: usize, scale: f32) {
+    attn_backward_seq_impl(vq, vk, vv, g, gqb, gkb, gvb, s, seq, nh, nkv, hd, scale)
+}
+
+/// Dispatch. The branch is per SEQUENCE, not per element.
+#[allow(clippy::too_many_arguments)]
+fn attn_forward_seq(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
+                    s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if have_avx2() {
+        // SAFETY: guarded by the runtime feature check; the callee's body
+        // is the same safe code, compiled with wider instructions.
+        unsafe { attn_forward_seq_avx2(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale) };
+        return;
+    }
+    attn_forward_seq_impl(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attn_backward_seq(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
+                     gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
+                     s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if have_avx2() {
+        // SAFETY: as above.
+        unsafe {
+            attn_backward_seq_avx2(vq, vk, vv, g, gqb, gkb, gvb,
+                                   s, seq, nh, nkv, hd, scale)
+        };
+        return;
+    }
+    attn_backward_seq_impl(vq, vk, vv, g, gqb, gkb, gvb, s, seq, nh, nkv, hd, scale)
 }
 
 /// Transpose a row-major `rows × cols` matrix. Used by the GPU backward

@@ -6,6 +6,47 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
+## v0.3.9 (September 2026)
+
+**LLM training performance — the LMO queue.** Numbers are the 30-step BPE arm
+(19.4 MB TinyStories, 30 x 32 x 64, vocab 8,000, dim 256 x 4 layers) unless
+stated; every comparison was taken against PyTorch 2.13.0+cpu and JAX 0.11.1
+in the same window as the R2 run.
+
+- **LMO-14 `grad_B` was serial and is now threaded.** It was the one gradient
+  `Op::MatMul`'s backward never parallelised, and the output head's alone
+  measured 1,999 ms of a 5,540 ms step. Partitioned over grad_B's own rows —
+  every `i2` writes every row, so splitting `i2` would race — keeping ascending
+  accumulation order, hence bit-identical results.
+- **LMO-15 / LMO-5: `Op::Attention`, a fused batched attention op.** Attention
+  was built per sequence per head: slice, transpose, matmul, mask, softmax,
+  matmul, concat, 128 times at the shipping shape — 1,156 tape nodes and 2,312
+  Vec allocations per block. Measured, the two matmuls were 4.4% of the block
+  and slicing alone 47%; it ran at 5.7 GFLOP/s against R2's own GEMM at 66-76.
+  The fused op is one node: no slices, no transposes, no materialised score
+  matrix, softmax over `j <= i` only, and the backward recomputes the
+  probabilities rather than storing a quadratic buffer.
+- **`Tape::backward_from(var, seed)`** — PyTorch's `.backward(g)`. Lets a
+  benchmark differentiate an op from a supplied gradient instead of inventing a
+  scalar loss, which is what had made LMO-1's fwd+bwd comparison invalid.
+- **`requires` guards on MatMul/Mul/Add backward.** The one-hot embedding form
+  was computing an 8.4 GFLOP `grad_A` into a leaf that needs no gradient; the
+  one-hot fwd+bwd went 658 ms -> 47 ms at vocab 8,000. `Op::Mul`'s backward no
+  longer clones both operands.
+- **Embedding gather and scatter-add threaded** (`Op::Embed`), and
+  `transformer.rs` switched off the one-hot form onto the gather.
+- **Fixed: `continue` in the GPU matmul-backward branch** skipped the
+  gradient-buffer hand-back, leaving that node's gradient an empty `Vec` — a
+  second `backward()` read zero out of it, silently.
+- **Fixed: the float64 accuracy gate was red on a clean tree.**
+  `benchmarks/llm/accuracy_check.py` implemented SPLIT-HALF RoPE while
+  `ops::rope_inplace` is INTERLEAVED, and read the output head as
+  `view(vocab,dim).T` when it is stored row-major `(dim, vocab)`. Uniform ~1.35
+  relative error on all 21 blocks; now ~7e-7.
+- **Benchmarks now print one joint table with a verdict.** The R2 half writes
+  `lmoN_r2.json`; the Python half joins it and reports R2 against PyTorch and
+  JAX per row. An R2-versus-R2 speedup is not a result.
+
 ## v0.3.8 (July 2026)
 
 **New — `r2 --self-check`, verify accuracy on your own machine.** A

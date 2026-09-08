@@ -11,6 +11,8 @@ rayon = "1"
 # Backend policy for the backward pass (same Oracle as the forward).
 r2-oracle = { path = "../r2-oracle" }
 r2-tensor = { path = "../r2-tensor" }
+# The tape's two gradient cases are BLAS sgemm (NT and TN).
+r2-linalg = { path = "../r2-linalg" }
 
 [features]
 gpu = ["r2-tensor/gpu"]

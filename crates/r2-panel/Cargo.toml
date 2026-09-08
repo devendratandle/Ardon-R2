@@ -1,6 +1,6 @@
 [package]
 name = "r2-panel"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2021"
 license = "AGPL-3.0"
 description = "Declarative menu/dashboard apps for Ardon-R2 — buttons that run canned R2 tasks and show typed results (value / table / plot / text). Lets a non-user (QC operator, analyst on a shop floor) drive Ardon-R2 without learning it."

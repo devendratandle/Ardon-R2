@@ -126,35 +126,22 @@ impl Trainer {
             let q = tape.rope_seq(q, t, seq, c.n_heads, hd, c.rope_base);
             let k = tape.rope_seq(k, t, seq, c.n_kv_heads, hd, c.rope_base);
 
-            // Attention is the one part that CANNOT be fused across
-            // sequences: a token must never attend to another example's
-            // tokens. Each sequence gets its own slice of rows, and the
-            // per-sequence contexts are stacked back afterwards.
-            let group = c.n_heads / c.n_kv_heads;
-            let mut seq_ctx: Vec<Var> = Vec::with_capacity(nseq);
-            for s in 0..nseq {
-                let (q_s, k_s, v_s) = if nseq == 1 {
-                    (q, k, v)
-                } else {
-                    (tape.slice_rows(q, c.n_heads * hd, s * seq, seq),
-                     tape.slice_rows(k, c.n_kv_heads * hd, s * seq, seq),
-                     tape.slice_rows(v, c.n_kv_heads * hd, s * seq, seq))
-                };
-                let mut heads: Vec<Var> = Vec::with_capacity(c.n_heads);
-                for qh in 0..c.n_heads {
-                    let kvh = qh / group;
-                    let qs = tape.slice_cols(q_s, seq, c.n_heads * hd, qh * hd, hd);
-                    let ks = tape.slice_cols(k_s, seq, c.n_kv_heads * hd, kvh * hd, hd);
-                    let vs = tape.slice_cols(v_s, seq, c.n_kv_heads * hd, kvh * hd, hd);
-                    let kt = tape.transpose(ks, seq, hd);
-                    let sc = tape.matmul(qs, kt, seq, hd, seq);
-                    let sc = tape.scale_mask_causal(sc, seq, 1.0 / (hd as f32).sqrt());
-                    let at = tape.softmax_rows(sc, seq);
-                    heads.push(tape.matmul(at, vs, seq, seq, hd));
-                }
-                seq_ctx.push(tape.concat_cols(&heads, seq, hd));
-            }
-            let ctx = if nseq == 1 { seq_ctx[0] } else { tape.concat_rows(&seq_ctx) };
+            // Attention still cannot be fused ACROSS sequences — a token
+            // must never attend to another example's tokens — but it does
+            // not need to be taken apart to enforce that. `Op::Attention`
+            // keeps the sequence boundary inside one node and splits its
+            // work by sequence internally.
+            //
+            // This used to be a per-sequence, per-head loop: slice_rows,
+            // slice_cols, transpose, matmul, mask, softmax, matmul,
+            // concat — 128 times at 32x64, putting 1,156 nodes and 2,312
+            // Vec allocations on the tape per block. Measured
+            // (`--example lmo15_breakdown`), the two matmuls were 4.4% of
+            // it and the slicing 47%. LMO-15/LMO-5 in
+            // `benchmarks/llm/REPORT.md`.
+            let seq_eff = if seq == 0 { t } else { seq };
+            let ctx = tape.attention(q, k, v, nseq, seq_eff, c.n_heads, c.n_kv_heads,
+                                     hd, 1.0 / (hd as f32).sqrt());
             let o = tape.matmul(ctx, b(4), t, d, d);
             x = tape.add(x, o);
 

@@ -22,3 +22,5 @@ libloading = "0.8"
 # has no deps of its own, so this adds no cycle.
 rayon = "1.10"
 r2-oracle = { path = "../r2-oracle" }
+
+[dev-dependencies]

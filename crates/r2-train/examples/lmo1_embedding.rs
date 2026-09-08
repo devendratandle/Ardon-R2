@@ -65,6 +65,9 @@ fn main() {
     println!("  The table's leaf copy is measured and SUBTRACTED from all four.");
     println!("{}", "-".repeat(84));
 
+    // (vocab, oh_fwd, oh_fb, ga_fwd, ga_fb, leaf) kept for the JSON that
+    // the PyTorch side joins against.
+    let mut rows: Vec<(usize, f64, f64, f64, f64, f64)> = Vec::new();
     for &vocab in &vocabs {
         // Total work per rep is O(t*vocab*d), so hold it roughly fixed.
         let reps = ((2e9 / (t as f64 * vocab as f64 * d as f64)).ceil() as usize)
@@ -112,28 +115,42 @@ fn main() {
             let oh = tb.leaf(onehot, false);
             let w = tb.leaf(table.clone(), true);
             let x = tb.matmul(oh, w, t, vocab, d);
-            let s = tb.leaf(g.clone(), false);
-            let p = tb.mul(x, s);
-            let l = tb.sum_all(p);
-            tb.backward(l);
+            tb.backward_from(x, &g);
             std::hint::black_box(tb.grad(w).len());
         });
 
         // ── the GATHER, which is what ships now ────────────────────────
-        let g_fwd = (t_us(reps, || {
-            let mut tg = Tape::new();
-            let w = tg.leaf(table.clone(), true);
-            let x = tg.embed(w, &tokens, d);
-            std::hint::black_box(tg.value(x).len());
-        }) - leaf_only).max(0.0);
+        // NO subtraction here. The table leaf is created ONCE, outside the
+        // timer, which is exactly PyTorch's situation: its parameter tensor
+        // persists across calls and only the output is allocated per call.
+        // Timing `Tape::new() + leaf + embed` and subtracting a separately
+        // measured `leaf` is a difference of two large noisy numbers — it
+        // printed 658.6 / 69.9 / 3167.2 us for IDENTICAL work across the
+        // three vocabularies, which is not a measurement.
+        let g_fwd = {
+            let mut r = Vec::new();
+            for _ in 0..9 {
+                let mut tg = Tape::new();
+                let w = tg.leaf(table.clone(), true);
+                for _ in 0..reps.min(5) { std::hint::black_box(tg.embed(w, &tokens, d)); }
+                let s = std::time::Instant::now();
+                for _ in 0..reps { std::hint::black_box(tg.embed(w, &tokens, d)); }
+                r.push(s.elapsed().as_secs_f64() / reps as f64 * 1e6);
+            }
+            median(r)
+        };
+        // `backward_from(x, g)` IS PyTorch's `.backward(g)`. This used to
+        // build `mul(x, g)` then `sum_all` to manufacture a scalar for
+        // `backward` — an extra leaf, an extra elementwise multiply, a
+        // reduction and all three of their backwards, none of which the
+        // PyTorch side ran. It measured ~4 ms of a ~6.6 ms reading, so the
+        // published fwd+bwd ratio was a comparison of R2's HARNESS against
+        // PyTorch's embedding.
         let g_fb = (t_us(reps, || {
             let mut tg = Tape::new();
             let w = tg.leaf(table.clone(), true);
             let x = tg.embed(w, &tokens, d);
-            let s = tg.leaf(g.clone(), false);
-            let p = tg.mul(x, s);
-            let l = tg.sum_all(p);
-            tg.backward(l);
+            tg.backward_from(x, &g);
             std::hint::black_box(tg.grad(w).len());
         }) - leaf_only).max(0.0);
 
@@ -144,7 +161,27 @@ fn main() {
         let fb_net = (fb - leaf_only).max(0.0);
         println!("{vocab:>7} {:>10.1} {leaf_only:>8.1} {fwd_net:>11.1} {fb_net:>12.1} {g_fwd:>10.1} {g_fb:>10.1} {:>9.0}x", (t * vocab * 4) as f64 / 1e6,
                  if g_fb > 0.0 { fb_net / g_fb } else { 0.0 });
+        rows.push((vocab, fwd_net, fb_net, g_fwd, g_fb, leaf_only));
         let _ = (build, mflop);
+    }
+
+    // Emit the numbers so the PyTorch side can JOIN them and print ONE
+    // table with a verdict per row. Two programs printing two tables
+    // leaves the comparison to a human, and the comparison is the whole
+    // point: an R2-versus-R2 improvement that is still behind PyTorch is
+    // not a result. `benchmarks/llm/lmo1_embedding.py` reads this file.
+    let mut js = format!("{{\n  \"tokens\": {t}, \"dim\": {d},\n  \"rows\": [\n");
+    for (i, r) in rows.iter().enumerate() {
+        if i > 0 { js.push_str(",\n"); }
+        js.push_str(&format!(
+            "    {{\"vocab\": {}, \"oh_fwd\": {:.1}, \"oh_fb\": {:.1}, \"ga_fwd\": {:.1}, \"ga_fb\": {:.1}, \"leaf\": {:.1}}}",
+            r.0, r.1, r.2, r.3, r.4, r.5));
+    }
+    js.push_str("\n  ]\n}\n");
+    match std::fs::write("lmo1_r2.json", js) {
+        Ok(()) => println!("\nwrote lmo1_r2.json — run `python benchmarks/llm/lmo1_embedding.py`\n\
+                            for the joint R2-vs-PyTorch table and the per-row verdict."),
+        Err(e) => eprintln!("could not write lmo1_r2.json: {e}"),
     }
 
     println!("\nA gather does t*d = {} element copies for ANY vocabulary.", t * d);

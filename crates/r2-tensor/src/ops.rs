@@ -31,29 +31,26 @@ pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     }
 }
 
-/// CPU matmul. Loop order is i-k-j so the inner loop walks B and C
-/// contiguously and vectorizes; the j-inner form strides both and runs
-/// several times slower. Rows of C are independent, so they split across
-/// cores when `parallel`.
+/// CPU matmul — BLAS `sgemm`, from `r2_linalg::gemm`.
+///
+/// This was an i-k-j triple loop. That loop order is right for a naive
+/// kernel (the inner loop walks B and C contiguously) but it re-streams
+/// all of B for every row of C, so it falls off a cliff the moment B stops
+/// fitting cache: measured 63-73 GFLOP/s on the small shapes and 26.8 on
+/// the output head, where B is 256x8000x4B = 8 MB = exactly this machine's
+/// L3. `gemm` packs instead, and dispatches an AVX2+FMA micro-kernel at
+/// runtime: 118-195 GFLOP/s on the same five shapes, 5.1x overall.
+///
+/// The old loop carried `if aik == 0.0 { continue; }` for one-hot
+/// embedding rows. Nothing builds a one-hot any more — `llm.rs` and
+/// `transformer.rs` both use `Op::Embed`'s gather — so the branch is gone
+/// with the loop rather than being carried into a kernel where a
+/// data-dependent branch per element would cost more than it saves.
 fn matmul_cpu(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, parallel: bool)
     -> Vec<f32>
 {
-    use rayon::prelude::*;
-    let mut c = vec![0.0f32; m * n];
-    let row = |i: usize, crow: &mut [f32]| {
-        for p in 0..k {
-            let aik = a[i * k + p];
-            if aik == 0.0 { continue; }   // one-hot embedding rows are mostly zero
-            let brow = &b[p * n..p * n + n];
-            for j in 0..n { crow[j] += aik * brow[j]; }
-        }
-    };
-    if parallel {
-        c.par_chunks_mut(n).enumerate().for_each(|(i, crow)| row(i, crow));
-    } else {
-        c.chunks_mut(n).enumerate().for_each(|(i, crow)| row(i, crow));
-    }
-    c
+    r2_linalg::gemm::sgemm(a, r2_linalg::gemm::Trans::No,
+                           b, r2_linalg::gemm::Trans::No, m, k, n, parallel)
 }
 
 /// RMSNorm over the last dim: y = x / sqrt(mean(x²) + eps) * weight.
@@ -64,7 +61,7 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     let mut out = vec![0.0f32; x.len()];
     for r in 0..rows {
         let row = &x[r * d..r * d + d];
-        let ms = row.iter().map(|v| v * v).sum::<f32>() / d as f32;
+        let ms = sum_sq4(row) / d as f32;
         let scale = 1.0 / (ms + eps).sqrt();
         for j in 0..d { out[r * d + j] = row[j] * scale * weight[j]; }
     }
@@ -77,7 +74,21 @@ pub fn softmax(x: &[f32], d: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; x.len()];
     for r in 0..rows {
         let row = &x[r * d..r * d + d];
+        // `f32::max` lowers to `llvm.maxnum`, which LLVM CAN vectorise as a
+        // reduction — unlike `+`, whose non-associativity blocks it. So this
+        // fold is already branchless SIMD and the hand-rolled `max4` below,
+        // which uses compare-and-branch, measured WORSE. Not every serial
+        // reduction is the same problem.
         let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        // The exp and the sum stay FUSED in one pass, deliberately.
+        //
+        // Splitting them so the sum could use `sum4` was tried and measured
+        // 12% WORSE on the training step (31.05 -> 34.77 s): at vocab 8,000
+        // this runs over 16.4M elements per step, so a second pass costs
+        // ~64 MB of memory traffic, while the serial add it removes was
+        // already hidden behind the latency of the `exp` beside it. A
+        // dependency chain only costs anything when something else is not
+        // already the bottleneck.
         let mut sum = 0.0f32;
         for j in 0..d { let e = (row[j] - m).exp(); out[r * d + j] = e; sum += e; }
         let inv = 1.0 / sum;
@@ -85,6 +96,77 @@ pub fn softmax(x: &[f32], d: usize) -> Vec<f32> {
     }
     out
 }
+
+// ── vectorisable reductions ─────────────────────────────────────────
+//
+// `x.iter().map(|v| v*v).sum::<f32>()` and `(0..d).map(..).sum()` are
+// SERIAL reductions: each step depends on
+// the previous one. Float addition is not associative and `f32::max` has
+// NaN-ordering semantics, so the compiler is NOT ALLOWED to reassociate
+// either — which means it cannot vectorise them either. The whole chain
+// runs one scalar op at a time, at the LATENCY of the unit rather than
+// its throughput.
+//
+// NOT every reduction has this problem, and hand-rolling the ones that do
+// not measured WORSE: `f32::max` lowers to `llvm.maxnum`, which LLVM CAN
+// vectorise as a reduction, and a fused `exp`+`sum` loop already hides the
+// chain behind the exp's latency. Only `+` over a plain product needs
+// help, which is why only these two helpers survive.
+//
+// Splitting into four independent chains is a choice about evaluation
+// order that only the author may make. These do make it, and they make it
+// DETERMINISTICALLY: the four chains are strided by a fixed pattern and
+// combined in a fixed sequence, so the result is identical run to run,
+// thread to thread, and machine to machine. That property is why the
+// tape's gradients stay bit-reproducible.
+//
+// Measured in the attention kernel, where the same change was made first:
+// it is worth about 12% of a whole training step.
+
+
+/// Sum of squares, with four independent accumulators. The mean of this
+/// is what RMSNorm normalises by.
+#[inline(always)]
+pub fn sum_sq4(x: &[f32]) -> f32 {
+    let mut a = [0.0f32; 4];
+    let n = x.len();
+    let full = n - n % 4;
+    let mut i = 0;
+    while i < full {
+        a[0] += x[i] * x[i];
+        a[1] += x[i + 1] * x[i + 1];
+        a[2] += x[i + 2] * x[i + 2];
+        a[3] += x[i + 3] * x[i + 3];
+        i += 4;
+    }
+    let mut t = 0.0f32;
+    while i < n { t += x[i] * x[i]; i += 1; }
+    (a[0] + a[1]) + (a[2] + a[3]) + t
+}
+
+
+/// Three-way product reduction `Σ x·y·z`, four accumulators. RMSNorm's
+/// backward needs exactly this shape.
+#[inline(always)]
+pub fn dot3_4(x: &[f32], y: &[f32], z: &[f32]) -> f32 {
+    let n = x.len().min(y.len()).min(z.len());
+    let mut a = [0.0f32; 4];
+    let full = n - n % 4;
+    let mut i = 0;
+    while i < full {
+        a[0] += x[i] * y[i] * z[i];
+        a[1] += x[i + 1] * y[i + 1] * z[i + 1];
+        a[2] += x[i + 2] * y[i + 2] * z[i + 2];
+        a[3] += x[i + 3] * y[i + 3] * z[i + 3];
+        i += 4;
+    }
+    let mut t = 0.0f32;
+    while i < n { t += x[i] * y[i] * z[i]; i += 1; }
+    (a[0] + a[1]) + (a[2] + a[3]) + t
+}
+
+/// Maximum, with four independent chains.
+///
 
 /// SiLU (a.k.a. swish): x * sigmoid(x). The SwiGLU activation half.
 #[inline]

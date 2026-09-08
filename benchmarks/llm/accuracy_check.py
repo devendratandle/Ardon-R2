@@ -41,14 +41,30 @@ def rms_norm(x, w, eps):
 
 
 def rope(x, base):
-    """Rotate pairs (i, i+half) by position*freq — R2's rope_inplace."""
+    """Rotate ADJACENT pairs (2i, 2i+1) by position*freq.
+
+    This is the GPT-NeoX/interleaved convention, which is what
+    `r2_tensor::ops::rope_inplace` implements:
+
+        x[2i], x[2i+1]  <-  a*cos - b*sin, a*sin + b*cos
+        freq            =   1 / base^(2i/hd)
+
+    NOT the Llama/HuggingFace SPLIT-HALF convention that pairs (i, i+half).
+    The two use the same frequencies and both are valid RoPE; they are not
+    the same function, and this checker used to implement the split-half
+    one while claiming in its docstring to implement R2's. That alone put
+    the logits 1.4 (relative) away from R2's and made every one of the 21
+    gradient blocks fail at ~1.35 — a uniform failure that looks like a
+    broken model and is actually a broken reference.
+    """
     t, h, hd = x.shape
     half = hd // 2
-    freq = base ** (-torch.arange(0, half, dtype=DT) / half)
+    freq = base ** (-2.0 * torch.arange(half, dtype=DT) / hd)
     ang = torch.arange(t, dtype=DT)[:, None] * freq[None, :]
     cos, sin = ang.cos()[:, None, :], ang.sin()[:, None, :]
-    a, b = x[..., :half], x[..., half:]
-    return torch.cat([a * cos - b * sin, a * sin + b * cos], dim=-1)
+    a, b = x[..., 0::2], x[..., 1::2]
+    return torch.stack((a * cos - b * sin, a * sin + b * cos),
+                       dim=-1).reshape(t, h, hd)
 
 
 def main():
@@ -94,7 +110,14 @@ def main():
         x = x + (gate * (h @ w3.view(dim, ffn))) @ w2.view(ffn, dim)
 
     x = rms_norm(x, P[1], eps)
-    logits = x @ P[2].view(vocab, dim).T
+    # The output head is stored (dim x vocab) ROW-MAJOR — R2 computes it as
+    # `matmul(xn, leaves[2], t, d, vocab)`, whose B operand is k x n = d x
+    # vocab (`Trainer::block_shapes` writes it `d * cfg.vocab`, against
+    # `cfg.vocab * d` for the embedding). Reading it as `view(vocab, dim).T`
+    # is a DIFFERENT matrix, not a transposed view of the same one — the
+    # embedding and the head have identical element counts, so nothing in
+    # the manifest catches the mix-up.
+    logits = x @ P[2].view(dim, vocab)
     loss = torch.nn.functional.cross_entropy(logits, tgts.reshape(-1))
     loss.backward()
 
@@ -106,8 +129,8 @@ def main():
     print(f"reference: torch {torch.__version__}, dtype {DT}\n")
 
     ok = True
-    dl = abs(float(loss) - r2_loss)
-    print(f"{'loss':<22} R2 {r2_loss:.10f}  ref {float(loss):.10f}  diff {dl:.3e}")
+    dl = abs(loss.item() - r2_loss)
+    print(f"{'loss':<22} R2 {r2_loss:.10f}  ref {loss.item():.10f}  diff {dl:.3e}")
     ok &= dl < 1e-5
 
     lg = (logits - r2_logits).abs().max().item()
