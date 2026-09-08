@@ -352,9 +352,23 @@ impl Tokenizer {
         }
         s.push_str("\n  ],\n");
         if bytelevel {
+            // `trim_offsets` and `use_regex` are not optional in the
+            // HuggingFace schema: `tokenizers` deserialises ByteLevel into a
+            // struct with all four fields and rejects the file outright if
+            // any is missing ("missing field `trim_offsets`"), so omitting
+            // them made this export unloadable by the very library it exists
+            // to interoperate with. `use_regex` is true because R2 really
+            // does apply GPT-2's pre-tokenization before merging
+            // (`bpe::pre_tokens`) — writing false here would describe a
+            // different segmentation from the one the merges were learned
+            // on, and the two sides would silently encode the same text
+            // differently.
             s.push_str("  \"pre_tokenizer\": {\"type\": \"ByteLevel\", \
-                        \"add_prefix_space\": false},\n");
-            s.push_str("  \"decoder\": {\"type\": \"ByteLevel\"},\n");
+                        \"add_prefix_space\": false, \"trim_offsets\": true, \
+                        \"use_regex\": true},\n");
+            s.push_str("  \"decoder\": {\"type\": \"ByteLevel\", \
+                        \"add_prefix_space\": false, \"trim_offsets\": true, \
+                        \"use_regex\": true},\n");
         } else {
             s.push_str("  \"pre_tokenizer\": null,\n  \"decoder\": null,\n");
         }
@@ -1081,6 +1095,39 @@ mod encoding_tests {
         for s in ["hello world", " leading space", "émoji 😀 中文", "tabs\tnewlines\n"] {
             assert_eq!(t.decode(&t.encode(s).unwrap()), s, "round-trip failed for {s:?}");
         }
+    }
+
+    /// Encoding a text in chunks that end on PRE-TOKEN boundaries gives
+    /// exactly the ids of encoding it whole — the property the out-of-core
+    /// tokenizer pass in `r2-train`'s `tinystories_train` depends on to
+    /// stream a corpus larger than RAM without changing what the model
+    /// sees.
+    ///
+    /// Splitting anywhere else is NOT safe, and the second half of this
+    /// test pins that: a newline is an obvious-looking chunk boundary and
+    /// is wrong, because a newline followed by a space is a single
+    /// pre-token that a merge lives inside. Measured on 3 MB of
+    /// TinyStories at 64 KB chunks, a newline split produced `[10, 470]`
+    /// where whole-text encoding gives `[1293, 400]` for the same text.
+    #[test]
+    fn chunked_encoding_matches_whole_text_on_pretoken_boundaries() {
+        let t = Tokenizer::from_tokenizer_json(bytelevel_json()).unwrap();
+        let text = " the a the a the a the a";
+        let whole = t.encode(text).unwrap();
+
+        // Cut after each complete pre-token, the way `flush_chunk` does.
+        let parts = crate::bpe::pretokenize(text);
+        for split in 1..parts.len() {
+            let cut: usize = parts[..split].iter().map(|p| p.len()).sum();
+            let mut chunked = t.encode(&text[..cut]).unwrap();
+            chunked.extend(t.encode(&text[cut..]).unwrap());
+            assert_eq!(chunked, whole,
+                       "splitting at pre-token {split} (byte {cut}) changed the ids");
+        }
+
+        // Concatenating the pre-tokens must reproduce the text, or the
+        // boundaries above are not boundaries.
+        assert_eq!(parts.concat(), text);
     }
 
     #[test]

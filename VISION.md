@@ -19,19 +19,28 @@ Modern data science wastes enormous computational resources:
 
 **One language. Minimal glue. Direct to hardware.**
 
-### V0.1.0 — Current Release (2026-05)
-- 192 built-in functions; engine 4,860 lines after R.11/R.12 migrations
-- 12 ML algorithms built-in — no packages needed
-- 2.2x faster matrix multiply than R
-- 2.3x faster Random Forest (Rayon parallel)
-- 5 MB binary, Rust-only dependencies, no C/C++
-- Runs on x86_64 and ARM (Windows, Linux, macOS)
+### V0.4.0 — Current Release (2026-09)
+- **438 built-in functions** across 29 crates — no packages to install
+- Accuracy **matches CRAN R on 13/13 differential cases**, and R2's LLM
+  gradients match an independent float64 implementation to f32 rounding
+  across all 21 parameter blocks
+- **LLM training at PyTorch's speed**: a 7.24M-parameter model on
+  TinyStories trains **1.05x behind PyTorch 2.13+MKL** and learns
+  *identically* — same loss to four decimals at every checkpoint over 500
+  steps from shared initial weights. See `benchmarks/llm/REPORT.md`
+- **BPE tokenizer ~11x faster than HuggingFace `tokenizers`** — which is
+  itself Rust, so that is an algorithmic win, not a language one
+- Pure-Rust `sgemm`: blocked/packed Goto-BLIS with a hand-written AVX2
+  micro-kernel selected at *runtime*, so one binary ships everywhere
+- 12 ML algorithms built in; `lm`/`glm`/`aov`, MANOVA, Hotelling's T²
 - Full thin SVD with U and Vᵀ; Householder + Wilkinson-shift QR eigendecomp
-- JIT compiler with branchy multi-block IR + 3-arg ternary ABI
+- Cranelift JIT with branchy multi-block IR + 3-arg ternary ABI
 - RFC 4180 CSV parser; `regex-lite` regex engine; NA-aware `&`/`|`
-- Columnar memory layer (F.3–F.6) with mmap-backed reader
-- Welch–Satterthwaite df, exact hypergeometric Fisher, glm full diagnostics
-- 233 tests passing, clean build
+- Columnar memory layer with mmap-backed reader
+- Native desktop GUI (`R2Gui`), graphics to SVG/PNG/PDF
+- Runs on x86_64 and ARM (Windows, Linux, macOS)
+- **638 tests passing** across 71 binaries, clean build
+- Rust-only dependencies, no C/C++/Fortran anywhere
 - AGPL v3
 
 ### V1.0 — Stability Release
@@ -68,7 +77,7 @@ Modern data science wastes enormous computational resources:
 
 | Metric | Traditional Stack | R2 Target |
 |---|---|---|
-| Install size | 2-8 GB | 5 MB |
+| Install size | 2-8 GB | ~9 MB |
 | Language boundaries | 3-5 | 1 |
 | Interpreter overhead | 50-100x | 0x (compiled) |
 | User function speed | baseline (R) | 10-20x faster (bytecode VM) |
@@ -86,19 +95,26 @@ Modern data science wastes enormous computational resources:
 ## R2 Roadmap Summary
 
 ```
-NOW        V0.1.0  →  Ship it. Full SVD, branchy JIT, RFC 4180 CSV, regex,
-                       columnar storage. 233 tests passing.
-Month 1    V0.2.0  →  Graphics backends (PNG/PDF), multi-key merge,
-                       more datasets (ToothGrowth, ChickWeight, CO2),
-                       Reduce/Filter/Map, sprintf width/precision.
-Month 3    V1.0    →  Stability release. Community feedback baked in.
-Month 6    V2.0    →  Phase G — hardware awareness (cores/ISA/cache),
-                       Oracle calibration via r2-bench, GPU dispatcher
-                       scaffolding (WGPU).
-Month 9    V2.5    →  Bytecode VM. User-written functions JITed at the
-                       same speed as built-ins.
-Month 12   V3.0    →  Universal compute. Distributed processing.
+DONE       V0.1-0.3 →  Full SVD, branchy JIT, RFC 4180 CSV, regex, columnar
+                       storage, graphics backends, native GUI, self-check.
+NOW        V0.4.0  →  LLM training at PyTorch's speed on CPU: packed
+                       AVX2 sgemm, fused attention, vectorised exp.
+                       438 builtins, 638 tests.
+Next       V0.5.0  →  Out-of-core training data (Arrow/Parquet + memmap),
+                       so a corpus larger than RAM trains without a
+                       preprocessing step. Closing the remaining sgemm
+                       parallel efficiency (2.7-3.8x against a measured
+                       5.53x machine ceiling) and the memory-traffic tail.
+Later      V1.0    →  Stability release. Community feedback baked in.
+           V2.0    →  Hardware awareness (cores/ISA/cache), Oracle
+                       calibration, GPU dispatcher (WGPU).
+           V2.5    →  Bytecode VM. User functions JITed at built-in speed.
+           V3.0    →  Universal compute. Distributed processing.
 ```
+
+Dated milestones ("Month 1", "Month 3") were removed rather than
+recalculated: they were written against a 2026-05 start and every one of
+them had passed while the file still called V0.1.0 the current release.
 
 ## Created By
 

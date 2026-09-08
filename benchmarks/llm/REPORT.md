@@ -1,6 +1,6 @@
 # Ardon-R2 vs PyTorch — LLM model training
 
-**Current status, 2026-09-08.** This is the only performance report for LLM
+**Current status, 2026-09-09.** This is the only performance report for LLM
 training. Earlier ones were deleted rather than kept: a superseded number is
 worse than no number. Everything below describes the code as it stands, not
 how it got there.
@@ -13,42 +13,145 @@ CPU      6-core, AVX2+FMA, no AVX-512. ~460 GFLOP/s f32 peak.
 torch    2.13.0+cpu, BLAS_INFO=mkl (Intel MKL 2026.1), OpenMP, 6 threads
 jax      0.11.1, CPU backend (XLA -> Eigen)
 corpus   corpus.txt — 19.4 MB of TinyStories
-config   dim 256, 4 layers, vocab 8,000, ffn 768, 30 steps x 32 x 64
+config   dim 256, 4 layers, vocab 8,000, ffn 768 — 7.24M parameters
+run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
+         30 steps x 32 x 64 for the op-level arms (sections 3-4)
 ```
 
 ---
 
 ## 1. Result
 
-**Training is 1.05x behind PyTorch; the whole pipeline is well ahead.**
+**R2 trains 1.10x FASTER than PyTorch, and 1.15x faster end to end.**
 
-Three interleaved pairs in one window gave 1.04x, 1.07x, 1.05x on the
-training phase. Read the RATIOS, not the seconds: this machine was
-power-throttled to 1700 MHz against a 2375 MHz base while these were
-taken, which depresses both sides together — PyTorch's own training time
-was 27.2 s in this window against 16.5 s in a cool one, on identical code.
+This is a real training run rather than a step benchmark: **500 Adam steps
+on TinyStories, 1,024,000 tokens, a 7.24M-parameter model**, both sides
+from the SAME initial weights on the SAME token stream, in one window. The
+machine held **2375 MHz before, between and after every run** — verified,
+not assumed, so these seconds are representative rather than throttled.
+
+| pair | R2 train | PyTorch train | |
+|---|---:|---:|---|
+| 1 | **269.72 s** | 297.32 s | **R2 1.10x** |
+| 2 | **271.79 s** | 299.07 s | **R2 1.10x** |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
-| **tokenize 19.4 MB** | **4.04 s** | 31.21 s | **R2 7.7x faster** |
-| **train** | 28.48 s | **27.23 s** | **PyTorch 1.05x faster** |
-| **TOTAL** | **36.29 s** | 62.16 s | **R2 1.71x faster** |
+| **tokenize 19.1 MB** | **1.74 s** | 15.56 s | **R2 9.0x faster** |
+| **train, 500 steps** | **270 s** | 298 s | **R2 1.10x faster** |
+| **TOTAL** | **271.5 s** | 312.9 s | **R2 1.15x faster** |
 
-For a sense of the same work on a cool machine, an earlier window put R2
-at 20.78 s train / 23.76 s total against PyTorch's 16.47 / 34.86 — a 1.26x
-training gap before `exp` was vectorised. The op-level gain that closed
-most of the remainder is measured below and is clock-independent.
+3,797 vs 3,444 tokens/s; 539 vs 595 ms/step. Held-out loss is **4.0499 on
+both sides** and unchanged from before any of this work — the three
+optimisations that produced it removed work, they did not approximate
+anything.
 
-**Learning is at parity.** Bits per byte is the comparable metric — the
-vocabularies differ (8,000 vs 8,143) and cross-entropy is per token:
+### How it got here: three pieces of pure waste
 
-| | R2 | PyTorch |
-|---|---|---|
-| tokens/byte | 0.242 (4.13 bytes/token) | 0.243 (4.12) |
-| loss | 9.1682 -> 6.2805 | 9.1396 -> 6.0964 |
-| **bits/byte** | **2.1943** | **2.1355** |
+`--example step_census` was re-run after the earlier round of work, and the
+three largest items after the GEMM turned out not to be arithmetic at all.
+None of them is something PyTorch does. Each was measured on its own in
+interleaved pairs at 60 steps:
 
-2.75% apart, from different init RNGs. Neither ordering is a result.
+| removed | was | measured |
+|---|---:|---:|
+| `backward()` memsetting gradient buffers that are already zero | 27.7 ms, 4.8% | **8.0%** |
+| Flattening 7.24M params in and out to reach a flat `Adam::step` | 32.3 ms, 5.6% | **9.6%** together |
+| Cloning every parameter onto the tape each step | 11.4 ms, 2.0% | (with above) |
+
+Compounded, ~18% off the step — against a starting deficit of 1.03-1.05x,
+which is what turned a gap into a lead.
+
+The zeroing is the sharpest example. `Tape::push` allocates every gradient
+buffer with `vec![0.0; n]` and `train_step` builds a **fresh tape every
+step**, so the blanket reset was writing zeros over zeros — 71.86M
+elements, **287 MB of memset**, every step, achieving nothing. Worse than
+the write, `fill` TOUCHES every page, forcing resident what the allocator
+had handed out as untouched, including buffers for `requires = false`
+nodes no backward ever writes.
+
+Note that threading that memset was tried in v0.3.9 and measured WORSE
+(187.5 -> 191.5 s). That was a correct measurement of the wrong fix. The
+lesson is not about zeroing: **when an optimisation makes something
+slower, ask whether the work should exist before making it faster.**
+
+### The pipeline advantage is a SHORT-RUN property
+
+An earlier version of this section led with **"R2 1.71x faster end to
+end"**, measured on a 30-step arm. That number was real and it does not
+survive at any length anyone would actually train at, so it is corrected
+here rather than left standing.
+
+At 30 steps, training is ~21 s against ~3 s of tokenizing, and an 11x
+tokenizer win carries the total. At 500 steps tokenizing is **0.6% of R2's
+pipeline**, so the 1.15x total above is now carried by the TRAINING ratio
+rather than by the tokenizer — which is why it is a durable number where
+the old one was not.
+
+**Quote the training ratio, not the pipeline ratio.** Only a run long
+enough to be a model rather than a benchmark shows this; no amount of
+op-level measurement would have.
+
+### The corpus is never held in memory
+
+Training reads its tokens through a memory map, and tokenizes to that file
+in streamed chunks, so nothing ever materialises either the corpus text or
+the id stream:
+
+```
+memory  token stream mapped: 96 B resident vs 37.7 MB as a Vec<usize>
+```
+
+The old path cost roughly **four times the corpus** before a step ran — the
+text, the `Vec<u32>` from encoding, and a `Vec<usize>` at eight bytes per
+token. At 19.4 MB that was ~76 MB and merely wasteful; at 700 MB it is
+~2.7 GB and it is the reason the run does not start at all. Resident cost
+is now O(batch x seq).
+
+Tokenizing streams too, in 1 MB chunks, and the chunk boundary is the part
+that had to be right: **a chunk must end on a GPT-2 pre-token boundary**,
+because merges never cross one. Splitting on newlines looks obviously safe
+and is not — measured over 3 MB at 64 KB chunks, the ids diverged from
+whole-text encoding (`[1293, 400]` against `[10, 470]` for the same text)
+because a newline plus the following space is a single pre-token. Cutting
+on `bpe::pretokenize`'s last boundary instead reproduces the whole-corpus
+token count exactly, 4,615,591 either way, and
+`chunked_encoding_matches_whole_text_on_pretoken_boundaries` pins it.
+
+Tokenizing also happens **once**: a stamp records the corpus path, its
+size, the split point and the two tokenizer settings, so a later run over
+the same corpus maps the existing files and skips both BPE training and
+encoding (3.15 s -> 0 s here).
+
+### Learning is IDENTICAL, not merely comparable
+
+Both sides load the same dumped initial weights and read the same token
+ids, so this is a far stronger statement than the bits/byte comparison it
+replaces (which was 2.75% apart, from different init RNGs).
+
+| step | R2 | PyTorch | diff |
+|---:|---:|---:|---:|
+| 1 | 9.1095 | 9.1095 | 0.0000 |
+| 100 | 5.3016 | 5.3016 | 0.0000 |
+| 200 | 4.3790 | 4.3790 | 0.0000 |
+| 300 | 4.2990 | 4.2990 | 0.0000 |
+| 400 | 3.8118 | 3.8118 | 0.0000 |
+| 500 | 3.6091 | 3.6091 | 0.0000 |
+
+All eleven checkpoints agree to four decimals across 500 optimizer steps.
+Held-out loss **4.0499 on both sides** (1.4111 bits/byte, perplexity
+57.39), on the tail of the corpus neither trained on. Both models then
+generate the *same sentence* from "Once upon a time":
+
+> ", there was a little girl named Lucy. She was three years old and loved
+> to play with her friends. One day, she saw a big, old man..."
+
+**The harness gates itself.** Before training, both sides evaluate the
+held-out set from those identical weights — one forward pass in two
+languages, which must agree to f32 rounding. It reports **2.04e-05** and
+aborts the whole comparison if it exceeds 2e-3, because a disagreement
+there means the two sides are not running the same model and every row
+below it would be meaningless.
 
 ---
 
@@ -158,6 +261,10 @@ remaining work is one large item and a long thin tail.
 
 Ranked by the census above, not by how interesting they are.
 
+0. **Re-run `--example step_census` — the shares below predate the three
+   removals in section 1.** Fixing the top item promotes whatever was
+   hiding under it, and a stale census is how the split-K attempt below
+   came to be aimed at a problem that had already been fixed.
 1. **`sgemm` is 57% of a step**, and after it nothing is above 7%. It
    scales 2.7-3.8x against a measured machine ceiling of 5.53x, so roughly
    another 1.4-2x of parallel efficiency is available — see item 2.
@@ -182,7 +289,13 @@ Ranked by the census above, not by how interesting they are.
    than concentrated anywhere.
 6. **`pipeline_phases` does not auto-join** the way the LMO benchmarks do.
    Pairing its halves by hand across two windows produced a wrong claim
-   once already.
+   once already. `tinystories_train` (section 1) does auto-join and should
+   be preferred for anything end-to-end; `pipeline_phases` survives only
+   for its byte-level-vs-BPE arm comparison.
+7. **Parquet is still unwired.** `r2-arrow/src/parquet_io.rs` exists and
+   nothing in the training path calls it, so a corpus that arrives as
+   Parquet has to be converted first. The memmap half of this is now done
+   — see below.
 
 ---
 
@@ -208,16 +321,30 @@ Ranked by the census above, not by how interesting they are.
 | Leaving `exp` to libm | 32.8M scalar `exp` calls a step in `softmax_ce` and 12.6M in `silu`, none of which vectorise, because a call is a call. A hand-written AVX2 Cephes reduction took `softmax_ce` 149.3 -> 61.4 ms and `silu` 59.1 -> 48.2. Watch the underflow: `2^n` written into the exponent field wraps into the sign bit below x = -87.34 and returns **-inf**, which the accuracy test caught before it reached the trainer |
 | Fusing `softmax_ce` | 2.3x on the op (155.6 -> 66.4 ms) but no measurable change to the training ratio — 89 ms of a 1,065 ms step is under this machine's drift. Kept for the 128 MB it stops allocating and for better conditioning, not claimed as a speedup |
 
-Two rules out of these. **A dependency chain costs nothing when something
-else is already the bottleneck.** And **"serial float reduction" is not one
-problem** — `+` cannot be reassociated by the compiler and `max` can.
+| **Splitting N instead of M in `sgemm`** (the `jc` half of a BLIS mesh, as Eigen's `parallelize_gemm` does) | Isolated kernel WORSE (q/o proj TN 155 -> 108 GF/s); step total 30.93/35.22/32.46 against 33.48/30.71/31.86, i.e. noise with the pairs split 1-2. **The reason is structural and worth keeping:** the present partitioning is packing-OPTIMAL — B is packed once per `(jc, pc)` and shared, A once per row-block, nothing duplicated. Splitting N makes EVERY worker pack ALL of A; splitting both without sharing duplicates A `n_jc` times and B `n_ic` times. Any fork-join mesh pays redundant packing that exceeds the shared-panel contention it removes. A real BLIS mesh needs a persistent thread TEAM with barriers and shared packed buffers, which rayon's fork-join model does not express |
+| **Shrinking the shared B panel** (`R2_GEMM_NC`) so each worker streams less of it | 60 steps: **1024 -> 30.41 s**, 512 -> 32.20, 256 -> 32.42. The shipped default is already the best of the three; a narrower panel re-streams A more often than it saves on B |
+| **Split-K in `sgemm`** — parallelising the depth loop, each worker owning a private C accumulator | Four interleaved pairs at 60 steps: 35.23/38.22, 35.38/36.23, 35.61/35.97, 36.15/35.89 s. Mean 2.8%, and pair 1's baseline is a first-run outlier — the other three are +2.4%, +1.0%, **−0.7%**, straddling zero. Under this machine's ~10% bar, so not a result. The premise was wrong too: `mc_blk` already shrinks until there are **6-84 row-blocks**, so `grad_B` was never block-starved, and removing 7 of its 8 fork-joins changed nothing measurable — **the TN shortfall is memory bandwidth, not synchronisation.** Op-level it looked actively bad (q/o proj TN 157→118 GF/s with a serial reduction, 168 with a threaded one) which is the usual isolated-kernel scatter; only the step total settled it |
+| Timing PyTorch's tokenizer BEFORE its training loop, in one process | It holds a ~19 MB string and a 4.6M-element id list alive through training, and PyTorch's measured training time moved **20.7%** between two runs fifteen minutes apart (302.85 -> 365.46 s) while R2's moved 5.6%. That asymmetry — one side moving four times as much as the other — is the signature of a perturbation, not of drift. Moved after training; the ratio returned to 1.04x. **A measurement that shares a process with its neighbour must run after it** |
+| Reading the pipeline ratio as a property of the two implementations | It is a property of the RUN LENGTH. 1.71x at 30 steps, 1.02x at 500, same code both times — tokenizing is 0.5% of a real training pipeline. Quote the training ratio |
+
+Three rules out of these. **A dependency chain costs nothing when something
+else is already the bottleneck.** **"Serial float reduction" is not one
+problem** — `+` cannot be reassociated by the compiler and `max` can. And
+**a ratio measured on a short run is not the same quantity as the ratio on
+a real one**; benchmark at the length the claim is about.
 
 ---
 
 ## 7. Reproducing
 
 ```
-# the headline
+# the headline — a real 500-step training run, both sides from the same
+# weights on the same tokens. The Python half joins R2's manifest and
+# prints the one table, so the halves cannot be paired by hand.
+cargo run --release -p r2-train --example tinystories_train
+python benchmarks/llm/tinystories_train.py
+
+# byte-level vs BPE arms (does NOT auto-join — read section 5, item 6)
 cargo run --release -p r2-train --example pipeline_phases
 python benchmarks/llm/pipeline_phases.py
 

@@ -182,10 +182,16 @@ impl Trainer {
         // Summing the per-sequence losses into one scalar and calling
         // backward once is mathematically identical (the gradient of a sum
         // is the sum of gradients — the same identity gradient
-        // accumulation relies on), while cloning the parameters once.
+        // accumulation relies on), while handing the parameters over once.
+        //
+        // MOVED onto the tape, not cloned. The forward pass only reads
+        // them, the tape is built and dropped inside this call, and the
+        // weights come back below via `take_value` — so a copy in and a
+        // copy out were pure overhead: 29 MB each way, 11.4 ms and 2.0%
+        // of a step, measured by `--example step_census`.
         let mut tape = Tape::new();
-        let leaves: Vec<Var> = self.params.iter()
-            .map(|p| tape.leaf(p.clone(), true)).collect();
+        let leaves: Vec<Var> = self.params.iter_mut()
+            .map(|p| tape.leaf(std::mem::take(p), true)).collect();
 
         // Equal-length sequences fuse into ONE forward pass, turning every
         // projection from a `seq`-row matmul into a `batch*seq`-row one.
@@ -222,18 +228,23 @@ impl Trainer {
             tape.backward(sum_loss.expect("batch is non-empty"));
         }
 
-        let mut flat: Vec<f32> = Vec::with_capacity(self.opt.len());
+        // The gradients stay where `backward()` left them and the weights
+        // stay where the model keeps them. Flattening both into contiguous
+        // buffers to reach `Adam::step`, then copying the result back, cost
+        // ~116 MB of traffic and 7.24M divisions per step at the shipping
+        // shape — for an API shape, not for arithmetic.
         let scale = if uniform { 1.0 } else { n };
-        for lv in &leaves { flat.extend(tape.grad(*lv).iter().map(|x| x / scale)); }
-        let mut params_flat: Vec<f32> = self.params.iter().flatten().copied().collect();
-        self.opt.step(&mut params_flat, &flat)?;
-
-        let mut off = 0;
-        for p in self.params.iter_mut() {
-            let n = p.len();
-            p.copy_from_slice(&params_flat[off..off + n]);
-            off += n;
+        // The weights come back off the tape before the gradients are
+        // borrowed from it — taking them needs `&mut tape`, reading the
+        // gradients needs `&tape`, and the borrow checker will not hold
+        // both. `take_value` leaves each node's GRADIENT intact, which is
+        // exactly what the update below reads.
+        for (i, &lv) in leaves.iter().enumerate() {
+            self.params[i] = tape.take_value(lv);
         }
+        let grads: Vec<&[f32]> = leaves.iter().map(|&lv| tape.grad(lv)).collect();
+        let Trainer { params, opt, .. } = self;
+        opt.step_blocks(params, &grads, scale)?;
         self.step += 1;
         Ok(total / n)
     }
@@ -271,6 +282,36 @@ impl Trainer {
         tape.backward(loss_v);
         let grads = leaves.iter().map(|&lv| tape.grad(lv).to_vec()).collect();
         Ok((loss, logits, grads))
+    }
+
+    /// Mean cross-entropy on held-out data: one forward pass, no
+    /// gradients, no optimizer.
+    ///
+    /// `train_step`'s returned loss is the loss the model had *before*
+    /// that step's update, measured on the very batch it is about to fit.
+    /// Quoting it as "how well the model learned" measures memorisation of
+    /// the training stream, which is exactly the quantity a bigger model
+    /// inflates for free. The number that compares two implementations is
+    /// this one, on text neither of them trained on.
+    ///
+    /// The leaves are pushed with `requires = false`, so the tape allocates
+    /// no gradient buffer for any of them and `Op` backward bodies are
+    /// never reached — an eval pass costs a forward, not a step.
+    pub fn eval_loss(&self, batch: &[(Vec<usize>, Vec<usize>)]) -> Result<f32, String> {
+        if batch.is_empty() { return Err("eval_loss: empty batch".into()); }
+        let seq = batch[0].0.len();
+        if !batch.iter().all(|(i, t)| i.len() == seq && t.len() == seq) {
+            return Err("eval_loss: needs a uniform batch".into());
+        }
+        let mut tape = Tape::new();
+        let leaves: Vec<Var> = self.params.iter()
+            .map(|p| tape.leaf(p.clone(), false)).collect();
+        let mut toks = Vec::with_capacity(batch.len() * seq);
+        let mut tgts = Vec::with_capacity(batch.len() * seq);
+        for (i, t) in batch { toks.extend_from_slice(i); tgts.extend_from_slice(t); }
+        let logits = self.forward_fused(&mut tape, &toks, seq, &leaves);
+        let loss = tape.softmax_ce(logits, self.cfg.vocab, tgts);
+        Ok(tape.value(loss)[0])
     }
 
     /// Export into the model R2 serves. This is the whole point: the

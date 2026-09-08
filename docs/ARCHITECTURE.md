@@ -9,7 +9,7 @@
 
 ## 1. Purpose of this document
 
-R2 v0.3.7 ships a working tree-walking interpreter (~48K lines, 400+ builtins)
+R2 v0.4.0 ships a working tree-walking interpreter (~48K lines, 400+ builtins)
 with a Cranelift JIT for eligible user functions.
 The next several versions transform R2 into a **compiled, scheduled, columnar
 runtime** without rewriting the working interpreter. This file is the
@@ -65,7 +65,7 @@ locked unless this file is changed.
 
 ---
 
-## 3. Layer status (as of v0.3.7)
+## 3. Layer status (as of v0.4.0)
 
 | Layer | Component | Status | Where it lives |
 |---|---|---|---|
@@ -140,7 +140,7 @@ so it has been archived to `code-history/` (and remains in git history).
 This section now carries only the **current state** and the
 **not-yet-built phases** (kept until we reach them).
 
-### Current state (v0.2.2)
+### Current state (v0.4.0)
 
 Shipped layers:
 
@@ -163,6 +163,16 @@ Shipped layers:
   `Logicals`/Bool.
 - **Domain crates** — `r2-stats`, `r2-ml`, `r2-data`, `r2-linalg`,
   `r2-graphics`, each exposing `register_builtins()`.
+- **LLM stack** (`r2-tensor`, `r2-autograd`, `r2-train`) — byte-level BPE
+  tokenizer, reverse-mode autograd tape, fused batched attention, RMSNorm /
+  RoPE / SwiGLU, log-sum-exp cross-entropy, Adam, checkpointing, and KV-cached
+  inference. Pure Rust, no C: it trains a transformer **1.05× behind
+  PyTorch+MKL** and learns identically. The matrix path underneath it is
+  `r2_linalg::gemm::sgemm` — blocked/packed Goto-BLIS with a hand-written
+  AVX2 micro-kernel selected by `is_x86_feature_detected!` at **runtime**,
+  which beat `-C target-cpu=native` and keeps one shippable binary.
+  Measurements and the list of approaches that measured *worse* live in
+  `benchmarks/llm/REPORT.md`.
 - **Console** — one unified sink (the **r2dterminal**, `r2_types::out`),
   mirroring R's `R_WriteConsole`; the frontend installs the target
   (CLI → stdout, GUI → `ConsoleBuffer`). Graphics is a separate
@@ -209,7 +219,7 @@ Oracle V2 adds GPU / Cloud backends *below* the kernel layer; builtins
 stay unchanged. Best tackled once the CPU out-of-core/compute path above
 is complete.
 
-### Phase H — Accelerator hub (v0.3.0+)
+### Phase H — Accelerator hub (post-v0.5.0)
 
 Pluggable accelerators behind the kernel/Oracle boundary.
 

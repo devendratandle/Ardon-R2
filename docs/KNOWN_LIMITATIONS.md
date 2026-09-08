@@ -7,20 +7,29 @@ to address each**. This lists *open* gaps only — resolved items move to
 > Recently resolved (see CHANGELOG): full `sprintf` specs, `svd()`/`eigen()`
 > eigenvectors, exact t/F/ANOVA/MANOVA p-values, memory-mapped out-of-core
 > columns, zero-copy element-wise arithmetic, `factor(levels=)`, positional
-> `rnorm`/`runif`/… parameters.
+> `rnorm`/`runif`/… parameters, **`format()`/`strftime` on `Date`/`POSIXct`**,
+> **closure-state `<<-`** (the counter-factory idiom), **the full `merge()`
+> join** (composite keys, `all`/`all.x`/`all.y`, `by.x`/`by.y`, `.x`/`.y`
+> suffixes, key ordering, type preservation), and **`data.frame()` no longer
+> turning `stringsAsFactors` into a column** or leaving a short column
+> un-recycled — all verified against this build at v0.4.0 and covered by
+> `tests/differential/cases/merge_joins.R`.
 
 ## Resolution schedule (priority)
 
+Every row below was re-tested against the v0.4.0 binary before this table
+was written. Three entries carrying stale targets turned out to be already
+fixed, and one — `merge()` silently ignoring `all.x`/`all.y` — turned out
+to be worse than documented and was fixed here rather than scheduled.
+
 | Limitation | Impact | Target |
 |---|---|---|
-| `format()`/`strftime` don't render `Date`/`POSIXct` (print the raw day/second count) | High — dates look wrong | **v0.3.5** |
-| `merge()` — single-key inner join only (no multi-key, no outer joins) | Medium | **v0.3.5** |
-| `acf()` lag-count semantics differ slightly from R | Low | **v0.3.5** |
-| Mutable environments — `<<-` / closure-state counters only work at top level | High — blocks a common R idiom | **v0.4.0** |
-| Addon package system (load R2-script packages; optional-domain feature flags) | Medium — ecosystem | **v0.4.0** |
-| Mixed-effects models (`lmer`-style random effects) | Medium | **v0.4.0** |
-| `manova()` eigenvalues drift ~1–3% from R (needs a non-symmetric eigensolver) | Medium — accuracy | **v0.4.0** |
-| Split-plot ANOVA: `Error(subject/within)` collapses to the outer stratum | Medium | **v0.4.0** |
+| `acf(x, k)` ignores the lag argument and returns every lag | Low — values are right, the count is not | **v0.4.1** |
+| Mixed-effects models — `lmer` exists but rejects the `(1\|group)` random-effect term | Medium | **v0.5.0** |
+| Addon package system (load R2-script packages; optional-domain feature flags) | Medium — ecosystem | **v0.5.0** |
+| `manova()` eigenvalues drift ~1–3% from R (needs a non-symmetric eigensolver) | Medium — accuracy | **v0.5.0** |
+| Split-plot ANOVA: `Error(subject/within)` collapses to the outer stratum | Medium | **v0.5.0** |
+| Parquet corpora must be converted first (`r2-arrow/parquet_io.rs` is unwired from training) | Low — memmap path now ships | **v0.5.0** |
 | Divide-and-conquer SVD/eigensolver (speed on large/wide matrices; `prcomp` on ≳100 features) | Low — perf, not correctness | **v1.0** |
 | Dynamic (compiled `.dll`) packages | Low — only if real demand | **v1.0+** |
 | Oracle parallelism-threshold auto-calibration (hardware awareness) | Low — perf tuning | **v1.0+** |
@@ -30,36 +39,33 @@ to address each**. This lists *open* gaps only — resolved items move to
 
 ## Language / evaluation
 
-- **Mutable environments.** `x <<- 5` works at top level, but the
-  closure-state factory pattern (a returned function mutating a captured
-  variable, e.g. a counter) does not — R2 currently snapshots a closure's
-  captured environment. Same root as the for-loop captured-environment
-  behaviour. Architectural; targeted for v0.4.0.
 - **No lazy promises.** Arguments are evaluated eagerly, so `substitute()`
   works but the captured expression must still be evaluable, and R's
   skip-unused-argument semantics don't apply.
 
 ## Dates & time series
 
-- **`format(d, fmt)` / `strftime` don't format `Date`/`POSIXct`.** The
-  generic `format()` doesn't dispatch to the date formatter, so a `Date`
-  prints as its raw day-count (e.g. `19797` instead of `2024-03-15`).
-  `as.Date`, date arithmetic, and `difftime` are correct — only the
-  string rendering is missing. Targeted for v0.3.5.
-- **`acf(x, k)`** returns a slightly different lag count than R; the
-  autocovariances themselves are correct. Targeted for v0.3.5.
+- **`acf(x, k)` ignores `k`.** R returns lags `0..k`; R2 returns every lag
+  it can compute regardless of the argument. On `x` of length 10,
+  `acf(x, 3)` gives 4 values in R and 10 in R2. The **autocorrelations
+  themselves are exact** — the overlapping values match R to every digit
+  printed (`1, 0.45, 0.5, -0.033333333`) — so this is an argument-handling
+  bug, not a numerical one. Targeted for v0.4.1.
 
 ## Statistics
 
 - **`manova()` eigenvalues** of E⁻¹H drift ~1–3% from R's values on some
   designs (R2 routes through a symmetric solver; an exact non-symmetric
   eigensolver would close it). The four test statistics and their ordering
-  are correct; the small drift is in the reported eigenvalues. v0.4.0.
+  are correct; the small drift is in the reported eigenvalues. v0.5.0.
 - **Split-plot ANOVA.** `aov(y ~ x + Error(subject/within))` collapses to
   the outer (whole-plot) stratum — the one-way repeated-measures case is
-  exact, but a full multi-stratum split-plot decomposition is not done. v0.4.0.
-- **Mixed-effects models** (`lmer`-style random effects, REML) are not
-  implemented. v0.4.0.
+  exact, but a full multi-stratum split-plot decomposition is not done. v0.5.0.
+- **Mixed-effects models are stubbed, not working.** `lmer` is registered
+  as a builtin, but a formula carrying the standard random-effect term is
+  rejected: `lmer(y ~ x + (1|g))` errors with "formula must include at
+  least one random-effect term". So the function exists and cannot yet be
+  called successfully — verified against v0.4.0. v0.5.0.
 - **Paired Hotelling T².** R's `Hotelling` package and standard textbooks
   disagree on the paired convention; R2 follows the textbook definition.
   Documented difference, not a bug.
@@ -71,12 +77,6 @@ to address each**. This lists *open* gaps only — resolved items move to
   (`prcomp` on ≳100 features) are slower than R's LAPACK D&C routines. This
   is a *speed* gap, not an accuracy one. v1.0.
 
-## Data manipulation
-
-- **`merge(df1, df2)`** does a single-key inner join (auto-detected or via
-  `by=`). Multi-column keys (`by = c("a","b")`) and outer joins
-  (`all.x`/`all.y`) are not implemented. v0.3.5.
-
 ## Packages / extensibility
 
 - **Addon packages — script packages work (functions, types & methods);
@@ -86,7 +86,7 @@ to address each**. This lists *open* gaps only — resolved items move to
   package may export **functions, types, and methods** (verified end to end).
   **Open:** (1) `install.packages(name)` with no `path` — the online package
   registry isn't live; (2) optional-domain Cargo feature flags for a smaller
-  minimal build. v0.4.0. Dynamic compiled (`.dll`) packages only if there's
+  minimal build. v0.5.0. Dynamic compiled (`.dll`) packages only if there's
   real demand (v1.0+).
 
 ## Platform

@@ -146,6 +146,12 @@ pub struct Tape {
     grads: Vec<Vec<f32>>,
     ops: Vec<Op>,
     requires: Vec<bool>,
+    /// Has a backward pass already run on this tape?
+    ///
+    /// Gradient buffers are allocated zero (`push`), so on the FIRST
+    /// backward there is nothing to clear. Only a second pass over the same
+    /// tape needs the blanket reset, and this is what tells the two apart.
+    differentiated: bool,
 }
 
 /// Element count below which an op stays SERIAL.
@@ -160,7 +166,8 @@ const PAR_MIN: usize = 1 << 15;
 
 impl Tape {
     pub fn new() -> Self {
-        Tape { vals: Vec::new(), grads: Vec::new(), ops: Vec::new(), requires: Vec::new() }
+        Tape { vals: Vec::new(), grads: Vec::new(), ops: Vec::new(),
+               requires: Vec::new(), differentiated: false }
     }
 
     fn push(&mut self, val: Vec<f32>, op: Op, requires: bool) -> Var {
@@ -188,6 +195,26 @@ impl Tape {
 
     pub fn value(&self, v: Var) -> &[f32] { &self.vals[v.0] }
     pub fn grad(&self, v: Var) -> &[f32] { &self.grads[v.0] }
+
+    /// Take a node's value buffer back out, leaving the node empty.
+    ///
+    /// For the one caller that OWNS what it put on the tape: a training
+    /// step pushes the model's weights as leaves and, once backward has
+    /// run, wants them back. Cloning them in and copying them out again
+    /// costs 29 MB each way at the shipping shape — measured, the copy in
+    /// alone is **11.4 ms, 2.0% of a step**, for buffers a forward pass
+    /// only ever reads. PyTorch does not copy parameters into its graph
+    /// either; it references them.
+    ///
+    /// The node's GRADIENT is untouched, so `grad()` still works after
+    /// this — which is the whole point, since the caller needs both.
+    ///
+    /// Only sound after the value is no longer needed: a later backward
+    /// over this node would read an empty buffer. Training calls it after
+    /// `backward()` and then drops the tape.
+    pub fn take_value(&mut self, v: Var) -> Vec<f32> {
+        std::mem::take(&mut self.vals[v.0])
+    }
 
     // ── forward ops (each records enough for backward) ─────────────────
 
@@ -541,21 +568,33 @@ impl Tape {
         assert_eq!(self.vals[v.0].len(), seed.len(),
                    "backward_from: seed is {} long, node is {}",
                    seed.len(), self.vals[v.0].len());
-        // `fill` is a memset; the scalar loop this replaces was not always
-        // recognised as one. Big buffers get threaded: at vocab 8,000 this
-        // blanket zeroing measured 1,569 us on a FIVE-node tape, and it
-        // scales with the whole model's tape rather than with the op being
-        // differentiated. (PyTorch has no equivalent step at all — its
-        // gradients are freshly-allocated outputs and `w.grad = None` lets
-        // AccumulateGrad take ownership. Removing this loop rather than
-        // speeding it up is the real fix and is a tape-wide change; see
-        // LMO-1's notes.)
-        // SERIAL, deliberately. Threading this was tried and measured
-        // WORSE: a fork-join per gradient buffer, on a tape with hundreds
-        // of them, costs more than a memset over a shared memory
-        // controller can win back (187.5 s -> 191.5 s on the 30-step
-        // BPE arm). `perf-measurement-law` again: the join is the cost.
-        for gb in self.grads.iter_mut() { gb.fill(0.0); }
+        // Clear only what a PREVIOUS backward dirtied.
+        //
+        // `push` allocates every gradient buffer with `vec![0.0; n]`, so on
+        // a tape's first backward they are already zero and this memset
+        // writes zeros over zeros. Training builds a fresh `Tape` per step
+        // (`Trainer::train_step`), which makes that every step: measured by
+        // `--example step_census`, 71.86M elements — 287 MB of memset —
+        // for **27.7 ms, 4.8% of a step**, achieving nothing.
+        //
+        // Worse than the write itself: `fill` TOUCHES every page, forcing
+        // resident what the allocator had handed out as untouched zero
+        // pages, including the gradient buffers of `requires = false` nodes
+        // that no backward will ever write.
+        //
+        // Threading it was tried and measured WORSE (187.5 -> 191.5 s on
+        // the 30-step BPE arm): a fork-join per buffer costs more than the
+        // memset. That was the right measurement of the wrong fix — the
+        // memset should not happen at all. PyTorch has no equivalent step
+        // either; its gradients are freshly-allocated outputs and
+        // `w.grad = None` lets AccumulateGrad take ownership.
+        //
+        // A second backward on the SAME tape does need the reset, because
+        // the first one left gradients in those buffers.
+        if self.differentiated {
+            for gb in self.grads.iter_mut() { gb.fill(0.0); }
+        }
+        self.differentiated = true;
         self.grads[v.0].copy_from_slice(seed);
 
         // Nodes were pushed in topological order → reverse index order is
@@ -1497,6 +1536,7 @@ fn attn_forward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
     // Scratch, allocated once for the whole sequence rather than per tile.
     let mut acc = vec![0.0f32; BR * hd];
     let mut sc = vec![0.0f32; BR * BC];
+    let mut ex = vec![0.0f32; BC];
     let mut mrun = [0.0f32; BR];
     let mut lrun = [0.0f32; BR];
 
@@ -1543,12 +1583,29 @@ fn attn_forward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
                         for x in a.iter_mut() { *x *= corr; }
                         lrun[ii] *= corr;
                     }
+                    // Exponentiate the WHOLE tile row at once.
+                    //
+                    // This loop used to call `f32::exp` per (query, key)
+                    // pair. A libm call cannot vectorise, and it is not a
+                    // small part of the work here: the pair costs about
+                    // 128 FMAs — roughly 16 AVX2 ops — against one scalar
+                    // exp of ~25 cycles, so the transcendental was the
+                    // majority of the inner loop. Same finding as
+                    // `softmax_ce`, in a kernel nothing had looked at.
+                    //
+                    // `exp_shift_sum` brings its own `#[target_feature]`
+                    // body rather than relying on being inlined into this
+                    // one, so it keeps its AVX2 codegen across the crate
+                    // boundary — unlike `dot4`, which does not (see its
+                    // note). Masked entries are -inf and come back as
+                    // exactly 0.0, which is what the `e == 0.0` skip below
+                    // relies on and what the old `continue` did.
+                    let ev = &mut ex[..bc];
+                    lrun[ii] += r2_tensor::ops::exp_shift_sum(row, mnew, ev);
                     let a = &mut acc[ii * hd..ii * hd + hd];
                     for jj in 0..bc {
-                        let x = row[jj];
-                        if x == f32::NEG_INFINITY { continue; }
-                        let e = (x - mnew).exp();
-                        lrun[ii] += e;
+                        let e = ev[jj];
+                        if e == 0.0 { continue; }
                         let voff = (base + j0 + jj) * kw + kvh * hd;
                         let vrow = &vv[voff..voff + hd];
                         for c in 0..hd { a[c] += e * vrow[c]; }
@@ -1590,6 +1647,11 @@ fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
     let (qw, kw) = (nh * hd, nkv * hd);
     let base = s * seq;
     let mut p = vec![0.0f32; seq];
+    // Destination for the vectorised exp. `exp_shift_sum` cannot read and
+    // write one slice, and allocating per row would cost more than the
+    // scalar loop it replaces, so this is allocated once per sequence
+    // alongside the others.
+    let mut pe = vec![0.0f32; seq];
     let mut gs = vec![0.0f32; seq];
     for qh in 0..nh {
         let kvh = qh / group;
@@ -1604,10 +1666,15 @@ fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
                 p[j] = x;
                 if x > m { m = x; }
             }
-            let mut sum = 0.0f32;
-            for j in 0..=i { let e = (p[j] - m).exp(); p[j] = e; sum += e; }
+            // Same vectorised exp as the forward. The backward RECOMPUTES
+            // the probabilities rather than storing a quadratic buffer, so
+            // it pays this softmax in full — and at the shipping shape the
+            // backward is roughly five times the forward's cost, which
+            // makes it the larger of the two places a scalar `exp` was
+            // hiding. `exp_shift_sum` writes in place over `p`.
+            let sum = r2_tensor::ops::exp_shift_sum(&p[..=i], m, &mut pe[..=i]);
             let inv = 1.0 / sum;
-            for j in 0..=i { p[j] *= inv; }
+            for j in 0..=i { p[j] = pe[j] * inv; }
 
             let grow = &g[qoff..qoff + hd];
             // ── grad_p, its softmax pullback, and grad_v in one pass ──

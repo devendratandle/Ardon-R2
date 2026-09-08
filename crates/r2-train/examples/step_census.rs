@@ -220,8 +220,12 @@ fn main() {
     println!("{:>34} {:>10.1} {:>7.1}%", "sgemm x3 (fwd, grad_A, grad_B)", gemm_ms, pct(gemm_ms));
     println!("{:>34} {:>10.1} {:>7.1}%", "attention (4 layers)", 50.0, pct(50.0));
     println!("{:>34} {:>10.1} {:>7.1}%", "softmax_ce fwd+bwd", ce - ce_leaf, pct(ce - ce_leaf));
-    println!("{:>34} {:>10.1} {:>7.1}%", "tape's copy of every parameter", leaves, pct(leaves));
-    println!("{:>34} {:>10.1} {:>7.1}%", "backward()'s blanket grad zeroing", zero_ms, pct(zero_ms));
+    // REMOVED from the training path — timed only to show what they used
+    // to cost, and excluded from the sum below. Printing them as live
+    // stages would over-report the step by ~7% and hide whatever is
+    // genuinely next in line.
+    println!("{:>34} {:>10.1}   removed", "was: tape's copy of params", leaves);
+    println!("{:>34} {:>10.1}   removed", "was: blanket grad zeroing", zero_ms);
     println!("{:>34} {:>10.1} {:>7.1}%", "tape alloc churn (2 Vecs/node)", churn, pct(churn));
     println!("  -- elementwise, fwd+bwd, at per-step counts --");
     println!("{:>34} {:>10.1} {:>7.1}%", "silu x4", silu_ms, pct(silu_ms));
@@ -230,7 +234,10 @@ fn main() {
     println!("{:>34} {:>10.1} {:>7.1}%", "rmsnorm x8", rms_ms, pct(rms_ms));
     println!("{:>34} {:>10.1} {:>7.1}%", "rope_seq x8", rope_ms, pct(rope_ms));
     println!("{:>34} {:>10.1} {:>7.1}%", "embed x1", embed_ms, pct(embed_ms));
-    let named = gemm_ms + 50.0 + (ce - ce_leaf) + (full - fb) + zero_ms + churn
+    // `zero_ms` and `leaves` are NOT in this sum: both stages were removed
+    // from the training path, so counting them would inflate the total and
+    // hide whatever is genuinely next.
+    let named = gemm_ms + 50.0 + (ce - ce_leaf) + (full - fb) + churn
         + silu_ms + mul_ms + add_ms + rms_ms + rope_ms + embed_ms;
     println!("{}", "-".repeat(54));
     println!("{:>34} {:>10.1} {:>7.1}%", "accounted for", named, pct(named));
@@ -240,6 +247,8 @@ fn main() {
     let full_end = t_ms(2, || { let _ = tr.train_step(&batch).expect("step"); });
     println!("  step total {full:.1} ms before the stage timings, {full_end:.1} ms after ({:+.1}% drift)",
              (full_end - full) / full * 100.0);
-    println!("\n  tape holds {elems} elements; backward() zeroes every one of");
-    println!("  them before it starts, and PyTorch has no equivalent step.");
+    println!("\n  tape holds {elems} elements — about 10x the model, every node");
+    println!("  owning a value buffer AND a gradient buffer. backward() no");
+    println!("  longer zeroes them: `push` allocates them zero and a step builds");
+    println!("  a fresh tape, so the blanket reset was writing zeros over zeros.");
 }

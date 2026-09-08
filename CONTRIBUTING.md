@@ -176,12 +176,18 @@ test(r2-base): verify iris row 143 matches canonical R values
 Sorted roughly by current impact:
 
 1. **Apple Silicon testing and Cranelift NEON dispatch** — Phase G prep work
-2. **`r2-dl` deep learning bindings to `candle`** — major v0.2.0 feature
+2. **Out-of-core training data** — `r2-train/src/tokens.rs` (memmap) and `r2-arrow/src/parquet_io.rs` both exist, but nothing in the training path uses them, so a corpus must fit in RAM. Wiring them up is self-contained and high value
 3. **Coverage of remaining R idioms** — S4 dispatch, R5 reference classes, more of the long tail of CRAN-style helpers
 4. **Documentation and examples** — every `pub fn` deserves a doc comment with a runnable snippet
 5. **Performance benchmarks across more hardware classes** — Raspberry Pi, AWS Graviton, M2/M3, EPYC, Threadripper
-6. **`r2-pkg` package runtime** — currently a 15-line skeleton; making this usable opens up a contributor ecosystem
+6. **`r2-pkg` online package registry** — script packages already install from a local dir, a `.zip`, or a GitHub `user/repo`, and export functions, types and methods; `install.packages(name)` with no path is what's missing
 7. **The `r2-calculus` and `r2-symbolic` libraries on the roadmap** — green-field, designed to be modular, ideal for a small focused contributor team
+
+> Deep learning is **not** a bindings project here. R2 has its own stack in
+> pure Rust — `r2-tensor`, `r2-autograd`, `r2-train` — and trains a
+> transformer at PyTorch's speed (`benchmarks/llm/REPORT.md`). An earlier
+> version of this list proposed binding to `candle`; that would reintroduce
+> exactly the glue layer R2 exists to remove.
 
 ---
 

@@ -455,7 +455,90 @@ pub(crate) fn bi_as_int(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 }
 pub(crate) fn bi_strict(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Strict; soutln!("Mode: strict"); Ok(RVal::Null) }
 pub(crate) fn bi_lenient(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { e.mode = ErrorMode::Lenient; soutln!("Mode: lenient"); Ok(RVal::Null) }
-pub(crate) fn bi_df(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let cols: Vec<(Arc<str>, RVal)> = a.iter().enumerate().map(|(i,arg)| { let n = arg.name.clone().unwrap_or_else(|| Arc::from(format!("V{}",i+1).as_str())); (n, arg.value.clone()) }).collect(); Ok(RVal::DataFrame(DataFrame { columns: cols, row_names: None })) }
+/// `data.frame(...)` — every argument becomes a column, EXCEPT the ones R
+/// reserves to control construction.
+///
+/// `stringsAsFactors` is the one that matters in practice: it appears in a
+/// very large share of real R scripts written before R 4.0 changed the
+/// default, and treating it as data added a spurious logical column named
+/// `stringsAsFactors` to the frame. Nothing errored — the frame simply had
+/// one more column than the author wrote, which then propagated into every
+/// `merge`, `ncol`, `names` and column loop downstream.
+///
+/// R2 stores character columns as character already, so honouring the flag
+/// is a no-op; what matters is that it not become data. `row.names` is
+/// consumed properly, and the remaining control arguments are accepted and
+/// ignored so that valid R keeps working.
+pub(crate) fn bi_df(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    fn is_control(n: &str) -> bool {
+        matches!(n, "stringsAsFactors" | "check.names" | "check.rows" | "fix.empty.names")
+    }
+    let mut cols: Vec<(Arc<str>, RVal)> = Vec::with_capacity(a.len());
+    let mut row_names: Option<Vec<Arc<str>>> = None;
+    for (i, arg) in a.iter().enumerate() {
+        match arg.name.as_deref() {
+            Some(n) if is_control(n) => continue,
+            Some("row.names") => {
+                row_names = match &arg.value {
+                    RVal::Character(v, _) => Some(v.iter()
+                        .map(|s| s.clone().unwrap_or_else(|| Arc::from("NA"))).collect()),
+                    RVal::Null => None,
+                    // Numeric row names are legal in R and render as their
+                    // digits; do it once here rather than at every use.
+                    RVal::Numeric(v, _) => Some(v.iter()
+                        .map(|x| Arc::from(x.map_or("NA".to_string(), |n| format!("{n}")).as_str()))
+                        .collect()),
+                    RVal::Integer(v, _) => Some(v.iter()
+                        .map(|x| Arc::from(x.map_or("NA".to_string(), |n| format!("{n}")).as_str()))
+                        .collect()),
+                    _ => None,
+                };
+                continue;
+            }
+            _ => {}
+        }
+        let n = arg.name.clone()
+            .unwrap_or_else(|| Arc::from(format!("V{}", i + 1).as_str()));
+        cols.push((n, arg.value.clone()));
+    }
+
+    // Recycle short columns to the frame's row count, as R does. Without
+    // this, `data.frame(k = 1:3, g = "x")` built a frame whose `nrow()`
+    // said 3 while `g` held a single element — every row-wise operation
+    // then read past the end of it and silently produced NA.
+    //
+    // R recycles only when the length divides evenly (and warns otherwise);
+    // a non-dividing length is left alone here rather than half-filled, so
+    // the ragged column stays visible instead of being quietly padded.
+    let nrow = cols.iter().map(|(_, c)| r2_types::rval_length(c)).max().unwrap_or(0);
+    for (_, c) in cols.iter_mut() {
+        let len = r2_types::rval_length(c);
+        if len > 0 && len < nrow && nrow % len == 0 {
+            *c = recycle_col(c, nrow);
+        }
+    }
+    Ok(RVal::DataFrame(DataFrame { columns: cols, row_names }))
+}
+
+/// Repeat a column's elements until it is `n` long, keeping its type.
+fn recycle_col(col: &RVal, n: usize) -> RVal {
+    macro_rules! rep {
+        ($v:expr) => { (0..n).map(|i| $v[i % $v.len()]).collect() };
+    }
+    match col {
+        RVal::Numeric(v, a) => RVal::Numeric(rep!(v), a.clone()),
+        RVal::Integer(v, a) => RVal::Integer(rep!(v), a.clone()),
+        RVal::Logical(v, a) => RVal::Logical(rep!(v), a.clone()),
+        RVal::Character(v, a) => RVal::Character(
+            (0..n).map(|i| v[i % v.len()].clone()).collect(), a.clone()),
+        RVal::Factor(f) => RVal::Factor(r2_types::Factor {
+            codes: (0..n).map(|i| f.codes[i % f.codes.len()]).collect(),
+            levels: f.levels.clone(),
+            ordered: f.ordered,
+        }),
+        _ => col.clone(),
+    }
+}
 pub(crate) fn bi_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(RVal::List(a.iter().map(|x| (x.name.clone(), x.value.clone())).collect())) }
 
 /// `list.meta(lst)` — introspect a list's per-component shape.

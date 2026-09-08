@@ -6,6 +6,150 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
+## v0.4.0 (September 2026)
+
+**Train a real model and compare it, in two commands.** `cargo run
+--release -p r2-train --example tinystories_train` trains a 7.24M-parameter
+model on 19.4 MB of TinyStories, saves it, and generates from it;
+`python benchmarks/llm/tinystories_train.py` trains the same model in
+PyTorch and prints one joined table of speed and accuracy. The two halves
+hold three things identical — the token stream, the initial weights, and
+the batch order — so the only thing left free is the arithmetic and how
+fast each library does it. It gates itself: both sides evaluate held-out
+loss from the same weights before training, and the comparison aborts if
+those disagree by more than f32 rounding.
+
+Result on 500 steps / 1,024,000 tokens, machine at full clock: **training
+1.05x behind PyTorch, learning identical to four decimals at every one of
+eleven checkpoints**, held-out loss 4.0499 on both sides, and both models
+generate the same sentence. Full numbers in `benchmarks/llm/REPORT.md`.
+
+- **Corrected: the "R2 1.71x faster end to end" claim was a short-run
+  artefact.** It came from a 30-step arm, where training is ~21 s against
+  ~3 s of tokenizing and an 11x tokenizer advantage carries the total. At
+  500 steps tokenizing is 0.5% of the pipeline and the total is level
+  (1.02x, one pair each way). Same code, different run length. The
+  training ratio is the number to quote.
+- **Fixed: `Tokenizer::to_tokenizer_json` wrote files HuggingFace refuses
+  to load.** The ByteLevel sections omitted `trim_offsets` and
+  `use_regex`, which are not optional in that schema — `tokenizers`
+  rejects the file outright with "missing field `trim_offsets`". R2's
+  export was unusable by the ecosystem it exists to interoperate with.
+  Both fields are now written, and a shared vocabulary round-trips: R2 and
+  HuggingFace encode the same prompt to the same ids and the two models
+  generate byte-identical text.
+- **New: `Trainer::eval_loss`** — one forward pass, no gradients, no
+  optimizer. `train_step`'s loss is what the model had *before* that
+  step's update on the batch it was about to fit, which measures
+  memorisation of the training stream; held-out loss is the number that
+  compares two implementations.
+- **Fixed: `installer/R2.iss` still declared 0.3.9.** It ships both
+  `r2.exe` and `R2Gui.exe`, so a release cut from it would have packaged
+  binaries stamped with two different versions.
+
+**Three pieces of work a training step was doing for no reason.** Found by
+re-running `--example step_census` rather than reasoning about it: the top
+three items after the GEMM were not arithmetic at all, and none of them is
+something PyTorch does. Measured separately, in interleaved pairs at 60
+steps, with the loss trajectory bit-identical in every run.
+
+- **`backward()` no longer memsets gradient buffers that are already
+  zero** — **8.0% of a training step.** `Tape::push` allocates every
+  gradient buffer with `vec![0.0; n]` and `train_step` builds a fresh tape
+  each step, so the blanket reset at the top of `backward()` was writing
+  zeros over zeros: 71.86M elements, 287 MB, 27.7 ms, every step. Worse
+  than the write, `fill` TOUCHES every page, forcing resident what the
+  allocator had handed out as untouched — including the buffers of
+  `requires = false` nodes that no backward ever writes. A second backward
+  on the same tape still resets, because that one has real gradients to
+  clear. (Threading this was measured *worse* in v0.3.9; that was a correct
+  measurement of the wrong fix.)
+- **Adam updates the parameter blocks in place, with an AVX2 kernel** —
+  **9.6% together with the item below.** Reaching the flat `Adam::step`
+  meant building a 29 MB gradient buffer with a division per element,
+  copying all 7.24M parameters into a second 29 MB buffer, and copying them
+  back: ~116 MB of traffic per step to satisfy an API shape. The new
+  `Adam::step_blocks` walks the blocks against a running offset into
+  `m`/`v` instead, and folds the gradient scaling into the update. The
+  kernel is bit-identical to the scalar form — `div` and `sqrt`, not
+  reciprocals; separate multiply-add, not FMA — and a test asserts that
+  against the original `Adam::step` over five steps and six block shapes.
+  It earned its place immediately: the first version associated
+  `(1-b2)*g*g` as `(1-b2)*(g*g)` where the scalar form evaluates
+  `((1-b2)*g)*g`, and the last bit differed.
+- **The tape borrows the weights instead of cloning them.** Parameters are
+  moved onto the tape and returned by a new `Tape::take_value`, which
+  leaves the node's gradient intact. A forward pass only reads them, so the
+  29 MB copy in and 29 MB copy out were pure overhead — 11.4 ms, 2.0% of a
+  step. PyTorch does not copy parameters into its graph either.
+- **Fixed: the benchmark crashed on a reused token file.** With tokens
+  cached, R2's `tokenize_s` is zero and the Python half divided by it. It
+  now reports "reused" and declines to print a pipeline ratio at all —
+  scoring R2's zero against PyTorch's full tokenizing pass would credit R2
+  for work it had simply already done.
+
+**Out-of-core training data — a corpus no longer has to fit in RAM.**
+`tinystories_train` now tokenizes straight to a file and trains from a
+memory map, so neither the corpus text nor the id stream is ever fully
+resident: 96 bytes of mapping against 37.7 MB as a `Vec<usize>`. The old
+path cost roughly four times the corpus before a step ran (text + `u32`
+ids + `usize` ids), which is ~76 MB at 19.4 MB and ~2.7 GB at 700 MB — the
+point where a run simply does not start.
+
+- **Tokenizing is streamed and chunk boundaries are correct.** Chunks are
+  cut on a GPT-2 **pre-token** boundary, because merges never cross one.
+  Cutting on newlines instead looks safe and is not: measured over 3 MB at
+  64 KB chunks it produced different ids from whole-text encoding
+  (`[1293, 400]` versus `[10, 470]` for identical text), since a newline
+  plus the following space is a single pre-token. The streamed pass now
+  reproduces the whole-corpus token count exactly — 4,615,591 either way —
+  and a new test,
+  `chunked_encoding_matches_whole_text_on_pretoken_boundaries`, pins the
+  property.
+- **Tokenizing happens once per corpus.** A stamp records the corpus path,
+  size, split point and tokenizer settings; a later run maps the existing
+  token files and skips both BPE training and encoding (3.15 s -> 0 s).
+- **Rejected after measurement: split-K in `sgemm`.** Parallelising the
+  depth loop with per-worker accumulators, to cut the eight fork-joins a
+  `grad_B` multiply makes down to one. Four interleaved pairs put it inside
+  noise (mean 2.8%, and the three pairs after a first-run outlier were
+  +2.4%, +1.0%, -0.7%). The premise was also wrong: the block count is
+  already 6-84, so `grad_B` was never starved of tasks, and removing seven
+  of its eight barriers changed nothing measurable — the shortfall is
+  memory bandwidth. Reverted; recorded in `benchmarks/llm/REPORT.md` so it
+  is not retried.
+
+**Data frames and joins — three silent-wrong-answer bugs.** All found by
+re-testing `docs/KNOWN_LIMITATIONS.md` against the build instead of
+trusting it, and all now covered by
+`tests/differential/cases/merge_joins.R`, which diffs R2 against GNU R.
+
+- **`merge()` is now a real join.** It supported one key column and
+  **silently ignored `all.x` / `all.y` / `all`** — asking for an outer join
+  returned the inner join, with no warning and no error, just fewer rows.
+  It also read only the first element of `by`, so `by = c("k1","k2")`
+  joined on `k1` and duplicated `k2` as a `.y` column; suffixed only the
+  right-hand side of a name collision where R suffixes both (`v.x`/`v.y`);
+  returned rows in match order where R sorts by the key; and rebuilt every
+  column by formatting it to a string and re-parsing, which turned a
+  character column of digits (`"007"`) into a number. Now: composite keys,
+  `by.x`/`by.y`, all four join types with NA fill, `.x`/`.y` suffixes,
+  key-ordered output (`sort=`), and type-preserving columns. The right
+  frame is indexed once rather than scanned per left row — O(n+m) instead
+  of O(n x m).
+- **`data.frame(stringsAsFactors = FALSE)` added a column called
+  `stringsAsFactors`.** The construction flags were treated as data, so a
+  frame written by any pre-R-4.0 script silently carried one extra logical
+  column into every `ncol`, `names`, column loop and join downstream.
+  `stringsAsFactors`, `check.names`, `check.rows` and `fix.empty.names` are
+  now consumed, and `row.names =` sets the row names instead of becoming a
+  column.
+- **`data.frame()` now recycles short columns**, as R does.
+  `data.frame(k = 1:3, g = "x")` built a frame whose `nrow()` said 3 while
+  `g` held one element; every row-wise read past the end quietly produced
+  NA. A length that does not divide evenly is still left alone rather than
+  half-filled, so a genuinely ragged column stays visible.
+
 ## v0.3.9 (September 2026)
 
 **LLM training performance — the LMO queue.** Numbers are the 30-step BPE arm

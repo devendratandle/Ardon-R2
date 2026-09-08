@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.3.9.</em></p>
+<em>An AI-Assisted Project. v0.4.0.</em></p>
 
 ---
 
@@ -24,8 +24,9 @@ packages to install.
 R2 takes R's best ideas and rebuilds them from scratch with modern
 performance and Rust-only dependencies. The numbers are **R-identical to ~7
 significant figures** (see [PERFORMANCE.md](PERFORMANCE.md)); the whole thing
-is one ~6 MB binary that builds the same on Linux, Windows, and macOS, x86
-and ARM. This README is a **map of the project** — what each folder and file
+is one self-contained ~15 MB binary that builds the same on Linux, Windows,
+and macOS, x86 and ARM (the Windows installer, carrying CLI + GUI + docs +
+samples, is ~9 MB). This README is a **map of the project** — what each folder and file
 holds, and where to look next.
 
 ## Showcase
@@ -48,7 +49,7 @@ holds, and where to look next.
 
 | | R | Python (scikit-learn) | R2 |
 |---|---|---|---|
-| Install size | 200+ MB | 5–8 GB | **~6 MB** |
+| Install size | 200+ MB | 5–8 GB | **~9 MB installer** |
 | Setup time | minutes | hours (pip conflicts) | **0 seconds** |
 | ML packages needed | 5–10 installs | 3–5 installs | **0 (built-in)** |
 | Matrix multiply (500²) | 1× (ref BLAS) | 1× (NumPy) | **3.6× faster** |
@@ -72,7 +73,8 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 | Path | What you'll find |
 |------|------------------|
 | **[`samples/`](samples)** | Programs you can run to **test R2 on your machine and cross-check against R**. `smoke.r` runs on *both* R and R2 (compare the output); `capabilities.r2` tours the R2-specific features; `graph_gallery.r2` draws the plots above. **Found a mismatch or error? Please [open an issue](https://github.com/devendratandle/Ardon-R2/issues).** |
-| **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy (v0.3.8, 2026-07-15). Accuracy **matches CRAN R (12/12 differential harness)**; at parity-or-better on R's C internals (up to 3.6× matmul), and **4×–38,000× faster on user loops and library code** the JIT compiles. Includes a CPU-vs-integrated-GPU table. |
+| **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy. Accuracy **matches CRAN R (13/13 differential harness, re-run at v0.4.0)**; at parity-or-better on R's C internals (up to 3.6× matmul), and **4×–38,000× faster on user loops and library code** the JIT compiles. Includes a CPU-vs-integrated-GPU table. Timings were taken at v0.3.8. |
+| **[`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md)** | **R2 vs PyTorch and JAX on LLM training** — the single source for those numbers. A 7.24M-parameter model trained on TinyStories runs **1.05× behind PyTorch 2.13+MKL** and **learns identically** (same loss to four decimals at every checkpoint over 500 steps, from shared initial weights). BPE tokenization is **~11× faster than HuggingFace `tokenizers`**. Includes what was tried and measured *worse*, so it isn't retried. |
 | **[`benchmarks/`](benchmarks)** | The runnable benchmark harness (tuned parallel `.R`/`.r2` files) behind PERFORMANCE.md — reproduce the numbers yourself. |
 | **[`FUNCTIONS.md`](FUNCTIONS.md)** | Complete reference for the 400+ built-in functions. |
 | **[`CHANGELOG.md`](CHANGELOG.md)** | Per-version history — what functions were added and what problems were fixed, release by release. |
@@ -81,7 +83,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 | **[`VISION.md`](VISION.md)** | Why R2 exists — the Green-AI / efficiency thesis. |
 | **[`INSTALL_LINUX.md`](INSTALL_LINUX.md)** | Linux install guide (CLI + GUI), prebuilt or from source. |
 | **[`screenshots/`](screenshots)** | Graph gallery output + your GUI/CLI screenshots. |
-| **[`crates/`](crates)** | The source — ~25 focused crates (`r2-parser` → `r2-types` → `r2-engine` → domain crates → `r2-kernel` → `r2-arrow`). Split small, on purpose, so logic is easy to locate. |
+| **[`crates/`](crates)** | The source — 29 focused crates (`r2-parser` → `r2-types` → `r2-engine` → domain crates → `r2-kernel` → `r2-arrow`). Split small, on purpose, so logic is easy to locate. |
 
 ## Highlights
 
@@ -90,7 +92,8 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 - **Machine learning, built in**: decision tree, random forest, gradient boosting, KNN, naive Bayes, PCA, K-means, cross-validation.
 - **Graphics**: in-memory device, full `par()` multi-panel layouts, scatter/line/bar/hist/box/pie, PNG/SVG/PDF output, and a live browser plot viewer (`dev.view()`).
 - **JIT-compiled user functions** — pure-arithmetic closures compile to native code via Cranelift; multi-op math fuses into one loop.
-- **Pure-Rust math kernel** — hand-written DGEMM, SVD/QR/eigen, distributions; automatic serial/Rayon parallelism.
+- **Pure-Rust math kernel** — hand-written DGEMM and a blocked/packed SGEMM with an AVX2 micro-kernel chosen at *runtime* (one binary runs everywhere), SVD/QR/eigen, distributions; automatic serial/Rayon parallelism.
+- **LLM training that keeps up with PyTorch** — BPE tokenizer, autograd tape, fused attention, and an Adam trainer, all in Rust with no C. Trains **1.05× behind PyTorch+MKL** and learns identically; see [`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md).
 
 Want to see it run rather than read code? `r2 samples/smoke.r` and
 `r2 samples/capabilities.r2`.

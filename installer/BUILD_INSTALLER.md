@@ -44,7 +44,7 @@ build machine, not on the user's.
 4. Done. The output appears at:
 
 ```
-installer\Output\R2-Setup-0.1.0.exe
+installer\Output\R2-Setup-0.4.0.exe
 ```
 
 That single file is everything a user needs to install Ardon-R2.
@@ -53,7 +53,7 @@ That single file is everything a user needs to install Ardon-R2.
 
 ## What the installer does
 
-When the user runs `R2-Setup-0.1.0.exe`:
+When the user runs `R2-Setup-0.4.0.exe`:
 
 * Default install path: `%LOCALAPPDATA%\Programs\Ardon-R2` (no admin needed).
 * Optional install path: `C:\Program Files\Ardon-R2` (admin needed).
@@ -89,7 +89,7 @@ If you don't want an installer at all, just zip the release directory:
 
 ```bash
 cd target/release
-7z a R2-portable-0.1.0.zip r2.exe ../../../samples ../../../docs
+7z a R2-portable-0.4.0.zip r2.exe ../../../samples ../../../docs
 ```
 
 Users unzip and run `r2.exe` directly. No registry writes, no PATH changes,

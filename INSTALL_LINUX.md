@@ -38,7 +38,7 @@ R2Gui                                       # opens the GUI window
 ./install-linux.sh --cli                  # CLI only
 ./install-linux.sh --gui                  # GUI only
 ./install-linux.sh --source               # build from source instead of downloading
-./install-linux.sh --version v0.3.3       # install a specific release
+./install-linux.sh --version v0.4.0       # pin a specific release (default: latest)
 ./install-linux.sh --prefix "$HOME/.local"   # install WITHOUT sudo (per-user)
 ```
 
@@ -56,7 +56,7 @@ If you'd rather not run a script.
 
 ```bash
 cd ~/Downloads
-wget https://github.com/devendratandle/Ardon-R2/releases/download/v0.3.3/r2-linux-x86_64.tar.gz
+wget https://github.com/devendratandle/Ardon-R2/releases/latest/download/r2-linux-x86_64.tar.gz
 tar -xzf r2-linux-x86_64.tar.gz
 sudo install -m 755 r2 /usr/local/bin/r2
 r2 --help    # or just:  r2
@@ -72,7 +72,7 @@ sudo apt-get install -y \
   libxcb1 libx11-6 libxrandr2 libxi6 libxcursor1 libgl1 libegl1
 
 # Download and install the GUI
-wget https://github.com/devendratandle/Ardon-R2/releases/download/v0.3.3/R2Gui-linux-x86_64.tar.gz
+wget https://github.com/devendratandle/Ardon-R2/releases/latest/download/R2Gui-linux-x86_64.tar.gz
 tar -xzf R2Gui-linux-x86_64.tar.gz
 sudo install -m 755 R2Gui /usr/local/bin/R2Gui
 R2Gui

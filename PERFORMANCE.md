@@ -1,12 +1,27 @@
-# Performance — Ardon-R2 vs R (v0.3.8)
+# Performance — Ardon-R2 vs R
+
+**Timings measured at v0.3.8 (2026-07-15); accuracy re-verified at v0.4.0.**
 
 Head-to-head timing and numerical accuracy of Ardon-R2 against CRAN R,
-measured **2026-07-15** on one 6-core AVX2 workstation (no AVX-512) with an
-**AMD Radeon integrated GPU**. Elapsed seconds, best of 3 warm runs, R2
-v0.3.8 (release, no-LTO CI profile) vs CRAN R 4.5.3 (default reference
-Rblas). Reproduce: `benchmarks/v038/bench_r2.r2` and `bench_r.R` (identical
-algorithms and sizes), GPU: `cargo run -p r2-gpu --release --features gpu
---example flops`.
+measured on one 6-core AVX2 workstation (no AVX-512) with an **AMD Radeon
+integrated GPU**. Elapsed seconds, best of 3 warm runs, R2 (release, no-LTO
+CI profile) vs CRAN R 4.5.3 (default reference Rblas). Reproduce:
+`benchmarks/v038/bench_r2.r2` and `bench_r.R` (identical algorithms and
+sizes), GPU: `cargo run -p r2-gpu --release --features gpu --example flops`.
+
+> **What changed since these timings were taken, and why they still stand.**
+> v0.3.9/v0.4.0 rewrote the **single-precision** matrix path — a
+> blocked/packed `sgemm` with a runtime-dispatched AVX2 micro-kernel — for
+> LLM training. R's `%*%` and every statistical routine here run in
+> **double** precision through `level3::dgemm`, which that work deliberately
+> did not touch. So the table below is unaffected by it; the f32 numbers
+> live in `benchmarks/llm/REPORT.md` and are a different measurement of a
+> different kernel. Re-run the harness above if you want them re-taken on
+> your own machine.
+
+**This file is R-vs-R2.** For R2 against PyTorch and JAX on LLM training,
+see **[`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md)** — that is the
+single source for those numbers, and none of them appear here.
 
 The comparison is split by **class of workload**, because that is what
 decides who wins — R runs C internals natively but user code interpreted,
@@ -91,9 +106,10 @@ eligible.
 
 Every release is gated by a differential harness that runs identical scripts
 under R2 and CRAN R and compares numerically (`tests/differential/run.sh`):
-**12/12 cases pass** at v0.3.8 (matrix arithmetic, indexing, statistics,
-lm/glm, data frames, strings, control flow, numeric edge semantics,
-closures/environments, default args, indexed-loop math).
+**13/13 cases pass, re-run at v0.4.0** (matrix arithmetic, indexing,
+statistics, lm/glm, data frames, strings, control flow, numeric edge
+semantics, closures/environments, default args, indexed-loop math, matrix
+metadata, and merge/join semantics).
 
 **Digit-level agreement** on identical fixed input (not RNG — the two
 engines' random streams differ by design, so accuracy is measured on the
@@ -133,7 +149,7 @@ than R.
 Ardon-R2 is **at parity or faster than R on R's own C internals** (up to
 3.6× on matmul), and **dramatically faster on the code users and libraries
 actually write** — 4–7× on real loops, and up to ~38,000× where R does
-redundant interpreted work R2 compiles away. Accuracy matches CRAN R (12/12
+redundant interpreted work R2 compiles away. Accuracy matches CRAN R (13/13
 differential). The GPU dispatcher is a correct, accurate foundation that
 brings integrated-GPU capability to any machine; performance tuning of the
 GPU path is ongoing.
