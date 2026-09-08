@@ -151,9 +151,11 @@ macro_rules! blocked_gemm_for {
             acc
         }
 
-        /// The same source, compiled for AVX2 + FMA.
+        /// The same source, compiled for AVX2 + FMA. Kept as the fallback
+        /// for element types with no hand-written kernel.
         #[cfg(target_arch = "x86_64")]
         #[target_feature(enable = "avx2", enable = $feat)]
+        #[allow(dead_code)]
         unsafe fn micro_wide(kc: usize, apack: &[$ty], bpack: &[$ty]) -> [[$ty; NR]; MR] {
             micro_impl(kc, apack, bpack)
         }
@@ -182,9 +184,24 @@ macro_rules! blocked_gemm_for {
             #[cfg(target_arch = "x86_64")]
             if wide {
                 // SAFETY: `wide` is only true when `have_wide()` confirmed
-                // AVX2+FMA on this CPU. The callee's body is the same safe
-                // code as `micro_impl`; the attribute changes codegen, not
-                // semantics.
+                // AVX2+FMA on this CPU, and the packed buffers are sized by
+                // `pack_a`/`pack_b` as the kernel's own safety note requires.
+                //
+                // MR x NR is 6 x 16 for f32, which is what the hand-written
+                // kernel implements; the transmutes are identity casts that
+                // let one macro body serve a type with a bespoke kernel and
+                // a type without. Any other instantiation falls back to the
+                // compiler-vectorised body.
+                if std::mem::size_of::<$ty>() == 4 && MR == 6 && NR == 16 {
+                    return unsafe {
+                        let a: &[f32] = core::slice::from_raw_parts(
+                            apack.as_ptr() as *const f32, apack.len());
+                        let b: &[f32] = core::slice::from_raw_parts(
+                            bpack.as_ptr() as *const f32, bpack.len());
+                        let r = super::micro_f32_avx2(kc, a, b);
+                        core::ptr::read(&r as *const _ as *const [[$ty; NR]; MR])
+                    };
+                }
                 return unsafe { micro_wide(kc, apack, bpack) };
             }
             let _ = wide;
@@ -408,6 +425,97 @@ macro_rules! blocked_gemm_for {
 pub mod f32 {
     use super::{nthreads, Trans, MR};
     blocked_gemm_for!(f32, 16, 256, 96, 1024, "fma");
+}
+
+/// The f32 micro-kernel, written with AVX2 intrinsics instead of left to
+/// the optimiser.
+///
+/// # Why this exists in a project that avoids `unsafe`
+///
+/// `micro_impl` is a plain Rust loop and LLVM vectorises it, but it does
+/// not *guarantee* the twelve accumulators stay in registers across the
+/// whole `kc` depth — and if even one spills, the innermost loop of the
+/// whole library starts round-tripping through memory. Measured, that loop
+/// reached 56-67 GFLOP/s against roughly 77 of single-core peak: 78%, with
+/// the missing fifth exactly where a spill or a missed FMA fusion would
+/// put it.
+///
+/// This is the same thing BLIS does. Its portable kernels are intrinsics,
+/// not assembly, for precisely this reason — the register allocation of
+/// the inner 6x16 tile is too important to delegate. It stays pure Rust
+/// with no C dependency, which is the constraint that matters here
+/// (`docs/BLAS_DISPATCH.md`); `unsafe` buys explicit registers, not a
+/// foreign library.
+///
+/// The shape is 6 rows x 16 floats = **12 YMM accumulators**, plus 2 for
+/// the B strip and 1 for the broadcast A scalar: 15 of the 16 architectural
+/// YMM registers, with one to spare. `RESULTS`' own tile sweep found 12
+/// independent FMA chains to be the peak — 4 chains gave 49.8 GFLOP/s, 12
+/// gave 77.3, and 16 gave 60.3 because it spills.
+///
+/// # Safety
+///
+/// The caller passes packed buffers built by [`f32::pack_a`] and
+/// [`f32::pack_b`], which are sized `panels * kc * MR` and
+/// `strips * kc * NR` and always sliced to exactly one panel or strip. The
+/// reads below walk `kc * MR` and `kc * NR` elements respectively, in
+/// order, from the start of each — the debug assertions pin that. AVX2 and
+/// FMA availability is established by the caller's `have_wide()` check.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn micro_f32_avx2(kc: usize, apack: &[f32], bpack: &[f32]) -> [[f32; 16]; 6] {
+    use std::arch::x86_64::*;
+    debug_assert!(apack.len() >= kc * 6);
+    debug_assert!(bpack.len() >= kc * 16);
+
+    // Twelve accumulators, named so the register allocator has no choice.
+    let (mut c00, mut c01) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let (mut c10, mut c11) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let (mut c20, mut c21) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let (mut c30, mut c31) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let (mut c40, mut c41) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let (mut c50, mut c51) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+
+    let mut a = apack.as_ptr();
+    let mut b = bpack.as_ptr();
+    for _ in 0..kc {
+        // One B strip: 16 floats, the two halves of the tile's width.
+        let b0 = _mm256_loadu_ps(b);
+        let b1 = _mm256_loadu_ps(b.add(8));
+        // Each A element broadcasts across the strip. Packing put the six
+        // rows of this depth step adjacent, so these six loads are one
+        // cache line.
+        let a0 = _mm256_set1_ps(*a);
+        c00 = _mm256_fmadd_ps(a0, b0, c00);
+        c01 = _mm256_fmadd_ps(a0, b1, c01);
+        let a1 = _mm256_set1_ps(*a.add(1));
+        c10 = _mm256_fmadd_ps(a1, b0, c10);
+        c11 = _mm256_fmadd_ps(a1, b1, c11);
+        let a2 = _mm256_set1_ps(*a.add(2));
+        c20 = _mm256_fmadd_ps(a2, b0, c20);
+        c21 = _mm256_fmadd_ps(a2, b1, c21);
+        let a3 = _mm256_set1_ps(*a.add(3));
+        c30 = _mm256_fmadd_ps(a3, b0, c30);
+        c31 = _mm256_fmadd_ps(a3, b1, c31);
+        let a4 = _mm256_set1_ps(*a.add(4));
+        c40 = _mm256_fmadd_ps(a4, b0, c40);
+        c41 = _mm256_fmadd_ps(a4, b1, c41);
+        let a5 = _mm256_set1_ps(*a.add(5));
+        c50 = _mm256_fmadd_ps(a5, b0, c50);
+        c51 = _mm256_fmadd_ps(a5, b1, c51);
+        a = a.add(6);
+        b = b.add(16);
+    }
+
+    let mut out = [[0.0f32; 16]; 6];
+    let p = out.as_mut_ptr() as *mut f32;
+    _mm256_storeu_ps(p, c00);            _mm256_storeu_ps(p.add(8), c01);
+    _mm256_storeu_ps(p.add(16), c10);    _mm256_storeu_ps(p.add(24), c11);
+    _mm256_storeu_ps(p.add(32), c20);    _mm256_storeu_ps(p.add(40), c21);
+    _mm256_storeu_ps(p.add(48), c30);    _mm256_storeu_ps(p.add(56), c31);
+    _mm256_storeu_ps(p.add(64), c40);    _mm256_storeu_ps(p.add(72), c41);
+    _mm256_storeu_ps(p.add(80), c50);    _mm256_storeu_ps(p.add(88), c51);
+    out
 }
 
 /// BLAS `sgemm`, row-major: `C = A·B` in single precision.

@@ -23,14 +23,14 @@ config   dim 256, 4 layers, vocab 8,000, ffn 768, 30 steps x 32 x 64
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
 | read | 0.02 s | 0.03 s | — |
-| learn BPE merges | 1.40 s | 1.72 s | R2 1.23x |
-| **tokenize 19.4 MB** | **1.54 s** | 16.41 s | **R2 10.7x faster** |
-| **train** | 23.51 s | **16.69 s** | **PyTorch 1.4x faster** |
-| **TOTAL** | **26.78 s** | 34.15 s | **R2 1.28x faster** |
+| learn BPE merges | 1.39 s | 1.71 s | R2 1.23x |
+| **tokenize 19.4 MB** | **1.56 s** | 15.96 s | **R2 10.2x faster** |
+| **train** | 21.61 s | **16.82 s** | **PyTorch 1.28x faster** |
+| **TOTAL** | **24.59 s** | 34.52 s | **R2 1.40x faster** |
 
-Two interleaved pairs giving 1.34x and 1.41x on training (24.05/17.99 and
-23.51/16.69). **Training is 1.4x behind; the whole pipeline is ahead**,
-because R2 tokenises about 11x faster.
+Two interleaved pairs giving 1.33x and 1.28x on training (22.44/16.82 and
+21.61/16.82). **Training is 1.3x behind; the whole pipeline is ahead**,
+because R2 tokenises about 10x faster.
 
 **Learning is at parity.** Bits per byte is the comparable metric — the
 vocabularies differ (8,000 vs 8,143) and cross-entropy is per token:
@@ -91,14 +91,22 @@ and both are hand-written assembly R2 does not ship.
 
 | block | m x k x n | calls/step | NN | NT (`grad_A`) | TN (`grad_B`) |
 |---|---|---:|---:|---:|---:|
-| output head | 2048x256x8000 | 1 | 149.8 | 139.0 | 180.3 |
-| ffn w1/w3 | 2048x256x768 | 8 | 112.7 | 209.3 | 144.1 |
-| ffn w2 | 2048x768x256 | 4 | 214.2 | 205.6 | 138.8 |
-| q/o proj | 2048x256x256 | 8 | 154.1 | 167.7 | 134.0 |
-| k/v proj | 2048x256x128 | 8 | 168.2 | 153.0 | 123.7 |
+| output head | 2048x256x8000 | 1 | 162.8 | 181.2 | 209.6 |
+| ffn w1/w3 | 2048x256x768 | 8 | 230.5 | 224.0 | 155.4 |
+| ffn w2 | 2048x768x256 | 4 | 221.8 | 240.8 | 192.7 |
+| q/o proj | 2048x256x256 | 8 | 203.5 | 209.3 | 143.6 |
+| k/v proj | 2048x256x128 | 8 | 187.1 | 158.1 | 123.1 |
 
-MKL measures 171-286 on the same shapes; the i-k-j loop this replaced
-managed 27-73.
+Weighted by calls per step, **189.0 GFLOP/s**. MKL measures 171-286 on the
+same shapes, so several are now inside its range; the i-k-j loop this
+replaced managed 27-73.
+
+The micro-kernel is **hand-written with AVX2 intrinsics** — twelve named
+`__m256` accumulators, so the 6x16 tile's registers are placed rather than
+hoped for. Leaving it to the optimiser cost 20-25%: 56-67 GFLOP/s serial
+against 73-84 now. This is what BLIS does for its portable kernels too,
+and it stays pure Rust with no C dependency — `unsafe` here buys explicit
+registers, not a foreign library.
 
 ---
 
@@ -140,14 +148,12 @@ Ranked by the census above, not by how interesting they are.
 1. **`sgemm` is 45% of a step and everything else is now single digits.**
    Past this point the remaining wins are small and many, not few and
    large. See item 2 for the one structural lever left on it.
-2. **`sgemm` parallel efficiency is 2.6-3.4x on six cores.** Serially the
-   kernel runs 56-67 GFLOP/s against ~77 of single-core peak — 78%, and
-   that last stretch is MKL's hand-written assembly, software pipelining
-   and explicit prefetch. But the threading leaves half the machine unused
-   even where row-blocks are plentiful: every row-block re-streams the
-   whole packed B panel, and A is re-packed once per column panel. A thread
-   mesh over `jc` x `ic`, as BLIS uses, is the fix — and unlike the
-   assembly, it is not a language problem.
+2. **`sgemm` parallel efficiency is 1.9-2.8x on six cores** — now the
+   whole of the remaining GEMM gap. The serial kernel is hand-written and
+   competitive; the threading is not. Every row-block re-streams the whole
+   packed B panel and A is re-packed once per column panel, so more threads
+   buy less than they should. A thread mesh over `jc` x `ic`, as BLIS uses,
+   is the fix.
 3. **Attention is 1.5-2.7x behind `scaled_dot_product_attention`**, which
    blocks over keys and keeps the running softmax in registers. Only 5% of
    a step, so closing it entirely buys about 3%.
