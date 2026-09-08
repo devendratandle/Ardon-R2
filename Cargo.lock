@@ -3182,6 +3182,7 @@ dependencies = [
  "memmap2",
  "r2-autograd",
  "r2-gpu",
+ "r2-linalg",
  "r2-mesh",
  "r2-oracle",
  "r2-tensor",

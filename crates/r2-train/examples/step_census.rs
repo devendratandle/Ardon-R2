@@ -116,6 +116,22 @@ fn main() {
         std::hint::black_box(keep.len());
     });
 
+    // sgemm, measured live rather than pasted in: the three cases at the
+    // five shapes a step runs, weighted by how often each is called.
+    let gemm_ms: f64 = [(2048usize, 256usize, 8000usize, 1usize),
+                        (2048, 256, 768, 8), (2048, 768, 256, 4),
+                        (2048, 256, 256, 8), (2048, 256, 128, 8)]
+        .iter().map(|&(m, k, n, cnt)| {
+            use r2_linalg::gemm::{sgemm, Trans};
+            let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.001).sin()).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.002).cos()).collect();
+            let gg: Vec<f32> = (0..m * n).map(|i| (i as f32 * 0.003).sin()).collect();
+            let nn = t_ms(2, || { std::hint::black_box(sgemm(&a, Trans::No, &b, Trans::No, m, k, n, true)); });
+            let nt = t_ms(2, || { std::hint::black_box(sgemm(&gg, Trans::No, &b, Trans::Yes, m, n, k, true)); });
+            let tn = t_ms(2, || { std::hint::black_box(sgemm(&a, Trans::Yes, &gg, Trans::No, k, m, n, true)); });
+            (nn + nt + tn) * cnt as f64
+        }).sum();
+
     let pct = |x: f64| x / full * 100.0;
     println!("{:>34} {:>10} {:>8}", "stage", "ms/step", "share");
     println!("{}", "-".repeat(54));
@@ -124,7 +140,7 @@ fn main() {
     println!("{:>34} {:>10.1} {:>7.1}%", "  optimizer + flatten + writeback", full - fb, pct(full - fb));
     println!("{}", "-".repeat(54));
     println!("  inside forward+backward:");
-    println!("{:>34} {:>10.1} {:>7.1}%", "sgemm x3 (fwd, grad_A, grad_B)", 500.0, pct(500.0));
+    println!("{:>34} {:>10.1} {:>7.1}%", "sgemm x3 (fwd, grad_A, grad_B)", gemm_ms, pct(gemm_ms));
     println!("{:>34} {:>10.1} {:>7.1}%", "attention (4 layers)", 50.0, pct(50.0));
     println!("{:>34} {:>10.1} {:>7.1}%", "softmax_ce fwd+bwd", ce - ce_leaf, pct(ce - ce_leaf));
     println!("{:>34} {:>10.1} {:>7.1}%", "tape's copy of every parameter", leaves, pct(leaves));
@@ -132,7 +148,7 @@ fn main() {
     println!("{:>34} {:>10.1} {:>7.1}%", "rmsnorm fwd x8 (one measured x8)", rms * 8.0, pct(rms * 8.0));
     println!("{:>34} {:>10.1} {:>7.1}%", "silu fwd x4", silu * 4.0, pct(silu * 4.0));
     println!("{:>34} {:>10.1} {:>7.1}%", "tape alloc churn (2 Vecs/node)", churn, pct(churn));
-    let named = 500.0 + 50.0 + (ce - ce_leaf) + (full - fb) + zero_ms + rms * 8.0 + silu * 4.0 + churn;
+    let named = gemm_ms + 50.0 + (ce - ce_leaf) + (full - fb) + zero_ms + rms * 8.0 + silu * 4.0 + churn;
     println!("{}", "-".repeat(54));
     println!("{:>34} {:>10.1} {:>7.1}%", "accounted for", named, pct(named));
     println!("{:>34} {:>10.1} {:>7.1}%", "STILL UNATTRIBUTED", full - named, pct(full - named));

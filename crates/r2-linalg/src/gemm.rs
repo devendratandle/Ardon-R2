@@ -97,6 +97,15 @@ fn nthreads() -> usize {
     *N.get_or_init(rayon::current_num_threads)
 }
 
+impl Trans {
+    /// The same buffer, read the other way round. Used to restate
+    /// `C = A·B` as `Cᵀ = Bᵀ·Aᵀ` without touching any data.
+    #[inline]
+    fn flip(self) -> Trans {
+        match self { Trans::No => Trans::Yes, Trans::Yes => Trans::No }
+    }
+}
+
 /// Rows per register tile. See the module docs.
 const MR: usize = 6;
 
@@ -243,6 +252,60 @@ macro_rules! blocked_gemm_for {
                 return;
             }
             use rayon::prelude::*;
+
+            // ── short-M path ───────────────────────────────────────────
+            //
+            // Parallelism below runs over ROW-BLOCKS of C, so a short `m`
+            // starves it however good the kernel is. That is not a corner
+            // case, it is `grad_B = Aᵀ·g`, whose M is the weight's INPUT
+            // dim: 256 against the forward's 2,048. Measured with
+            // `--example gemm_scaling`, all three transpose cases run at
+            // 56-64 GFLOP/s on ONE thread — the micro-kernel does not care
+            // about the transpose at all — and then diverge entirely by M
+            // once threaded:
+            //
+            //     case   M      1 thread   6 threads   scale
+            //     NN     2048    55.9 GF    150.5 GF   2.69x
+            //     NT     2048    60.6       148.0      2.44x
+            //     TN      256    58.4        68.3      1.17x
+            //     TN      768    62.9       167.3      2.66x   (ffn w2)
+            //
+            // The last row is the same explanation confirming itself: three
+            // times the M, and most of the deficit goes away.
+            //
+            // The fix is to give the threaded loop a long dimension, and
+            // `Cᵀ = Bᵀ·Aᵀ` does exactly that — it swaps M and N, so the
+            // 8,000 becomes the row count and the 256 becomes the columns.
+            // Neither operand moves: a transpose of an operand is just the
+            // other `Trans` flag, which the packing pass honours for free.
+            // Only the RESULT has to be turned back, one `m x n` pass
+            // against an `m*k*n` multiply.
+            //
+            // Shrinking MC instead was tried and rejected: every row-block
+            // re-streams the whole packed B panel, and for this case B is
+            // the large operand, so more blocks made it worse (148 -> 159
+            // ms).
+            let blocks = m.div_ceil(MC);
+            if parallel && blocks < nthreads() && n > m && m * n > 0 {
+                let ct = gemm(b, tb.flip(), a, ta.flip(), n, k, m, true);
+                // Transposed accumulate, tiled so neither side strides for
+                // more than a tile: a flat i-j loop would stride one of them
+                // by a whole row on every element.
+                const T: usize = 32;
+                for i0 in (0..m).step_by(T) {
+                    let ih = T.min(m - i0);
+                    for j0 in (0..n).step_by(T) {
+                        let jh = T.min(n - j0);
+                        for i in i0..i0 + ih {
+                            for j in j0..j0 + jh {
+                                c[i * n + j] += ct[j * m + i];
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
             let wide = have_wide();
 
             // Parallelism runs over ROW-BLOCKS of C, so a small `m`
