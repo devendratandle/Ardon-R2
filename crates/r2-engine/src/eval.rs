@@ -131,10 +131,20 @@ impl Engine {
             Expr::Binary { op, lhs, rhs } => {
                 if *op == BinOp::Colon { let l = self.eval_in(lhs, env)?; let r = self.eval_in(rhs, env)?; return self.seq_colon(&l, &r); }
                 if *op == BinOp::Tilde {
-                    // Formula: y ~ x evaluates both sides, stores as formula-list
-                    // lhs can be NULL for one-sided formulas (~x)
-                    let l = self.eval_in(lhs, env)?;
-                    let r = self.eval_in(rhs, env)?;
+                    // Formula: y ~ x resolves both sides against the calling
+                    // scope and stores a formula-list. lhs can be NULL for
+                    // one-sided formulas (~x).
+                    //
+                    // The RHS goes through the formula-term resolver, NOT
+                    // plain evaluation: `+` is a term separator in a
+                    // formula, and evaluating `x1 + x2` arithmetically made
+                    // `lm(y ~ x1 + x2)` (no data=) silently fit ONE
+                    // predictor — the elementwise sum — with `x2` gone
+                    // from the output. Same resolver the data= path uses,
+                    // with no frame to shadow the scope.
+                    let no_frame = DataFrame { columns: Vec::new(), row_names: None };
+                    let l = self.resolve_formula_term(lhs, &no_frame, env)?;
+                    let r = self.resolve_formula_term(rhs, &no_frame, env)?;
                     return Ok(RVal::List(vec![
                         (Some(Arc::from("~lhs")), l),
                         (Some(Arc::from("~rhs")), r),
@@ -1025,7 +1035,7 @@ impl Engine {
                                         if !v.is_empty() {
                                         let col = v.columnar();
                                         let values = col.values();
-                                        let out = unsafe { h.try_call_vec1(values.as_ptr(), values.len() as i64) };
+                                        let out = h.try_call_vec1(&values);
                                         if let Some(val) = out {
                                             return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
                                         }
@@ -1035,7 +1045,7 @@ impl Engine {
                                         // vector for whole-array reductions (sum(m), sum(m*m), …).
                                         // NaN stands in for NA and propagates correctly.
                                         if !m.data.is_empty() {
-                                            let out = unsafe { h.try_call_vec1(m.data.as_ptr(), m.data.len() as i64) };
+                                            let out = h.try_call_vec1(&m.data);
                                             if let Some(val) = out {
                                                 return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
                                             }
@@ -1052,7 +1062,7 @@ impl Engine {
                                             let b_col = b.columnar();
                                             let a_vals = a_col.values();
                                             let b_vals = b_col.values();
-                                            let out = unsafe { h.try_call_vec2(a_vals.as_ptr(), b_vals.as_ptr(), a.len() as i64) };
+                                            let out = h.try_call_vec2(&a_vals, &b_vals);
                                             if let Some(val) = out {
                                                 return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
                                             }
@@ -1061,7 +1071,7 @@ impl Engine {
                                         // J.3 — two same-shaped matrices' flat buffers (e.g. the
                                         // Frobenius inner product sum(A*B) over equal-dim matrices).
                                         if a.data.len() == b.data.len() && !a.data.is_empty() {
-                                            let out = unsafe { h.try_call_vec2(a.data.as_ptr(), b.data.as_ptr(), a.data.len() as i64) };
+                                            let out = h.try_call_vec2(&a.data, &b.data);
                                             if let Some(val) = out {
                                                 return Ok(RVal::Numeric(vec![Some(val)].into(), Attrs::default()));
                                             }
@@ -1079,7 +1089,7 @@ impl Engine {
                                             let a_vals = a_col.values();
                                             let b_vals = b_col.values();
                                             let mut out_buf: Vec<f64> = vec![0.0; a.len()];
-                                            let ok = unsafe { h.try_call_vec_binary(a_vals.as_ptr(), b_vals.as_ptr(), out_buf.as_mut_ptr(), a.len() as i64) };
+                                            let ok = h.try_call_vec_binary(&a_vals, &b_vals, &mut out_buf);
                                             if ok {
                                                 let a_bits = a_col.valid_bits();
                                                 let b_bits = b_col.valid_bits();
@@ -1092,7 +1102,7 @@ impl Engine {
                                         // (e.g. A + B, A * B). Result keeps A's dim + dimnames.
                                         if a.data.len() == b.data.len() && a.nrow == b.nrow && !a.data.is_empty() {
                                             let mut out_buf: Vec<f64> = vec![0.0; a.data.len()];
-                                            let ok = unsafe { h.try_call_vec_binary(a.data.as_ptr(), b.data.as_ptr(), out_buf.as_mut_ptr(), a.data.len() as i64) };
+                                            let ok = h.try_call_vec_binary(&a.data, &b.data, &mut out_buf);
                                             if ok {
                                                 return Ok(RVal::Matrix(r2_types::Matrix {
                                                     data: out_buf, nrow: a.nrow, ncol: a.ncol,
@@ -1118,7 +1128,7 @@ impl Engine {
                                             let b_vals = b_col.values();
                                             let c_vals = c_col.values();
                                             let mut out_buf: Vec<f64> = vec![0.0; a.len()];
-                                            let ok = unsafe { h.try_call_vec_ternary(a_vals.as_ptr(), b_vals.as_ptr(), c_vals.as_ptr(), out_buf.as_mut_ptr(), a.len() as i64) };
+                                            let ok = h.try_call_vec_ternary(&a_vals, &b_vals, &c_vals, &mut out_buf);
                                             if ok {
                                                 let result = combine_ternary_output(&out_buf, a_col.valid_bits(), b_col.valid_bits(), c_col.valid_bits());
                                                 return Ok(RVal::Numeric(result.into(), Attrs::default()));
@@ -1134,7 +1144,7 @@ impl Engine {
                                         let col = v.columnar();
                                         let values = col.values();
                                         let mut out_buf: Vec<f64> = vec![0.0; values.len()];
-                                        let ok = unsafe { h.try_call_vec_map(values.as_ptr(), out_buf.as_mut_ptr(), values.len() as i64) };
+                                        let ok = h.try_call_vec_map(&values, &mut out_buf);
                                         if ok {
                                             let bits = col.valid_bits();
                                             let result = combine_unary_output(&out_buf, bits);
@@ -1145,7 +1155,7 @@ impl Engine {
                                         // R keeps dim + dimnames; NaN carries NA through the buffer.
                                         if !m.data.is_empty() {
                                             let mut out_buf: Vec<f64> = vec![0.0; m.data.len()];
-                                            let ok = unsafe { h.try_call_vec_map(m.data.as_ptr(), out_buf.as_mut_ptr(), m.data.len() as i64) };
+                                            let ok = h.try_call_vec_map(&m.data, &mut out_buf);
                                             if ok {
                                                 return Ok(RVal::Matrix(r2_types::Matrix {
                                                     data: out_buf, nrow: m.nrow, ncol: m.ncol,
@@ -1165,7 +1175,7 @@ impl Engine {
                                             let col = v.columnar();
                                             let values = col.values();
                                             let mut out_buf: Vec<f64> = vec![0.0; values.len()];
-                                            let ok = unsafe { h.try_call_ixstore1(values.as_ptr(), out_buf.as_mut_ptr(), values.len() as i64) };
+                                            let ok = h.try_call_ixstore1(&values, &mut out_buf);
                                             if ok {
                                                 let result = combine_unary_output(&out_buf, col.valid_bits());
                                                 return Ok(RVal::Numeric(result.into(), Attrs::default()));
@@ -1183,7 +1193,7 @@ impl Engine {
                                             let a_vals = a_col.values();
                                             let b_vals = b_col.values();
                                             let mut out_buf: Vec<f64> = vec![0.0; a.len()];
-                                            let ok = unsafe { h.try_call_ixstore2(a_vals.as_ptr(), b_vals.as_ptr(), out_buf.as_mut_ptr(), a.len() as i64) };
+                                            let ok = h.try_call_ixstore2(&a_vals, &b_vals, &mut out_buf);
                                             if ok {
                                                 let result = combine_binary_output(&out_buf, a_col.valid_bits(), b_col.valid_bits());
                                                 return Ok(RVal::Numeric(result.into(), Attrs::default()));
@@ -1200,7 +1210,7 @@ impl Engine {
                                             let col = v.columnar();
                                             let vv = col.values();
                                             let mut out = vec![0.0f64; m.ncol];
-                                            let ok = unsafe { h.try_call_matvec(m.data.as_ptr(), m.nrow as i64, m.ncol as i64, vv.as_ptr(), out.as_mut_ptr()) };
+                                            let ok = h.try_call_matvec(&m.data, m.nrow, m.ncol, &vv, &mut out);
                                             if ok {
                                                 let res: Vec<Option<f64>> = out.into_iter().map(Some).collect();
                                                 return Ok(RVal::Numeric(res.into(), Attrs::default()));

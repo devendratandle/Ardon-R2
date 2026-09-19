@@ -16,7 +16,7 @@
     fn jit_const_returns_real() {
         let f = lower_program(&[num(42.0)], "k");
         let c = JitCompiler::compile(&f).expect("compile ok");
-        unsafe { assert_eq!(c.call0(), 42.0); }
+        assert_eq!(c.call0().unwrap(), 42.0);
     }
 
     #[test]
@@ -24,10 +24,8 @@
         let body = sym("x");
         let f = lower_function("ident", vec![real_param("x")], &body);
         let c = JitCompiler::compile(&f).expect("compile ok");
-        unsafe {
-            assert_eq!(c.call1(7.0), 7.0);
-            assert_eq!(c.call1(-3.5), -3.5);
-        }
+                    assert_eq!(c.call1(7.0).unwrap(), 7.0);
+            assert_eq!(c.call1(-3.5).unwrap(), -3.5);
     }
 
     #[test]
@@ -35,7 +33,7 @@
         let body = add(sym("x"), sym("y"));
         let f = lower_function("add", vec![real_param("x"), real_param("y")], &body);
         let c = JitCompiler::compile(&f).expect("compile ok");
-        unsafe { assert_eq!(c.call2(1.5, 2.5), 4.0); }
+        assert_eq!(c.call2(1.5, 2.5).unwrap(), 4.0);
     }
 
     #[test]
@@ -44,7 +42,7 @@
         let body = add(add(mul(sym("x"), sym("x")), mul(num(2.0), sym("x"))), num(1.0));
         let f = lower_function("poly", vec![real_param("x")], &body);
         let c = JitCompiler::compile(&f).expect("compile ok");
-        unsafe { assert_eq!(c.call1(3.0), 16.0); }
+        assert_eq!(c.call1(3.0).unwrap(), 16.0);
     }
 
     #[test]
@@ -57,11 +55,9 @@
         };
         let f = lower_function("absval", vec![real_param("x")], &body);
         let c = JitCompiler::compile(&f).expect("compile ok");
-        unsafe {
-            assert_eq!(c.call1(-3.0), 3.0);
-            assert_eq!(c.call1( 5.0), 5.0);
-            assert_eq!(c.call1( 0.0), 0.0);
-        }
+                    assert_eq!(c.call1(-3.0).unwrap(), 3.0);
+            assert_eq!(c.call1( 5.0).unwrap(), 5.0);
+            assert_eq!(c.call1( 0.0).unwrap(), 0.0);
     }
 
     #[test]
@@ -70,10 +66,8 @@
         let body = Expr::Binary { op: BinOp::Gt, lhs: Box::new(sym("x")), rhs: Box::new(num(0.0)) };
         let f = lower_function("ispos", vec![real_param("x")], &body);
         let c = JitCompiler::compile(&f).expect("compile ok");
-        unsafe {
-            assert_eq!(c.call1( 1.0), 1.0);
-            assert_eq!(c.call1(-1.0), 0.0);
-        }
+                    assert_eq!(c.call1( 1.0).unwrap(), 1.0);
+            assert_eq!(c.call1(-1.0).unwrap(), 0.0);
     }
 
     #[test]
@@ -111,9 +105,7 @@
             r2_types::JitKind::VectorBinaryMap => {
                 let a = vec![3.0_f64]; let b = vec![5.0_f64];
                 let mut out = vec![0.0_f64; 1];
-                let ok = unsafe {
-                    handle.try_call_vec_binary(a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), 1)
-                };
+                let ok = handle.try_call_vec_binary(&a, &b, &mut out);
                 assert!(ok);
                 assert!((out[0] - 14.0).abs() < 1e-12);
             }
@@ -137,7 +129,7 @@
         assert_eq!(handle.kind(), r2_types::JitKind::Vector1ToScalar);
 
         let data: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = unsafe { handle.try_call_vec1(data.as_ptr(), data.len() as i64) };
+        let result = handle.try_call_vec1(&data);
         assert_eq!(result, Some(15.0));
     }
 
@@ -156,13 +148,13 @@
         let b = vec![4.0, 5.0, 6.0];
         let h = try_compile_closure(&mk("sum", mul(sym("x"), sym("w")))).expect("dot product should JIT");
         assert_eq!(h.kind(), r2_types::JitKind::Vector2ToScalar);
-        assert_eq!(unsafe { h.try_call_vec2(a.as_ptr(), b.as_ptr(), 3) }, Some(32.0)); // 4+10+18
+        assert_eq!(h.try_call_vec2(&a, &b), Some(32.0)); // 4+10+18
         // sum(x*w + 1) → 35
         let h1 = try_compile_closure(&mk("sum", add(mul(sym("x"), sym("w")), num(1.0)))).expect("JIT");
-        assert_eq!(unsafe { h1.try_call_vec2(a.as_ptr(), b.as_ptr(), 3) }, Some(35.0));
+        assert_eq!(h1.try_call_vec2(&a, &b), Some(35.0));
         // prod(x+w) → 5*7*9 = 315
         let hp = try_compile_closure(&mk("prod", add(sym("x"), sym("w")))).expect("JIT");
-        assert_eq!(unsafe { hp.try_call_vec2(a.as_ptr(), b.as_ptr(), 3) }, Some(315.0));
+        assert_eq!(hp.try_call_vec2(&a, &b), Some(315.0));
     }
 
     #[test]
@@ -188,7 +180,7 @@
         assert_eq!(h.kind(), r2_types::JitKind::VectorMap);
         let data: Vec<f64> = vec![2.0, 3.0, 4.0];
         let mut out: Vec<f64> = vec![0.0; 3];
-        assert!(unsafe { h.try_call_vec_map(data.as_ptr(), out.as_mut_ptr(), 3) });
+        assert!(h.try_call_vec_map(&data, &mut out));
         assert_eq!(out, vec![4.0, 9.0, 16.0]);
     }
 
@@ -216,13 +208,13 @@
         // sum: s <- s + x[i]  → 15
         let h = try_compile_closure(&mkfn(0.0, add(sym("s"), idx("x", "i")))).expect("index-sum should JIT");
         assert_eq!(h.kind(), r2_types::JitKind::Vector1ToScalar);
-        assert_eq!(unsafe { h.try_call_vec1(data.as_ptr(), data.len() as i64) }, Some(15.0));
+        assert_eq!(h.try_call_vec1(&data), Some(15.0));
         // sum of squares: s <- s + x[i]*x[i]  → 55
         let hq = try_compile_closure(&mkfn(0.0, add(sym("s"), mul(idx("x", "i"), idx("x", "i"))))).expect("index-sumsq should JIT");
-        assert_eq!(unsafe { hq.try_call_vec1(data.as_ptr(), data.len() as i64) }, Some(55.0));
+        assert_eq!(hq.try_call_vec1(&data), Some(55.0));
         // product: s <- s * x[i]  → 120
         let hp = try_compile_closure(&mkfn(1.0, mul(sym("s"), idx("x", "i")))).expect("index-prod should JIT");
-        assert_eq!(unsafe { hp.try_call_vec1(data.as_ptr(), data.len() as i64) }, Some(120.0));
+        assert_eq!(hp.try_call_vec1(&data), Some(120.0));
         // Non-fold (uses the index, not x[i]) must NOT take this path:
         // function(x){ s<-0; for(i in 1:length(x)) s<-s+i; s } — recognizer returns None.
         assert!(recognize_index_reduction(mkfn(0.0, add(sym("s"), sym("i"))).body.as_ref(), "x").is_none());
@@ -241,7 +233,7 @@
         };
         let handle = try_compile_closure(&cl).expect("should compile mean");
         let data: Vec<f64> = vec![2.0, 4.0, 6.0, 8.0];
-        let result = unsafe { handle.try_call_vec1(data.as_ptr(), data.len() as i64) };
+        let result = handle.try_call_vec1(&data);
         assert_eq!(result, Some(5.0));
     }
 
@@ -263,7 +255,7 @@
 
         let input: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0];
         let mut output: Vec<f64> = vec![0.0; 4];
-        let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), output.as_mut_ptr(), 4) };
+        let ok = handle.try_call_vec_map(&input, &mut output);
         assert!(ok);
         assert_eq!(output, vec![2.0, 3.0, 4.0, 5.0]);
     }
@@ -284,7 +276,7 @@
         let handle = try_compile_closure(&cl).expect("should compile");
         let input: Vec<f64> = vec![1.5, 2.5, 3.5];
         let mut output: Vec<f64> = vec![0.0; 3];
-        let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), output.as_mut_ptr(), 3) };
+        let ok = handle.try_call_vec_map(&input, &mut output);
         assert!(ok);
         assert_eq!(output, vec![3.0, 5.0, 7.0]);
     }
@@ -311,7 +303,7 @@
         let a: Vec<f64> = vec![1.0, 2.0, 3.0];
         let b: Vec<f64> = vec![10.0, 20.0, 30.0];
         let mut out: Vec<f64> = vec![0.0; 3];
-        let ok = unsafe { handle.try_call_vec_binary(a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), 3) };
+        let ok = handle.try_call_vec_binary(&a, &b, &mut out);
         assert!(ok);
         assert_eq!(out, vec![11.0, 22.0, 33.0]);
     }
@@ -337,7 +329,7 @@
         let a: Vec<f64> = vec![10.0, f64::NAN, 9.0];
         let b: Vec<f64> = vec![ 2.0,    3.0,   3.0];
         let mut out: Vec<f64> = vec![0.0; 3];
-        let ok = unsafe { handle.try_call_vec_binary(a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), 3) };
+        let ok = handle.try_call_vec_binary(&a, &b, &mut out);
         assert!(ok);
         assert_eq!(out[0], 5.0);
         assert!(out[1].is_nan(), "NA in input should propagate through arithmetic");
@@ -365,7 +357,7 @@
         assert_eq!(handle.kind(), r2_types::JitKind::VectorMap);
         let input: Vec<f64> = vec![1.0, 2.0, 3.0];
         let mut output: Vec<f64> = vec![0.0; 3];
-        let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), output.as_mut_ptr(), 3) };
+        let ok = handle.try_call_vec_map(&input, &mut output);
         assert!(ok);
         assert_eq!(output, vec![4.0, 6.0, 8.0]);
     }
@@ -390,7 +382,7 @@
         let handle = try_compile_closure(&cl).expect("should compile v*v - 1");
         let input: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
         let mut output: Vec<f64> = vec![0.0; 4];
-        let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), output.as_mut_ptr(), 4) };
+        let ok = handle.try_call_vec_map(&input, &mut output);
         assert!(ok);
         assert_eq!(output, vec![-1.0, 0.0, 3.0, 8.0]);
     }
@@ -417,7 +409,7 @@
 
         let input: Vec<f64> = vec![-3.0, -1.0, 0.0, 2.0, -5.5];
         let mut out: Vec<f64> = vec![0.0; input.len()];
-        let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), out.as_mut_ptr(), input.len() as i64) };
+        let ok = handle.try_call_vec_map(&input, &mut out);
         assert!(ok);
         // 0.0 is not > 0, so it takes the else branch (-0.0). Compare by abs.
         let expected = vec![3.0, 1.0, 0.0, 2.0, 5.5];
@@ -455,11 +447,7 @@
         let a: Vec<f64> = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         let b: Vec<f64> = vec![-10.0, -20.0, -30.0, -40.0, -50.0];
         let mut out: Vec<f64> = vec![0.0; c.len()];
-        let ok = unsafe {
-            handle.try_call_vec_ternary(
-                c.as_ptr(), a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), c.len() as i64,
-            )
-        };
+        let ok = handle.try_call_vec_ternary(&c, &a, &b, &mut out);
         assert!(ok);
         // c>0 picks a; otherwise b. c=0.0 fails >0 → picks b.
         assert_eq!(out, vec![10.0, -20.0, 30.0, -40.0, -50.0]);
@@ -492,7 +480,7 @@
             r2_types::JitKind::VectorMap => {
                 let input = vec![x];
                 let mut out = vec![0.0_f64; 1];
-                let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), out.as_mut_ptr(), 1) };
+                let ok = handle.try_call_vec_map(&input, &mut out);
                 assert!(ok, "vec_map call");
                 out[0]
             }
@@ -569,7 +557,7 @@
             r2_types::JitKind::VectorMap => {
                 let input: Vec<f64> = vec![1.0, 4.0, 9.0, 16.0];
                 let mut out = vec![0.0_f64; 4];
-                let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), out.as_mut_ptr(), 4) };
+                let ok = handle.try_call_vec_map(&input, &mut out);
                 assert!(ok);
                 for (got, exp) in out.iter().zip([1.0, 2.0, 3.0, 4.0].iter()) {
                     assert!((got - exp).abs() < 1e-12);
@@ -595,9 +583,7 @@
         // Odd-length to force the remainder path.
         let input: Vec<f64> = (1..=7).map(|i| i as f64).collect();
         let mut out = vec![0.0_f64; input.len()];
-        let ok = unsafe {
-            handle.try_call_vec_map(input.as_ptr(), out.as_mut_ptr(), input.len() as i64)
-        };
+        let ok = handle.try_call_vec_map(&input, &mut out);
         assert!(ok);
         // sqrt(i*i + 1) for i in 1..=7
         let expected: Vec<f64> = input.iter().map(|x| (x*x + 1.0).sqrt()).collect();
@@ -649,9 +635,7 @@
         let a = vec![3.0_f64, 5.0, 8.0];
         let b = vec![4.0_f64, 12.0, 15.0];
         let mut out = vec![0.0_f64; 3];
-        let ok = unsafe {
-            handle.try_call_vec_binary(a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), 3)
-        };
+        let ok = handle.try_call_vec_binary(&a, &b, &mut out);
         assert!(ok);
         for (got, exp) in out.iter().zip([5.0, 13.0, 17.0].iter()) {
             assert!((got - exp).abs() < 1e-12, "{} vs {}", got, exp);
@@ -707,7 +691,7 @@
             r2_types::JitKind::VectorMap => {
                 let input = vec![1.0_f64, 2.0, 3.0];
                 let mut out = vec![0.0_f64; 3];
-                let ok = unsafe { handle.try_call_vec_map(input.as_ptr(), out.as_mut_ptr(), 3) };
+                let ok = handle.try_call_vec_map(&input, &mut out);
                 assert!(ok);
                 assert!((out[0] - 2.5).abs() < 1e-12);
                 assert!((out[1] - 5.0).abs() < 1e-12);
@@ -756,7 +740,7 @@
         assert_eq!(handle.kind(), r2_types::JitKind::Vector1ToScalar);
         // sum(v*v) for v = [1, 2, 3, 4, 5] = 1+4+9+16+25 = 55
         let input: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let r = unsafe { handle.try_call_vec1(input.as_ptr(), input.len() as i64) };
+        let r = handle.try_call_vec1(&input);
         assert_eq!(r, Some(55.0));
     }
 
@@ -785,7 +769,7 @@
         assert_eq!(handle.kind(), r2_types::JitKind::Vector1ToScalar);
         // v = [3, 4] → sqrt(10)+sqrt(17) ≈ 3.1623 + 4.1231 = 7.2854
         let input: Vec<f64> = vec![3.0, 4.0];
-        let r = unsafe { handle.try_call_vec1(input.as_ptr(), input.len() as i64) };
+        let r = handle.try_call_vec1(&input);
         let expected = 10.0_f64.sqrt() + 17.0_f64.sqrt();
         assert!((r.unwrap() - expected).abs() < 1e-12, "got {:?} expected {}", r, expected);
     }
@@ -809,7 +793,7 @@
         assert_eq!(handle.kind(), r2_types::JitKind::Vector1ToScalar);
         // prod([2, 3, 5]) = 30
         let input: Vec<f64> = vec![2.0, 3.0, 5.0];
-        let r = unsafe { handle.try_call_vec1(input.as_ptr(), input.len() as i64) };
+        let r = handle.try_call_vec1(&input);
         assert_eq!(r, Some(30.0));
     }
 
@@ -890,7 +874,7 @@
                 r2_types::JitKind::Scalar => h.try_call_real(&[n]).unwrap(),
                 r2_types::JitKind::VectorMap => {
                     let inp = vec![n]; let mut o = vec![0.0];
-                    assert!(unsafe { h.try_call_vec_map(inp.as_ptr(), o.as_mut_ptr(), 1) });
+                    assert!(h.try_call_vec_map(&inp, &mut o));
                     o[0]
                 }
                 other => panic!("unexpected kind {:?}", other),

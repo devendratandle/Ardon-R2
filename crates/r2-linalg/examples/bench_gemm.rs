@@ -24,12 +24,12 @@ fn main() {
     );
 
     // Warm-up (allocations, thread pool spin-up).
-    r2_linalg::dgemm_dispatch(m, n, k, 1.0, &a, &b, 0.0, &mut c).unwrap();
+    r2_linalg::dgemm(m, n, k, 1.0, &a, &b, 0.0, &mut c).unwrap();
 
     let reps = 5;
     let t = std::time::Instant::now();
     for _ in 0..reps {
-        r2_linalg::dgemm_dispatch(m, n, k, 1.0, &a, &b, 0.0, &mut c).unwrap();
+        r2_linalg::dgemm(m, n, k, 1.0, &a, &b, 0.0, &mut c).unwrap();
     }
     let secs = t.elapsed().as_secs_f64() / reps as f64;
     let gflops = 2.0 * (m as f64) * (n as f64) * (k as f64) / secs / 1e9;

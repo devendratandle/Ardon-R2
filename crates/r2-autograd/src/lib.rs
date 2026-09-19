@@ -1708,7 +1708,7 @@ fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn attn_forward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
+fn attn_forward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
                                 s: usize, seq: usize, nh: usize, nkv: usize,
                                 hd: usize, scale: f32) {
     attn_forward_seq_impl(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale)
@@ -1718,7 +1718,7 @@ unsafe fn attn_forward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn attn_backward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
+fn attn_backward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
                                  gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
                                  s: usize, seq: usize, nh: usize, nkv: usize,
                                  hd: usize, scale: f32) {

@@ -51,6 +51,7 @@ pub fn bi_cor(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // shared by cor/cov/cor-matrix/cor.test — accuracy consistency rule.
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
+    if x.len() != y.len() { return Err(R2Err { msg: "incompatible dimensions".into(), kind: ErrKind::Runtime }); }
     match crate::moments::centred2_pairwise(&x, &y) {
         Some((_, _, _, sxx, syy, sxy)) => {
             let r = crate::moments::pearson_from(sxx, syy, sxy);
@@ -63,6 +64,7 @@ pub fn bi_cor(a: &[EvalArg]) -> Result<RVal, R2Err> {
 pub fn bi_cov(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
+    if x.len() != y.len() { return Err(R2Err { msg: "incompatible dimensions".into(), kind: ErrKind::Runtime }); }
     match crate::moments::centred2_pairwise(&x, &y) {
         Some((n, _, _, _, _, sxy)) => Ok(rnum(crate::moments::cov_from(n, sxy))),
         None => Ok(rna()),

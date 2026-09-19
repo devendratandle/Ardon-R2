@@ -203,7 +203,7 @@ fn macro_kernel(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn macro_kernel_avx2(
+fn macro_kernel_avx2(
     mc: usize, nc: usize, kc: usize, alpha: f64,
     packed_a: &[f64], packed_b: &[f64],
     c: &mut [f64], ldc: usize, ic: usize, jc: usize,
@@ -213,7 +213,7 @@ unsafe fn macro_kernel_avx2(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn macro_kernel_avx512(
+fn macro_kernel_avx512(
     mc: usize, nc: usize, kc: usize, alpha: f64,
     packed_a: &[f64], packed_b: &[f64],
     c: &mut [f64], ldc: usize, ic: usize, jc: usize,
@@ -389,11 +389,11 @@ fn dot4(x: &[f64], y: &[f64], m: usize) -> f64 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn dot4_avx2(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
+fn dot4_avx2(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn dot4_avx512(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
+fn dot4_avx512(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
 
 /// Crossproduct: C = Aᵀ·A (n×n) with unrolled dot products. Oracle-gated
 /// multi-core: parallel over output columns (each is an independent set of

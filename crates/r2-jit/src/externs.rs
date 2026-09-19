@@ -8,17 +8,37 @@ use std::collections::HashMap;
 use crate::*;
 
 // ── Rust externs the JIT calls ───────────────────────────────────────
+//
+// Every (pointer, length) pair that reaches these functions was handed
+// to the compiled code by one of `CompiledFn`'s slice-taking entry
+// points, which checked the lengths before the call. The two helpers
+// below are the ONLY place that promise is turned back into a slice, so
+// there is one `unsafe` per direction rather than one per extern.
+
+/// View `len` f64s at `ptr` as a slice. Null or negative → empty.
+fn jit_slice<'a>(ptr: *const f64, len: i64) -> &'a [f64] {
+    if ptr.is_null() || len <= 0 { return &[]; }
+    // SAFETY: the pointer came from a live `&[f64]` of at least `len`
+    // elements (checked in `CompiledFn::try_call_*`), and the compiled
+    // code neither frees nor outlives it during this call.
+    unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+}
+
+/// Mutable view of `len` f64s at `ptr`. Null or negative → empty.
+fn jit_slice_mut<'a>(ptr: *mut f64, len: i64) -> &'a mut [f64] {
+    if ptr.is_null() || len <= 0 { return &mut []; }
+    // SAFETY: as `jit_slice`, from a live `&mut [f64]` that nothing else
+    // aliases for the duration of the call.
+    unsafe { std::slice::from_raw_parts_mut(ptr, len as usize) }
+}
 
 pub(crate) extern "C" fn r2_extern_sum(ptr: *const f64, len: i64) -> f64 {
-    if ptr.is_null() || len < 0 { return 0.0; }
-    let s = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    s.iter().sum()
+    jit_slice(ptr, len).iter().sum()
 }
 
 pub(crate) extern "C" fn r2_extern_mean(ptr: *const f64, len: i64) -> f64 {
-    if ptr.is_null() || len <= 0 { return f64::NAN; }
-    let s = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    s.iter().sum::<f64>() / len as f64
+    if len <= 0 { return f64::NAN; }
+    jit_slice(ptr, len).iter().sum::<f64>() / len as f64
 }
 
 pub(crate) extern "C" fn r2_extern_length(_ptr: *const f64, len: i64) -> f64 {
@@ -26,9 +46,7 @@ pub(crate) extern "C" fn r2_extern_length(_ptr: *const f64, len: i64) -> f64 {
 }
 
 pub(crate) extern "C" fn r2_extern_prod(ptr: *const f64, len: i64) -> f64 {
-    if ptr.is_null() || len < 0 { return 1.0; }
-    let s = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    s.iter().product()
+    jit_slice(ptr, len).iter().product()
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -191,32 +209,28 @@ pub(crate) extern "C" fn r2_scratch_free(ptr: i64, bytes: i64) {
 /// out[0..n] = M · v   (v has length p)
 pub(crate) extern "C" fn r2_kern_matvec(m: *const f64, nrow: i64, ncol: i64, v: *const f64, out: *mut f64) {
     let (n, p) = (nrow as usize, ncol as usize);
-    unsafe {
-        let mm = std::slice::from_raw_parts(m, n * p);
-        let vv = std::slice::from_raw_parts(v, p);
-        let oo = std::slice::from_raw_parts_mut(out, n);
-        for x in oo.iter_mut() { *x = 0.0; }
-        for j in 0..p {
-            let c = vv[j];
-            if c == 0.0 { continue; }
-            let col = &mm[j * n..j * n + n];
-            for i in 0..n { oo[i] += c * col[i]; }
-        }
+    let mm = jit_slice(m, nrow * ncol);
+    let vv = jit_slice(v, ncol);
+    let oo = jit_slice_mut(out, nrow);
+    for x in oo.iter_mut() { *x = 0.0; }
+    for j in 0..p {
+        let c = vv[j];
+        if c == 0.0 { continue; }
+        let col = &mm[j * n..j * n + n];
+        for i in 0..n { oo[i] += c * col[i]; }
     }
 }
 
 /// out[0..p] = Mᵀ · v   (v has length n) — column dot-products.
 pub(crate) extern "C" fn r2_kern_tmatvec(m: *const f64, nrow: i64, ncol: i64, v: *const f64, out: *mut f64) {
     let (n, p) = (nrow as usize, ncol as usize);
-    unsafe {
-        let mm = std::slice::from_raw_parts(m, n * p);
-        let vv = std::slice::from_raw_parts(v, n);
-        let oo = std::slice::from_raw_parts_mut(out, p);
-        for j in 0..p {
-            let col = &mm[j * n..j * n + n];
-            let mut acc = 0.0;
-            for i in 0..n { acc += col[i] * vv[i]; }
-            oo[j] = acc;
-        }
+    let mm = jit_slice(m, nrow * ncol);
+    let vv = jit_slice(v, nrow);
+    let oo = jit_slice_mut(out, ncol);
+    for j in 0..p {
+        let col = &mm[j * n..j * n + n];
+        let mut acc = 0.0;
+        for i in 0..n { acc += col[i] * vv[i]; }
+        oo[j] = acc;
     }
 }

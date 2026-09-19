@@ -5,12 +5,6 @@ edition = "2021"
 license = "AGPL-3.0"
 description = "Ardon-R2 GUI framework — grid-based, terminal-philosophy, modern-stack. Designed once, intended to remain stable for years (see docs/R2_UI_FRAMEWORK.md)."
 
-# Dual output: rlib for static linking by R2Gui at compile time;
-# cdylib so we can ship r2_ui.dll separately and hot-swap it without
-# rebuilding the launcher. The DLL form is what enables third-party
-# themes / plugins to load against a stable surface.
-[lib]
-crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 # Internal — buffer + line types shared with the CLI.

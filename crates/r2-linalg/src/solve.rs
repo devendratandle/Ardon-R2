@@ -183,6 +183,20 @@ pub fn ddet(n: usize, a: &[f64]) -> Result<f64, LinalgError> {
 ///
 /// X = QR (Householder); β solves Rβ = Qᵀy by back-substitution.
 pub fn dlsq_qr(m: usize, n: usize, x: &[f64], y: &[f64]) -> Result<Vec<f64>, LinalgError> {
+    dlsq_qr_full(m, n, x, y).map(|(beta, _)| beta)
+}
+
+/// `dlsq_qr` that also returns the n×n upper-triangular **R factor**
+/// (column-major, strictly-lower part zero).
+///
+/// Callers that need `(XᵀX)⁻¹` — every standard error in `lm`/`glm` —
+/// must take it from this R via [`chol2inv`], never by forming `XᵀX` and
+/// inverting it. The QR is paid for precisely so the condition number is
+/// not squared; computing the coefficients stably and then the standard
+/// errors from `dgetri(XᵀX)` throws that away, and on a near-collinear
+/// design the SEs are garbage while the coefficients look fine. This is
+/// what R does: `summary.lm` uses `chol2inv(Qr$qr)`.
+pub fn dlsq_qr_full(m: usize, n: usize, x: &[f64], y: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgError> {
     if x.len() != m * n { return Err(LinalgError::InvalidShape("lstsq: X shape".into())); }
     if y.len() != m { return Err(LinalgError::DimensionMismatch { expected: (m, 1), got: (y.len(), 1) }); }
     if m < n { return Err(LinalgError::InvalidShape("lstsq: need m >= n".into())); }
@@ -212,7 +226,38 @@ pub fn dlsq_qr(m: usize, n: usize, x: &[f64], y: &[f64]) -> Result<Vec<f64>, Lin
         if rii.abs() < 1e-300 { return Err(LinalgError::Singular); }
         beta[i] = s / rii;
     }
-    Ok(beta)
+    let mut r = vec![0.0; n * n];
+    for j in 0..n { for i in 0..=j { r[j * n + i] = qr[j * m + i]; } }
+    Ok((beta, r))
+}
+
+/// `(RᵀR)⁻¹ = R⁻¹R⁻ᵀ` from an n×n upper-triangular R (column-major) —
+/// R's `chol2inv`. With R from `X = QR` this is `(XᵀX)⁻¹` at the
+/// conditioning of X, not of XᵀX. Only the upper triangle of `r` is read.
+pub fn chol2inv(n: usize, r: &[f64]) -> Result<Vec<f64>, LinalgError> {
+    if r.len() != n * n { return Err(LinalgError::InvalidShape("chol2inv: R shape".into())); }
+    // R⁻¹ is upper triangular; solve R·col_j = e_j by back-substitution.
+    let mut rinv = vec![0.0; n * n];
+    for j in 0..n {
+        for i in (0..=j).rev() {
+            let mut s = if i == j { 1.0 } else { 0.0 };
+            for k in (i + 1)..=j { s -= r[k * n + i] * rinv[j * n + k]; }
+            let rii = r[i * n + i];
+            if rii.abs() < 1e-300 { return Err(LinalgError::Singular); }
+            rinv[j * n + i] = s / rii;
+        }
+    }
+    // C = R⁻¹ R⁻ᵀ:  C[i,j] = Σ_k R⁻¹[i,k] R⁻¹[j,k]  over k ≥ max(i,j).
+    let mut c = vec![0.0; n * n];
+    for i in 0..n {
+        for j in i..n {
+            let mut s = 0.0;
+            for k in j..n { s += rinv[k * n + i] * rinv[k * n + j]; }
+            c[j * n + i] = s;
+            c[i * n + j] = s;
+        }
+    }
+    Ok(c)
 }
 
 /// Direct 2×2 solve (avoids all overhead for simple regression)
@@ -245,6 +290,62 @@ pub fn solve_3x3(a: &[f64; 9], b: &[f64; 3]) -> Result<[f64; 3], LinalgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On a well-conditioned X, chol2inv(R) and dgetri(XᵀX) agree to
+    /// machine precision — the QR route must not change good answers.
+    #[test]
+    fn chol2inv_matches_direct_inverse_when_well_conditioned() {
+        let (m, n) = (6, 3);
+        let x = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                     1.0, 2.0, 3.0, 4.0, 5.0, 6.5,
+                     3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
+        let y = vec![1.0, 2.0, 2.0, 3.0, 5.0, 8.0];
+        let (_, r) = dlsq_qr_full(m, n, &x, &y).unwrap();
+        let via_r = chol2inv(n, &r).unwrap();
+        let mut xtx = vec![0.0; n * n];
+        for i in 0..n { for j in 0..n { for k in 0..m { xtx[j * n + i] += x[i * m + k] * x[j * m + k]; } } }
+        let direct = dgetri(n, &xtx).unwrap();
+        for k in 0..n * n { assert!((via_r[k] - direct[k]).abs() < 1e-12 * direct[k].abs().max(1.0), "{k}: {} vs {}", via_r[k], direct[k]); }
+    }
+
+    /// On a near-collinear X the two routes DIVERGE — which is the point.
+    /// Columns 2 and 3 differ by 1e-8; κ(X) ≈ 1e8 so κ(XᵀX) ≈ 1e16 and
+    /// dgetri(XᵀX) is at the noise floor, while R from QR still carries
+    /// the information. Checked against the exact form (XᵀX)⁻¹·XᵀX = I.
+    #[test]
+    fn chol2inv_survives_conditioning_that_kills_the_normal_equations() {
+        let (m, n) = (8, 3);
+        let mut x = vec![0.0; m * n];
+        for i in 0..m {
+            let t = i as f64;
+            x[i] = 1.0;
+            x[m + i] = t;
+            x[2 * m + i] = t + 1e-8 * (t * t);
+        }
+        let y: Vec<f64> = (0..m).map(|i| i as f64).collect();
+        let (_, r) = dlsq_qr_full(m, n, &x, &y).unwrap();
+        let via_r = chol2inv(n, &r).unwrap();
+        let mut xtx = vec![0.0; n * n];
+        for i in 0..n { for j in 0..n { for k in 0..m { xtx[j * n + i] += x[i * m + k] * x[j * m + k]; } } }
+        // Residual of the QR route:  ‖(XᵀX)⁻¹·(XᵀX) − I‖_max, in units of
+        // the inverse's magnitude.
+        let resid = |inv: &[f64]| -> f64 {
+            let scale = inv.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+            let mut worst = 0.0f64;
+            for i in 0..n { for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n { s += inv[k * n + i] * xtx[j * n + k]; }
+                let target = if i == j { 1.0 } else { 0.0 };
+                worst = worst.max((s - target).abs());
+            } }
+            worst / scale
+        };
+        let qr_resid = resid(&via_r);
+        let direct_resid = dgetri(n, &xtx).map(|inv| resid(&inv)).unwrap_or(f64::INFINITY);
+        assert!(qr_resid < 1e-12, "QR route residual {qr_resid}");
+        assert!(direct_resid > qr_resid * 10.0,
+            "expected the normal-equations route to be visibly worse: {direct_resid} vs {qr_resid}");
+    }
 
     #[test]
     fn test_dgesv() {

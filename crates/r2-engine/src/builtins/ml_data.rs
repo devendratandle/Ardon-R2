@@ -815,8 +815,10 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
     let mut lines = content.lines();
 
     // Parse header
+    let check_names = r2_io::check_names_arg(a);
     let col_names: Vec<String> = if header {
-        lines.next().map(|l| parse_csv_line(l, &sep)).unwrap_or_default()
+        let raw = lines.next().map(|l| parse_csv_line(l, &sep)).unwrap_or_default();
+        if check_names { r2_io::make_names(&raw, true) } else { raw }
     } else { Vec::new() };
 
     // Read all rows
@@ -1134,4 +1136,16 @@ pub(crate) fn bi_gpu_map(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
     if xs.is_empty() { return err!(Runtime, "gpu.map: needs a non-empty numeric vector"); }
     let out = r2_gpu::dispatch(op, &xs);
     Ok(RVal::Numeric(Reals::from_dense_f64(out.into_iter().map(|v| v as f64).collect()), Attrs::default()))
+}
+
+/// `make.names(x)` — R's rule for turning strings into valid, unique
+/// names; the same function `read.csv(check.names = TRUE)` applies.
+pub(crate) fn bi_make_names(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let xs: Vec<String> = match &gv(a, 0) {
+        RVal::Character(v, _) => v.iter().map(|c| c.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "NA".into())).collect(),
+        other => vec![val_to_str(other)],
+    };
+    let unique = gn(a, "unique").and_then(|v| match v { RVal::Logical(b, _) => b.first().copied().flatten(), _ => None }).unwrap_or(false);
+    let out: Vec<Character> = r2_io::make_names(&xs, unique).into_iter().map(|s| Some(Arc::from(s.as_str()))).collect();
+    Ok(RVal::Character(out, Attrs::default()))
 }

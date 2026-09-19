@@ -64,15 +64,8 @@ That's the WHOLE public surface a typical R2-UI consumer touches.
 
 ## Build output
 
-Cargo produces both forms — static rlib (compile-time link) and
-cdylib (runtime DLL). The installer's launcher loads the DLL form
-so r2_ui.dll can be hot-swapped for patch releases.
-
-```
-target/release/
-├── libr2_ui.rlib   ← static link target
-└── r2_ui.dll       ← shipped DLL (loaded by R2Gui.exe at startup)
-```
+An ordinary `rlib`, statically linked into `R2Gui.exe`. R2 ships a
+single executable; there is no runtime-loaded form.
 
 ## License
 

@@ -4,7 +4,9 @@
 //! Column-major matrix storage (Fortran convention, same as R).
 //!
 //! Design principles:
-//!   - Zero external dependencies — pure Rust stdlib only
+//!   - Pure Rust throughout: the kernels use only std. The crate depends on
+//!     `rayon` (Level-3 parallel dispatch) and `r2-oracle` (the serial/parallel
+//!     crossover decision). No FFI.
 //!   - Cache-friendly blocked algorithms for matrix multiply
 //!   - Explicit SIMD-friendly loops (compiler auto-vectorizes with -O3)
 //!   - Fallible operations return Result, not panic
@@ -24,10 +26,6 @@ pub mod level3;
 pub mod decomp;
 pub mod eigen;
 pub mod solve;
-// Stable C-ABI surface + runtime dispatch for a swappable optimized
-// BLAS (mirrors R's Rblas). See blas_abi / blas_dispatch.
-pub mod blas_abi;
-pub mod blas_dispatch;
 
 pub use level1::*;
 pub use level2::*;
@@ -35,8 +33,6 @@ pub use level3::*;
 pub use decomp::*;
 pub use eigen::*;
 pub use solve::*;
-pub use blas_dispatch::dgemm_dispatch;
-pub use blas_abi::{r2_dgemm, DgemmCFn};
 
 /// Errors from linear algebra operations
 #[derive(Debug, Clone)]

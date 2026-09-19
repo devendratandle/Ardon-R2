@@ -7,6 +7,7 @@ use std::sync::Arc;
 mod serve;
 
 fn main() {
+    r2_engine::set_product_version(env!("CARGO_PKG_VERSION"));
     // Stack size set to 64MB via .cargo/config.toml linker flags
     // This avoids issues with _getch() FFI on spawned threads.
     //

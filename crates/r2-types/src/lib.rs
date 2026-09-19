@@ -251,38 +251,30 @@ pub trait JitHandle: std::fmt::Debug + Send + Sync {
     fn arity(&self) -> usize;
     /// Scalar dispatch (Phase C.2). Returns `None` if `kind()` isn't Scalar.
     fn try_call_real(&self, args: &[f64]) -> Option<f64>;
-    /// Vector1ToScalar dispatch (Phase C.3). Returns `None` if `kind()` isn't
-    /// Vector1ToScalar. SAFETY contract: `ptr` must point to `len` valid f64s.
-    /// Default impl returns None so existing impls compile unchanged.
-    unsafe fn try_call_vec1(&self, _ptr: *const f64, _len: i64) -> Option<f64> { None }
+    /// The vector entry points take SLICES and check that every length
+    /// agrees before the native code runs, so the pointer/length promise
+    /// the JIT'd code depends on is enforced here, once, rather than
+    /// re-stated in an `unsafe` block at every call site in the engine.
+    /// Each returns `None`/`false` when `kind()` does not match or the
+    /// lengths do not.
+    ///
+    /// Vector1ToScalar dispatch (Phase C.3).
+    fn try_call_vec1(&self, _x: &[f64]) -> Option<f64> { None }
     /// Vector2ToScalar dispatch (Phase J.2) — fused binary map-reduce.
-    /// SAFETY: `a_ptr`/`b_ptr` must each reference `len` valid f64s.
-    unsafe fn try_call_vec2(&self, _a_ptr: *const f64, _b_ptr: *const f64, _len: i64) -> Option<f64> { None }
-    /// VectorMap dispatch (Phase C.4). SAFETY: `in_ptr` and `out_ptr` must
-    /// each point to `len` valid f64s; out_ptr is written to.
-    unsafe fn try_call_vec_map(&self, _in_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }
-    /// VectorBinaryMap dispatch (C.4-full). SAFETY: all three pointers must
-    /// reference at least `len` valid f64s; out_ptr is written to.
-    unsafe fn try_call_vec_binary(&self, _a_ptr: *const f64, _b_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }
-    /// VectorTernaryMap dispatch (Phase C.5). SAFETY: all four pointers must
-    /// reference at least `len` valid f64s; out_ptr is written to.
-    unsafe fn try_call_vec_ternary(
-        &self,
-        _a_ptr: *const f64,
-        _b_ptr: *const f64,
-        _c_ptr: *const f64,
-        _out_ptr: *mut f64,
-        _len: i64,
-    ) -> bool { false }
-    /// IndexedStoreMap1 dispatch (Phase J.3). SAFETY: `in_ptr`/`out_ptr` each
-    /// reference at least `len` valid f64s; out_ptr is written to.
-    unsafe fn try_call_ixstore1(&self, _in_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }
-    /// IndexedStoreMap2 dispatch (Phase J.3). SAFETY: all three pointers each
-    /// reference at least `len` valid f64s; out_ptr is written to.
-    unsafe fn try_call_ixstore2(&self, _a_ptr: *const f64, _b_ptr: *const f64, _out_ptr: *mut f64, _len: i64) -> bool { false }
-    /// MatVecIterOut dispatch (Phase J.4 matrix state). SAFETY: `m_ptr` holds
-    /// nrow*ncol f64s (column-major), `v_ptr` nrow f64s, `out_ptr` ncol f64s.
-    unsafe fn try_call_matvec(&self, _m_ptr: *const f64, _nrow: i64, _ncol: i64, _v_ptr: *const f64, _out_ptr: *mut f64) -> bool { false }
+    fn try_call_vec2(&self, _a: &[f64], _b: &[f64]) -> Option<f64> { None }
+    /// VectorMap dispatch (Phase C.4): `out[i] = f(x[i])`.
+    fn try_call_vec_map(&self, _x: &[f64], _out: &mut [f64]) -> bool { false }
+    /// VectorBinaryMap dispatch (C.4-full): `out[i] = f(a[i], b[i])`.
+    fn try_call_vec_binary(&self, _a: &[f64], _b: &[f64], _out: &mut [f64]) -> bool { false }
+    /// VectorTernaryMap dispatch (Phase C.5): `out[i] = f(a[i], b[i], c[i])`.
+    fn try_call_vec_ternary(&self, _a: &[f64], _b: &[f64], _c: &[f64], _out: &mut [f64]) -> bool { false }
+    /// IndexedStoreMap1 dispatch (Phase J.3).
+    fn try_call_ixstore1(&self, _x: &[f64], _out: &mut [f64]) -> bool { false }
+    /// IndexedStoreMap2 dispatch (Phase J.3).
+    fn try_call_ixstore2(&self, _a: &[f64], _b: &[f64], _out: &mut [f64]) -> bool { false }
+    /// MatVecIterOut dispatch (Phase J.4 matrix state): `m` is nrow x ncol
+    /// column-major, `v` has nrow elements, `out` has ncol.
+    fn try_call_matvec(&self, _m: &[f64], _nrow: usize, _ncol: usize, _v: &[f64], _out: &mut [f64]) -> bool { false }
 }
 
 /// EngineCtx — Phase R.2 step 6.

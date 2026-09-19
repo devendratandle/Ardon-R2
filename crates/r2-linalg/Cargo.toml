@@ -3,20 +3,12 @@ name = "r2-linalg"
 version = "0.1.1"
 edition = "2021"
 
-# rlib + cdylib. r2-linalg is the FIRST target for CPU-feature-
-# dispatched DLL variants (planned for Phase 4): installer detects
-# the host CPU's instruction-set extensions and drops the right
-# `r2_linalg_scalar.dll` / `r2_linalg_avx2.dll` / `r2_linalg_avx512.dll`
-# into the install dir. Mirrors R's Rblas.dll → Intel MKL swap.
-[lib]
-crate-type = ["rlib", "cdylib"]
+# CPU-specific kernels are selected at RUNTIME inside this one rlib
+# (`is_x86_feature_detected!` in level3.rs / gemm.rs): one binary runs
+# on every x86-64 and uses the widest vectors the host has. See
+# docs/BLAS_DISPATCH.md.
 
 [dependencies]
-# Runtime loader for an optional CPU-optimized BLAS variant DLL,
-# selected via the R2_BLAS env var (mirrors R's swappable Rblas).
-# The reference kernels remain pure-Rust; only the opt-in dispatch
-# path in blas_dispatch.rs touches libloading.
-libloading = "0.8"
 # Multi-core dispatch for the Level-3 kernels. The Oracle decides the
 # serial/parallel crossover (hardware-scaled); Rayon executes. r2-oracle
 # has no deps of its own, so this adds no cycle.

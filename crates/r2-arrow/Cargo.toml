@@ -18,8 +18,12 @@ parquet = ["dep:parquet", "dep:arrow"]
 
 [dependencies]
 memmap2 = { version = "0.9", optional = true }
-# Pure-Rust Parquet + Arrow (no system libs). Default features include the
-# common compression codecs (snappy/zstd/gzip/lz4/brotli) and the arrow
-# bridge, which is exactly what the reader needs.
-parquet = { version = "53", optional = true }
+# Parquet + Arrow with the PURE-RUST codec set only: snappy (`snap`),
+# gzip (`flate2` on its Rust backend), lz4 (`lz4_flex`), brotli. The
+# crate's default set also enables `zstd`, which is `zstd-sys` — bundled C
+# compiled through `cc` — and was the single C object in the shipped
+# binary while the README promised none. A zstd-compressed Parquet file
+# now fails to read with the codec named; recompress with snappy.
+parquet = { version = "53", optional = true, default-features = false,
+            features = ["arrow", "snap", "flate2", "lz4", "brotli", "base64"] }
 arrow   = { version = "53", optional = true }

@@ -3,12 +3,6 @@ name = "r2-engine"
 version = "0.1.1"
 edition = "2021"
 
-# Built as BOTH a static rlib (used by binaries that link in the
-# whole engine at compile time) AND a cdylib (shipped to users as
-# r2_engine.dll alongside R2Gui.exe / r2.exe, hot-swappable for
-# patch releases without recompiling the launchers).
-[lib]
-crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 r2-types = { path = "../r2-types" }

@@ -203,14 +203,82 @@ fn columns_from_rows(raw_cols: &[Vec<String>], col_names: &[String]) -> Vec<(Arc
     columns
 }
 
-fn read_delimited(path: &str, sep: &str, header: bool) -> Result<RVal, R2Err> {
+
+/// R's `make.names(x, unique=)`: turn arbitrary strings into
+/// syntactically valid, unique column names.
+///
+/// `read.csv` applies this by default (`check.names = TRUE`), which is
+/// why a header `a b,c-d,1x` becomes `a.b`, `c.d`, `X1x` in R and every
+/// column can then be reached as `d$a.b`. R2 used to keep the raw header,
+/// so a column with a space could only be reached with backticks or
+/// `d[["a b"]]`.
+///
+/// Rules, in R's order: `X` is prepended when the name does not start
+/// with a letter, or with a dot not followed by a digit (so `1x` -> `X1x`,
+/// `.1` -> `X.1`, `` -> `X`); every character that is not alphanumeric,
+/// `.` or `_` becomes `.`; a reserved word gets a trailing `.`; then
+/// duplicates are made unique with `.1`, `.2`, ... appended to the later
+/// occurrences (`make.unique`, sep = ".").
+pub fn make_names(names: &[String], unique: bool) -> Vec<String> {
+    const RESERVED: &[&str] = &["if", "else", "repeat", "while", "function", "for", "next",
+        "break", "TRUE", "FALSE", "NULL", "Inf", "NaN", "NA", "NA_integer_", "NA_real_",
+        "NA_character_", "in"];
+    let mut out: Vec<String> = names.iter().map(|n| {
+        let mut chars = n.chars();
+        let first = chars.next();
+        let second = chars.next();
+        let ok_start = match first {
+            Some(c) if c.is_alphabetic() => true,
+            Some('.') => !matches!(second, Some(d) if d.is_ascii_digit()),
+            _ => false,
+        };
+        let mut s = String::with_capacity(n.len() + 1);
+        if !ok_start { s.push('X'); }
+        for c in n.chars() {
+            s.push(if c.is_alphanumeric() || c == '.' || c == '_' { c } else { '.' });
+        }
+        if RESERVED.contains(&s.as_str()) { s.push('.'); }
+        s
+    }).collect();
+    if !unique { return out; }
+    // make.unique: later duplicates get .1, .2, ... and the result must
+    // itself not collide with an existing name.
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    for i in 0..out.len() {
+        let base = out[i].clone();
+        let count = seen.get(&base).copied().unwrap_or(0);
+        if count > 0 {
+            let mut k = count;
+            let cand = loop {
+                let cand = format!("{base}.{k}");
+                if !out.contains(&cand) && !seen.contains_key(&cand) { break cand; }
+                k += 1;
+            };
+            out[i] = cand;
+            seen.insert(base, k + 1);
+        } else {
+            seen.insert(base, 1);
+        }
+    }
+    out
+}
+
+/// The `check.names=` argument: R's default is TRUE.
+pub fn check_names_arg(a: &[EvalArg]) -> bool {
+    gn(a, "check.names")
+        .and_then(|v| match v { RVal::Logical(b, _) => b.first().copied().flatten(), _ => None })
+        .unwrap_or(true)
+}
+
+fn read_delimited(path: &str, sep: &str, header: bool, check_names: bool) -> Result<RVal, R2Err> {
     let content = std::fs::read_to_string(path).map_err(|e| R2Err {
         msg: format!("cannot read '{}': {}", path, e),
         kind: ErrKind::Runtime,
     })?;
     let mut rows = parse_csv(&content, sep);
     let col_names: Vec<String> = if header && !rows.is_empty() {
-        rows.remove(0)
+        let raw = rows.remove(0);
+        if check_names { make_names(&raw, true) } else { raw }
     } else {
         Vec::new()
     };
@@ -250,14 +318,14 @@ fn sep_arg(a: &[EvalArg], default: &str) -> String {
 pub fn bi_read_csv(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let path = require_path(&gv(a, 0), "read.csv")?;
     let header = header_arg(a);
-    read_delimited(&path, ",", header)
+    read_delimited(&path, ",", header, check_names_arg(a))
 }
 
 pub fn bi_read_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let path = require_path(&gv(a, 0), "read.table")?;
     let header = header_arg(a);
     let sep = sep_arg(a, "\t");
-    read_delimited(&path, &sep, header)
+    read_delimited(&path, &sep, header, check_names_arg(a))
 }
 
 pub fn bi_read_delim(a: &[EvalArg]) -> Result<RVal, R2Err> {

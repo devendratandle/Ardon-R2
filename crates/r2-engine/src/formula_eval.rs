@@ -11,11 +11,15 @@ impl Engine {
     pub(crate) fn resolve_formula_term(&mut self, expr: &Expr, df: &DataFrame, env: &EnvRef) -> Result<RVal, R2Err> {
         match expr {
             Expr::Symbol(name) => {
-                // Look up as column name first — preserve the name!
+                // Look up as column name first — preserve the name! A
+                // symbol that resolves from the enclosing scope instead
+                // keeps its name the same way, so `lm(y ~ x1 + x2)` labels
+                // its coefficients `x1`/`x2` and not `x1`/`x2`-by-position.
                 if let Some(col) = df.get_col(name) {
                     Ok(RVal::List(vec![(Some(name.clone()), col.clone())]))
                 } else {
-                    self.eval_in(expr, env)
+                    let v = self.eval_in(expr, env)?;
+                    Ok(RVal::List(vec![(Some(name.clone()), v)]))
                 }
             }
             Expr::Binary { op: BinOp::Add, lhs, rhs } => {

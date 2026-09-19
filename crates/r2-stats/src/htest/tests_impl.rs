@@ -562,22 +562,25 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
 }
 
 pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let x: Vec<f64> = first(a).as_reals()?.into_iter().filter_map(|v| v).collect();
-    let y: Vec<f64> = nth(a, 1).as_reals()?.into_iter().filter_map(|v| v).collect();
-    let n = x.len().min(y.len());
-    if n < 3 { return Err(runtime_err("cor.test needs at least 3 observations".into())); }
-
-    let mx = x.iter().take(n).sum::<f64>() / n as f64;
-    let my = y.iter().take(n).sum::<f64>() / n as f64;
-    let mut sxy = 0.0; let mut sxx = 0.0; let mut syy = 0.0;
-    for i in 0..n {
-        let dx = x[i] - mx; let dy = y[i] - my;
-        sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+    let x = first(a).as_reals()?;
+    let y = nth(a, 1).as_reals()?;
+    if x.len() != y.len() {
+        return Err(runtime_err("'x' and 'y' must have the same length".into()));
     }
-    let r = if sxx > 0.0 && syy > 0.0 { sxy / (sxx * syy).sqrt() } else { 0.0 };
+    // NA handling is PAIRWISE (R's complete.obs): a row is dropped when
+    // either side is NA. Filtering each vector on its own and zipping the
+    // survivors — the previous code — shifted every pair after the first
+    // NA and correlated x[i] with y[i+1].
+    let (n, _, _, sxx, syy, sxy) = crate::moments::centred2_pairwise(&x, &y)
+        .filter(|m| m.0 >= 3)
+        .ok_or_else(|| runtime_err("not enough finite observations".into()))?;
+    let r = crate::moments::pearson_from(sxx, syy, sxy);
+    let r = if r.is_nan() { 0.0 } else { r };
     let df = (n - 2) as f64;
     let t_stat = if (1.0 - r * r).abs() > 1e-15 { r * (df / (1.0 - r * r)).sqrt() } else { f64::INFINITY };
-    let p_value = 2.0 * phi_upper(t_stat.abs());
+    // R: pt(-|t|, df)*2 — the t distribution, not the normal. The normal
+    // shortcut understates p at small n (n=10: 0.0128 vs R's 0.0264).
+    let p_value = 2.0 * (1.0 - t_cdf(t_stat.abs(), df));
 
     soutln!("\n  Pearson's product-moment correlation\n");
     soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), n - 2, fmt_pval(p_value));

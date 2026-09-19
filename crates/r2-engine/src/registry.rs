@@ -50,6 +50,15 @@ impl FunctionRegistry {
 
     pub fn add_layer(&mut self, layer: PackageLayer) { self.layers.push(layer); }
 
+    /// Number of DISTINCT builtin names across every loaded layer — what
+    /// `version()` and the docs report, read from the tables rather than
+    /// typed by hand (the typed number sat at "191+" for four releases).
+    pub fn n_functions(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for l in &self.layers { for k in l.functions.keys() { seen.insert(k.as_str()); } }
+        seen.len()
+    }
+
     pub fn remove_layer(&mut self, name: &str) -> Result<Vec<String>, String> {
         let pos = self.layers.iter().position(|l| l.name == name);
         match pos {

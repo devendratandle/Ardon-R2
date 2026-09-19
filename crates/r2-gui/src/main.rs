@@ -50,6 +50,7 @@ use support::*;
 // ─── Main ─────────────────────────────────────────────────────────
 
 fn main() -> Result<(), String> {
+    r2_engine::set_product_version(env!("CARGO_PKG_VERSION"));
     // Working directory: launched from the Start Menu, the GUI's cwd is
     // the (read-only) install dir, so file writes — write.csv, save,
     // mmap.write, plot-save — fail with "Access is denied". Match the

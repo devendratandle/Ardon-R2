@@ -18,7 +18,13 @@ pub fn centred1_dense(x: &[f64]) -> (usize, f64, f64) {
 
 /// Two-pass centred moments over a pair of DENSE f64 slices of equal
 /// length: `(n, mx, my, sxx, syy, sxy)`.
+///
+/// The lengths MUST agree. This used to take `min(len)`, which made
+/// `cor(1:4, 1:3)` return `1` where R errors "incompatible dimensions" —
+/// a silently wrong answer. Callers validate and raise the R error;
+/// this debug assertion catches any new caller that forgets.
 pub fn centred2_dense(x: &[f64], y: &[f64]) -> (usize, f64, f64, f64, f64, f64) {
+    debug_assert_eq!(x.len(), y.len(), "centred2_dense: length mismatch");
     let n = x.len().min(y.len());
     let nf = n as f64;
     let (mut sx, mut sy) = (0.0, 0.0);
@@ -37,6 +43,7 @@ pub fn centred2_dense(x: &[f64], y: &[f64]) -> (usize, f64, f64, f64, f64, f64) 
 /// either side is NA are dropped (R's `use = "complete.obs"` for the
 /// two-vector case). Returns None when fewer than 2 complete pairs.
 pub fn centred2_pairwise(x: &[Real], y: &[Real]) -> Option<(usize, f64, f64, f64, f64, f64)> {
+    debug_assert_eq!(x.len(), y.len(), "centred2_pairwise: length mismatch");
     let pairs: Vec<(f64, f64)> = x.iter().zip(y.iter())
         .filter_map(|(a, b)| match (a, b) { (Some(a), Some(b)) => Some((*a, *b)), _ => None })
         .collect();

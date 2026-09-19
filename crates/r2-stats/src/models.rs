@@ -247,14 +247,23 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // X'X, so the condition number is not squared) — matching R's lm and
     // numerically stable for near-collinear predictors. Fall back to the
     // normal-equations path only if QR is inapplicable (e.g. m < p).
-    let coeffs = r2_linalg::dlsq_qr(n, p, &x_mat.data, &y_vec)
-        .or_else(|_| r2_linalg::dlsq_fused(n, p, &x_mat.data, &y_vec))
-        .or_else(|_| {
-            let xtx = x_mat.crossprod();
-            let xty = x_mat.crossprod_vec(&y_vec);
-            xtx.solve(&xty)
-        })
-        .map_err(|e| R2Err { msg: format!("lm failed: {}", e), kind: ErrKind::Runtime })?;
+    // The R factor is kept: the standard errors below come from it too.
+    // Solving β stably and then inverting XᵀX for the SEs would square
+    // the condition number in exactly the quantity users read off
+    // summary(lm) — the QR must carry all the way through.
+    let (coeffs, r_factor) = match r2_linalg::dlsq_qr_full(n, p, &x_mat.data, &y_vec) {
+        Ok((b, r)) => (b, Some(r)),
+        Err(_) => {
+            let b = r2_linalg::dlsq_fused(n, p, &x_mat.data, &y_vec)
+                .or_else(|_| {
+                    let xtx = x_mat.crossprod();
+                    let xty = x_mat.crossprod_vec(&y_vec);
+                    xtx.solve(&xty)
+                })
+                .map_err(|e| R2Err { msg: format!("lm failed: {}", e), kind: ErrKind::Runtime })?;
+            (b, None)
+        }
+    };
 
     let mut fitted = vec![0.0; n];
     for i in 0..n { for j in 0..p { fitted[i] += x_mat.get(i, j) * coeffs[j]; } }
@@ -268,8 +277,12 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let adj_r2 = if n > p { 1.0 - (1.0 - r_squared) * (n - 1) as f64 / (n - p) as f64 } else { 0.0 };
     let rse = if n > p { (ss_res / (n - p) as f64).sqrt() } else { 0.0 };
 
-    let xtx = x_mat.crossprod();
-    let xtx_inv_result = r2_linalg::dgetri(p, &xtx.data);
+    // (XᵀX)⁻¹ = R⁻¹R⁻ᵀ — R's chol2inv(qr.R). Only the fallback path
+    // (QR inapplicable) forms XᵀX.
+    let xtx_inv_result = match &r_factor {
+        Some(r) => r2_linalg::chol2inv(p, r),
+        None => r2_linalg::dgetri(p, &x_mat.crossprod().data),
+    };
     let mut std_errors = vec![0.0; p];
     let mut t_values = vec![0.0; p];
     let mut p_values = vec![1.0; p];
@@ -374,9 +387,8 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     let (coeffs, iter_count) = match family.as_str() {
         "gaussian" => {
-            let xtx = x_mat.crossprod();
-            let xty = x_mat.crossprod_vec(&y);
-            let beta = xtx.solve(&xty).map_err(|e| R2Err { msg: format!("glm failed: {}", e), kind: ErrKind::Runtime })?;
+            let beta = r2_linalg::dlsq_qr(n, p, &x_mat.data, &y)
+                .map_err(|e| R2Err { msg: format!("glm failed: {}", e), kind: ErrKind::Runtime })?;
             (beta, 1usize)
         }
         "binomial" => irls_binomial(&x_mat, &y, n, p)?,
@@ -418,15 +430,10 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
         "poisson"  => fitted.clone(),
         _          => vec![1.0; n],
     };
-    let mut xtwx_data = vec![0.0; p * p];
-    for j1 in 0..p {
-        for j2 in 0..p {
-            let mut s = 0.0;
-            for i in 0..n { s += x_mat.get(i, j1) * weights[i] * x_mat.get(i, j2); }
-            xtwx_data[j2 * p + j1] = s;
-        }
-    }
-    let xtwx_inv = r2_linalg::dgetri(p, &xtwx_data);
+    // (XᵀWX)⁻¹ via the QR of W^{1/2}X (glm.fit's Cdqrls), so the
+    // conditioning is that of W^{1/2}X and not its square. Near-separated
+    // logistic fits are where the difference shows.
+    let xtwx_inv = weighted_xtx_inv(&x_mat, &weights, n, p);
     let dispersion = if family == "gaussian" && n > p {
         residuals.iter().map(|r| r * r).sum::<f64>() / (n - p) as f64
     } else { 1.0 };
@@ -560,21 +567,37 @@ fn irls_poisson(x_mat: &Matrix, y: &[f64], n: usize, p: usize) -> Result<(Vec<f6
     Ok((beta, iter_used))
 }
 
+/// One IRLS step: min ‖W^{1/2}(z − Xβ)‖₂ by Householder QR of W^{1/2}X —
+/// the same computation as R's `glm.fit` (`Cdqrls`). Forming XᵀWX and
+/// solving the normal equations squares the condition number, which on a
+/// near-separated logistic design turns a slow convergence into a wrong
+/// answer.
 fn solve_wls(x_mat: &Matrix, w: &[f64], z: &[f64], n: usize, p: usize) -> Result<Vec<f64>, R2Err> {
-    let mut xtwx_data = vec![0.0; p * p];
-    let mut xtwz = vec![0.0; p];
-    for j1 in 0..p {
-        for j2 in 0..p {
-            let mut s = 0.0;
-            for i in 0..n { s += x_mat.get(i, j1) * w[i] * x_mat.get(i, j2); }
-            xtwx_data[j2 * p + j1] = s;
-        }
-        let mut s = 0.0;
-        for i in 0..n { s += x_mat.get(i, j1) * w[i] * z[i]; }
-        xtwz[j1] = s;
-    }
-    let xtwx = Matrix::new(xtwx_data, p, p);
-    xtwx.solve(&xtwz).map_err(|e| R2Err { msg: format!("glm IRLS failed: {}", e), kind: ErrKind::Runtime })
+    let (xs, zs) = weight_rows(x_mat, w, z, n, p);
+    r2_linalg::dlsq_qr(n, p, &xs, &zs)
+        .map_err(|e| R2Err { msg: format!("glm IRLS failed: {}", e), kind: ErrKind::Runtime })
+}
+
+/// `(W^{1/2}X, W^{1/2}z)` as column-major data. Weights are clamped at
+/// zero: a negative IRLS weight can only come from round-off at a
+/// saturated fitted value.
+fn weight_rows(x_mat: &Matrix, w: &[f64], z: &[f64], n: usize, p: usize) -> (Vec<f64>, Vec<f64>) {
+    let sw: Vec<f64> = w.iter().map(|&wi| wi.max(0.0).sqrt()).collect();
+    let mut xs = vec![0.0; n * p];
+    for j in 0..p { for i in 0..n { xs[j * n + i] = x_mat.get(i, j) * sw[i]; } }
+    let zs: Vec<f64> = (0..n).map(|i| z[i] * sw[i]).collect();
+    (xs, zs)
+}
+
+/// `(XᵀWX)⁻¹` from the R factor of `W^{1/2}X = QR` (R's chol2inv).
+fn weighted_xtx_inv(x_mat: &Matrix, w: &[f64], n: usize, p: usize) -> Result<Vec<f64>, r2_linalg::LinalgError> {
+    let zero = vec![0.0; n];
+    let (xs, _) = weight_rows(x_mat, w, &zero, n, p);
+    let mut qr = xs;
+    r2_linalg::dgeqrf(n, p, &mut qr)?;
+    let mut r = vec![0.0; p * p];
+    for j in 0..p { for i in 0..=j { r[j * p + i] = qr[j * n + i]; } }
+    r2_linalg::chol2inv(p, &r)
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -89,6 +89,20 @@ pub mod membudget;
 pub mod policy;
 pub use policy::Policy;
 
+/// The PRODUCT version (`r2.exe` / `R2Gui.exe`), set once by the frontend
+/// from its own `CARGO_PKG_VERSION`. The engine crate has its own, unrelated
+/// version number, and `version()` used to print that — so the binary said
+/// 0.1.1 while every Cargo.toml, the installer and the README said 0.4.0.
+static PRODUCT_VERSION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Record the product version. Call once from `main`; later calls are ignored.
+pub fn set_product_version(v: &'static str) { let _ = PRODUCT_VERSION.set(v); }
+
+/// The product version if a frontend set one, else this crate's.
+pub fn product_version() -> &'static str {
+    PRODUCT_VERSION.get().copied().unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 // Formula-walking helpers (Error(...) splitter for repeated measures,
 // (1|group) random-intercept splitter, Expr→source deparser).
 mod formula;  // deparse + Error()/(1|g) splitters; used by eval.rs & formula_eval.rs

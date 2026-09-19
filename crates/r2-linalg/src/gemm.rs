@@ -69,9 +69,8 @@
 //! the installer ships one binary to machines that may not have it and an
 //! illegal instruction on a user's CPU is not a trade for throughput. So
 //! the wide kernel is selected by `is_x86_feature_detected!`, which is what
-//! MKL and Eigen do, and what `docs/BLAS_DISPATCH.md` already describes as
-//! this project's intended architecture — resolved in-process rather than
-//! through a DLL.
+//! MKL and Eigen do, and what `docs/BLAS_DISPATCH.md` describes as this
+//! project's architecture — resolved in-process, one binary.
 //!
 //! Note that packing matters MORE with AVX2, not less: it took the naive
 //! loop from 27-73 to 28-83 GFLOP/s (+30%) and this kernel from 29-59 to
@@ -173,7 +172,7 @@ macro_rules! blocked_gemm_for {
         #[cfg(target_arch = "x86_64")]
         #[target_feature(enable = "avx2", enable = $feat)]
         #[allow(dead_code)]
-        unsafe fn micro_wide(kc: usize, apack: &[$ty], bpack: &[$ty]) -> [[$ty; NR]; MR] {
+        fn micro_wide(kc: usize, apack: &[$ty], bpack: &[$ty]) -> [[$ty; NR]; MR] {
             micro_impl(kc, apack, bpack)
         }
 

@@ -89,7 +89,7 @@ pub(crate) fn base_table() -> Vec<(&'static str, BuiltinFn)> {
         ("asin",bi_asin),("acos",bi_acos),("atan",bi_atan),("atan2",bi_atan2),
         ("sinh",bi_sinh),("cosh",bi_cosh),("tanh",bi_tanh),
         ("sign",bi_sign),("trunc",bi_trunc),
-        ("cumsum",bi_cumsum),("cumprod",bi_cumprod),("cummax",bi_cummax),("cummin",bi_cummin),("diff",bi_diff),
+        ("cumsum",bi_cumsum),("cumprod",bi_cumprod),("diff",bi_diff),
         // rolling-window (Phase K.9)
         ("rollsum",bi_rollsum),("rollmean",bi_rollmean),("rollmax",bi_rollmax),("rollmin",bi_rollmin),("rollsd",bi_rollsd),
         // more base
@@ -176,11 +176,44 @@ pub(crate) fn graphics_table() -> Vec<(&'static str, BuiltinFn)> {
 pub(crate) fn utils_table() -> Vec<(&'static str, BuiltinFn)> {
     vec![
         ("head",bi_head),("tail",bi_tail),("str",bi_str),
-        ("read.csv",bi_read_csv_v2),("write.csv",bi_write_csv),
+        ("read.csv",bi_read_csv_v2),("write.csv",bi_write_csv),("make.names",bi_make_names),
         ("search",bi_search),("t",bi_transpose),("crossprod",bi_crossprod),
         ("source",bi_source),("system.time",bi_system_time),
         ("read.table",bi_read_table),("write.table",bi_write_table),("read.delim",bi_read_delim),
-        ("Sys.time",bi_Sys_time),("help",bi_help),("getwd",bi_getwd),("setwd",bi_setwd),
-        ("file.exists",bi_file_exists),("list.files",bi_list_files),("Sys.getenv",bi_sys_getenv),("save",bi_save),("load",bi_load),("version",bi_version),("clear",bi_clear),("cls",bi_clear),(".Internal",bi_internal),
+        ("help",bi_help),("getwd",bi_getwd),("setwd",bi_setwd),
+        ("file.exists",bi_file_exists),("list.files",bi_list_files),("Sys.getenv",bi_sys_getenv),("save",bi_save),("load",bi_load),("version",bi_version),(".Internal",bi_internal),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name registered in two layers is resolved from the LAST-loaded
+    /// one (`Registry::resolve` searches non-core layers in reverse), so a
+    /// duplicate does not merely waste a slot — it silently replaces the
+    /// intended implementation. `Sys.time` was registered in `base` as
+    /// POSIXct and again in `utils` as a bare number; the `utils` copy won
+    /// and `class(Sys.time())` came out `"numeric"`. This keeps every name
+    /// unique across all five tables.
+    #[test]
+    fn no_builtin_is_registered_twice() {
+        let tables: [(&str, Vec<(&'static str, BuiltinFn)>); 5] = [
+            ("core", core_table()),
+            ("base", base_table()),
+            ("stats", stats_table()),
+            ("graphics", graphics_table()),
+            ("utils", utils_table()),
+        ];
+        let mut seen: std::collections::HashMap<&str, &str> = Default::default();
+        let mut dups = Vec::new();
+        for (layer, table) in &tables {
+            for (name, _) in table {
+                if let Some(prev) = seen.insert(name, layer) {
+                    dups.push(format!("{name} ({prev} and {layer})"));
+                }
+            }
+        }
+        assert!(dups.is_empty(), "duplicate registrations: {}", dups.join(", "));
+    }
 }

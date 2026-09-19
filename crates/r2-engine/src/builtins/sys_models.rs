@@ -723,11 +723,6 @@ pub(crate) fn bi_ends_with(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     Ok(RVal::Logical(result.into(), Attrs::default()))
 }
 
-pub(crate) fn bi_Sys_time(_: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    Ok(rnum(now))
-}
-
 pub(crate) fn bi_stop(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let msg = val_to_str(&gv(a,0));
     err!(Runtime, "{}", msg)
@@ -776,35 +771,51 @@ pub(crate) fn bi_glm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 // confint() — confidence intervals for model coefficients
 // ═══════════════════════════════════════════════════════════════════════
 
+/// `confint(fit, level = 0.95)` — Wald intervals `coef ± q · SE` from the
+/// standard errors the fit already carries. For `lm` the quantile is
+/// Student-t on the residual df (R's `confint.lm`); for `glm` it is the
+/// normal quantile (R's `confint.default`; R's own `confint.glm` profiles
+/// the likelihood, which is not implemented here). Returns the p×2 matrix
+/// R returns, with the coefficient names as row names.
+///
+/// This replaces a stub that used ONE standard error (`sigma/√df`) for
+/// every coefficient and returned NULL — so `confint(fit)[2, 1]` failed
+/// and the printed `hp` interval for `lm(mpg ~ wt + hp, mtcars)` was
+/// `[-0.98, 0.91]` against R's `[-0.050, -0.013]`.
 pub(crate) fn bi_confint(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let level = gn(a, "level").and_then(|v| e.scalar_f64(&v).ok().flatten()).unwrap_or(0.95);
     match &gv(a,0) {
         RVal::TypeInstance(inst) if inst.type_name.as_ref() == "lm" || inst.type_name.as_ref() == "glm" => {
             let coeffs_val = inst.fields.get("coefficients").ok_or(R2Err{msg:"no coefficients".into(),kind:ErrKind::Runtime})?;
             let coeffs = e.as_reals(coeffs_val)?.into_iter().filter_map(|x| x).collect::<Vec<f64>>();
-            let sigma = inst.fields.get("sigma").and_then(|v| e.scalar_f64(v).ok().flatten()).unwrap_or(1.0);
-            let df = inst.fields.get("df").and_then(|v| e.scalar_f64(v).ok().flatten()).unwrap_or(30.0);
-
-            let alpha = 1.0 - level;
-            let t_crit = qnorm_approx(1.0 - alpha / 2.0); // approximate
-
-            let names: Vec<String> = match coeffs_val {
-                RVal::Numeric(_, attrs) => attrs.names.as_ref().map(|n| n.iter().map(|s| s.to_string()).collect()).unwrap_or_else(|| (0..coeffs.len()).map(|i| format!("x{}", i)).collect()),
-                _ => (0..coeffs.len()).map(|i| format!("x{}", i)).collect(),
-            };
-
-            // Standard errors (simplified — assumes diagonal of (X'X)^-1 * sigma^2)
-            let se = sigma / (df.sqrt());
-
-            soutln!("{:>15} {:>15} {:>15}", "", fmt_num(alpha/2.0*100.0).to_string() + " %", fmt_num((1.0-alpha/2.0)*100.0).to_string() + " %");
-            for (i, name) in names.iter().enumerate() {
-                let lo = coeffs[i] - t_crit * se;
-                let hi = coeffs[i] + t_crit * se;
-                soutln!("{:>15} {:>15} {:>15}", name, fmt_num(lo), fmt_num(hi));
+            let se_val = inst.fields.get("std.errors").ok_or(R2Err{msg:"confint(): fit carries no standard errors".into(),kind:ErrKind::Runtime})?;
+            let se = e.as_reals(se_val)?.into_iter().filter_map(|x| x).collect::<Vec<f64>>();
+            if se.len() != coeffs.len() {
+                return err!(Runtime, "confint(): {} coefficients but {} standard errors", coeffs.len(), se.len());
             }
-            Ok(RVal::Null)
+            let alpha = 1.0 - level;
+            let q = if inst.type_name.as_ref() == "lm" {
+                let df = inst.fields.get("df").and_then(|v| e.scalar_f64(v).ok().flatten()).unwrap_or(f64::INFINITY);
+                r2_stats::htest::qt(1.0 - alpha / 2.0, df)
+            } else {
+                qnorm_approx(1.0 - alpha / 2.0)
+            };
+            let names: Vec<Arc<str>> = match coeffs_val {
+                RVal::Numeric(_, attrs) => attrs.names.clone()
+                    .unwrap_or_else(|| (0..coeffs.len()).map(|i| Arc::from(format!("x{}", i).as_str())).collect()),
+                _ => (0..coeffs.len()).map(|i| Arc::from(format!("x{}", i).as_str())).collect(),
+            };
+            let p = coeffs.len();
+            let mut data = Vec::with_capacity(2 * p);
+            for i in 0..p { data.push(coeffs[i] - q * se[i]); }
+            for i in 0..p { data.push(coeffs[i] + q * se[i]); }
+            let pct = |x: f64| Arc::from(format!("{} %", fmt_num(x * 100.0)).as_str());
+            let mut m = Matrix::new(data, p, 2);
+            m.row_names = Some(names);
+            m.col_names = Some(vec![pct(alpha / 2.0), pct(1.0 - alpha / 2.0)]);
+            Ok(RVal::Matrix(m))
         }
         _ => err!(Runtime, "confint() needs lm or glm object"),
     }
 }
-
+
