@@ -217,6 +217,15 @@ trusting it, and all now covered by
   The comparison moved from 1.10x to 1.23-1.29x across the off-thread
   free, the value pool and the gradient pool. Adam itself is 2.7x faster
   than PyTorch's.
+- **Attention is tiled like a GEMM.** Both directions computed every
+  score as a 64-long dot product with a horizontal reduction per
+  (query, key) pair; they now pack Kᵀ/Vᵀ once per sequence and form 4x16
+  score tiles lane-parallel, with the backward's dK/dV accumulation
+  key-outer so each row is touched once per query block. At 2,048
+  tokens the forward is now faster than PyTorch's fused
+  `scaled_dot_product_attention` (1,136 vs 1,344 us) and the backward
+  went 8.6 -> 6.4 ms. 300-step training 131.2 -> 128.1 s and 132.5 ->
+  126.7 s; 1.29-1.38x vs PyTorch across five pairs.
 - **`read.csv` header names are now valid names, as in R.** A header
   `a b,c-d,1x` produced columns named `a b`, `c-d`, `1x`, reachable only
   with backticks or `d[["a b"]]`. R applies `make.names` unless

@@ -22,7 +22,7 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.23-1.29x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
+**R2 trains 1.29-1.38x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
@@ -38,6 +38,7 @@ than throttled.
 | 3 | **147.32 s** | 174.67 s | **R2 1.19x** (cold machine after a reboot; fastest run on both sides) |
 | 4 | **140.63 s** | 172.30 s | **R2 1.23x** (with the tape's value-buffer pool, below) |
 | 5 | **131.82 s** | 169.83 s | **R2 1.29x** (gradients pooled too, first writer assigns) |
+| 6 | **126.71 s** | 174.97 s | **R2 1.38x** (tiled attention; PyTorch's run drifted up in this window) |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
@@ -121,6 +122,37 @@ PyTorch in the same window: 131.82 vs 169.83 s, **1.29x**.
 The embedding item (LMO-1) is closed by these two: the gather was
 already at parity (62 vs 65 us), and its backward's cost was the fault on
 a fresh 8 MB table gradient, which no longer exists.
+
+### Attention, tiled the way a GEMM is (LMO-15)
+
+Both directions computed every score as `dot4(q_row, k_row)`: eight FMAs
+and a HORIZONTAL REDUCTION per (query, key) pair, and the reduction was
+the cost. `scaled_dot_product_attention` forms a tile of scores
+lane-parallel — one query element broadcast against a row of keys — and
+never reduces. The kernels now pack Kᵀ (and Vᵀ for the backward) once
+per sequence and kv-head, compute 4 x 16 score and dP tiles in the
+GEMM's register-tile form, and keep the three accumulations (dQ, dK, dV)
+in broadcast form — key-outer in the backward, so each dK/dV row is read
+and written once per four-query block instead of once per pair. The
+online-softmax rescaling went with it (it had measured nothing here; the
+score row of a query block is 4 x seq floats).
+
+`lmo15_attention` (+ `.py`), 2,048 tokens, same window:
+
+| | before | after | SDPA |
+|---|---:|---:|---:|
+| forward | ~2,000 us (1.5x behind) | **1,136 us** | 1,344 — R2 ahead |
+| backward | 8,636 us | **6,378 us** | ~4,300 |
+| fwd+bwd | 10,889 us (1.9x) | **8,643 us (1.5x)** | 5,619 |
+
+Ahead of SDPA on the forward at 2,048 and 4,096 tokens (0.8x, 0.6x).
+The backward's remaining 1.5x is the L1 traffic of the accumulations
+(three row loads, three read-modify-writes per pair), not arithmetic;
+register-tiling dK/dV is the next cut. Finite-difference gradient test
+and decomposition test pass. Two 300-step pairs, R2 alone: **131.18 ->
+128.05 s and 132.46 -> 126.71 s** (-2.4%, -4.3%), loss curve identical
+to four decimals. Against PyTorch in the same window: 126.71 vs 174.97
+s, **1.38x**.
 
 ### How it got here: three pieces of pure waste
 
@@ -263,8 +295,8 @@ per-row verdict, so the comparison cannot be quietly skipped.
 | Tokenizer | **R2 ~10x AHEAD** | — |
 | Accuracy | **at parity or better** | — |
 | `sgemm` — forward, `grad_A`, `grad_B` | 1.0-1.7x behind MKL | **39%** |
-| Attention forward | 1.5-2.3x; **beats torch-explicit and JAX at 4,096 tokens** | 5% |
-| Attention fwd+bwd | 2.1-2.7x | (within the 5%) |
+| Attention forward | **AHEAD of SDPA at 2,048 and 4,096 tokens** (0.8x, 0.6x); 1.4x behind at 512 | 4% |
+| Attention backward | 1.5x behind SDPA (fwd+bwd 1.3-1.7x) | (within the 4%) |
 | `softmax_ce` | fused; not separately compared | 7% |
 | Embedding | 1.9-3.8x fwd+bwd | 0.07% |
 

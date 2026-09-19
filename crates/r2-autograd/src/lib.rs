@@ -1777,100 +1777,95 @@ fn have_avx2() -> bool {
 #[inline(always)]
 fn attn_forward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
                     s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
-    /// Queries per block: how many times each loaded K/V block is reused.
+    // ── why this is tiled the way a GEMM is ──
+    //
+    // The previous kernel computed every score as `dot4(q_row, k_row)`:
+    // eight FMAs and then a HORIZONTAL REDUCTION per (query, key) pair.
+    // The reduction is the cost — a dozen shuffles and adds per eight
+    // FMAs — and it is exactly what `scaled_dot_product_attention` does
+    // not pay: it forms a TILE of scores lane-parallel, broadcasting one
+    // query element against a row of keys, so every FMA lane holds a
+    // different key and no reduction ever happens. That needs K
+    // transposed (a row of keys per head-dim), which is packed ONCE per
+    // sequence and kv-head here — 16 KB at seq 64, L2-resident at 2,048
+    // — and shared by every query head in the GQA group.
+    //
+    // With the whole score row of a query block available at once, the
+    // softmax is the plain two-pass form: row max, `exp_shift_sum`,
+    // normalise. The online (flash) rescaling the previous kernel carried
+    // measured nothing here (K/V re-reads were already L1-served; see
+    // REPORT.md), and the score row is 4 x seq floats — 32 KB at 2,048 —
+    // so nothing quadratic is materialised.
+    //
+    // The causal mask is still structural: keys beyond the last query of
+    // a block are never computed, and only the diagonal tile is checked
+    // per element.
+    /// Queries per block.
     const BR: usize = 4;
-    /// Keys per block.
-    const BC: usize = 64;
+    /// Keys per register tile.
+    const BC: usize = 16;
 
     let group = nh / nkv;
     let (qw, kw) = (nh * hd, nkv * hd);
     let base = s * seq;
-    // Scratch, allocated once for the whole sequence rather than per tile.
-    let mut acc = vec![0.0f32; BR * hd];
-    let mut sc = vec![0.0f32; BR * BC];
-    let mut ex = vec![0.0f32; BC];
-    let mut mrun = [0.0f32; BR];
-    let mut lrun = [0.0f32; BR];
+    // Kᵀ, padded to a multiple of the tile width so the tile loop needs
+    // no ragged edge: kt[d * seqp + j] = K[j][d].
+    let seqp = seq.next_multiple_of(BC);
+    let mut kt = vec![0.0f32; hd * seqp];
+    // Score rows for one query block, then their exponentials.
+    let mut sc = vec![0.0f32; BR * seqp];
+    let mut ex = vec![0.0f32; seqp];
+    let mut acc = vec![0.0f32; hd];
 
-    for qh in 0..nh {
-        let kvh = qh / group;
-        for i0 in (0..seq).step_by(BR) {
-            let br = BR.min(seq - i0);
-            for x in acc[..br * hd].iter_mut() { *x = 0.0; }
-            for ii in 0..br { mrun[ii] = f32::NEG_INFINITY; lrun[ii] = 0.0; }
-            // Causality: the last query in this block is the furthest one
-            // that can see anything, so keys beyond it are never touched.
-            let jmax = i0 + br - 1;
-
-            for j0 in (0..=jmax).step_by(BC) {
-                let bc = BC.min(jmax + 1 - j0);
-                // ── scores for this tile ──
+    for kvh in 0..nkv {
+        // ── pack Kᵀ for this kv-head ──
+        for j in 0..seq {
+            let koff = (base + j) * kw + kvh * hd;
+            let krow = &vk[koff..koff + hd];
+            for d in 0..hd { kt[d * seqp + j] = krow[d]; }
+        }
+        for qh in kvh * group..(kvh + 1) * group {
+            for i0 in (0..seq).step_by(BR) {
+                let br = BR.min(seq - i0);
+                let jmax = i0 + br - 1;           // furthest key any query here can see
+                let tiles = (jmax / BC) + 1;      // key tiles that reach it
+                // ── scores: BR x (tiles*BC), lane-parallel over keys ──
+                for t in 0..tiles {
+                    let j0 = t * BC;
+                    let mut tile = [[0.0f32; BC]; BR];
+                    for d in 0..hd {
+                        let kr = &kt[d * seqp + j0..d * seqp + j0 + BC];
+                        for ii in 0..br {
+                            let q = vq[(base + i0 + ii) * qw + qh * hd + d];
+                            let row = &mut tile[ii];
+                            for jj in 0..BC { row[jj] += q * kr[jj]; }
+                        }
+                    }
+                    for ii in 0..br {
+                        let dst = &mut sc[ii * seqp + j0..ii * seqp + j0 + BC];
+                        for jj in 0..BC { dst[jj] = tile[ii][jj] * scale; }
+                    }
+                }
+                // ── softmax + PV per query ──
                 for ii in 0..br {
                     let qi = i0 + ii;
-                    let qoff = (base + qi) * qw + qh * hd;
-                    let qrow = &vq[qoff..qoff + hd];
-                    for jj in 0..bc {
-                        let j = j0 + jj;
-                        sc[ii * BC + jj] = if j > qi {
-                            f32::NEG_INFINITY
-                        } else {
-                            let koff = (base + j) * kw + kvh * hd;
-                            dot4(qrow, &vk[koff..koff + hd]) * scale
-                        };
-                    }
-                }
-                // ── online softmax update, per query in the block ──
-                for ii in 0..br {
-                    let row = &sc[ii * BC..ii * BC + bc];
-                    let mut mb = f32::NEG_INFINITY;
-                    for &x in row { if x > mb { mb = x; } }
-                    if mb == f32::NEG_INFINITY { continue; }  // wholly masked
-                    let mnew = if mrun[ii] > mb { mrun[ii] } else { mb };
-                    // Rescale what is already accumulated onto the new max.
-                    // exp(-inf) == 0, which is exactly right on the first
-                    // block, where acc and l are zero anyway.
-                    let corr = (mrun[ii] - mnew).exp();
-                    if corr != 1.0 {
-                        let a = &mut acc[ii * hd..ii * hd + hd];
-                        for x in a.iter_mut() { *x *= corr; }
-                        lrun[ii] *= corr;
-                    }
-                    // Exponentiate the WHOLE tile row at once.
-                    //
-                    // This loop used to call `f32::exp` per (query, key)
-                    // pair. A libm call cannot vectorise, and it is not a
-                    // small part of the work here: the pair costs about
-                    // 128 FMAs — roughly 16 AVX2 ops — against one scalar
-                    // exp of ~25 cycles, so the transcendental was the
-                    // majority of the inner loop. Same finding as
-                    // `softmax_ce`, in a kernel nothing had looked at.
-                    //
-                    // `exp_shift_sum` brings its own `#[target_feature]`
-                    // body rather than relying on being inlined into this
-                    // one, so it keeps its AVX2 codegen across the crate
-                    // boundary — unlike `dot4`, which does not (see its
-                    // note). Masked entries are -inf and come back as
-                    // exactly 0.0, which is what the `e == 0.0` skip below
-                    // relies on and what the old `continue` did.
-                    let ev = &mut ex[..bc];
-                    lrun[ii] += r2_tensor::ops::exp_shift_sum(row, mnew, ev);
-                    let a = &mut acc[ii * hd..ii * hd + hd];
-                    for jj in 0..bc {
-                        let e = ev[jj];
+                    let row = &mut sc[ii * seqp..ii * seqp + qi + 1];  // causal: keys 0..=qi
+                    let mut m = f32::NEG_INFINITY;
+                    for &x in row.iter() { if x > m { m = x; } }
+                    let l = r2_tensor::ops::exp_shift_sum(row, m, &mut ex[..qi + 1]);
+                    for x in acc.iter_mut() { *x = 0.0; }
+                    for j in 0..=qi {
+                        let e = ex[j];
                         if e == 0.0 { continue; }
-                        let voff = (base + j0 + jj) * kw + kvh * hd;
+                        let voff = (base + j) * kw + kvh * hd;
                         let vrow = &vv[voff..voff + hd];
-                        for c in 0..hd { a[c] += e * vrow[c]; }
+                        for c in 0..hd { acc[c] += e * vrow[c]; }
                     }
-                    mrun[ii] = mnew;
+                    let inv = 1.0 / l;
+                    // `oblk` is this sequence's own slice: local row index.
+                    let dst = &mut oblk[qi * qw + qh * hd..qi * qw + qh * hd + hd];
+                    for (d, v) in dst.iter_mut().zip(&acc) { *d = v * inv; }
                 }
-            }
-            // ── normalise and write out ──
-            for ii in 0..br {
-                let inv = 1.0 / lrun[ii];
-                let src = &acc[ii * hd..ii * hd + hd];
-                let dst = &mut oblk[(i0 + ii) * qw + qh * hd..(i0 + ii) * qw + qh * hd + hd];
-                for (d, v) in dst.iter_mut().zip(src) { *d = v * inv; }
             }
         }
     }
@@ -1895,61 +1890,104 @@ fn attn_forward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
 fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
                      gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
                      s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
+    // Same tiling as the forward, for the same reason. Two products here
+    // were per-pair dot products with a horizontal reduction each — the
+    // scores `Q·Kᵀ` (recomputed rather than stored, see the forward) and
+    // `dP = dO·Vᵀ`. Both are now register tiles over a packed Kᵀ and Vᵀ,
+    // lane-parallel across keys. The three accumulations — dQ, dK, dV —
+    // were already in broadcast form (one scalar against a contiguous row)
+    // and stay as they were.
+    //
+    // Per query i, with P its softmax row and dP = dO_i·Vᵀ:
+    //   D_i  = Σ_j P_ij dP_ij
+    //   dS_j = P_ij (dP_ij − D_i) · scale
+    //   dQ_i += Σ_j dS_j K_j      dK_j += dS_j Q_i      dV_j += P_ij dO_i
+    const BR: usize = 4;
+    const BC: usize = 16;
+
     let group = nh / nkv;
     let (qw, kw) = (nh * hd, nkv * hd);
     let base = s * seq;
-    let mut p = vec![0.0f32; seq];
-    // Destination for the vectorised exp. `exp_shift_sum` cannot read and
-    // write one slice, and allocating per row would cost more than the
-    // scalar loop it replaces, so this is allocated once per sequence
-    // alongside the others.
-    let mut pe = vec![0.0f32; seq];
-    let mut gs = vec![0.0f32; seq];
-    for qh in 0..nh {
-        let kvh = qh / group;
-        for i in 0..seq {
-            let qoff = (base + i) * qw + qh * hd;
-            let qrow = &vq[qoff..qoff + hd];
-            // ── recompute p[i, 0..=i] ──
-            let mut m = f32::NEG_INFINITY;
-            for j in 0..=i {
-                let koff = (base + j) * kw + kvh * hd;
-                let x = dot4(qrow, &vk[koff..koff + hd]) * scale;
-                p[j] = x;
-                if x > m { m = x; }
-            }
-            // Same vectorised exp as the forward. The backward RECOMPUTES
-            // the probabilities rather than storing a quadratic buffer, so
-            // it pays this softmax in full — and at the shipping shape the
-            // backward is roughly five times the forward's cost, which
-            // makes it the larger of the two places a scalar `exp` was
-            // hiding. `exp_shift_sum` writes in place over `p`.
-            let sum = r2_tensor::ops::exp_shift_sum(&p[..=i], m, &mut pe[..=i]);
-            let inv = 1.0 / sum;
-            for j in 0..=i { p[j] = pe[j] * inv; }
+    let seqp = seq.next_multiple_of(BC);
+    let mut kt = vec![0.0f32; hd * seqp];
+    let mut vt = vec![0.0f32; hd * seqp];
+    let mut sc = vec![0.0f32; BR * seqp];   // scores, then probabilities
+    let mut dp = vec![0.0f32; BR * seqp];   // dO·Vᵀ
+    let mut ex = vec![0.0f32; seqp];
 
-            let grow = &g[qoff..qoff + hd];
-            // ── grad_p, its softmax pullback, and grad_v in one pass ──
-            let mut dot = 0.0f32;
-            for j in 0..=i {
-                let voff = (base + j) * kw + kvh * hd;
-                let gp = dot4(grow, &vv[voff..voff + hd]);
-                gs[j] = gp;
-                dot += p[j] * gp;
-                // grad_v[j] += p[i,j] * g[i]
-                let gvo = j * kw + kvh * hd;
-                for c in 0..hd { gvb[gvo + c] += p[j] * grow[c]; }
-            }
-            // ── grad_s, then grad_q and grad_k ──
-            let gqo = i * qw + qh * hd;
-            for j in 0..=i {
-                let d = p[j] * (gs[j] - dot) * scale;
-                if d == 0.0 { continue; }
-                let koff = (base + j) * kw + kvh * hd;
-                let gko = j * kw + kvh * hd;
-                for c in 0..hd {
-                    gqb[gqo + c] += d * vk[koff + c];
-                    gkb[gko + c] += d * qrow[c];
+    for kvh in 0..nkv {
+        for j in 0..seq {
+            let off = (base + j) * kw + kvh * hd;
+            let (krow, vrow) = (&vk[off..off + hd], &vv[off..off + hd]);
+            for d in 0..hd { kt[d * seqp + j] = krow[d]; vt[d * seqp + j] = vrow[d]; }
+        }
+        for qh in kvh * group..(kvh + 1) * group {
+            for i0 in (0..seq).step_by(BR) {
+                let br = BR.min(seq - i0);
+                let jmax = i0 + br - 1;
+                let tiles = (jmax / BC) + 1;
+                // ── scores and dP, both lane-parallel over keys ──
+                for t in 0..tiles {
+                    let j0 = t * BC;
+                    let mut ts = [[0.0f32; BC]; BR];
+                    let mut td = [[0.0f32; BC]; BR];
+                    for d in 0..hd {
+                        let kr = &kt[d * seqp + j0..d * seqp + j0 + BC];
+                        let vr = &vt[d * seqp + j0..d * seqp + j0 + BC];
+                        for ii in 0..br {
+                            let off = (base + i0 + ii) * qw + qh * hd + d;
+                            let (q, go) = (vq[off], g[off]);
+                            let (rs, rd) = (&mut ts[ii], &mut td[ii]);
+                            for jj in 0..BC { rs[jj] += q * kr[jj]; rd[jj] += go * vr[jj]; }
+                        }
+                    }
+                    for ii in 0..br {
+                        let (ds, dd) = (&mut sc[ii * seqp + j0..ii * seqp + j0 + BC],
+                                        &mut dp[ii * seqp + j0..ii * seqp + j0 + BC]);
+                        for jj in 0..BC { ds[jj] = ts[ii][jj] * scale; dd[jj] = td[ii][jj]; }
+                    }
+                }
+                // ── per query: softmax P, D, and dS (written over dp) ──
+                for ii in 0..br {
+                    let qi = i0 + ii;
+                    let n = qi + 1;                    // causal: keys 0..=qi
+                    let prow = &mut sc[ii * seqp..ii * seqp + n];
+                    let mut m = f32::NEG_INFINITY;
+                    for &x in prow.iter() { if x > m { m = x; } }
+                    let sum = r2_tensor::ops::exp_shift_sum(prow, m, &mut ex[..n]);
+                    let inv = 1.0 / sum;
+                    for j in 0..n { prow[j] = ex[j] * inv; }
+                    let dprow = &mut dp[ii * seqp..ii * seqp + n];
+                    let mut dot = 0.0f32;
+                    for j in 0..n { dot += prow[j] * dprow[j]; }
+                    for j in 0..n { dprow[j] = prow[j] * (dprow[j] - dot) * scale; }
+                    // keys this query cannot see contribute nothing
+                    for j in n..jmax + 1 { sc[ii * seqp + j] = 0.0; dp[ii * seqp + j] = 0.0; }
+                }
+                // ── accumulate, KEY-OUTER: each dK_j / dV_j row is read and
+                // written once per query block, not once per query. The
+                // previous order did that read-modify-write of two 256-byte
+                // rows for every (query, key) pair — the backward's cost was
+                // that traffic, not the arithmetic.
+                for j in 0..=jmax {
+                    let gvo = j * kw + kvh * hd;
+                    let koff = (base + j) * kw + kvh * hd;
+                    let krow = &vk[koff..koff + hd];
+                    for ii in 0..br {
+                        let qi = i0 + ii;
+                        if j > qi { continue; }
+                        let pj = sc[ii * seqp + j];
+                        let d = dp[ii * seqp + j];
+                        let qoff = (base + qi) * qw + qh * hd;
+                        let qrow = &vq[qoff..qoff + hd];
+                        let grow = &g[qoff..qoff + hd];
+                        let gqo = qi * qw + qh * hd;
+                        for c in 0..hd {
+                            gvb[gvo + c] += pj * grow[c];
+                            gkb[gvo + c] += d * qrow[c];
+                            gqb[gqo + c] += d * krow[c];
+                        }
+                    }
                 }
             }
         }
