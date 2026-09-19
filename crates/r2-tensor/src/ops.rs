@@ -288,6 +288,53 @@ pub fn silu_into(src: &[f32], dst: &mut [f32]) {
     for (d, &v) in dst.iter_mut().zip(src) { *d = silu(v); }
 }
 
+/// EXPERIMENT (measured by `--example silu_forms`): the silu backward in
+/// PyTorch's expression order, `dy * s * (1 + x * (1 - s))`, writing the
+/// result fresh (no accumulate) exactly as ATen's `silu_backward_kernel`
+/// does. Same `exp8`, same 8-wide loop; only the arithmetic order and the
+/// store differ. Kept `pub` so the example can call it.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+pub unsafe fn silu_bwd_torch_form_avx2(v: &[f32], g: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = v.len();
+    let one = _mm256_set1_ps(1.0);
+    let mut i = 0;
+    while i + 8 <= n {
+        let vv = _mm256_loadu_ps(v.as_ptr().add(i));
+        let gv = _mm256_loadu_ps(g.as_ptr().add(i));
+        let s = _mm256_div_ps(one,
+            _mm256_add_ps(one, exp8(_mm256_sub_ps(_mm256_setzero_ps(), vv))));
+        // dy * s * (1 + x * (1 - s))   — ATen's order, no fusion
+        let t = _mm256_sub_ps(one, s);
+        let t = _mm256_mul_ps(vv, t);
+        let t = _mm256_add_ps(one, t);
+        let t = _mm256_mul_ps(s, t);
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_mul_ps(gv, t));
+        i += 8;
+    }
+    while i < n {
+        let s = 1.0 / (1.0 + (-v[i]).exp());
+        out[i] = g[i] * s * (1.0 + v[i] * (1.0 - s));
+        i += 1;
+    }
+}
+
+/// Runtime-dispatched wrapper for the experiment above.
+pub fn silu_bwd_torch_form(v: &[f32], g: &[f32], out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if have_avx2() {
+        debug_assert!(g.len() >= v.len() && out.len() >= v.len());
+        // SAFETY: guarded by the runtime feature check; lengths asserted.
+        unsafe { silu_bwd_torch_form_avx2(v, g, out) };
+        return;
+    }
+    for ((o, &vv), &gg) in out.iter_mut().zip(v).zip(g) {
+        let s = 1.0 / (1.0 + (-vv).exp());
+        *o = gg * s * (1.0 + vv * (1.0 - s));
+    }
+}
+
 /// `gout[j] += g[j] * d/dv silu(v[j])`, vectorised.
 ///
 /// `d/dv [v*s] = s + v*s*(1-s)` with `s = sigmoid(v)`.

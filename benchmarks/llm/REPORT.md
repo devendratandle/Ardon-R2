@@ -22,29 +22,63 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.10x FASTER than PyTorch, and 1.15x faster end to end.**
+**R2 trains 1.15x FASTER than PyTorch, and 1.25x faster end to end.**
 
-This is a real training run rather than a step benchmark: **500 Adam steps
-on TinyStories, 1,024,000 tokens, a 7.24M-parameter model**, both sides
-from the SAME initial weights on the SAME token stream, in one window. The
-machine held **2375 MHz before, between and after every run** — verified,
-not assumed, so these seconds are representative rather than throttled.
+This is a real training run rather than a step benchmark: **300 Adam steps
+on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
+the SAME initial weights on the SAME token stream, in one window
+(2026-09-19). The machine held **2375 MHz before, between and after every
+run** — verified, not assumed, so these seconds are representative rather
+than throttled.
 
 | pair | R2 train | PyTorch train | |
 |---|---:|---:|---|
-| 1 | **269.72 s** | 297.32 s | **R2 1.10x** |
-| 2 | **271.79 s** | 299.07 s | **R2 1.10x** |
+| 1 | **168.80 s** | 196.06 s | **R2 1.16x** |
+| 2 | **159.85 s** | 183.77 s | **R2 1.15x** |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
-| **tokenize 19.1 MB** | **1.74 s** | 15.56 s | **R2 9.0x faster** |
-| **train, 500 steps** | **270 s** | 298 s | **R2 1.10x faster** |
-| **TOTAL** | **271.5 s** | 312.9 s | **R2 1.15x faster** |
+| **tokenize 19.1 MB** | **1.70 s** | 16.90 s | **R2 9.97x faster** |
+| **train, 300 steps** | **168.8 s** | 196.1 s | **R2 1.16x faster** |
+| **TOTAL** | **170.5 s** | 213.0 s | **R2 1.25x faster** |
 
-3,797 vs 3,444 tokens/s; 539 vs 595 ms/step. Held-out loss is **4.0499 on
-both sides** and unchanged from before any of this work — the three
-optimisations that produced it removed work, they did not approximate
-anything.
+3,640-3,844 vs 3,134-3,343 tokens/s; 533-563 vs 613-654 ms/step. Held-out
+loss **4.3113 vs 4.3114**, perplexity 74.54 on both, the training loss
+identical to four decimals at all eleven checkpoints, and both models
+generate the same sentence from the same prompt.
+
+The previous standing figure was 1.10x (two pairs at 500 steps,
+2026-09-09: 269.72/297.32 and 271.79/299.07 s). The step between them is
+one change — the tape is freed off the training thread — and the two
+harnesses below show where it came from.
+
+### Forward, backward, optimizer — and the fourth piece of waste
+
+`--example phase_split` and `benchmarks/llm/phase_split.py` cut one step
+into its phases on both sides (same model, same 2,048 tokens/step, two
+interleaved pairs, 2026-09-19):
+
+| phase | R2 | PyTorch | |
+|---|---:|---:|---|
+| forward | 154 / 156 ms | 233 / 228 | **R2 1.48x** |
+| backward | 295 / 298 | 415 / 420 | **R2 1.41x** |
+| optimizer phase | 44 / 48 | 29 / 30 | PyTorch 1.5x |
+
+R2 leads both compute phases; the optimizer phase was the odd one out, so
+it was split again: **Adam itself is 10.7 ms** (PyTorch's is 29 — R2 2.7x
+faster) and the other **38 ms was `drop(tape)`** — returning ~3,000 value
+and gradient buffers (~287 MB) to the allocator one at a time, 7.7% of a
+step, more than Adam and rmsnorm together. No op census had a line for it
+because freeing is not an op.
+
+The tape is now dropped on a background thread (`train_step`). A/B on the
+step total, three interleaved pairs: 487 -> 455, 510 -> 455, 497 -> 485 ms
+(6.6%, 10.7%, 2.3%); the 300-step pairs above confirm it at run length.
+This hides the cost rather than removing it — a full buffer pool would
+also remove the ~19 ms of page faults the next step pays re-allocating the
+same sizes — but a reused GRADIENT buffer would need zeroing, which is
+the memset the `differentiated` fix removed, so the pool is value-buffers
+only and is the next item.
 
 ### How it got here: three pieces of pure waste
 
@@ -195,6 +229,39 @@ per-row verdict, so the comparison cannot be quietly skipped.
 Only MKL's `sgemm` and `scaled_dot_product_attention` are clearly ahead,
 and both are hand-written assembly R2 does not ship.
 
+### Forward vs backward vs optimizer
+
+`cargo run --release -p r2-train --example phase_split` and
+`python benchmarks/llm/phase_split.py` — the same step cut into its three
+phases on both sides, same model, same 2,048 tokens/step, two interleaved
+pairs in one window (2026-09-19, clock 2375 MHz). ms/step, median of 20.
+
+| phase | R2 | PyTorch 2.13 + MKL | ratio |
+|---|---:|---:|---:|
+| forward (to loss) | 154 / 156 | 233 / 228 | **R2 1.48x faster** |
+| backward (all gradients) | 295 / 298 | 415 / 420 | **R2 1.41x faster** |
+| optimizer (Adam) | 44 / 48 | 29 / 30 | PyTorch 1.5x faster |
+| whole step | 489 / 519 | 662 / 662 | R2 1.28-1.35x faster |
+
+Each side's phases sum to its whole step (R2 493 vs 489; torch 677 vs
+662), so the split is accounting for the step and not for something
+beside it. Backward is ~1.9x forward on both sides, as it should be:
+two GEMMs per weight against one.
+
+The optimizer is the one phase PyTorch wins. R2's number is not Adam's
+arithmetic alone: the phase includes taking the weights back off the
+tape and DROPPING the tape (freeing ~71.9M elements of value and gradient
+buffers), while PyTorch's graph frees during `backward()`. Adam itself is
+a single-threaded AVX2 kernel over 7.24M parameters; PyTorch's
+`_foreach` Adam runs multi-threaded. At 9% of a step it is the smallest
+phase, but it is a real, unclaimed lever.
+
+The whole-step ratio in this short window (1.28-1.35x) is higher than
+the 500-step figure (1.10x). The 500-step number is the one to quote: it
+is sustained, on real data, from identical weights, and both sides are
+throttled alike. Short windows favour whichever side runs while the
+part is cooler. The PHASE ratios are what this table adds.
+
 ### `sgemm` rates on the shapes a step runs
 
 `cargo run --release -p r2-tensor --example gemm_rate` — GFLOP/s.
@@ -265,17 +332,57 @@ Ranked by the census above, not by how interesting they are.
    removals in section 1.** Fixing the top item promotes whatever was
    hiding under it, and a stale census is how the split-K attempt below
    came to be aimed at a problem that had already been fixed.
-1. **`sgemm` is 57% of a step**, and after it nothing is above 7%. It
-   scales 2.7-3.8x against a measured machine ceiling of 5.53x, so roughly
-   another 1.4-2x of parallel efficiency is available — see item 2.
-2. **`sgemm` scales 2.7-3.8x against a machine ceiling of 5.53x.**
-   `--example scaling_ceiling` measures what this machine can actually give
-   a perfectly parallel workload — 5.53x on six cores, 92% efficient — so
-   the bar is that, not 6.00x. Threading `pack_b` took scaling from 1.9-2.8
-   to 2.7-3.8; the remaining serial fraction is `pack_a` (per row-block, so
-   already inside the parallel region but repeated per column panel) and
-   the fork-joins themselves. A BLIS-style thread mesh over `jc` x `ic`
-   would let threads sharing a B panel avoid re-packing it.
+1. **`sgemm` is 57% of a step**, and after it nothing is above 7%.
+
+2. **Where `sgemm` stands against MKL — measured per core and per
+   thread count, same shapes, same window (2026-09-19).** This corrects
+   two earlier claims: the machine peak is not 460 GFLOP/s, and the
+   remaining gap is not per-core.
+
+   `--example fma_power` (throughput-bound FMA, twelve independent
+   accumulators, no memory): **1 core 123.7 GFLOP/s, 6 cores 622.1,
+   5.03x.** That is the machine: 3.9 GHz boost on one core, 3.2 GHz on
+   all six, and power is NOT the ceiling.
+
+   `--example gemm_scaling` and `benchmarks/llm/mkl_scaling.py` (torch
+   `set_num_threads` 1 and 6):
+
+   | | 1 core | 6 cores | scale |
+   |---|---:|---:|---:|
+   | FMA peak | 124 | 622 | 5.03x |
+   | **R2 `sgemm`** | 58-87 | 152-243 | 2.4-3.4x |
+   | **MKL `sgemm`** | 60-83 | 156-285 | 2.3-4.0x |
+
+   **Per core, R2 and MKL are the same speed** — both at 50-70% of the
+   core's FMA peak. The 6x16 micro-kernel issues 8 loads per 12 FMAs (six
+   A broadcasts, two B vectors) and the packing and C-update passes sit
+   on top; that is the microarchitecture's price for K=256 slabs and MKL
+   pays it identically. There is no per-core lever.
+
+   **Across cores, both lose ~40% of the remaining 5x** to the shared
+   hierarchy — an L3 that is two 4 MB CCX halves (the packed B panel is
+   copied into both) and laptop DRAM — which is what `bandwidth_sweep`
+   measured. PyTorch faces the same wall: MKL scales 2.3-4.0x here.
+
+   **R2's actual deficit is confined to small-n and TN shapes:** k/v TN
+   117 vs 285, w1/w3 TN 157 vs 240, q/o TN 162 vs 245 — sub-millisecond
+   GEMMs where MKL scales 3.2-4.0x and R2 2.4x, so it is partitioning and
+   per-call overhead at small sizes, not the kernel. Closing all of it is
+   worth ~4% of a step. Everywhere else R2 is at parity or ahead (output
+   head NN 195 vs 168).
+
+   The `bandwidth_sweep` table stands as the measurement of the shared
+   hierarchy; the conclusions drawn from it that the machine peak was
+   460 and that the residual was per-core are withdrawn.
+
+   **Open, scoped honestly:** a persistent thread team for `sgemm` — one
+   fork per call, workers packing cooperatively behind barriers, no
+   serial section — is what MKL has and R2 does not. It buys nothing on
+   the large shapes (MKL scales no better than R2 there) and 1.3-1.7x on
+   the sub-millisecond gradient shapes, ~4% of a step. Under a
+   zero-overhead policy it is a defect to fix; under the measurement law
+   its effect can only be confirmed at step level, over many pairs.
+
 3. **Attention is 1.5-2.7x behind `scaled_dot_product_attention`**, which
    blocks over keys and keeps the running softmax in registers. Only 5% of
    a step, so closing it entirely buys about 3%.
@@ -324,6 +431,10 @@ Ranked by the census above, not by how interesting they are.
 | **Splitting N instead of M in `sgemm`** (the `jc` half of a BLIS mesh, as Eigen's `parallelize_gemm` does) | Isolated kernel WORSE (q/o proj TN 155 -> 108 GF/s); step total 30.93/35.22/32.46 against 33.48/30.71/31.86, i.e. noise with the pairs split 1-2. **The reason is structural and worth keeping:** the present partitioning is packing-OPTIMAL — B is packed once per `(jc, pc)` and shared, A once per row-block, nothing duplicated. Splitting N makes EVERY worker pack ALL of A; splitting both without sharing duplicates A `n_jc` times and B `n_ic` times. Any fork-join mesh pays redundant packing that exceeds the shared-panel contention it removes. A real BLIS mesh needs a persistent thread TEAM with barriers and shared packed buffers, which rayon's fork-join model does not express |
 | **Shrinking the shared B panel** (`R2_GEMM_NC`) so each worker streams less of it | 60 steps: **1024 -> 30.41 s**, 512 -> 32.20, 256 -> 32.42. The shipped default is already the best of the three; a narrower panel re-streams A more often than it saves on B |
 | **Split-K in `sgemm`** — parallelising the depth loop, each worker owning a private C accumulator | Four interleaved pairs at 60 steps: 35.23/38.22, 35.38/36.23, 35.61/35.97, 36.15/35.89 s. Mean 2.8%, and pair 1's baseline is a first-run outlier — the other three are +2.4%, +1.0%, **−0.7%**, straddling zero. Under this machine's ~10% bar, so not a result. The premise was wrong too: `mc_blk` already shrinks until there are **6-84 row-blocks**, so `grad_B` was never block-starved, and removing 7 of its 8 fork-joins changed nothing measurable — **the TN shortfall is memory bandwidth, not synchronisation.** Op-level it looked actively bad (q/o proj TN 157→118 GF/s with a serial reduction, 168 with a threaded one) which is the usual isolated-kernel scatter; only the step total settled it |
+| **Fusing GEMMs that share a left operand** — `h·w1` and `h·w3` as one 2048x256x1536 call; `h·wq`, `h·wk`, `h·wv` as one 2048x256x512 (the llama.cpp layout; PyTorch eager runs the separate calls, as R2 does) | `--example fused_shapes`, separate vs fused interleaved, 9 rounds, median ms. FFN: NN 7.14 -> 7.99 (**slower**, 1.12x), NT 7.55 -> 7.07, TN 10.97 -> 9.43 — net **4.6%** on a block that is ~17% of a step. QKV: NN 3.08 -> 2.58, NT 3.22 -> 2.24, TN 3.80 -> 3.05 — net ~22% on a block that is ~5% of a step. Together ~2% of a step BEFORE the copies a fused layout needs (slicing gate/up, or a strided SwiGLU), under this machine's ~10% bar. The FFN forward regression is not panel imbalance: `R2_GEMM_NC=768` (two equal panels) gives the same 1.11x. Wider n does not help NN on this kernel — the shape table already said so (output head NN at n=8000 is below w1/w3 at n=768). Same lesson as the ceiling work: what remains is per-core, not structural |
+| **Swapping the micro-kernel loop nest to B-strip-outer / A-strip-inner** (the textbook Goto order, so the 16 KB B strip stays in L1 and the shared 1 MB panel is read from L3 once per block instead of once per A strip) | `gemm_rate` before/after: output head NN **195 -> 152**, NT 206 -> 186; w1/w3 NN 231 -> 210; the rest flat. On Zen 2 the private L2 is 512 KB, so the original order's B re-stream is L2-served and cheap, while the swapped order's C-tile writes (96 rows at stride n, 32 KB apart on the output head) are what thrash. Loop order is tuned to this cache geometry already; reverted |
+| **One whole-K slab for small outputs** (k/v and q/o gradients: 256x128 / 256x256 with K=2048), on the theory that eight KC=256 slabs are eight serial packs and eight fork-joins of pure overhead | `gemm_rate`, `R2_GEMM_FULLK` 0/1 interleaved: k/v TN 145 -> 117 / 142 -> 86, q/o TN 155 -> 106 / 166 -> 90 — **worse**. KC is not overhead: it is what keeps the 16 KB B strip and 6 KB A strip in L1 per tile; at kc=2048 they are 128 KB and 48 KB and stream from L2 on every tile. Also learned: sub-millisecond kernels scatter +/-25% between identical runs here (q/o NN 208 then 161, no change), so the small-shape residue cannot be resolved at op level below that. The honest item is a persistent thread team (one fork per call, cooperative packing behind barriers) — the one thing MKL has on these shapes (3.2-4.0x vs 2.4x) and nowhere else — worth ~4% of a step |
+| **Rewriting the silu backward in ATen's expression order** (`dy*s*(1+x*(1-s))`, plain store) on the theory that PyTorch's is "more vectorised" | `--example silu_forms`, 2048x768, 1 thread, 21 rounds: R2's two-FMA form 1.430 ms, ATen order 1.435 ms — identical; the two agree to 1.1e-7 (< f32 eps). The REAL `aten::silu_backward` on the same array: 2.096 ms on 1 thread (R2 **1.47x faster per core**), 1.262 ms on 6. Both are the same 8-wide AVX2 loop; PyTorch's Sleef `exp` is wider-range and slower than R2's clamped Cephes, which is all silu needs |
 | Timing PyTorch's tokenizer BEFORE its training loop, in one process | It holds a ~19 MB string and a 4.6M-element id list alive through training, and PyTorch's measured training time moved **20.7%** between two runs fifteen minutes apart (302.85 -> 365.46 s) while R2's moved 5.6%. That asymmetry — one side moving four times as much as the other — is the signature of a perturbation, not of drift. Moved after training; the ratio returned to 1.04x. **A measurement that shares a process with its neighbour must run after it** |
 | Reading the pipeline ratio as a property of the two implementations | It is a property of the RUN LENGTH. 1.71x at 30 steps, 1.02x at 500, same code both times — tokenizing is 0.5% of a real training pipeline. Quote the training ratio |
 

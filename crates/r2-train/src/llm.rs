@@ -245,6 +245,15 @@ impl Trainer {
         let grads: Vec<&[f32]> = leaves.iter().map(|&lv| tape.grad(lv)).collect();
         let Trainer { params, opt, .. } = self;
         opt.step_blocks(params, &grads, scale)?;
+        drop(grads);
+        // Free the tape OFF the training thread. Returning ~3,000 value and
+        // gradient buffers (~287 MB at the shipping shape) to the allocator
+        // one at a time measured 38 ms — 7.7% of a step, more than Adam and
+        // rmsnorm together (`--example phase_split`). Nothing waits on it,
+        // so it runs while the next forward starts. The buffers are not
+        // reused because a reused gradient buffer would need zeroing, and
+        // that memset is the cost `differentiated` already removed.
+        std::thread::spawn(move || drop(tape));
         self.step += 1;
         Ok(total / n)
     }

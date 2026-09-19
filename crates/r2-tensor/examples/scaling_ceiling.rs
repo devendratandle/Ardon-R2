@@ -70,6 +70,62 @@ fn main() {
 
     println!("\n  Each thread runs the SAME chain, so a machine that held its");
     println!("  clock would finish {cores} threads in the same wall time as 1.");
-    println!("  Whatever the last row shows is the CEILING for any parallel");
-    println!("  code here — judge sgemm's scaling against that, not 6.00x.");
+    println!("  That is the ceiling for COMPUTE-bound parallel code.");
+
+    // ── the ceiling that actually applies to a GEMM ────────────────────
+    //
+    // The chain above is register-resident: it touches no memory at all,
+    // so it measures how well the CORES scale and nothing else. A GEMM is
+    // not that. It streams packed panels through a shared L3 and one
+    // memory controller, and cores do not multiply memory bandwidth.
+    //
+    // Judging `sgemm`'s 2.7-3.8x against the register ceiling is the
+    // premise behind four failed attempts — split-K, split-N, narrower
+    // panels, a wider row-block cap — every one of which assumed there was
+    // headroom to reclaim. This measures the OTHER ceiling: a STREAM-style
+    // triad over buffers far larger than L3, which is bandwidth and
+    // nothing else. A GEMM's real ceiling lies between the two.
+    println!("\n{:>10} {:>12} {:>10} {:>9}", "threads", "GB/s", "vs 1", "efficiency");
+    println!("{}", "-".repeat(46));
+    // 24 MB per buffer, three per thread — past an 8 MB L3 even at one
+    // thread, so nothing is ever served from cache.
+    const N: usize = 6 << 20;
+    let mk = || -> Vec<f32> { (0..N).map(|i| (i % 251) as f32).collect() };
+    let bytes = (N * 4 * 3) as f64;
+
+    let triad = |b: &[f32], cv: &[f32], a: &mut [f32]| {
+        let s = std::hint::black_box(1.000_001f32);
+        for i in 0..a.len() { a[i] = b[i] + s * cv[i]; }
+    };
+
+    let (bb, cc) = (mk(), mk());
+    let mut aa = mk();
+    let t1 = median((0..5).map(|_| {
+        let st = std::time::Instant::now();
+        triad(&bb, &cc, &mut aa);
+        std::hint::black_box(aa[0]);
+        st.elapsed().as_secs_f64()
+    }).collect());
+    println!("{:>10} {:>12.2} {:>10} {:>9}", 1, bytes / t1 / 1e9, "1.00x", "100%");
+
+    for nt in [2usize, 4, cores] {
+        if nt > cores { continue; }
+        // Each thread owns its OWN buffers, so this measures bandwidth
+        // rather than contention on one shared array.
+        let mut sets: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> =
+            (0..nt).map(|_| (mk(), mk(), mk())).collect();
+        let t = median((0..5).map(|_| {
+            let st = std::time::Instant::now();
+            sets.par_iter_mut().for_each(|(b, cv, a)| triad(b, cv, a));
+            st.elapsed().as_secs_f64()
+        }).collect());
+        let speedup = t1 * nt as f64 / t;
+        println!("{:>10} {:>12.2} {:>9.2}x {:>8.0}%",
+                 nt, bytes * nt as f64 / t / 1e9, speedup, speedup / nt as f64 * 100.0);
+    }
+
+    println!("\n  The second table is the ceiling a GEMM can actually reach:");
+    println!("  cores multiply arithmetic, not memory bandwidth. `sgemm`");
+    println!("  scales 2.7-3.8x — read that against THIS number, not the");
+    println!("  register-resident one, before assuming headroom exists.");
 }
