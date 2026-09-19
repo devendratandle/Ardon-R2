@@ -148,6 +148,14 @@ pub struct Tape {
     requires: Vec<bool>,
     /// Value buffers recycled from the previous step — see [`BufPool`].
     pool: BufPool,
+    /// How many of this tape's gradient buffers came back from the pool
+    /// holding last step's gradients (contents stale).
+    recycled_grads: usize,
+    /// Per node: has a backward arm written this node's gradient yet?
+    /// The FIRST writer assigns, every later one accumulates — so no
+    /// gradient buffer is ever zeroed, recycled or not. See
+    /// `backward_from`.
+    gwritten: Vec<bool>,
     /// Has a backward pass already run on this tape?
     ///
     /// Gradient buffers are allocated zero (`push`), so on the FIRST
@@ -176,9 +184,18 @@ const PAR_MIN: usize = 1 << 15;
 /// handed straight back without zeroing; the pool keeps them by exact
 /// length, and a step draws from it through [`Tape::alloc`].
 ///
-/// GRADIENT buffers are not pooled: backward accumulates into them, so a
-/// reused one would need a memset first — the same pass the
-/// `differentiated` flag removed. They stay freshly calloc'd.
+/// GRADIENT buffers are pooled too, and they are never zeroed. A calloc'd
+/// buffer is "free" to zero — the kernel hands out zero pages — but it is
+/// NOT free to touch: the first write to each page takes a fault and a
+/// kernel-side memset, single-threaded, on the writing thread. Measured on
+/// the 8 MB table gradient of the embedding: the scatter-add into a warm
+/// buffer takes 413 us and into a fresh calloc'd one 2,126 us. A step's
+/// ~143 MB of gradients paid that every step, inside `backward`, where no
+/// census could see it. Zeroing recycled buffers in one parallel pass
+/// measured about the same (~22 ms: this laptop's DRAM write bandwidth
+/// either way). So instead the backward tracks, per node, whether its
+/// gradient has been written yet: the FIRST consumer to contribute
+/// ASSIGNS, later ones accumulate. Nothing is zeroed, nothing is faulted.
 #[derive(Default)]
 pub struct BufPool {
     free: std::collections::HashMap<usize, Vec<Vec<f32>>>,
@@ -190,10 +207,16 @@ impl BufPool {
     /// A buffer of exactly `n` elements. Its contents are whatever the
     /// previous user left — the caller MUST write every element.
     pub fn take(&mut self, n: usize) -> Vec<f32> {
+        self.take_tagged(n).0
+    }
+
+    /// As [`BufPool::take`], also saying whether the buffer was recycled
+    /// (`true`: contents are stale) or freshly calloc'd (`false`: zero).
+    pub fn take_tagged(&mut self, n: usize) -> (Vec<f32>, bool) {
         if let Some(list) = self.free.get_mut(&n) {
-            if let Some(v) = list.pop() { debug_assert_eq!(v.len(), n); return v; }
+            if let Some(v) = list.pop() { debug_assert_eq!(v.len(), n); return (v, true); }
         }
-        vec![0.0f32; n]
+        (vec![0.0f32; n], false)
     }
 
     /// Return a buffer for reuse. Empty buffers are dropped.
@@ -219,7 +242,8 @@ impl Tape {
     /// step's buffers, handed on by [`Tape::into_pool`].
     pub fn with_pool(pool: BufPool) -> Self {
         Tape { vals: Vec::new(), grads: Vec::new(), ops: Vec::new(),
-               requires: Vec::new(), differentiated: false, pool }
+               requires: Vec::new(), differentiated: false, pool,
+               recycled_grads: 0, gwritten: Vec::new() }
     }
 
     /// Dismantle the tape: every value buffer goes into the pool for the
@@ -230,11 +254,12 @@ impl Tape {
     pub fn into_pool(mut self) -> BufPool {
         let mut pool = std::mem::take(&mut self.pool);
         for v in self.vals.drain(..) { pool.give(v); }
-        let grads = std::mem::take(&mut self.grads);
-        let ops = std::mem::take(&mut self.ops);
-        std::thread::spawn(move || { drop(grads); drop(ops); });
+        for g in self.grads.drain(..) { pool.give(g); }
         pool
     }
+
+    /// Buffers currently held by this tape's pool (count, elements).
+    pub fn pool_stats(&self) -> (usize, usize) { self.pool.stats() }
 
     /// An output buffer of `n` elements for a forward op. Recycled when the
     /// pool has one of that size; contents are undefined and the op must
@@ -251,10 +276,13 @@ impl Tape {
 
     fn push(&mut self, val: Vec<f32>, op: Op, requires: bool) -> Var {
         let idx = self.vals.len();
-        self.grads.push(vec![0.0; val.len()]);
+        let (g, recycled) = self.pool.take_tagged(val.len());
+        if recycled { self.recycled_grads += 1; }
+        self.grads.push(g);
         self.vals.push(val);
         self.ops.push(op);
         self.requires.push(requires);
+        self.gwritten.push(false);
         Var(idx)
     }
 
@@ -685,11 +713,15 @@ impl Tape {
         //
         // A second backward on the SAME tape does need the reset, because
         // the first one left gradients in those buffers.
-        if self.differentiated {
-            for gb in self.grads.iter_mut() { gb.fill(0.0); }
-        }
+        // No zeroing pass, ever. Each arm below asks `first_write(node)`
+        // before touching a gradient: the first writer assigns the whole
+        // buffer (or zeroes it and accumulates, for the arms that write
+        // only part of it), later writers accumulate. A second backward on
+        // the same tape simply starts the bookkeeping again.
+        for w in self.gwritten.iter_mut() { *w = false; }
         self.differentiated = true;
         self.grads[v.0].copy_from_slice(seed);
+        self.gwritten[v.0] = true;
 
         // Nodes were pushed in topological order → reverse index order is
         // a valid reverse-topological walk.
@@ -709,12 +741,16 @@ impl Tape {
                     let par = g.len() >= PAR_MIN;
                     for side in [a, b] {
                         if !self.requires[side] { continue; }
+                        let assign = first_write(&mut self.gwritten, side);
                         if par {
                             use rayon::prelude::*;
                             self.grads[side].par_chunks_mut(C).zip(g.par_chunks(C))
                                 .for_each(|(gd, gi)| {
-                                    for (d, s) in gd.iter_mut().zip(gi) { *d += s; }
+                                    if assign { gd.copy_from_slice(gi); }
+                                    else { for (d, s) in gd.iter_mut().zip(gi) { *d += s; } }
                                 });
+                        } else if assign {
+                            self.grads[side].copy_from_slice(&g);
                         } else {
                             for (gd, gi) in self.grads[side].iter_mut().zip(&g) { *gd += gi; }
                         }
@@ -733,20 +769,24 @@ impl Tape {
                     // attention mask, an upstream gradient fed in as data —
                     // was getting a full gradient computed into a buffer
                     // nothing would ever read.
-                    let Tape { vals, grads, requires, .. } = self;
+                    let Tape { vals, grads, requires, gwritten, .. } = self;
                     const C: usize = 1 << 14;
                     let par = g.len() >= PAR_MIN;
                     // grad of `a` reads the value of `b`, and vice versa.
                     for (dst, src) in [(a, b), (b, a)] {
                         if !requires[dst] { continue; }
+                        let assign = first_write(gwritten, dst);
                         let other = &vals[src];
                         if par {
                             use rayon::prelude::*;
                             grads[dst].par_chunks_mut(C).zip(g.par_chunks(C))
                                 .zip(other.par_chunks(C))
                                 .for_each(|((gd, gi), o)| {
-                                    for ((d, s), o) in gd.iter_mut().zip(gi).zip(o) { *d += s * o; }
+                                    if assign { for ((d, s), o) in gd.iter_mut().zip(gi).zip(o) { *d = s * o; } }
+                                    else { for ((d, s), o) in gd.iter_mut().zip(gi).zip(o) { *d += s * o; } }
                                 });
+                        } else if assign {
+                            for ((d, s), o) in grads[dst].iter_mut().zip(&g).zip(other) { *d = s * o; }
                         } else {
                             for ((d, s), o) in grads[dst].iter_mut().zip(&g).zip(other) { *d += s * o; }
                         }
@@ -759,6 +799,11 @@ impl Tape {
                     // exactly the commonest tokens.
                     let (ti, d) = (table.0, *d);
                     if self.requires[ti] {
+                        // A scatter touches only the rows of tokens present,
+                        // so the first write must zero the table gradient
+                        // (8 MB at vocab 8,000) before accumulating. Done in
+                        // parallel: warm pages, six threads.
+                        if first_write(&mut self.gwritten, ti) { zero_par(&mut self.grads[ti]); }
                         let gt = &mut self.grads[ti];
                         // Threading a scatter-add needs care: two tokens can
                         // hit the SAME row, so splitting the tokens across
@@ -840,12 +885,14 @@ impl Tape {
                         if need_a {
                             let bt = transpose_of(&self.vals[bi], k, n);   // n×k
                             let ga = r2_tensor::ops::matmul(&g, &bt, m, n, k);
-                            for (dst, v) in self.grads[ai].iter_mut().zip(&ga) { *dst += v; }
+                            if first_write(&mut self.gwritten, ai) { self.grads[ai].copy_from_slice(&ga); }
+                            else { for (dst, v) in self.grads[ai].iter_mut().zip(&ga) { *dst += v; } }
                         }
                         if need_b {
                             let at = transpose_of(&self.vals[ai], m, k);   // k×m
                             let gb = r2_tensor::ops::matmul(&at, &g, k, m, n);
-                            for (dst, v) in self.grads[bi].iter_mut().zip(&gb) { *dst += v; }
+                            if first_write(&mut self.gwritten, bi) { self.grads[bi].copy_from_slice(&gb); }
+                            else { for (dst, v) in self.grads[bi].iter_mut().zip(&gb) { *dst += v; } }
                         }
                         // Hand the buffer back before skipping the rest —
                         // `continue` used to jump over the assignment at the
@@ -874,21 +921,21 @@ impl Tape {
                     // operand transposed for free — which is why
                     // `REPORT.md` records materialising them as a
                     // REJECTED attempt at 393 ms against 326.
-                    use r2_linalg::gemm::{sgemm_into as gemm_into, Trans};
+                    use r2_linalg::gemm::{sgemm_assign_into, sgemm_into, Trans};
                     let par = m * k * n >= PAR_MIN;
                     if need_a {
                         // (M, K, N) = (m, n, k); B is stored k×n, which IS
                         // the N×K the transposed read wants.
-                        let Tape { vals, grads, .. } = self;
-                        gemm_into(&g, Trans::No, &vals[bi], Trans::Yes,
-                                  m, n, k, &mut grads[ai], par);
+                        let Tape { vals, grads, gwritten, .. } = self;
+                        let f = if first_write(gwritten, ai) { sgemm_assign_into } else { sgemm_into };
+                        f(&g, Trans::No, &vals[bi], Trans::Yes, m, n, k, &mut grads[ai], par);
                     }
                     if need_b {
                         // (M, K, N) = (k, m, n); A is stored m×k, which IS
                         // the K×M the transposed read wants.
-                        let Tape { vals, grads, .. } = self;
-                        gemm_into(&vals[ai], Trans::Yes, &g, Trans::No,
-                                  k, m, n, &mut grads[bi], par);
+                        let Tape { vals, grads, gwritten, .. } = self;
+                        let f = if first_write(gwritten, bi) { sgemm_assign_into } else { sgemm_into };
+                        f(&vals[ai], Trans::Yes, &g, Trans::No, k, m, n, &mut grads[bi], par);
                     }
                 }
                 Op::Silu(x) => {
@@ -898,12 +945,13 @@ impl Tape {
                         // them as such. This used to `clone()` the whole
                         // input first — 6.3 MB per call at the shipping
                         // shape, four times a step, to read it once.
-                        let Tape { vals, grads, .. } = self;
+                        let Tape { vals, grads, gwritten, .. } = self;
+                        let acc = !first_write(gwritten, xi);
                         let vx = &vals[xi];
                         // d/dv [v*s] = s + v*s*(1-s), with the sigmoid's
                         // `exp` vectorised — same reason as the forward.
                         let work = |gx: &mut [f32], gi: &[f32], v: &[f32]| {
-                            r2_tensor::ops::silu_bwd(v, gi, gx);
+                            r2_tensor::ops::silu_bwd_acc(v, gi, gx, acc);
                         };
                         if g.len() >= PAR_MIN {
                             use rayon::prelude::*;
@@ -921,6 +969,8 @@ impl Tape {
                     let vx = self.vals[xi].clone();
                     let vw = self.vals[wi].clone();
                     let rows = vx.len() / d;
+                    let assign_x = first_write(&mut self.gwritten, xi);
+                    if first_write(&mut self.gwritten, wi) { self.grads[wi].fill(0.0); }
                     for r in 0..rows {
                         let xr = &vx[r * d..r * d + d];
                         let gr = &g[r * d..r * d + d];
@@ -931,7 +981,8 @@ impl Tape {
                         let coef = rinv * rinv * rinv / d as f32;
                         for j in 0..d {
                             // dL/dx_i = g_i w_i r  -  r³ x_i/d * s
-                            self.grads[xi][r * d + j] += gr[j] * vw[j] * rinv - coef * xr[j] * s;
+                            let dx = gr[j] * vw[j] * rinv - coef * xr[j] * s;
+                            if assign_x { self.grads[xi][r * d + j] = dx; } else { self.grads[xi][r * d + j] += dx; }
                             // dL/dw_j = g_j * x_j * r
                             self.grads[wi][j] += gr[j] * xr[j] * rinv;
                         }
@@ -939,6 +990,7 @@ impl Tape {
                 }
                 Op::Transpose { x, rows, cols } => {
                     let (xi, rows, cols) = (x.0, *rows, *cols);
+                    zero_if_first(&mut self.gwritten, &mut self.grads, xi);
                     // grad_x[i,j] += g[j,i]
                     for i in 0..rows { for j in 0..cols {
                         self.grads[xi][i * cols + j] += g[j * rows + i];
@@ -954,6 +1006,7 @@ impl Tape {
                     let (half, per) = (hd / 2, period.max(1));
                     let tab = r2_tensor::ops::rope_table(per, hd, base);
                     let w = nh * hd;
+                    let assign = first_write(&mut self.gwritten, xi);
                     let row = |r: usize, grow: &mut [f32]| {
                         // Same position mapping as the forward pass: in a
                         // fused batch the angle restarts each sequence.
@@ -965,8 +1018,9 @@ impl Tape {
                                 let (c, s) = trow[p];
                                 let (ga, gb) = (gsrc[off + 2 * p], gsrc[off + 2 * p + 1]);
                                 // Inverse of [c -s; s c] is [c s; -s c].
-                                grow[off + 2 * p] += ga * c + gb * s;
-                                grow[off + 2 * p + 1] += -ga * s + gb * c;
+                                let (ra, rb) = (ga * c + gb * s, -ga * s + gb * c);
+                                if assign { grow[off + 2 * p] = ra; grow[off + 2 * p + 1] = rb; }
+                                else { grow[off + 2 * p] += ra; grow[off + 2 * p + 1] += rb; }
                             }
                         }
                     };
@@ -983,6 +1037,7 @@ impl Tape {
                     // Rows are contiguous: the adjoint scatters the
                     // incoming gradient back into its row range.
                     let (xi, cols, start, len) = (x.0, *cols, *start, *len);
+                    zero_if_first(&mut self.gwritten, &mut self.grads, xi);
                     let base = start * cols;
                     for i in 0..len * cols { self.grads[xi][base + i] += g[i]; }
                 }
@@ -990,6 +1045,7 @@ impl Tape {
                     // Each input owns a contiguous slab of the output.
                     let mut off = 0usize;
                     for v in xs {
+                        zero_if_first(&mut self.gwritten, &mut self.grads, v.0);
                         let n = self.grads[v.0].len();
                         for i in 0..n { self.grads[v.0][i] += g[off + i]; }
                         off += n;
@@ -997,6 +1053,7 @@ impl Tape {
                 }
                 Op::SliceCols { x, rows, total, start, len } => {
                     let (xi, rows, total, start, len) = (x.0, *rows, *total, *start, *len);
+                    zero_if_first(&mut self.gwritten, &mut self.grads, xi);
                     for r in 0..rows { for j in 0..len {
                         self.grads[xi][r * total + start + j] += g[r * len + j];
                     }}
@@ -1004,6 +1061,7 @@ impl Tape {
                 Op::ConcatCols { xs, rows, each } => {
                     let (rows, each, n) = (*rows, *each, xs.len());
                     for (i, v) in xs.iter().enumerate() {
+                        zero_if_first(&mut self.gwritten, &mut self.grads, v.0);
                         for r in 0..rows { for j in 0..each {
                             self.grads[v.0][r * each + j] += g[r * n * each + i * each + j];
                         }}
@@ -1011,6 +1069,7 @@ impl Tape {
                 }
                 Op::ScaleMaskCausal { x, t, scale } => {
                     let (xi, t, scale) = (x.0, *t, *scale);
+                    zero_if_first(&mut self.gwritten, &mut self.grads, xi);
                     // Masked entries are constants (-inf), so they pass no
                     // gradient back — a token cannot learn from its future.
                     for i in 0..t { for j in 0..=i {
@@ -1019,6 +1078,7 @@ impl Tape {
                 }
                 Op::SoftmaxRows { x, d } => {
                     let (xi, d) = (x.0, *d);
+                    zero_if_first(&mut self.gwritten, &mut self.grads, xi);
                     let y = self.vals[i].clone(); // this node's value = softmax
                     let rows = y.len() / d;
                     for r in 0..rows {
@@ -1051,9 +1111,11 @@ impl Tape {
                         // cannot be borrowed mutably at once, and the adds
                         // are O(size) against an O(nseq*nh*seq^2*hd)
                         // backward.
-                        let mut gq = vec![0.0f32; rows * nh * hd];
-                        let mut gk = vec![0.0f32; rows * nkv * hd];
-                        let mut gv = vec![0.0f32; rows * nkv * hd];
+                        // Scratch from the pool (warm pages), zeroed in
+                        // parallel: the sequence kernel accumulates into it.
+                        let mut gq = self.pool.take(rows * nh * hd);  zero_par(&mut gq);
+                        let mut gk = self.pool.take(rows * nkv * hd); zero_par(&mut gk);
+                        let mut gv = self.pool.take(rows * nkv * hd); zero_par(&mut gv);
                         {
                             let (vq, vk, vv) = (&self.vals[qi], &self.vals[ki], &self.vals[vi]);
                             // Same disjoint-by-sequence split as the
@@ -1082,17 +1144,22 @@ impl Tape {
                                 }
                             }
                         }
-                        if need_q { for (d, x) in self.grads[qi].iter_mut().zip(&gq) { *d += x; } }
-                        if need_k { for (d, x) in self.grads[ki].iter_mut().zip(&gk) { *d += x; } }
-                        if need_v { for (d, x) in self.grads[vi].iter_mut().zip(&gv) { *d += x; } }
+                        for (need, node, src) in [(need_q, qi, &gq), (need_k, ki, &gk), (need_v, vi, &gv)] {
+                            if !need { continue; }
+                            if first_write(&mut self.gwritten, node) { self.grads[node].copy_from_slice(src); }
+                            else { for (d, x) in self.grads[node].iter_mut().zip(src) { *d += x; } }
+                        }
+                        self.pool.give(gq); self.pool.give(gk); self.pool.give(gv);
                     }
                 }
                 Op::SumAll(x) => {
                     let xi = x.0;
+                    zero_if_first(&mut self.gwritten, &mut self.grads, xi);
                     for gx in self.grads[xi].iter_mut() { *gx += g[0]; }
                 }
                 Op::Mse { pred, target } => {
                     let pi = pred.0;
+                    zero_if_first(&mut self.gwritten, &mut self.grads, pi);
                     let n = target.len() as f32;
                     let vp = self.vals[pi].clone();
                     let target = target.clone();
@@ -1115,11 +1182,12 @@ impl Tape {
                     // gradient, so they split across cores with no
                     // coordination.
                     let (targets, lse) = (targets.clone(), lse.clone());
-                    let Tape { vals, grads, .. } = self;
+                    let Tape { vals, grads, gwritten, .. } = self;
+                    let acc = !first_write(gwritten, li);
                     let xs = &vals[li];
                     let work = |r: usize, grow: &mut [f32]| {
-                        r2_tensor::ops::softmax_ce_grad(
-                            &xs[r * d..r * d + d], lse[r], targets[r], inv, grow);
+                        r2_tensor::ops::softmax_ce_grad_acc(
+                            &xs[r * d..r * d + d], lse[r], targets[r], inv, grow, acc);
                     };
                     if targets.len() * d >= PAR_MIN {
                         use rayon::prelude::*;
@@ -1134,6 +1202,42 @@ impl Tape {
             // Return the buffer so grad() still reports this node.
             self.grads[i] = g;
         }
+        // A node no arm wrote (an unused leaf, a branch not reaching the
+        // seed) must still report a zero gradient. On a fresh tape its
+        // buffer already is zero and is left untouched — no fault. Only a
+        // recycled buffer can hold stale values.
+        if self.recycled_grads > 0 {
+            for i in 0..self.grads.len() {
+                if !self.gwritten[i] && self.requires[i] { zero_par(&mut self.grads[i]); }
+            }
+        }
+    }
+}
+
+/// `true` exactly once per node per backward: the caller is the FIRST
+/// writer of that node's gradient and must ASSIGN (or zero, then add).
+#[inline]
+fn first_write(gwritten: &mut [bool], node: usize) -> bool {
+    let first = !gwritten[node];
+    gwritten[node] = true;
+    first
+}
+
+/// For arms that write only PART of a gradient (a slice, a masked
+/// triangle, a scatter): zero the whole buffer on the first write so the
+/// untouched part reads as zero, then accumulate as before.
+#[inline]
+fn zero_if_first(gwritten: &mut [bool], grads: &mut [Vec<f32>], node: usize) {
+    if first_write(gwritten, node) { zero_par(&mut grads[node]); }
+}
+
+/// Zero a buffer, in parallel when it is large enough to matter.
+fn zero_par(v: &mut [f32]) {
+    if v.len() >= PAR_MIN {
+        use rayon::prelude::*;
+        v.par_chunks_mut(1 << 16).for_each(|c| c.fill(0.0));
+    } else {
+        v.fill(0.0);
     }
 }
 
@@ -1160,6 +1264,60 @@ pub fn finite_diff<F: Fn(&[f32]) -> f32>(params: &[f32], f: F) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small transformer-shaped graph run three times through ONE pool:
+    /// step 1 has fresh buffers, steps 2 and 3 get recycled ones full of
+    /// stale values and stale gradients. Every value and every gradient
+    /// must be bit-identical to a tape with no pool at all.
+    #[test]
+    fn pooled_tapes_reproduce_fresh_tapes_bit_for_bit() {
+        let (t, d, ffn, vocab) = (16usize, 8usize, 24usize, 40usize);
+        let table: Vec<f32> = (0..vocab * d).map(|i| ((i as f32) * 0.37).sin() * 0.5).collect();
+        let w1: Vec<f32> = (0..d * ffn).map(|i| ((i as f32) * 0.11).cos() * 0.3).collect();
+        let w3: Vec<f32> = (0..d * ffn).map(|i| ((i as f32) * 0.23).sin() * 0.3).collect();
+        let w2: Vec<f32> = (0..ffn * d).map(|i| ((i as f32) * 0.17).cos() * 0.3).collect();
+        let nw: Vec<f32> = vec![1.0; d];
+        let tokens: Vec<usize> = (0..t).map(|i| (i * 7 + 3) % vocab).collect();
+        let targets: Vec<usize> = (0..t).map(|i| (i * 11 + 1) % vocab).collect();
+
+        let run = |tape: &mut Tape| -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+            let lt = tape.leaf(table.clone(), true);
+            let l1 = tape.leaf(w1.clone(), true);
+            let l3 = tape.leaf(w3.clone(), true);
+            let l2 = tape.leaf(w2.clone(), true);
+            let ln = tape.leaf(nw.clone(), true);
+            let x = tape.embed(lt, &tokens, d);
+            let h = tape.rmsnorm(x, ln, d, 1e-5);
+            let gate = tape.matmul(h, l1, t, d, ffn);
+            let up = tape.matmul(h, l3, t, d, ffn);
+            let act = tape.silu(gate);
+            let gated = tape.mul(act, up);
+            let down = tape.matmul(gated, l2, t, ffn, d);
+            let y = tape.add(x, down);
+            // logits via the table as an output head: t x vocab
+            let tt = tape.transpose(lt, vocab, d);
+            let logits = tape.matmul(y, tt, t, d, vocab);
+            let loss = tape.softmax_ce(logits, vocab, targets.clone());
+            tape.backward(loss);
+            let vals = [x, h, gate, up, act, gated, down, y, logits, loss].iter().map(|v| tape.value(*v).to_vec()).collect();
+            let grads = [lt, l1, l3, l2, ln, x, h, gate, y].iter().map(|v| tape.grad(*v).to_vec()).collect();
+            (vals, grads)
+        };
+
+        let mut fresh = Tape::new();
+        let want = run(&mut fresh);
+
+        let mut pool = BufPool::new();
+        for step in 0..3 {
+            let mut tape = Tape::with_pool(std::mem::take(&mut pool));
+            let got = run(&mut tape);
+            assert_eq!(got.0, want.0, "values differ on pooled step {step}");
+            assert_eq!(got.1, want.1, "gradients differ on pooled step {step}");
+            let (n, _) = tape.pool_stats();
+            pool = tape.into_pool();
+            assert!(pool.stats().0 > n, "step {step}: into_pool did not return the buffers");
+        }
+    }
 
     /// Build attention the OLD way — slice, transpose, matmul, mask,
     /// softmax, matmul, concat — exactly as `llm.rs::forward_fused` did

@@ -22,7 +22,7 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.19-1.23x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
+**R2 trains 1.23-1.29x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
@@ -37,6 +37,7 @@ than throttled.
 | 2 | **159.85 s** | 183.77 s | **R2 1.15x** |
 | 3 | **147.32 s** | 174.67 s | **R2 1.19x** (cold machine after a reboot; fastest run on both sides) |
 | 4 | **140.63 s** | 172.30 s | **R2 1.23x** (with the tape's value-buffer pool, below) |
+| 5 | **131.82 s** | 169.83 s | **R2 1.29x** (gradients pooled too, first writer assigns) |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
@@ -97,6 +98,29 @@ s and 150.10 -> 140.63 s** (-4.3%, -6.3%), loss curve identical. Under
 this machine's 10% bar as a single pair; taken as real because the
 mechanism was measured directly and both pairs agree. Against PyTorch in
 the same window: 140.63 vs 172.30 s, **1.23x**.
+
+Third fix, **gradients pooled too — and never zeroed.** `embed_probe`
+showed the embedding's scatter-add costs 413 us into a warm table
+gradient and 2,126 us into a fresh calloc'd one: the first touch of each
+page is a fault plus a kernel memset. Pooling the gradient buffers and
+zeroing them in one parallel pass measured NO better (143.1 -> 152.3 s
+and 143.4 -> 142.5: DRAM write bandwidth either way, closed below). So
+the backward now tracks, per node, whether its gradient has been written
+in this pass: the FIRST consumer to contribute ASSIGNS, later ones
+accumulate — `sgemm_assign_into` for the GEMM gradients, an FMA with a
+zero addend in the `silu` and `softmax_ce` kernels (bit-identical to
+accumulating into zero), `copy_from_slice` for the elementwise arms; the
+arms that write only part of a buffer (a scatter, a slice, a masked
+triangle) zero it on their first write. Nothing is memset, nothing is
+faulted. A test runs a transformer-shaped graph three times through one
+pool against a fresh tape and requires every value and gradient to be
+identical. Two interleaved 300-step pairs, R2 alone: **139.96 -> 131.56
+s and 140.15 -> 131.82 s** (-6.0%, -5.9%), loss curve identical. Against
+PyTorch in the same window: 131.82 vs 169.83 s, **1.29x**.
+
+The embedding item (LMO-1) is closed by these two: the gather was
+already at parity (62 vs 65 us), and its backward's cost was the fault on
+a fresh 8 MB table gradient, which no longer exists.
 
 ### How it got here: three pieces of pure waste
 
@@ -452,6 +476,7 @@ Ranked by the census above, not by how interesting they are.
 | **Fusing GEMMs that share a left operand** — `h·w1` and `h·w3` as one 2048x256x1536 call; `h·wq`, `h·wk`, `h·wv` as one 2048x256x512 (the llama.cpp layout; PyTorch eager runs the separate calls, as R2 does) | `--example fused_shapes`, separate vs fused interleaved, 9 rounds, median ms. FFN: NN 7.14 -> 7.99 (**slower**, 1.12x), NT 7.55 -> 7.07, TN 10.97 -> 9.43 — net **4.6%** on a block that is ~17% of a step. QKV: NN 3.08 -> 2.58, NT 3.22 -> 2.24, TN 3.80 -> 3.05 — net ~22% on a block that is ~5% of a step. Together ~2% of a step BEFORE the copies a fused layout needs (slicing gate/up, or a strided SwiGLU), under this machine's ~10% bar. The FFN forward regression is not panel imbalance: `R2_GEMM_NC=768` (two equal panels) gives the same 1.11x. Wider n does not help NN on this kernel — the shape table already said so (output head NN at n=8000 is below w1/w3 at n=768). Same lesson as the ceiling work: what remains is per-core, not structural |
 | **Swapping the micro-kernel loop nest to B-strip-outer / A-strip-inner** (the textbook Goto order, so the 16 KB B strip stays in L1 and the shared 1 MB panel is read from L3 once per block instead of once per A strip) | `gemm_rate` before/after: output head NN **195 -> 152**, NT 206 -> 186; w1/w3 NN 231 -> 210; the rest flat. On Zen 2 the private L2 is 512 KB, so the original order's B re-stream is L2-served and cheap, while the swapped order's C-tile writes (96 rows at stride n, 32 KB apart on the output head) are what thrash. Loop order is tuned to this cache geometry already; reverted |
 | **One whole-K slab for small outputs** (k/v and q/o gradients: 256x128 / 256x256 with K=2048), on the theory that eight KC=256 slabs are eight serial packs and eight fork-joins of pure overhead | `gemm_rate`, `R2_GEMM_FULLK` 0/1 interleaved: k/v TN 145 -> 117 / 142 -> 86, q/o TN 155 -> 106 / 166 -> 90 — **worse**. KC is not overhead: it is what keeps the 16 KB B strip and 6 KB A strip in L1 per tile; at kc=2048 they are 128 KB and 48 KB and stream from L2 on every tile. Also learned: sub-millisecond kernels scatter +/-25% between identical runs here (q/o NN 208 then 161, no change), so the small-shape residue cannot be resolved at op level below that. The honest item is a persistent thread team (one fork per call, cooperative packing behind barriers) — the one thing MKL has on these shapes (3.2-4.0x vs 2.4x) and nowhere else — worth ~4% of a step |
+| **Pooling gradient buffers and zeroing them in one parallel pass** before backward, to replace calloc's page faults with a memset | Two 300-step pairs against the values-only pool: 143.09 -> 152.30 s and 143.42 -> 142.52 — worse, then flat. A 6-thread memset of ~172 MB costs what the faults cost: this laptop's DRAM write bandwidth. The fix that worked removes the zeroing entirely (first writer assigns) |
 | **Rewriting the silu backward in ATen's expression order** (`dy*s*(1+x*(1-s))`, plain store) on the theory that PyTorch's is "more vectorised" | `--example silu_forms`, 2048x768, 1 thread, 21 rounds: R2's two-FMA form 1.430 ms, ATen order 1.435 ms — identical; the two agree to 1.1e-7 (< f32 eps). The REAL `aten::silu_backward` on the same array: 2.096 ms on 1 thread (R2 **1.47x faster per core**), 1.262 ms on 6. Both are the same 8-wide AVX2 loop; PyTorch's Sleef `exp` is wider-range and slower than R2's clamped Cephes, which is all silu needs |
 | Timing PyTorch's tokenizer BEFORE its training loop, in one process | It holds a ~19 MB string and a 4.6M-element id list alive through training, and PyTorch's measured training time moved **20.7%** between two runs fifteen minutes apart (302.85 -> 365.46 s) while R2's moved 5.6%. That asymmetry — one side moving four times as much as the other — is the signature of a perturbation, not of drift. Moved after training; the ratio returned to 1.04x. **A measurement that shares a process with its neighbour must run after it** |
 | Reading the pipeline ratio as a property of the two implementations | It is a property of the RUN LENGTH. 1.71x at 30 steps, 1.02x at 500, same code both times — tokenizing is 0.5% of a real training pipeline. Quote the training ratio |

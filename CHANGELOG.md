@@ -210,8 +210,13 @@ trusting it, and all now covered by
   freshly allocated and are freed off the training thread. Tape drop
   43 -> 0.1 ms, forward 153 -> 146 ms; 300-step training 147.8 -> 141.5 s
   and 150.1 -> 140.6 s in two interleaved pairs, loss curve identical.
-  The comparison moved from 1.10x to 1.19-1.23x across this and the
-  earlier off-thread free. Adam itself is 2.7x faster than PyTorch's.
+  Gradient buffers are recycled as well and are never zeroed: the
+  backward tracks which gradients have been written, the first consumer
+  assigns and later ones accumulate, so no buffer is memset or
+  page-faulted. 300-step training 140.0 -> 131.6 s and 140.2 -> 131.8 s.
+  The comparison moved from 1.10x to 1.23-1.29x across the off-thread
+  free, the value pool and the gradient pool. Adam itself is 2.7x faster
+  than PyTorch's.
 - **`read.csv` header names are now valid names, as in R.** A header
   `a b,c-d,1x` produced columns named `a b`, `c-d`, `1x`, reachable only
   with backticks or `d[["a b"]]`. R applies `make.names` unless

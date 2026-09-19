@@ -166,7 +166,7 @@ Shipped layers:
 - **LLM stack** (`r2-tensor`, `r2-autograd`, `r2-train`) — byte-level BPE
   tokenizer, reverse-mode autograd tape, fused batched attention, RMSNorm /
   RoPE / SwiGLU, log-sum-exp cross-entropy, Adam, checkpointing, and KV-cached
-  inference. Pure Rust, no C: it trains a transformer **1.2× faster than
+  inference. Pure Rust, no C: it trains a transformer **1.3× faster than
   PyTorch+MKL** and learns identically. The matrix path underneath it is
   `r2_linalg::gemm::sgemm` — blocked/packed Goto-BLIS with a hand-written
   AVX2 micro-kernel selected by `is_x86_feature_detected!` at **runtime**,

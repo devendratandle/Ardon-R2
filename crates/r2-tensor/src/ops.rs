@@ -362,7 +362,7 @@ pub fn silu_bwd_torch_form(v: &[f32], g: &[f32], out: &mut [f32]) {
 /// `d/dv [v*s] = s + v*s*(1-s)` with `s = sigmoid(v)`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn silu_bwd_avx2(v: &[f32], g: &[f32], gout: &mut [f32]) {
+unsafe fn silu_bwd_avx2(v: &[f32], g: &[f32], gout: &mut [f32], accumulate: bool) {
     use std::arch::x86_64::*;
     let n = v.len();
     let one = _mm256_set1_ps(1.0);
@@ -374,30 +374,41 @@ unsafe fn silu_bwd_avx2(v: &[f32], g: &[f32], gout: &mut [f32]) {
             _mm256_add_ps(one, exp8(_mm256_sub_ps(_mm256_setzero_ps(), vv))));
         // s + v*s*(1-s)
         let d = _mm256_fmadd_ps(_mm256_mul_ps(vv, s), _mm256_sub_ps(one, s), s);
-        let acc = _mm256_loadu_ps(gout.as_ptr().add(i));
+        // An FMA with a zero addend rounds once, exactly as the multiply
+        // alone would, so the assign form is bit-identical to accumulating
+        // into a zeroed buffer — and needs no zeroed buffer.
+        let acc = if accumulate { _mm256_loadu_ps(gout.as_ptr().add(i)) } else { _mm256_setzero_ps() };
         _mm256_storeu_ps(gout.as_mut_ptr().add(i), _mm256_fmadd_ps(gv, d, acc));
         i += 8;
     }
     while i < n {
         let s = 1.0 / (1.0 + (-v[i]).exp());
-        gout[i] += g[i] * (s + v[i] * s * (1.0 - s));
+        let d = g[i] * (s + v[i] * s * (1.0 - s));
+        if accumulate { gout[i] += d; } else { gout[i] = d; }
         i += 1;
     }
 }
 
 /// `gout[j] += g[j] * silu'(v[j])`. Dispatches to AVX2.
 pub fn silu_bwd(v: &[f32], g: &[f32], gout: &mut [f32]) {
+    silu_bwd_acc(v, g, gout, true)
+}
+
+/// [`silu_bwd`] with a choice: `accumulate` adds into `gout`, otherwise
+/// `gout` is ASSIGNED and its prior contents are ignored.
+pub fn silu_bwd_acc(v: &[f32], g: &[f32], gout: &mut [f32], accumulate: bool) {
     #[cfg(target_arch = "x86_64")]
     if have_avx2() {
         // SAFETY: guarded by the runtime feature check; all three slices
         // are the same length.
         debug_assert!(g.len() >= v.len() && gout.len() >= v.len());
-        unsafe { silu_bwd_avx2(v, g, gout) };
+        unsafe { silu_bwd_avx2(v, g, gout, accumulate) };
         return;
     }
     for ((go, &vv), &gg) in gout.iter_mut().zip(v).zip(g) {
         let s = 1.0 / (1.0 + (-vv).exp());
-        *go += gg * (s + vv * s * (1.0 - s));
+        let d = gg * (s + vv * s * (1.0 - s));
+        if accumulate { *go += d; } else { *go = d; }
     }
 }
 
@@ -405,7 +416,7 @@ pub fn silu_bwd(v: &[f32], g: &[f32], gout: &mut [f32]) {
 /// cross-entropy's gradient for one row, vectorised.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn softmax_ce_grad_avx2(x: &[f32], lse: f32, t: usize, inv: f32, gout: &mut [f32]) {
+unsafe fn softmax_ce_grad_avx2(x: &[f32], lse: f32, t: usize, inv: f32, gout: &mut [f32], accumulate: bool) {
     use std::arch::x86_64::*;
     let n = x.len();
     let l = _mm256_set1_ps(lse);
@@ -413,27 +424,38 @@ unsafe fn softmax_ce_grad_avx2(x: &[f32], lse: f32, t: usize, inv: f32, gout: &m
     let mut i = 0;
     while i + 8 <= n {
         let p = exp8(_mm256_sub_ps(_mm256_loadu_ps(x.as_ptr().add(i)), l));
-        let acc = _mm256_loadu_ps(gout.as_ptr().add(i));
+        let acc = if accumulate { _mm256_loadu_ps(gout.as_ptr().add(i)) } else { _mm256_setzero_ps() };
         _mm256_storeu_ps(gout.as_mut_ptr().add(i), _mm256_fmadd_ps(iv, p, acc));
         i += 8;
     }
-    while i < n { gout[i] += inv * (x[i] - lse).exp(); i += 1; }
+    while i < n {
+        let d = inv * (x[i] - lse).exp();
+        if accumulate { gout[i] += d; } else { gout[i] = d; }
+        i += 1;
+    }
     // the one-hot term, applied once
     gout[t] -= inv;
 }
 
 /// Softmax cross-entropy's gradient for one row. Dispatches to AVX2.
 pub fn softmax_ce_grad(x: &[f32], lse: f32, t: usize, inv: f32, gout: &mut [f32]) {
+    softmax_ce_grad_acc(x, lse, t, inv, gout, true)
+}
+
+/// [`softmax_ce_grad`] with a choice: `accumulate` adds into `gout`,
+/// otherwise `gout` is ASSIGNED and its prior contents are ignored.
+pub fn softmax_ce_grad_acc(x: &[f32], lse: f32, t: usize, inv: f32, gout: &mut [f32], accumulate: bool) {
     #[cfg(target_arch = "x86_64")]
     if have_avx2() {
         // SAFETY: guarded by the runtime feature check; `gout` matches `x`
         // and `t` indexes inside both.
         debug_assert!(gout.len() >= x.len() && t < x.len());
-        unsafe { softmax_ce_grad_avx2(x, lse, t, inv, gout) };
+        unsafe { softmax_ce_grad_avx2(x, lse, t, inv, gout, accumulate) };
         return;
     }
     for (j, (go, &v)) in gout.iter_mut().zip(x).enumerate() {
-        *go += inv * ((v - lse).exp() - if j == t { 1.0 } else { 0.0 });
+        let d = inv * ((v - lse).exp() - if j == t { 1.0 } else { 0.0 });
+        if accumulate { *go += d; } else { *go = d; }
     }
 }
 
