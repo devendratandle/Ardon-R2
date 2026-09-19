@@ -36,9 +36,9 @@ ones.
 4. **Small, auditable surface.** Total framework ≤ 5,000 LoC core
    (excluding tests and docs). Anything not necessary for the REPL +
    plot pane MVP is rejected.
-5. **DLL-friendly.** Build as `cdylib + rlib` from day 1. R2's
-   distribution model is multi-DLL (mirroring R's split between
-   `R.dll`, `Rblas.dll`, etc.); R2-UI is the first GUI-side DLL.
+5. **One binary.** R2-UI is statically linked into `R2Gui.exe`. R2
+   ships monolithic executables — no runtime-loaded libraries, nothing
+   for an installer to pick, nothing to mismatch.
 6. **Modern stack underneath.** GPU rendering via `wgpu`; native window
    via `winit`. We don't reinvent these.
 
@@ -375,56 +375,14 @@ is exact integer arithmetic — there's no floating-point hit-test on
 curved glyphs. The selection range is always well-defined. Painting
 the highlight is `rect_filled` per row of the selection. No edge cases.
 
-## 8. DLL boundary
+## 8. Linkage
 
-```toml
-# crates/r2-ui/Cargo.toml
-[lib]
-crate-type = ["rlib", "cdylib"]
-```
-
-`rlib` for static linking when building R2Gui dev/test builds.
-`cdylib` for the shipped `r2_ui.dll` (Windows) / `libr2_ui.so` (Linux)
-/ `libr2_ui.dylib` (macOS).
-
-The DLL is loaded by R2Gui (and any other R2-UI consumer) at process
-start. Update R2-UI by replacing the DLL — no recompile of R2Gui.
-
-### 8.1 ABI choice
-
-We expose a **Rust ABI** (not C ABI). Justification:
-
-| ABI | Pros | Cons |
-|---|---|---|
-| Rust ABI (default) | Trivial; all Rust types work natively | Compiler-version-coupled — R2Gui and R2-UI must be built with the same Rust version |
-| C ABI (`extern "C"`) | Stable across Rust versions; enables non-Rust consumers | Have to wrap every public type in C-compatible wrappers; significantly more code |
-
-For R2 (Rust-only consumer), Rust ABI is fine. The R2 installer ships
-both binaries built with the same compiler — no version mismatch
-possible.
-
-If we ever want third-party non-Rust plugins, we add a thin C ABI
-layer in `src/c_abi.rs` then. Not part of v1.
-
-### 8.2 What the user (R2 installer) sees
-
-```
-Ardon-R2/
-├── R2Gui.exe              ~300 KB (just startup + dynamic loader)
-├── bin/
-│   ├── r2_console.dll
-│   ├── r2_engine.dll
-│   ├── r2_graphics.dll
-│   ├── r2_linalg_avx2.dll   ← installer picks the right variant
-│   ├── r2_stats.dll
-│   ├── r2_time.dll
-│   └── r2_ui.dll            ← THIS framework
-└── packages/
-    └── (lazy-loaded addons)
-```
-
-A future R2-UI update ships as a single new `r2_ui.dll` file (~2 MB
-download) instead of an 80 MB full reinstall.
+R2-UI is an ordinary `rlib`, linked into `R2Gui.exe` at build time like
+every other crate in the workspace. There is no plugin ABI, no
+dynamically loaded component, and no separate update channel for the
+framework: a framework fix ships as a new `R2Gui.exe`, built by the same
+compiler as everything it contains. Third-party themes are data (a
+palette table), not code.
 
 ## 9. Keymap discipline
 
@@ -522,7 +480,6 @@ proven:
 - Rewrite `crates/r2-gui/src/main.rs` to use R2-UI's declarative API
   (≤ 300 LoC target as proven above)
 - Remove `eframe` / `egui` / `egui_wgpu` dependencies
-- Update installer to bundle `r2_ui.dll`
 - Final milestone: ship R2 0.3 on R2-UI
 
 If anything in week 3 (selection) takes longer than planned, we hold
@@ -568,8 +525,7 @@ Closing the framework's first release requires ALL of:
 - [ ] All 12 r2-console tests still passing through the GUI
 - [ ] Selection works in every direction tested (drag, keyboard, mouse-then-keyboard, mouse-then-mouse-different-side)
 - [ ] Khaki and RGui themes both shipped and switchable at runtime
-- [ ] DLL build (`r2_ui.dll`) produced, R2Gui loads it dynamically
-- [ ] Installer ships R2Gui.exe + r2_ui.dll + r2_engine.dll separately
+- [x] R2-UI statically linked into a single `R2Gui.exe`
 - [ ] CI green on Windows + Linux (macOS optional for 1.0)
 - [ ] At least one third-party theme demonstrated (sanity-check
       the public API)

@@ -12,7 +12,7 @@
 ;
 ;  v0.2.1 notes:
 ;    * R2Gui.exe is the new R2-UI build (winit + wgpu); eframe/egui retired.
-;    * r2-ui is statically linked into R2Gui.exe — no separate DLL to ship yet.
+;    * r2-ui is statically linked into R2Gui.exe (R2 ships single executables).
 ;    * Console body is white; MDI workspace is khaki (R Console palette).
 ;
 ;  Tested with Inno Setup 6.2.x.

@@ -1,6 +1,6 @@
 # Building the Ardon-R2 Windows installer
 
-Three-step process. The output is a single ~5 MB `.exe` users can double-click
+Three-step process. The output is a single ~15 MB `.exe` users can double-click
 to install Ardon-R2 anywhere on their machine.
 
 ---
@@ -9,11 +9,13 @@ to install Ardon-R2 anywhere on their machine.
 
 ```bash
 cd E:\R2_Rust _opus4.6\r2\r2
-cargo build --release -p r2-repl
+cargo build --release -p r2-repl -p r2-gui
 ```
 
-This produces `target/release/r2.exe` (~4 MB with the optimized release
-profile in `Cargo.toml`).
+This produces `target/release/r2.exe` and `target/release/R2Gui.exe`
+(~15 MB and ~21 MB with the optimized release profile in `Cargo.toml`).
+Do NOT use the no-LTO override here — that is for the test gate; the
+shipped binaries are the fat-LTO build.
 
 The profile uses:
 

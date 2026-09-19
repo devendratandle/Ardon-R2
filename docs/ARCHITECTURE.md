@@ -166,7 +166,7 @@ Shipped layers:
 - **LLM stack** (`r2-tensor`, `r2-autograd`, `r2-train`) — byte-level BPE
   tokenizer, reverse-mode autograd tape, fused batched attention, RMSNorm /
   RoPE / SwiGLU, log-sum-exp cross-entropy, Adam, checkpointing, and KV-cached
-  inference. Pure Rust, no C: it trains a transformer **1.05× behind
+  inference. Pure Rust, no C: it trains a transformer **1.15× faster than
   PyTorch+MKL** and learns identically. The matrix path underneath it is
   `r2_linalg::gemm::sgemm` — blocked/packed Goto-BLIS with a hand-written
   AVX2 micro-kernel selected by `is_x86_feature_detected!` at **runtime**,
@@ -232,6 +232,31 @@ subset falls back to the interpreter — the JIT never emits unsafe code and
 never guesses** (mis-typed calls, read-before-define, unsupported shapes all
 decline). Write plain R2 source; `explain(f)` reports whether it compiled and
 why not.
+
+**Where `unsafe` lives, and why it cannot be zero.** `unsafe` marks a claim
+the compiler cannot check, so the goal is few and concentrated, each with
+its proof written beside it. As of v0.4.0 the workspace has 54 sites in
+non-test code, in three families:
+
+- **The JIT boundary** (`r2-jit/src/handle.rs`, 13). Compiled code did
+  not exist when R2 was built, so calling it is one `transmute` per ABI
+  shape — irreducible for any JIT in any language. Every entry point
+  takes slices and checks lengths and kind BEFORE the call, so the engine
+  has **zero** `unsafe`: the promise is made once, in the handle. The
+  externs the compiled code calls back into turn its (pointer, length)
+  pairs into slices through two helpers, not one `from_raw_parts` per
+  function.
+- **SIMD gates** (`r2-linalg`, `r2-tensor`, `r2-autograd`, `r2-train`).
+  Calling an AVX2/AVX-512 function is the one step the compiler cannot
+  tie to the `is_x86_feature_detected!` branch above it. Wrapper kernels
+  whose bodies are ordinary Rust are safe functions; only the hand-written
+  intrinsic kernels (raw vector loads and stores) remain `unsafe fn`.
+- **Memory-mapped I/O** (`r2-arrow/src/mmap_impl.rs`, 6) — the file
+  behind a mapping can change under it, which no type system can rule out.
+
+There is no FFI: no `libloading`, no `cdylib`, no `extern` block binding
+a foreign library. R2 ships as single executables (`r2.exe`, `R2Gui.exe`);
+nothing is loaded at run time.
 
 **What compiles to native today** (all verified bit-close to the interpreter):
 

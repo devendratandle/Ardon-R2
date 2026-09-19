@@ -24,8 +24,8 @@ Modern data science wastes enormous computational resources:
 - Accuracy **matches CRAN R on 13/13 differential cases**, and R2's LLM
   gradients match an independent float64 implementation to f32 rounding
   across all 21 parameter blocks
-- **LLM training at PyTorch's speed**: a 7.24M-parameter model on
-  TinyStories trains **1.05x behind PyTorch 2.13+MKL** and learns
+- **LLM training faster than PyTorch**: a 7.24M-parameter model on
+  TinyStories trains **1.15x faster than PyTorch 2.13+MKL** and learns
   *identically* — same loss to four decimals at every checkpoint over 500
   steps from shared initial weights. See `benchmarks/llm/REPORT.md`
 - **BPE tokenizer ~11x faster than HuggingFace `tokenizers`** — which is
@@ -97,7 +97,7 @@ Modern data science wastes enormous computational resources:
 ```
 DONE       V0.1-0.3 →  Full SVD, branchy JIT, RFC 4180 CSV, regex, columnar
                        storage, graphics backends, native GUI, self-check.
-NOW        V0.4.0  →  LLM training at PyTorch's speed on CPU: packed
+NOW        V0.4.0  →  LLM training faster than PyTorch on CPU: packed
                        AVX2 sgemm, fused attention, vectorised exp.
                        438 builtins, 638 tests.
 Next       V0.5.0  →  Out-of-core training data (Arrow/Parquet + memmap),

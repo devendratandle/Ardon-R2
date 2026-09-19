@@ -19,10 +19,15 @@ fast each library does it. It gates itself: both sides evaluate held-out
 loss from the same weights before training, and the comparison aborts if
 those disagree by more than f32 rounding.
 
-Result on 500 steps / 1,024,000 tokens, machine at full clock: **training
-1.05x behind PyTorch, learning identical to four decimals at every one of
-eleven checkpoints**, held-out loss 4.0499 on both sides, and both models
-generate the same sentence. Full numbers in `benchmarks/llm/REPORT.md`.
+Result, machine at full clock, two interleaved pairs at 300 steps /
+614,400 tokens (2026-09-19): **R2 trains 1.15-1.16x FASTER than PyTorch
+2.13+MKL and learns identically** — the training loss matches to four
+decimals at every one of eleven checkpoints, held-out loss 4.3113 vs
+4.3114, and both models generate the same sentence. The pipeline
+(tokenize + train) is 1.25x faster; tokenizing alone is 10x. Forward is
+1.48x faster and backward 1.41x, measured phase by phase. Full numbers in
+`benchmarks/llm/REPORT.md`. (v0.3.9 was 1.05x behind; the session that
+produced this release moved it by removing work — see below.)
 
 - **Corrected: the "R2 1.71x faster end to end" claim was a short-run
   artefact.** It came from a 30-step arm, where training is ~21 s against
@@ -149,6 +154,98 @@ trusting it, and all now covered by
   `g` held one element; every row-wise read past the end quietly produced
   NA. A length that does not divide evenly is still left alone rather than
   half-filled, so a genuinely ragged column stays visible.
+- **`lm(y ~ x1 + x2)` without `data=` fitted ONE predictor.** A bare
+  formula evaluated its right-hand side as arithmetic, so `x1 + x2` became
+  the elementwise sum and the model was `y ~ (x1 + x2)` — two coefficients
+  printed where three were asked for, with no warning. The `data=` path
+  split terms correctly; the bare path now goes through the same resolver.
+- **Standard errors in `lm` and `glm` now come from the QR factor.**
+  Coefficients were solved by Householder QR (condition number of X), but
+  the standard errors were then computed by forming X'X and inverting it
+  (condition number of X, squared) — the accuracy the QR was paid for was
+  thrown away in the one column of `summary()` people read. `(X'X)^-1` is
+  now `R^-1 R^-T` from the same factorisation, R's `chol2inv(qr.R)`; the
+  IRLS steps in `glm` solve `W^(1/2) X` by QR as `glm.fit` does. New
+  differential case `lm_ill_conditioned`: on a design with kappa(X'X) of
+  1.6e11 the old route was off by 1.2e-6 relative; the new one agrees with
+  GNU R to 1e-9.
+- **`confint()` returned NULL and used one standard error for every
+  coefficient.** It printed `coef +/- z * sigma/sqrt(df)` — the same width
+  on every row, with a normal quantile — and returned nothing, so
+  `confint(fit)[2, 1]` failed. For `lm(mpg ~ wt + hp, mtcars)` the `hp`
+  row read `[-0.98, 0.91]` against R's `[-0.050, -0.013]`. It now returns
+  the p x 2 matrix from each coefficient's own standard error with the
+  Student-t quantile on the residual df (`lm`) or the normal quantile
+  (`glm`, R's `confint.default`).
+- **`cor.test()` misaligned pairs after an NA and used the wrong
+  distribution.** NAs were dropped from `x` and `y` independently, so one
+  NA in `x` shifted every later pair and correlated `x[i]` with `y[i+1]`;
+  the p-value came from the normal distribution rather than Student-t on
+  n-2 df (at n=10 that halves the p-value). Rows are now dropped pairwise
+  and the p-value matches R to seven digits.
+- **`cor(x, y)` and `cov(x, y)` silently truncated to the shorter
+  vector.** `cor(1:4, 1:3)` returned 1 where R errors "incompatible
+  dimensions". Both now raise that error.
+- **`Sys.time()` returned a bare number.** A second registration in the
+  `utils` layer masked the POSIXct one in `base`, so `class(Sys.time())`
+  was `"numeric"` and `format(Sys.time())` printed epoch seconds. The
+  duplicate is removed and a test now fails the build if any builtin is
+  registered in two layers (it also caught `clear`/`cls`, harmless
+  duplicates in `core` and `utils`).
+- **The binary contained C.** The Parquet reader's default codec set
+  pulled `zstd-sys`, compiled from bundled C, while the README promised
+  none anywhere in the stack. The zstd codec is dropped — snappy, gzip,
+  lz4 and brotli are all pure Rust and remain — and `cargo tree
+  --workspace -i cc` now prints nothing. A zstd-compressed Parquet file
+  fails to read with the codec named; recompress with snappy.
+- **The tape is freed off the training thread.** Returning ~3,000 value
+  and gradient buffers (~287 MB) to the allocator at the end of every
+  step measured 38 ms — 7.7% of a step, more than Adam (10.7 ms) and
+  rmsnorm together — and no census had a line for it because freeing is
+  not an op. `train_step` now drops the tape on a background thread.
+  Step total 487 -> 455 ms; the 300-step comparison moved from 1.10x to
+  1.15-1.16x. Adam itself is 2.7x faster than PyTorch's.
+- **`read.csv` header names are now valid names, as in R.** A header
+  `a b,c-d,1x` produced columns named `a b`, `c-d`, `1x`, reachable only
+  with backticks or `d[["a b"]]`. R applies `make.names` unless
+  `check.names = FALSE`: the same file now gives `a.b`, `c.d`, `X1x`, and
+  `d$a.b` works. Duplicate headers get `.1`, `.2`. `check.names = FALSE`
+  keeps the raw header; `make.names(x, unique=)` is callable directly.
+  Differential case `csv_names` matches GNU R on every rule.
+- **`?help` covers every builtin: 438 of 438**, up from 37 at v0.3.9.
+  `FUNCTIONS.md` is the single source (embedded at build time and parsed
+  on first use), and 153 functions that were registered but never
+  documented — `sin`, `sort`, `seq`, `rep`, `which`, `nrow`, `stop`,
+  every `d/p/q` distribution function, the `llm.*`, `mem.*`, `gpu.*`,
+  `roll*`, `apply.*` and Hindu-calendar families, the package installers
+  — now have entries. The parser reads column layouts, alias chains of
+  any length, nested parentheses in signatures, and a description on the
+  line below a long signature.
+- **`docs/MISSING_FUNCTIONS.md` and `docs/R2_SESSION_B_MULTI_DEVICE.md`
+  are retired** — 15 of the 16 functions on the first roadmap shipped
+  (`ecdf` is now listed in `KNOWN_LIMITATIONS.md`) and the multi-device
+  session is done.
+- **`llms.txt` described v0.3.3** — 320 functions, ~25 crates, a ~5 MB
+  binary. Now 438 (read from the registration table), 29 crates, ~15 MB,
+  and the LLM stack is listed. `FUNCTIONS.md`'s header count corrected
+  the same way.
+- **The `R2_BLAS` DLL mechanism is removed.** v0.2.1 planned per-CPU
+  builds of the kernel (`r2_linalg_avx2.dll` ...) chosen by the installer
+  and loaded at runtime. Runtime `is_x86_feature_detected!` dispatch
+  inside one binary — which every hot kernel now uses — measured faster
+  than a `-C target-cpu=native` build, needs no loader, and is the only
+  form a certification review can qualify. With it go `libloading`, the
+  `cdylib` crate type and the workspace's only `dlopen`; `r2.exe` now has
+  no FFI of any kind. `docs/BLAS_DISPATCH.md` records the reasoning.
+- **`unsafe` is down from 85 sites to 54 in non-test code, and out of the engine
+  entirely.** The JIT handle's entry points take slices and check every
+  length and the compiled kind before the call, so the twelve `unsafe`
+  blocks in `r2-engine` that existed only to pass raw pointers are gone
+  (12 → 0); the externs compiled code calls back into go through two
+  slice helpers instead of five `from_raw_parts`; and the seven SIMD
+  wrapper kernels whose bodies are ordinary Rust are now safe functions
+  (the gate that calls them keeps its `unsafe` and its proof). Machine
+  code and every bit-identity test unchanged.
 
 ## v0.3.9 (September 2026)
 

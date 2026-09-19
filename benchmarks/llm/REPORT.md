@@ -22,7 +22,7 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.15x FASTER than PyTorch, and 1.25x faster end to end.**
+**R2 trains 1.15-1.19x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
@@ -35,6 +35,7 @@ than throttled.
 |---|---:|---:|---|
 | 1 | **168.80 s** | 196.06 s | **R2 1.16x** |
 | 2 | **159.85 s** | 183.77 s | **R2 1.15x** |
+| 3 | **147.32 s** | 174.67 s | **R2 1.19x** (cold machine after a reboot; fastest run on both sides) |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|

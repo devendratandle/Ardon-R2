@@ -25,13 +25,16 @@ to be worse than documented and was fixed here rather than scheduled.
 | Limitation | Impact | Target |
 |---|---|---|
 | `acf(x, k)` ignores the lag argument and returns every lag | Low — values are right, the count is not | **v0.4.1** |
+| `ecdf(x)` is not implemented (the last item of the old `MISSING_FUNCTIONS.md` roadmap; the other 15 shipped) | Low | **v0.4.1** |
 | Mixed-effects models — `lmer` exists but rejects the `(1\|group)` random-effect term | Medium | **v0.5.0** |
 | Addon package system (load R2-script packages; optional-domain feature flags) | Medium — ecosystem | **v0.5.0** |
 | `manova()` eigenvalues drift ~1–3% from R (needs a non-symmetric eigensolver) | Medium — accuracy | **v0.5.0** |
 | Split-plot ANOVA: `Error(subject/within)` collapses to the outer stratum | Medium | **v0.5.0** |
 | Parquet corpora must be converted first (`r2-arrow/parquet_io.rs` is unwired from training) | Low — memmap path now ships | **v0.5.0** |
+| `read.parquet` cannot read zstd-compressed files — the only zstd implementation is C, and R2 ships none. snappy/gzip/lz4/brotli read fine; recompress zstd files with snappy | Low — a `pyarrow` one-liner | by design — needs a pure-Rust zstd in the `parquet` crate |
+| `confint(glm)` is the Wald interval (R's `confint.default`), not the profile-likelihood interval R's `confint.glm` computes | Low — they agree away from the boundary | **v0.5.0** |
+| `format(Sys.time())` prints UTC where R prints local time; `Sys.time() - t` is numeric, not `difftime` | Low | **v0.4.1** |
 | Divide-and-conquer SVD/eigensolver (speed on large/wide matrices; `prcomp` on ≳100 features) | Low — perf, not correctness | **v1.0** |
-| Dynamic (compiled `.dll`) packages | Low — only if real demand | **v1.0+** |
 | Oracle parallelism-threshold auto-calibration (hardware awareness) | Low — perf tuning | **v1.0+** |
 | Apple-Silicon JIT (falls back to interpreter — upstream Cranelift aarch64 PLT) | Low — correct, just slower on ARM Mac | upstream |
 
@@ -86,8 +89,8 @@ to be worse than documented and was fixed here rather than scheduled.
   package may export **functions, types, and methods** (verified end to end).
   **Open:** (1) `install.packages(name)` with no `path` — the online package
   registry isn't live; (2) optional-domain Cargo feature flags for a smaller
-  minimal build. v0.5.0. Dynamic compiled (`.dll`) packages only if there's
-  real demand (v1.0+).
+  minimal build. v0.5.0. Packages are R2 script, JIT-compiled at load; there
+  is no compiled-binary package form and none is planned.
 
 ## Platform
 
