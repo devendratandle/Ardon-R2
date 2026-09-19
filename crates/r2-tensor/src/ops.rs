@@ -31,6 +31,22 @@ pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     }
 }
 
+/// `out = A·B` into a caller-owned buffer whose contents are ignored — the
+/// form the tape's buffer pool needs, so a recycled output buffer is used
+/// without a zeroing pass. Same dispatch as [`matmul`].
+pub fn matmul_into(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), m * n);
+    use r2_linalg::gemm::{sgemm_assign_into, Trans};
+    match r2_oracle::dispatch(r2_oracle::Op::TensorMatMul, r2_oracle::Shape::nmk(m, n, k)) {
+        r2_oracle::Backend::Gpu => {
+            if let Some(v) = r2_gpu::matmul(a, b, m, k, n) { out.copy_from_slice(&v); return; }
+            sgemm_assign_into(a, Trans::No, b, Trans::No, m, k, n, out, true)
+        }
+        r2_oracle::Backend::Rayon  => sgemm_assign_into(a, Trans::No, b, Trans::No, m, k, n, out, true),
+        r2_oracle::Backend::Serial => sgemm_assign_into(a, Trans::No, b, Trans::No, m, k, n, out, false),
+    }
+}
+
 /// CPU matmul — BLAS `sgemm`, from `r2_linalg::gemm`.
 ///
 /// This was an i-k-j triple loop. That loop order is right for a naive
@@ -56,16 +72,22 @@ fn matmul_cpu(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, parallel: bool
 /// RMSNorm over the last dim: y = x / sqrt(mean(x²) + eps) * weight.
 /// (Llama-family normalization — no mean-subtraction, unlike LayerNorm.)
 pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+    let mut out = vec![0.0f32; x.len()];
+    rmsnorm_into(x, weight, eps, &mut out);
+    out
+}
+
+/// [`rmsnorm`] into a caller-owned buffer; every element is written.
+pub fn rmsnorm_into(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
     let d = weight.len();
     let rows = x.len() / d;
-    let mut out = vec![0.0f32; x.len()];
+    debug_assert_eq!(out.len(), x.len());
     for r in 0..rows {
         let row = &x[r * d..r * d + d];
         let ms = sum_sq4(row) / d as f32;
         let scale = 1.0 / (ms + eps).sqrt();
         for j in 0..d { out[r * d + j] = row[j] * scale * weight[j]; }
     }
-    out
 }
 
 /// Numerically-stable softmax over the last dim (subtract row max).

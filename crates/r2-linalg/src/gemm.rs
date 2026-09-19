@@ -296,10 +296,30 @@ macro_rules! blocked_gemm_for {
         /// gradient in without a temporary.
         pub fn gemm_into(a: &[$ty], ta: Trans, b: &[$ty], tb: Trans,
                          m: usize, k: usize, n: usize, c: &mut [$ty], parallel: bool) {
+            gemm_core(a, ta, b, tb, m, k, n, c, parallel, false)
+        }
+
+        /// `C = A·B` into an existing buffer whose contents are IGNORED.
+        ///
+        /// The first depth slab assigns and later slabs accumulate, so the
+        /// caller need not zero `c` first. That is what lets a recycled
+        /// buffer from the tape's pool be used directly: zeroing a 64 MB
+        /// logits buffer before every output-head GEMM would cost the
+        /// bandwidth the pool exists to save.
+        pub fn gemm_assign_into(a: &[$ty], ta: Trans, b: &[$ty], tb: Trans,
+                                m: usize, k: usize, n: usize, c: &mut [$ty], parallel: bool) {
+            gemm_core(a, ta, b, tb, m, k, n, c, parallel, true)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn gemm_core(a: &[$ty], ta: Trans, b: &[$ty], tb: Trans,
+                     m: usize, k: usize, n: usize, c: &mut [$ty], parallel: bool,
+                     assign: bool) {
             debug_assert_eq!(a.len(), m * k);
             debug_assert_eq!(b.len(), k * n);
             debug_assert_eq!(c.len(), m * n);
             if m == 0 || n == 0 || k == 0 {
+                if assign { for v in c.iter_mut() { *v = 0 as $ty; } }
                 return;
             }
             use rayon::prelude::*;
@@ -349,7 +369,8 @@ macro_rules! blocked_gemm_for {
                         let jh = T.min(n - j0);
                         for i in i0..i0 + ih {
                             for j in j0..j0 + jh {
-                                c[i * n + j] += ct[j * m + i];
+                                if assign { c[i * n + j] = ct[j * m + i]; }
+                                else { c[i * n + j] += ct[j * m + i]; }
                             }
                         }
                     }
@@ -407,6 +428,9 @@ macro_rules! blocked_gemm_for {
 
                     // ── L2 loop: a block of A's rows. Row-blocks of C are
                     // disjoint, so this is where the parallelism goes.
+                    // Only the FIRST depth slab may assign; every later slab
+                    // adds its partial product to what the first one wrote.
+                    let first = assign && pc == 0;
                     let block = |ic: usize, cband: &mut [$ty]| {
                         let mc = mc_blk.min(m - ic);
                         let mut apack: Vec<$ty> = Vec::new();
@@ -427,7 +451,7 @@ macro_rules! blocked_gemm_for {
                                     let crow = (pnl * MR + ii) * n + jc + s * NR;
                                     let dst = &mut cband[crow..crow + cols];
                                     for (d, v) in dst.iter_mut().zip(&acc[ii][..cols]) {
-                                        *d += v;
+                                        if first { *d = *v; } else { *d += v; }
                                     }
                                 }
                             }
@@ -568,6 +592,13 @@ pub fn sgemm_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
     self::f32::gemm_into(a, ta, b, tb, m, k, n, c, parallel)
 }
 
+/// BLAS `sgemm` writing `C = A·B` into an existing buffer whose prior
+/// contents are ignored (no zeroing required).
+pub fn sgemm_assign_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
+                         m: usize, k: usize, n: usize, c: &mut [f32], parallel: bool) {
+    self::f32::gemm_assign_into(a, ta, b, tb, m, k, n, c, parallel)
+}
+
 // NOT instantiated for f64, deliberately. `level3::dgemm` is the
 // column-major BLAS entry point the statistics path already calls, it has
 // its own small-shape fast path and its own tests, and changing it is a
@@ -580,6 +611,37 @@ pub fn sgemm_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `sgemm_assign_into` on a buffer full of garbage must equal `sgemm`
+    /// bit for bit — for every Trans case and for a K that spans several
+    /// depth slabs (only the first may assign) and for the transposed-result
+    /// path (small m, large n).
+    #[test]
+    fn assign_into_ignores_prior_contents_and_matches_sgemm() {
+        for &(m, k, n) in &[(7usize, 600usize, 5usize), (2, 300, 900), (96, 512, 40), (1, 1, 1)] {
+            let a: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.37).sin()).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.11).cos()).collect();
+            for &(ta, tb) in &[(Trans::No, Trans::No), (Trans::No, Trans::Yes), (Trans::Yes, Trans::No)] {
+                // operands laid out for the requested transposition
+                let (aa, bb) = (
+                    if ta == Trans::Yes { transpose(&a, m, k) } else { a.clone() },
+                    if tb == Trans::Yes { transpose(&b, k, n) } else { b.clone() },
+                );
+                for &par in &[false, true] {
+                    let want = sgemm(&aa, ta, &bb, tb, m, k, n, par);
+                    let mut c: Vec<f32> = (0..m * n).map(|i| 1e30 * ((i % 7) as f32 - 3.0)).collect();
+                    sgemm_assign_into(&aa, ta, &bb, tb, m, k, n, &mut c, par);
+                    assert_eq!(c, want, "m={m} k={k} n={n} ta={ta:?} tb={tb:?} par={par}");
+                }
+            }
+        }
+    }
+
+    fn transpose(x: &[f32], r: usize, c: usize) -> Vec<f32> {
+        let mut t = vec![0.0f32; r * c];
+        for i in 0..r { for j in 0..c { t[j * r + i] = x[i * c + j]; } }
+        t
+    }
 
     /// The definition, written out. Everything above is an optimisation of
     /// exactly this and must agree with it.

@@ -48,10 +48,12 @@ fn main() {
 
     let (mut fw, mut bw, mut op, mut whole) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut take, mut adam, mut dropt) = (Vec::new(), Vec::new(), Vec::new());
+    let use_pool = std::env::var("R2_POOL").map(|v| v != "0").unwrap_or(true);
+    let mut pool = r2_autograd::BufPool::new();
     for _ in 0..steps {
         // ── phase-split step: the body of Trainer::train_step, timed ──
         let s0 = std::time::Instant::now();
-        let mut tape = Tape::new();
+        let mut tape = if use_pool { Tape::with_pool(std::mem::take(&mut pool)) } else { Tape::new() };
         let leaves: Vec<Var> = tr.params.iter_mut()
             .map(|p| tape.leaf(std::mem::take(p), true)).collect();
         let logits = tr.forward_fused_census(&mut tape, &toks, seq, &leaves);
@@ -73,7 +75,7 @@ fn main() {
         let t_adam = s2b.elapsed().as_secs_f64() * 1e3;
         let s2c = std::time::Instant::now();
         drop(grads);
-        drop(tape);
+        if use_pool { pool = tape.into_pool(); } else { drop(tape); }
         let t_drop = s2c.elapsed().as_secs_f64() * 1e3;
         let t_o = s2.elapsed().as_secs_f64() * 1e3;
         fw.push(t_f); bw.push(t_b); op.push(t_o);

@@ -35,6 +35,7 @@ unsafe fn burn(iters: u64, seed: f32) -> f32 {
     out.iter().sum()
 }
 
+#[cfg(target_arch = "x86_64")]
 fn gflops(threads: usize, iters: u64) -> f64 {
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
     let flop_per_thread = iters as f64 * 12.0 * 8.0 * 2.0;
@@ -51,6 +52,7 @@ fn gflops(threads: usize, iters: u64) -> f64 {
     flop_per_thread * threads as f64 / start.elapsed().as_secs_f64() / 1e9
 }
 
+#[cfg(target_arch = "x86_64")]
 fn main() {
     if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
         println!("needs AVX2+FMA"); return;
@@ -68,4 +70,11 @@ fn main() {
     println!("\n  1 thread at 76 GFLOP/s is the 2375 MHz FMA peak (2 ports x 8 lanes x 2);");
     println!("  above it is boost clock. The 6-thread figure divided by 6 is the");
     println!("  all-core rate this part can sustain under full AVX2 load.");
+}
+
+/// The question this example answers is about an AVX2 machine; on any
+/// other architecture there is nothing to measure.
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {
+    println!("fma_power measures AVX2+FMA throughput; this is not an x86-64 build.");
 }

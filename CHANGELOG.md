@@ -198,13 +198,20 @@ trusting it, and all now covered by
   lz4 and brotli are all pure Rust and remain — and `cargo tree
   --workspace -i cc` now prints nothing. A zstd-compressed Parquet file
   fails to read with the codec named; recompress with snappy.
-- **The tape is freed off the training thread.** Returning ~3,000 value
-  and gradient buffers (~287 MB) to the allocator at the end of every
-  step measured 38 ms — 7.7% of a step, more than Adam (10.7 ms) and
-  rmsnorm together — and no census had a line for it because freeing is
-  not an op. `train_step` now drops the tape on a background thread.
-  Step total 487 -> 455 ms; the 300-step comparison moved from 1.10x to
-  1.15-1.16x. Adam itself is 2.7x faster than PyTorch's.
+- **The tape recycles its value buffers between steps.** Returning
+  ~3,000 value and gradient buffers (~287 MB) to the allocator at the end
+  of every step measured 38-43 ms — 7.7% of a step, more than Adam
+  (10.7 ms) and rmsnorm together — and the next step page-faulted the
+  same sizes back in. No census had a line for either, because neither
+  is an op. Every forward op writes its whole output, so value buffers
+  now pass from one step's tape to the next by exact length and are
+  reused without zeroing (`sgemm_assign_into` lets the output-head GEMM
+  write into a recycled 64 MB buffer directly); gradient buffers stay
+  freshly allocated and are freed off the training thread. Tape drop
+  43 -> 0.1 ms, forward 153 -> 146 ms; 300-step training 147.8 -> 141.5 s
+  and 150.1 -> 140.6 s in two interleaved pairs, loss curve identical.
+  The comparison moved from 1.10x to 1.19-1.23x across this and the
+  earlier off-thread free. Adam itself is 2.7x faster than PyTorch's.
 - **`read.csv` header names are now valid names, as in R.** A header
   `a b,c-d,1x` produced columns named `a b`, `c-d`, `1x`, reachable only
   with backticks or `d[["a b"]]`. R applies `make.names` unless

@@ -22,7 +22,7 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.15-1.19x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
+**R2 trains 1.19-1.23x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
@@ -36,6 +36,7 @@ than throttled.
 | 1 | **168.80 s** | 196.06 s | **R2 1.16x** |
 | 2 | **159.85 s** | 183.77 s | **R2 1.15x** |
 | 3 | **147.32 s** | 174.67 s | **R2 1.19x** (cold machine after a reboot; fastest run on both sides) |
+| 4 | **140.63 s** | 172.30 s | **R2 1.23x** (with the tape's value-buffer pool, below) |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
@@ -72,14 +73,30 @@ and gradient buffers (~287 MB) to the allocator one at a time, 7.7% of a
 step, more than Adam and rmsnorm together. No op census had a line for it
 because freeing is not an op.
 
-The tape is now dropped on a background thread (`train_step`). A/B on the
-step total, three interleaved pairs: 487 -> 455, 510 -> 455, 497 -> 485 ms
-(6.6%, 10.7%, 2.3%); the 300-step pairs above confirm it at run length.
-This hides the cost rather than removing it — a full buffer pool would
-also remove the ~19 ms of page faults the next step pays re-allocating the
-same sizes — but a reused GRADIENT buffer would need zeroing, which is
-the memset the `differentiated` fix removed, so the pool is value-buffers
-only and is the next item.
+First fix: the tape was dropped on a background thread. A/B on the step
+total, three interleaved pairs: 487 -> 455, 510 -> 455, 497 -> 485 ms.
+That hid the free; it did not remove it, and the next step still
+page-faulted the same ~143 MB of activations back in.
+
+Second fix, **the value-buffer pool** (`BufPool` in r2-autograd): every
+forward op writes its whole output, so the previous step's value buffers
+are handed to the next tape by exact length and reused without zeroing.
+`sgemm_assign_into` writes `C = A·B` into a buffer whose contents are
+ignored (first depth slab assigns, later ones accumulate), so the 64 MB
+logits buffer needs no memset before the output-head GEMM; a test pins
+it bit-identical to `sgemm` across NN/NT/TN, multi-slab K and the
+transposed-result path. Gradient buffers are NOT pooled — backward
+accumulates into them, and zeroing a reused one is the memset the
+`differentiated` fix removed — so they stay calloc'd and are freed off
+the training thread.
+
+Measured with `--example phase_split` (`R2_POOL=0/1`): tape drop **43 ->
+0.1 ms**, forward **153 -> 146 / 159 -> 134 ms** (the faults). At run
+length, two interleaved pairs of 300 steps, R2 alone: **147.84 -> 141.53
+s and 150.10 -> 140.63 s** (-4.3%, -6.3%), loss curve identical. Under
+this machine's 10% bar as a single pair; taken as real because the
+mechanism was measured directly and both pairs agree. Against PyTorch in
+the same window: 140.63 vs 172.30 s, **1.23x**.
 
 ### How it got here: three pieces of pure waste
 

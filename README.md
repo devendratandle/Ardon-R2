@@ -74,7 +74,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 |------|------------------|
 | **[`samples/`](samples)** | Programs you can run to **test R2 on your machine and cross-check against R**. `smoke.r` runs on *both* R and R2 (compare the output); `capabilities.r2` tours the R2-specific features; `graph_gallery.r2` draws the plots above. **Found a mismatch or error? Please [open an issue](https://github.com/devendratandle/Ardon-R2/issues).** |
 | **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy. Accuracy **matches CRAN R (13/13 differential harness, re-run at v0.4.0)**; at parity-or-better on R's C internals (up to 3.6× matmul), and **4×–38,000× faster on user loops and library code** the JIT compiles. Includes a CPU-vs-integrated-GPU table. Timings were taken at v0.3.8. |
-| **[`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md)** | **R2 vs PyTorch and JAX on LLM training** — the single source for those numbers. A 7.24M-parameter model trained on TinyStories trains **1.15× faster than PyTorch 2.13+MKL** and **learns identically** (same loss to four decimals at every checkpoint, from shared initial weights; forward 1.48× and backward 1.41× faster phase by phase). BPE tokenization is **~11× faster than HuggingFace `tokenizers`**. Includes what was tried and measured *worse*, so it isn't retried. |
+| **[`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md)** | **R2 vs PyTorch and JAX on LLM training** — the single source for those numbers. A 7.24M-parameter model trained on TinyStories trains **1.2× faster than PyTorch 2.13+MKL** and **learns identically** (same loss to four decimals at every checkpoint, from shared initial weights; forward 1.48× and backward 1.41× faster phase by phase). BPE tokenization is **~11× faster than HuggingFace `tokenizers`**. Includes what was tried and measured *worse*, so it isn't retried. |
 | **[`benchmarks/`](benchmarks)** | The runnable benchmark harness (tuned parallel `.R`/`.r2` files) behind PERFORMANCE.md — reproduce the numbers yourself. |
 | **[`FUNCTIONS.md`](FUNCTIONS.md)** | Complete reference for the 400+ built-in functions. |
 | **[`CHANGELOG.md`](CHANGELOG.md)** | Per-version history — what functions were added and what problems were fixed, release by release. |
@@ -93,7 +93,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 - **Graphics**: in-memory device, full `par()` multi-panel layouts, scatter/line/bar/hist/box/pie, PNG/SVG/PDF output, and a live browser plot viewer (`dev.view()`).
 - **JIT-compiled user functions** — pure-arithmetic closures compile to native code via Cranelift; multi-op math fuses into one loop.
 - **Pure-Rust math kernel** — hand-written DGEMM and a blocked/packed SGEMM with an AVX2 micro-kernel chosen at *runtime* (one binary runs everywhere), SVD/QR/eigen, distributions; automatic serial/Rayon parallelism.
-- **LLM training that keeps up with PyTorch** — BPE tokenizer, autograd tape, fused attention, and an Adam trainer, all in Rust with no C. Trains **1.15× faster than PyTorch+MKL** and learns identically; see [`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md).
+- **LLM training that keeps up with PyTorch** — BPE tokenizer, autograd tape, fused attention, and an Adam trainer, all in Rust with no C. Trains **1.2× faster than PyTorch+MKL** and learns identically; see [`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md).
 
 Want to see it run rather than read code? `r2 samples/smoke.r` and
 `r2 samples/capabilities.r2`.

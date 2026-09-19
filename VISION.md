@@ -25,7 +25,7 @@ Modern data science wastes enormous computational resources:
   gradients match an independent float64 implementation to f32 rounding
   across all 21 parameter blocks
 - **LLM training faster than PyTorch**: a 7.24M-parameter model on
-  TinyStories trains **1.15x faster than PyTorch 2.13+MKL** and learns
+  TinyStories trains **1.2x faster than PyTorch 2.13+MKL** and learns
   *identically* — same loss to four decimals at every checkpoint over 500
   steps from shared initial weights. See `benchmarks/llm/REPORT.md`
 - **BPE tokenizer ~11x faster than HuggingFace `tokenizers`** — which is

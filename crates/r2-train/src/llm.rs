@@ -23,6 +23,8 @@ pub struct Trainer {
     pub params: Vec<Vec<f32>>,
     pub opt: Adam,
     pub step: u64,
+    /// Value buffers from the previous step, reused by the next tape.
+    pub pool: r2_autograd::BufPool,
 }
 
 /// Per-layer parameter blocks, in the order they are stored.
@@ -71,7 +73,7 @@ impl Trainer {
 
         let total: usize = shapes.iter().sum();
         let opt = Adam::new(total, lr);
-        Ok(Trainer { cfg, params, opt, step: 0 })
+        Ok(Trainer { cfg, params, opt, step: 0, pool: r2_autograd::BufPool::new() })
     }
 
     /// Total trainable parameters — equals `Config::n_params`.
@@ -189,7 +191,10 @@ impl Trainer {
         // weights come back below via `take_value` — so a copy in and a
         // copy out were pure overhead: 29 MB each way, 11.4 ms and 2.0%
         // of a step, measured by `--example step_census`.
-        let mut tape = Tape::new();
+        // The tape draws its value buffers from the previous step's pool
+        // and hands them back at the end (`into_pool`), so a step neither
+        // frees ~143 MB of activations nor page-faults them in again.
+        let mut tape = Tape::with_pool(std::mem::take(&mut self.pool));
         let leaves: Vec<Var> = self.params.iter_mut()
             .map(|p| tape.leaf(std::mem::take(p), true)).collect();
 
@@ -246,14 +251,11 @@ impl Trainer {
         let Trainer { params, opt, .. } = self;
         opt.step_blocks(params, &grads, scale)?;
         drop(grads);
-        // Free the tape OFF the training thread. Returning ~3,000 value and
-        // gradient buffers (~287 MB at the shipping shape) to the allocator
-        // one at a time measured 38 ms — 7.7% of a step, more than Adam and
-        // rmsnorm together (`--example phase_split`). Nothing waits on it,
-        // so it runs while the next forward starts. The buffers are not
-        // reused because a reused gradient buffer would need zeroing, and
-        // that memset is the cost `differentiated` already removed.
-        std::thread::spawn(move || drop(tape));
+        // Value buffers back to the pool for the next step; gradient
+        // buffers freed off the training thread (a reused gradient buffer
+        // would need the memset `differentiated` removed). Freeing all of
+        // it on this thread measured 38 ms — 7.7% of a step.
+        self.pool = tape.into_pool();
         self.step += 1;
         Ok(total / n)
     }

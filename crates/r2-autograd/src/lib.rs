@@ -146,6 +146,8 @@ pub struct Tape {
     grads: Vec<Vec<f32>>,
     ops: Vec<Op>,
     requires: Vec<bool>,
+    /// Value buffers recycled from the previous step — see [`BufPool`].
+    pool: BufPool,
     /// Has a backward pass already run on this tape?
     ///
     /// Gradient buffers are allocated zero (`push`), so on the FIRST
@@ -164,10 +166,87 @@ pub struct Tape {
 /// to absorb it.
 const PAR_MIN: usize = 1 << 15;
 
+/// Value buffers kept alive between steps so the next tape can reuse them.
+///
+/// A training step builds ~3,000 nodes whose value buffers total ~143 MB
+/// at the shipping shape, then drops them all; the next step allocates the
+/// same sizes again. Freeing measured 38 ms/step (with the gradient half)
+/// and re-faulting the pages ~19 ms — neither is arithmetic. Every forward
+/// op writes its whole output, so a value buffer from the last step can be
+/// handed straight back without zeroing; the pool keeps them by exact
+/// length, and a step draws from it through [`Tape::alloc`].
+///
+/// GRADIENT buffers are not pooled: backward accumulates into them, so a
+/// reused one would need a memset first — the same pass the
+/// `differentiated` flag removed. They stay freshly calloc'd.
+#[derive(Default)]
+pub struct BufPool {
+    free: std::collections::HashMap<usize, Vec<Vec<f32>>>,
+}
+
+impl BufPool {
+    pub fn new() -> Self { Self::default() }
+
+    /// A buffer of exactly `n` elements. Its contents are whatever the
+    /// previous user left — the caller MUST write every element.
+    pub fn take(&mut self, n: usize) -> Vec<f32> {
+        if let Some(list) = self.free.get_mut(&n) {
+            if let Some(v) = list.pop() { debug_assert_eq!(v.len(), n); return v; }
+        }
+        vec![0.0f32; n]
+    }
+
+    /// Return a buffer for reuse. Empty buffers are dropped.
+    pub fn give(&mut self, v: Vec<f32>) {
+        if v.is_empty() { return; }
+        self.free.entry(v.len()).or_default().push(v);
+    }
+
+    /// Buffers held, and their total elements.
+    pub fn stats(&self) -> (usize, usize) {
+        let mut n = 0; let mut e = 0;
+        for (len, l) in &self.free { n += l.len(); e += len * l.len(); }
+        (n, e)
+    }
+}
+
 impl Tape {
     pub fn new() -> Self {
+        Self::with_pool(BufPool::new())
+    }
+
+    /// A tape that draws its value buffers from `pool` — the previous
+    /// step's buffers, handed on by [`Tape::into_pool`].
+    pub fn with_pool(pool: BufPool) -> Self {
         Tape { vals: Vec::new(), grads: Vec::new(), ops: Vec::new(),
-               requires: Vec::new(), differentiated: false }
+               requires: Vec::new(), differentiated: false, pool }
+    }
+
+    /// Dismantle the tape: every value buffer goes into the pool for the
+    /// next step, and the gradient buffers are freed on a background
+    /// thread so the training thread never waits on the allocator.
+    /// Parameter values taken back with [`Tape::take_value`] are already
+    /// gone from `vals` and are not affected.
+    pub fn into_pool(mut self) -> BufPool {
+        let mut pool = std::mem::take(&mut self.pool);
+        for v in self.vals.drain(..) { pool.give(v); }
+        let grads = std::mem::take(&mut self.grads);
+        let ops = std::mem::take(&mut self.ops);
+        std::thread::spawn(move || { drop(grads); drop(ops); });
+        pool
+    }
+
+    /// An output buffer of `n` elements for a forward op. Recycled when the
+    /// pool has one of that size; contents are undefined and the op must
+    /// write every element.
+    fn alloc(&mut self, n: usize) -> Vec<f32> { self.pool.take(n) }
+
+    /// As [`Tape::alloc`], zero-filled — for the few ops that accumulate
+    /// into their output rather than assigning it.
+    fn alloc_zeroed(&mut self, n: usize) -> Vec<f32> {
+        let mut v = self.pool.take(n);
+        for x in v.iter_mut() { *x = 0.0; }
+        v
     }
 
     fn push(&mut self, val: Vec<f32>, op: Op, requires: bool) -> Var {
@@ -231,25 +310,37 @@ impl Tape {
     // fixed-chain treatment in `r2_tensor::ops` instead.
 
     pub fn add(&mut self, a: Var, b: Var) -> Var {
-        let (va, vb) = (&self.vals[a.0], &self.vals[b.0]);
-        let val: Vec<f32> = if va.len() >= PAR_MIN {
-            use rayon::prelude::*;
-            va.par_iter().zip(vb.par_iter()).map(|(x, y)| x + y).collect()
-        } else {
-            va.iter().zip(vb).map(|(x, y)| x + y).collect()
-        };
+        let n = self.vals[a.0].len();
+        let mut val = self.alloc(n);
+        {
+            let (va, vb) = (&self.vals[a.0], &self.vals[b.0]);
+            if n >= PAR_MIN {
+                use rayon::prelude::*;
+                const C: usize = 1 << 14;
+                val.par_chunks_mut(C).zip(va.par_chunks(C)).zip(vb.par_chunks(C))
+                    .for_each(|((d, x), y)| for i in 0..d.len() { d[i] = x[i] + y[i]; });
+            } else {
+                for i in 0..n { val[i] = va[i] + vb[i]; }
+            }
+        }
         let req = self.requires[a.0] || self.requires[b.0];
         self.push(val, Op::Add(a, b), req)
     }
 
     pub fn mul(&mut self, a: Var, b: Var) -> Var {
-        let (va, vb) = (&self.vals[a.0], &self.vals[b.0]);
-        let val: Vec<f32> = if va.len() >= PAR_MIN {
-            use rayon::prelude::*;
-            va.par_iter().zip(vb.par_iter()).map(|(x, y)| x * y).collect()
-        } else {
-            va.iter().zip(vb).map(|(x, y)| x * y).collect()
-        };
+        let n = self.vals[a.0].len();
+        let mut val = self.alloc(n);
+        {
+            let (va, vb) = (&self.vals[a.0], &self.vals[b.0]);
+            if n >= PAR_MIN {
+                use rayon::prelude::*;
+                const C: usize = 1 << 14;
+                val.par_chunks_mut(C).zip(va.par_chunks(C)).zip(vb.par_chunks(C))
+                    .for_each(|((d, x), y)| for i in 0..d.len() { d[i] = x[i] * y[i]; });
+            } else {
+                for i in 0..n { val[i] = va[i] * vb[i]; }
+            }
+        }
         let req = self.requires[a.0] || self.requires[b.0];
         self.push(val, Op::Mul(a, b), req)
     }
@@ -267,7 +358,7 @@ impl Tape {
         if let Some(&bad) = tokens.iter().find(|&&t| t >= vocab) {
             panic!("embed: token {bad} out of range for vocab {vocab}");
         }
-        let mut val = vec![0.0f32; tokens.len() * d];
+        let mut val = self.alloc(tokens.len() * d);
         {
             let vt = &self.vals[table.0];
             // Rows are independent, so the gather splits cleanly across
@@ -294,7 +385,8 @@ impl Tape {
     }
 
     pub fn matmul(&mut self, a: Var, b: Var, m: usize, k: usize, n: usize) -> Var {
-        let val = r2_tensor::ops::matmul(&self.vals[a.0], &self.vals[b.0], m, k, n);
+        let mut val = self.alloc(m * n);
+        r2_tensor::ops::matmul_into(&self.vals[a.0], &self.vals[b.0], m, k, n, &mut val);
         let req = self.requires[a.0] || self.requires[b.0];
         self.push(val, Op::MatMul { a, b, m, k, n }, req)
     }
@@ -309,10 +401,10 @@ impl Tape {
     /// traffic. What was actually wrong was that both directions ran on
     /// one core.
     pub fn silu(&mut self, x: Var) -> Var {
+        let mut val = self.alloc(self.vals[x.0].len());
         let vx = &self.vals[x.0];
         // `silu_into` carries a vectorised `exp`; the scalar `f32::exp` is
         // a libm call and cannot vectorise at all.
-        let mut val = vec![0.0f32; vx.len()];
         if vx.len() >= PAR_MIN {
             use rayon::prelude::*;
             const C: usize = 1 << 14;
@@ -326,7 +418,8 @@ impl Tape {
     }
 
     pub fn rmsnorm(&mut self, x: Var, w: Var, d: usize, eps: f32) -> Var {
-        let val = r2_tensor::ops::rmsnorm(&self.vals[x.0], &self.vals[w.0], eps);
+        let mut val = self.alloc(self.vals[x.0].len());
+        r2_tensor::ops::rmsnorm_into(&self.vals[x.0], &self.vals[w.0], eps, &mut val);
         let req = self.requires[x.0] || self.requires[w.0];
         self.push(val, Op::Rmsnorm { x, w, d, eps }, req)
     }
@@ -353,7 +446,8 @@ impl Tape {
     /// per-sequence logits.
     pub fn rope_seq(&mut self, x: Var, rows: usize, period: usize,
                     n_heads: usize, head_dim: usize, base: f32) -> Var {
-        let mut val = self.vals[x.0].clone();
+        let mut val = self.alloc(self.vals[x.0].len());
+        val.copy_from_slice(&self.vals[x.0]);
         // The angles depend only on (position, pair), so they are built
         // ONCE and then reused by every row and every head. Calling
         // `rope_inplace` per row per head recomputed a `powf` and a
@@ -468,7 +562,7 @@ impl Tape {
         assert_eq!(self.vals[k.0].len(), rows * nkv * hd, "attention: k has the wrong length");
         assert_eq!(self.vals[v.0].len(), rows * nkv * hd, "attention: v has the wrong length");
 
-        let mut out = vec![0.0f32; rows * nh * hd];
+        let mut out = self.alloc(rows * nh * hd);
         {
             let (vq, vk, vv) = (&self.vals[q.0], &self.vals[k.0], &self.vals[v.0]);
             // Split by SEQUENCE. Sequence `s` reads and writes only its own
