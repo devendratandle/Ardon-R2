@@ -789,15 +789,59 @@ impl Engine {
                 // Environments are interior-mutable: assignments write into
                 // the live env, so the body always sees prior writes through
                 // the same Arc — no re-snapshot machinery needed.
-                let iv = self.eval_in(iter, env)?;
-                for item in self.to_items(&iv)? {
-                    self.scope_insert(var.clone(), item);
-                    match self.eval_in(body, env) {
-                        Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => break,
-                        Err(R2Err { kind: ErrKind::CtrlNext, .. }) => continue,
-                        Err(e) => return Err(e),
-                        _ => {}
+                //
+                // `for (i in a:b)` never builds the range: `1:1e9` as a
+                // vector is 4 GB, and the old path then boxed every element
+                // into a `Vec<RVal>` — tens of GB for a loop whose body
+                // sees one integer at a time. That is what R's ALTREP
+                // avoids, and it is also why Esc could not interrupt such a
+                // loop: the flag is polled per expression, and no
+                // expression boundary is reached while a billion elements
+                // are being allocated. Any other iterable is walked one
+                // element at a time, again without a Vec of all of them.
+                let run_body = |this: &mut Self, item: RVal| -> Result<bool, R2Err> {
+                    this.scope_insert(var.clone(), item);
+                    match this.eval_in(body, env) {
+                        Err(R2Err { kind: ErrKind::CtrlBreak, .. }) => Ok(false),
+                        Err(R2Err { kind: ErrKind::CtrlNext, .. }) => Ok(true),
+                        Err(e) => Err(e),
+                        _ => Ok(true),
                     }
+                };
+                if let Expr::Binary { op: BinOp::Colon, lhs, rhs } = &**iter {
+                    let l = self.eval_in(lhs, env)?;
+                    let r = self.eval_in(rhs, env)?;
+                    let na = || R2Err { msg: "NA in seq".into(), kind: ErrKind::Runtime };
+                    let from = self.scalar_f64(&l)?.ok_or_else(na)? as i64;
+                    let to = self.scalar_f64(&r)?.ok_or_else(na)? as i64;
+                    let step: i64 = if from <= to { 1 } else { -1 };
+                    let mut i = from;
+                    loop {
+                        if !run_body(self, RVal::Integer(vec![Some(i as i32)].into(), Attrs::default()))? { break; }
+                        if i == to { break; }
+                        i += step;
+                    }
+                    return Ok(RVal::Null);
+                }
+                let iv = self.eval_in(iter, env)?;
+                let n = match &iv {
+                    RVal::Integer(v, _) => v.len(),
+                    RVal::Numeric(v, _) => v.len(),
+                    RVal::Character(v, _) => v.len(),
+                    RVal::List(v) => v.len(),
+                    RVal::DataFrame(df) => df.columns.len(),
+                    other => return err!(Runtime, "cannot iterate over {}", other.type_name()),
+                };
+                for k in 0..n {
+                    let item = match &iv {
+                        RVal::Integer(v, _) => RVal::Integer(vec![v[k]].into(), Attrs::default()),
+                        RVal::Numeric(v, _) => RVal::Numeric(vec![v[k]].into(), Attrs::default()),
+                        RVal::Character(v, _) => RVal::Character(vec![v[k].clone()], Attrs::default()),
+                        RVal::List(v) => v[k].1.clone(),
+                        RVal::DataFrame(df) => df.columns[k].1.clone(),
+                        _ => unreachable!(),
+                    };
+                    if !run_body(self, item)? { break; }
                 }
                 Ok(RVal::Null)
             }

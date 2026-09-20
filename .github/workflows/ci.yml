@@ -75,7 +75,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cargo fmt check
-        run: cargo fmt --all -- --check
+        # `-l` lists the files rustfmt would change instead of printing
+        # every diff: the full diff was ~70,000 lines per run and buried
+        # the test step's real failure underneath it.
+        run: cargo fmt --all -- --check -l
         continue-on-error: true   # Don't fail launch CI on style; flip to false once enforced
 
       # The GUI crates (r2-ui, r2-gui) depend on winit + wgpu, which
