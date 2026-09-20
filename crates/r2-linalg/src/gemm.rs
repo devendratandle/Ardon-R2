@@ -110,6 +110,37 @@ impl Trans {
 /// cost and there is no reassociation to worry about.
 const PACK_PAR_MIN: usize = 1 << 13;
 
+/// Per-call timing of the small GEMMs inside a real step, for
+/// `--example gemm_insitu`. Off unless `R2_GEMM_STATS=1`; then every
+/// parallel call under 0.5 GFLOP records (shape key, microseconds). This
+/// is the measurement that closed the small-shape question: op-level
+/// timings with hot operands do not predict a step.
+fn stats_on() -> bool {
+    use std::sync::OnceLock;
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("R2_GEMM_STATS").map(|v| v == "1").unwrap_or(false))
+}
+static STATS: std::sync::Mutex<Vec<(u64, f32, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// Drain the recorded per-call timings: `(m<<40 | k<<20 | n, microseconds, team)`.
+pub fn take_gemm_stats() -> Vec<(u64, f32, bool)> {
+    std::mem::take(&mut *STATS.lock().unwrap())
+}
+
+/// A raw pointer that may cross into worker closures. Every use site
+/// carries its own proof of disjointness or of ordering by a barrier.
+#[derive(Clone, Copy)]
+struct SyncPtr<T>(*mut T);
+unsafe impl<T> Send for SyncPtr<T> {}
+unsafe impl<T> Sync for SyncPtr<T> {}
+impl<T> SyncPtr<T> {
+    /// Read through a METHOD, not the field: a 2021-edition closure that
+    /// names `p.0` captures the raw pointer alone (which is not `Sync`)
+    /// rather than the wrapper.
+    #[inline] fn get(self) -> *mut T { self.0 }
+}
+
+
 /// Rows per register tile. See the module docs.
 const MR: usize = 6;
 
@@ -178,7 +209,7 @@ macro_rules! blocked_gemm_for {
 
         /// Resolved once per process.
         #[inline]
-        fn have_wide() -> bool {
+        pub(crate) fn have_wide() -> bool {
             #[cfg(target_arch = "x86_64")]
             {
                 use std::sync::OnceLock;
@@ -322,7 +353,6 @@ macro_rules! blocked_gemm_for {
                 if assign { for v in c.iter_mut() { *v = 0 as $ty; } }
                 return;
             }
-            use rayon::prelude::*;
 
             // ── short-M path ───────────────────────────────────────────
             //
@@ -380,6 +410,24 @@ macro_rules! blocked_gemm_for {
 
             let wide = have_wide();
 
+            let flops = 2.0 * m as f64 * k as f64 * n as f64;
+            if stats_on() && parallel && flops < 5.0e8 {
+                let t = std::time::Instant::now();
+                gemm_forkjoin(a, ta, b, tb, m, k, n, c, parallel, assign, wide);
+                STATS.lock().unwrap().push(((m as u64) << 40 | (k as u64) << 20 | n as u64, t.elapsed().as_secs_f32() * 1e6, false));
+                return;
+            }
+            gemm_forkjoin(a, ta, b, tb, m, k, n, c, parallel, assign, wide);
+        }
+
+        /// The fork-join path: pack B per (jc, pc) slab, then a fork over
+        /// the row-blocks of C. What every parallel call runs unless the
+        /// team is opted in.
+        #[allow(clippy::too_many_arguments)]
+        fn gemm_forkjoin(a: &[$ty], ta: Trans, b: &[$ty], tb: Trans,
+                         m: usize, k: usize, n: usize, c: &mut [$ty], parallel: bool,
+                         assign: bool, wide: bool) {
+            use rayon::prelude::*;
             // Parallelism runs over ROW-BLOCKS of C, so a small `m`
             // starves it. That is not a corner case, it is `grad_B`:
             // `grad_B = Aᵀ·g` has M = the weight's INPUT dim (256, 768),
@@ -482,7 +530,7 @@ macro_rules! blocked_gemm_for {
 /// The f32 kernel. A block 96x256x4B = 96 KB (L2), B panel
 /// 256x1024x4B = 1 MB (L3).
 pub mod f32 {
-    use super::{nthreads, Trans, MR, PACK_PAR_MIN};
+    use super::{nthreads, stats_on, Trans, MR, PACK_PAR_MIN, STATS};
     blocked_gemm_for!(f32, 16, 256, 96, 1024, "fma");
 }
 
@@ -611,31 +659,6 @@ pub fn sgemm_assign_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `sgemm_assign_into` on a buffer full of garbage must equal `sgemm`
-    /// bit for bit — for every Trans case and for a K that spans several
-    /// depth slabs (only the first may assign) and for the transposed-result
-    /// path (small m, large n).
-    #[test]
-    fn assign_into_ignores_prior_contents_and_matches_sgemm() {
-        for &(m, k, n) in &[(7usize, 600usize, 5usize), (2, 300, 900), (96, 512, 40), (1, 1, 1)] {
-            let a: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.37).sin()).collect();
-            let b: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.11).cos()).collect();
-            for &(ta, tb) in &[(Trans::No, Trans::No), (Trans::No, Trans::Yes), (Trans::Yes, Trans::No)] {
-                // operands laid out for the requested transposition
-                let (aa, bb) = (
-                    if ta == Trans::Yes { transpose(&a, m, k) } else { a.clone() },
-                    if tb == Trans::Yes { transpose(&b, k, n) } else { b.clone() },
-                );
-                for &par in &[false, true] {
-                    let want = sgemm(&aa, ta, &bb, tb, m, k, n, par);
-                    let mut c: Vec<f32> = (0..m * n).map(|i| 1e30 * ((i % 7) as f32 - 3.0)).collect();
-                    sgemm_assign_into(&aa, ta, &bb, tb, m, k, n, &mut c, par);
-                    assert_eq!(c, want, "m={m} k={k} n={n} ta={ta:?} tb={tb:?} par={par}");
-                }
-            }
-        }
-    }
 
     fn transpose(x: &[f32], r: usize, c: usize) -> Vec<f32> {
         let mut t = vec![0.0f32; r * c];

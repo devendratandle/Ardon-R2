@@ -154,6 +154,30 @@ and decomposition test pass. Two 300-step pairs, R2 alone: **131.18 ->
 to four decimals. Against PyTorch in the same window: 126.71 vs 174.97
 s, **1.38x**.
 
+### How the lead scales with model size
+
+The 1.3x above is a small-model number and this measurement says so.
+Same harness, `R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4
+R2_SEQ=256 R2_BATCH=8 R2_STEPS=20` (39.8M parameters, 2,048 tokens/step,
+every GEMM 3-9x larger than the 7M model's), one pair, clock 2375 MHz
+before and after (2026-09-20):
+
+| | R2 | PyTorch | |
+|---|---:|---:|---|
+| 20 steps | **58.24 s** (2,912 ms/step) | 61.16 s (3,058) | **1.05x** — parity within noise |
+| held-out loss | 6.1412 | 6.1412 | identical |
+
+Expected, and the reason is structural: at 7M parameters the GEMMs are
+57% of a step and R2's lead comes from everything around them (no
+dispatch, fused elementwise, Adam in place, the tape, tiled attention).
+At 40M the GEMMs are ~85-90%, R2's `sgemm` equals MKL per core and
+scales the same on six threads, so the ratio goes to ~1.0. At billions
+of parameters it stays there. **The only lever that moves the ratio at
+scale is beating MKL per core** — both sit at 50-70% of the 124 GFLOP/s
+per-core FMA peak, so the headroom exists and neither has taken it.
+R2 sustained ~240 GFLOP/s at this size, the same as on the small model;
+nothing degraded with shape.
+
 ### How it got here: three pieces of pure waste
 
 `--example step_census` was re-run after the earlier round of work, and the
@@ -449,13 +473,35 @@ Ranked by the census above, not by how interesting they are.
    hierarchy; the conclusions drawn from it that the machine peak was
    460 and that the residual was per-core are withdrawn.
 
-   **Open, scoped honestly:** a persistent thread team for `sgemm` — one
-   fork per call, workers packing cooperatively behind barriers, no
-   serial section — is what MKL has and R2 does not. It buys nothing on
-   the large shapes (MKL scales no better than R2 there) and 1.3-1.7x on
-   the sub-millisecond gradient shapes, ~4% of a step. Under a
-   zero-overhead policy it is a defect to fix; under the measurement law
-   its effect can only be confirmed at step level, over many pairs.
+   **2026-09-20: the persistent thread team and the pack-free kernel
+   are REMOVED from the tree** (both rows in the closed table; the code
+   is in git history). Neither changed the step total; the small-shape
+   question was closed by measuring PyTorch in situ instead:
+
+   **CLOSED 2026-09-20 by the measurement that was missing:** PyTorch's
+   GEMMs profiled INSIDE its own training steps
+   (`benchmarks/llm/mm_profile.py`, `torch.profiler`, shapes recorded),
+   against R2's in-situ latencies from the in-situ probe (now `--example gemm_insitu`):
+
+   | shape (calls/step) | PyTorch p50 / mean us | R2 p50 / mean us | |
+   |---|---:|---:|---|
+   | k/v `grad_B` 256x2048x128 (8) | 755 / 892 | 760-787 / 853-940 | parity |
+   | q/o `grad_B` 256x2048x256 (8) | 1,414 / 1,667 | 1,327-1,446 / 1,463-1,900 | parity |
+   | k/v forward 2048x256x128 (8) | 791 / 880 | 557-577 / 584-610 | **R2 1.4x ahead** |
+   | k/v `grad_A` 2048x128x256 (8) | 625 / 735 | 573-581 / 590-595 | R2 1.2x ahead |
+   | q/o fwd + `grad_A` 2048x256x256 (16) | 1,368 / 1,470 | 1,021-1,042 / 1,104-1,144 | R2 1.3x ahead |
+   | all GEMMs per step | 364.8 ms | ~250 ms (census) | R2 ~1.45x ahead |
+
+   Every "R2 1.3-2.3x behind on the small shapes" figure above compared
+   R2 inside a real step (cold operands) with MKL in an isolated loop
+   (hot operands). MKL inside a real step pays the same: its output-head
+   `grad_B` runs at 132 GFLOP/s in situ against 156-221 isolated. On
+   these shapes R2 is at parity or ahead of what PyTorch actually pays,
+   which is why the team, the pack-free kernel and the whole-K slab all
+   measured flat or worse — they were solving a gap that was not there.
+   Rule, added to the measurement law: **the reference must be measured
+   the same way as the subject.** MKL's isolated rates remain the
+   per-core ceiling comparison; they are not a per-call comparison.
 
 3. **Attention is 1.5-2.7x behind `scaled_dot_product_attention`**, which
    blocks over keys and keeps the running softmax in registers. Only 5% of
@@ -509,6 +555,8 @@ Ranked by the census above, not by how interesting they are.
 | **Swapping the micro-kernel loop nest to B-strip-outer / A-strip-inner** (the textbook Goto order, so the 16 KB B strip stays in L1 and the shared 1 MB panel is read from L3 once per block instead of once per A strip) | `gemm_rate` before/after: output head NN **195 -> 152**, NT 206 -> 186; w1/w3 NN 231 -> 210; the rest flat. On Zen 2 the private L2 is 512 KB, so the original order's B re-stream is L2-served and cheap, while the swapped order's C-tile writes (96 rows at stride n, 32 KB apart on the output head) are what thrash. Loop order is tuned to this cache geometry already; reverted |
 | **One whole-K slab for small outputs** (k/v and q/o gradients: 256x128 / 256x256 with K=2048), on the theory that eight KC=256 slabs are eight serial packs and eight fork-joins of pure overhead | `gemm_rate`, `R2_GEMM_FULLK` 0/1 interleaved: k/v TN 145 -> 117 / 142 -> 86, q/o TN 155 -> 106 / 166 -> 90 — **worse**. KC is not overhead: it is what keeps the 16 KB B strip and 6 KB A strip in L1 per tile; at kc=2048 they are 128 KB and 48 KB and stream from L2 on every tile. Also learned: sub-millisecond kernels scatter +/-25% between identical runs here (q/o NN 208 then 161, no change), so the small-shape residue cannot be resolved at op level below that. The honest item is a persistent thread team (one fork per call, cooperative packing behind barriers) — the one thing MKL has on these shapes (3.2-4.0x vs 2.4x) and nowhere else — worth ~4% of a step |
 | **Pooling gradient buffers and zeroing them in one parallel pass** before backward, to replace calloc's page faults with a memset | Two 300-step pairs against the values-only pool: 143.09 -> 152.30 s and 143.42 -> 142.52 — worse, then flat. A 6-thread memset of ~172 MB costs what the faults cost: this laptop's DRAM write bandwidth. The fix that worked removes the zeroing entirely (first writer assigns) |
+| **A persistent GEMM thread team with a SPINNING barrier** (`gemm_team`; code removed 2026-09-20, see git history) | Bit-identical to the serial kernel (test). Median call 25-30% faster than fork-join on the k/v and q/o gradient shapes — but the TAIL: p99 21 ms, max 83 ms, against fork-join's 2-10 ms (the in-situ probe (now `--example gemm_insitu`), per-call latencies inside real training steps). Five workers spinning occupy the cores the descheduled sixth needs, so one OS deschedule costs a scheduler quantum or more. 300 steps: 128.48 -> 132.06 s. **Diagnosed, not abandoned:** the same team with a YIELDING barrier keeps the median gain and has a tighter tail than fork-join (max 2-4 ms; 20-25% less time in these calls per step) and is now the default. At run length that is ~2% of a step and the pairs straddle zero (124.40 -> 127.32, 126.48 -> 124.27): kept for the lower variance, not claimed as a speedup |
+| **A pack-free direct kernel for the `grad_B` shapes** (`tn_direct`; code removed 2026-09-20, see git history): the same 6x16 register tile reading `A[t][i..i+6]` and `g[t][j..j+16]` straight from the operands, no packing, no K slabs, one fork | a standalone pack-free kernel (removed with it), isolated, 15 interleaved rounds: **0.70x / 0.74x / 0.69x** of `sgemm`'s time on the k/v, q/o and w1/w3 gradient shapes, results to f32 rounding. Then 300 training steps: **117.80 -> 144.33 s (+22%), 130.33 -> 141.78 s (+9%)**. The isolated benchmark multiplied the same operands 75 times, so they were L2-hot; in a step they are the activation and the upstream gradient, 2-6 MB each and cold, and the direct kernel re-streams every operand strip once per tile — eight to sixteen times from DRAM. Packing is what makes a cold operand cross memory once. The most instructive negative of the small-shape work: an op-level 0.7x that was real and irrelevant |
 | **Rewriting the silu backward in ATen's expression order** (`dy*s*(1+x*(1-s))`, plain store) on the theory that PyTorch's is "more vectorised" | `--example silu_forms`, 2048x768, 1 thread, 21 rounds: R2's two-FMA form 1.430 ms, ATen order 1.435 ms — identical; the two agree to 1.1e-7 (< f32 eps). The REAL `aten::silu_backward` on the same array: 2.096 ms on 1 thread (R2 **1.47x faster per core**), 1.262 ms on 6. Both are the same 8-wide AVX2 loop; PyTorch's Sleef `exp` is wider-range and slower than R2's clamped Cephes, which is all silu needs |
 | Timing PyTorch's tokenizer BEFORE its training loop, in one process | It holds a ~19 MB string and a 4.6M-element id list alive through training, and PyTorch's measured training time moved **20.7%** between two runs fifteen minutes apart (302.85 -> 365.46 s) while R2's moved 5.6%. That asymmetry — one side moving four times as much as the other — is the signature of a perturbation, not of drift. Moved after training; the ratio returned to 1.04x. **A measurement that shares a process with its neighbour must run after it** |
 | Reading the pipeline ratio as a property of the two implementations | It is a property of the RUN LENGTH. 1.71x at 30 steps, 1.02x at 500, same code both times — tokenizing is 0.5% of a real training pipeline. Quote the training ratio |
