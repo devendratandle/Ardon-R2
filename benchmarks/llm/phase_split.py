@@ -19,10 +19,11 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tinystories_train as ts
 
-dim, nl, ffn, vocab, nh, nkv = 256, 4, 768, 8000, 4, 2
+E = lambda k, d: int(os.environ.get(k, d))
+dim, nl, ffn, vocab, nh, nkv = E('R2_DIM', 256), E('R2_LAYERS', 4), E('R2_FFN', 768), E('R2_VOCAB', 8000), E('R2_HEADS', 4), E('R2_KV', 2)
 hd = dim // nh
 kvd = nkv * hd
-bn, seq = 32, 64
+bn, seq = E('R2_BATCH', 32), E('R2_SEQ', 64)
 steps = int(os.environ.get("R2_STEPS", "20"))
 
 # R2's block layout: embed, final norm, head, then 9 blocks per layer.

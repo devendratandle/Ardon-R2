@@ -24,11 +24,15 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 fn main() {
-    let cfg = Config { dim: 256, n_heads: 4, n_kv_heads: 2, n_layers: 4,
-                       vocab: 8000, ffn_hidden: 768, max_seq: 64,
+    fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
+        std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    }
+    let cfg = Config { dim: env("R2_DIM", 256), n_heads: env("R2_HEADS", 4), n_kv_heads: env("R2_KV", 2),
+                       n_layers: env("R2_LAYERS", 4), vocab: env("R2_VOCAB", 8000),
+                       ffn_hidden: env("R2_FFN", 768), max_seq: env("R2_SEQ", 64usize).max(64),
                        rope_base: 10000.0, eps: 1e-5 };
-    let (bn, seq) = (32usize, 64usize);
-    let steps: usize = std::env::var("R2_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    let (bn, seq) = (env("R2_BATCH", 32usize), env("R2_SEQ", 64usize));
+    let steps: usize = env("R2_STEPS", 20);
     let mut tr = Trainer::new(cfg, 3e-4, 7).expect("trainer");
     let batch: Vec<(Vec<usize>, Vec<usize>)> = (0..bn).map(|b| {
         let inp: Vec<usize> = (0..seq).map(|i| (b * 131 + i * 7919 + 1) % cfg.vocab).collect();
@@ -98,4 +102,22 @@ fn main() {
     println!("{:<12} {:>10.1}", "phase sum", f + b + o);
     println!("{:<12} {:>10.1}   (train_step timed whole; should match the sum)", "whole step", w);
     println!("\nR2_PHASES forward={f:.2} backward={b:.2} optimizer={o:.2} whole={w:.2}");
+
+    // In-situ backward census (R2_TAPE_STATS=1): ms per step by op kind,
+    // over the split steps AND the whole steps timed above (2 x steps).
+    let stats = r2_autograd::take_backward_stats();
+    if !stats.is_empty() {
+        let mut by: std::collections::BTreeMap<&str, (usize, f64)> = Default::default();
+        for (k, ms) in &stats { let e = by.entry(k).or_insert((0, 0.0)); e.0 += 1; e.1 += *ms as f64; }
+        let denom = (2 * steps) as f64;
+        let mut rows: Vec<_> = by.into_iter().collect();
+        rows.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap());
+        println!("\nbackward census (in situ), ms per step:");
+        println!("{:<14} {:>8} {:>10} {:>8}", "op", "arms", "ms/step", "share");
+        let total: f64 = rows.iter().map(|r| r.1 .1).sum::<f64>() / denom;
+        for (k, (n, ms)) in &rows {
+            println!("{k:<14} {:>8} {:>10.1} {:>7.1}%", n / (2 * steps), ms / denom, ms / denom / total * 100.0);
+        }
+        println!("{:<14} {:>8} {:>10.1}", "total", "", total);
+    }
 }

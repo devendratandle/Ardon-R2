@@ -178,6 +178,39 @@ per-core FMA peak, so the headroom exists and neither has taken it.
 R2 sustained ~240 GFLOP/s at this size, the same as on the small model;
 nothing degraded with shape.
 
+### Where the medium model's step goes (dim 768, in situ, 2026-09-20)
+
+GEMMs, PyTorch profiled inside its steps (`mm_profile.py`) against R2's
+in-situ hook (`--example gemm_insitu`), p50 us:
+
+| shape (calls) | R2 | PyTorch | |
+|---|---:|---:|---|
+| 2048x768x2304 (12) w1/w3 fwd, w2 grad_A | 26,157 | 34,321 | R2 1.3x ahead |
+| 2048x2304x768 (12) w2 fwd, w1/w3 grad_A | 25,457 | 32,095 | R2 1.3x ahead |
+| 2048x768x768 (16) q/o fwd + grad_A | 8,522 | 11,717 | R2 1.4x ahead |
+| 2048x768x8000 (1) head fwd | 94,742 | 129,981 | R2 1.4x ahead |
+| 2048x8000x768 (1) head grad_A | 89,624 | 116,052 | R2 1.3x ahead |
+| 2048x256x768 (8) k/v grad_A | 2,800 | 4,868 | R2 1.7x ahead |
+| **768x2048x2304 (8) w1/w3 grad_B (TN)** | 38,323 | 33,340 | **R2 1.15x behind** |
+| **768x2048x768 (8) q/o grad_B (TN)** | 11,146 | 9,702 | **1.15x behind** |
+| **768x2048x8000 (1) head grad_B (TN)** | 129,712 | 122,123 | **1.06x behind** |
+| **768x2048x256 (8) k/v grad_B (TN)** | 4,351 | 3,749 | **1.16x behind** |
+| all GEMMs | **1,669 ms** | 2,034 ms | R2 1.22x ahead |
+
+Every NN and NT shape ahead, every TN (`grad_B = Aᵀ·g`) shape behind:
+the first NAMED cause at this size. A cache-line theory about packing
+the transposed A (k-outer packing) was tried and measured no better;
+the remaining candidate is that TN packs the activation-sized operand
+as B (65 MB on the head) where NN packs the weight (24 MB) — test by
+computing `grad_B` as `(gᵀ·A)ᵀ`, the NT form, with a transposed
+write-back of the small result.
+
+Backward census in situ (`R2_TAPE_STATS=1 --example phase_split`):
+matmul 82%, attention 12% (seq 256; not yet compared to SDPA at this
+length), rmsnorm 4% before it was made row-parallel (119 -> 33 ms; the
+forward was serial too). Run length, two 20-step pairs: 46.97 -> 46.89 s
+and 48.09 -> 46.19 s — under the bar, kept as strictly less work.
+
 ### How it got here: three pieces of pure waste
 
 `--example step_census` was re-run after the earlier round of work, and the

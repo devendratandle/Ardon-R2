@@ -284,7 +284,7 @@ fn main() {
 
     // ── model ───────────────────────────────────────────────────────────
     let cfg = Config {
-        dim: env("R2_DIM", 256), n_heads: 4, n_kv_heads: 2,
+        dim: env("R2_DIM", 256), n_heads: env("R2_HEADS", 4), n_kv_heads: env("R2_KV", 2),
         n_layers: env("R2_LAYERS", 4), vocab: tok.vocab_size(),
         ffn_hidden: env("R2_FFN", 768), max_seq: seq.max(64),
         rope_base: 10000.0, eps: 1e-5,

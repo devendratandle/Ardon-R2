@@ -411,7 +411,7 @@ macro_rules! blocked_gemm_for {
             let wide = have_wide();
 
             let flops = 2.0 * m as f64 * k as f64 * n as f64;
-            if stats_on() && parallel && flops < 5.0e8 {
+            if stats_on() && parallel {
                 let t = std::time::Instant::now();
                 gemm_forkjoin(a, ta, b, tb, m, k, n, c, parallel, assign, wide);
                 STATS.lock().unwrap().push(((m as u64) << 40 | (k as u64) << 20 | n as u64, t.elapsed().as_secs_f32() * 1e6, false));

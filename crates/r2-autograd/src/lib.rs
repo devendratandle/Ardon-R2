@@ -233,6 +233,38 @@ impl BufPool {
     }
 }
 
+impl Op {
+    /// Short kind name, for the in-situ backward census.
+    fn kind(&self) -> &'static str {
+        match self {
+            Op::Leaf => "leaf", Op::Add(..) => "add", Op::Mul(..) => "mul",
+            Op::Embed { .. } => "embed", Op::MatMul { .. } => "matmul", Op::Silu(..) => "silu",
+            Op::Rmsnorm { .. } => "rmsnorm", Op::Transpose { .. } => "transpose", Op::Rope { .. } => "rope",
+            Op::SliceRows { .. } | Op::ConcatRows { .. } | Op::SliceCols { .. } | Op::ConcatCols { .. } => "slice/concat",
+            Op::ScaleMaskCausal { .. } => "scale_mask", Op::SoftmaxRows { .. } => "softmax_rows",
+            Op::Attention { .. } => "attention", Op::SumAll(..) => "sum", Op::Mse { .. } => "mse",
+            Op::SoftmaxCE { .. } => "softmax_ce",
+        }
+    }
+}
+
+/// In-situ backward census: time per op kind across `backward_from`
+/// arms, on unless... off unless `R2_TAPE_STATS=1`. Read with
+/// [`take_backward_stats`]. The op-level census (`step_census`) times
+/// each op in isolation with hot inputs; this is what the backward
+/// actually pays, inside a step, at whatever shape is being trained.
+fn tape_stats_on() -> bool {
+    use std::sync::OnceLock;
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("R2_TAPE_STATS").map(|v| v == "1").unwrap_or(false))
+}
+static BWD_STATS: std::sync::Mutex<Vec<(&'static str, f32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Drain the backward census: `(op kind, milliseconds)` per arm executed.
+pub fn take_backward_stats() -> Vec<(&'static str, f32)> {
+    std::mem::take(&mut *BWD_STATS.lock().unwrap())
+}
+
 impl Tape {
     pub fn new() -> Self {
         Self::with_pool(BufPool::new())
@@ -725,7 +757,9 @@ impl Tape {
 
         // Nodes were pushed in topological order → reverse index order is
         // a valid reverse-topological walk.
+        let census = tape_stats_on();
         for i in (0..self.ops.len()).rev() {
+            let t_arm = if census { Some(std::time::Instant::now()) } else { None };
             // MOVE this node's accumulated gradient out rather than cloning
             // it. A tape has thousands of nodes and every one was being
             // deep-copied here — allocation, not arithmetic, dominated the
@@ -966,26 +1000,49 @@ impl Tape {
                 }
                 Op::Rmsnorm { x, w, d, eps } => {
                     let (xi, wi, d, eps) = (x.0, w.0, *d, *eps);
-                    let vx = self.vals[xi].clone();
-                    let vw = self.vals[wi].clone();
-                    let rows = vx.len() / d;
                     let assign_x = first_write(&mut self.gwritten, xi);
                     if first_write(&mut self.gwritten, wi) { self.grads[wi].fill(0.0); }
+                    // `vals` and `grads` are disjoint fields: borrow, do not
+                    // clone (this used to copy the 6 MB input per call).
+                    let Tape { vals, grads, .. } = self;
+                    let (vx, vw) = (&vals[xi], &vals[wi]);
+                    let rows = vx.len() / d;
+                    // Rows are independent, so dL/dx is row-parallel and
+                    // bit-identical to the serial loop; each row's 1/rms is
+                    // kept so the weight gradient below — a sum over rows,
+                    // whose order must not change — reads it once.
+                    let mut rinv = vec![0.0f32; rows];
+                    {
+                        let row = |r: usize, gx: &mut [f32], rinv_r: &mut f32| {
+                            let xr = &vx[r * d..r * d + d];
+                            let gr = &g[r * d..r * d + d];
+                            let ms = r2_tensor::ops::sum_sq4(xr) / d as f32;
+                            let ri = 1.0 / (ms + eps).sqrt();
+                            *rinv_r = ri;
+                            // s = Σ_j g_j w_j x_j
+                            let s = r2_tensor::ops::dot3_4(gr, vw, xr);
+                            let coef = ri * ri * ri / d as f32;
+                            for j in 0..d {
+                                // dL/dx_i = g_i w_i r  -  r³ x_i/d * s
+                                let dx = gr[j] * vw[j] * ri - coef * xr[j] * s;
+                                if assign_x { gx[j] = dx; } else { gx[j] += dx; }
+                            }
+                        };
+                        if rows * d >= PAR_MIN {
+                            use rayon::prelude::*;
+                            grads[xi].par_chunks_mut(d).zip(rinv.par_iter_mut()).enumerate()
+                                .for_each(|(r, (gx, ri))| row(r, gx, ri));
+                        } else {
+                            for (r, (gx, ri)) in grads[xi].chunks_mut(d).zip(rinv.iter_mut()).enumerate() { row(r, gx, ri); }
+                        }
+                    }
+                    // dL/dw_j = Σ_r g_rj x_rj r_r — in row order, as before.
+                    let gw = &mut grads[wi];
                     for r in 0..rows {
                         let xr = &vx[r * d..r * d + d];
                         let gr = &g[r * d..r * d + d];
-                        let ms = r2_tensor::ops::sum_sq4(xr) / d as f32;
-                        let rinv = 1.0 / (ms + eps).sqrt();
-                        // s = Σ_j g_j w_j x_j
-                        let s = r2_tensor::ops::dot3_4(gr, &vw, xr);
-                        let coef = rinv * rinv * rinv / d as f32;
-                        for j in 0..d {
-                            // dL/dx_i = g_i w_i r  -  r³ x_i/d * s
-                            let dx = gr[j] * vw[j] * rinv - coef * xr[j] * s;
-                            if assign_x { self.grads[xi][r * d + j] = dx; } else { self.grads[xi][r * d + j] += dx; }
-                            // dL/dw_j = g_j * x_j * r
-                            self.grads[wi][j] += gr[j] * xr[j] * rinv;
-                        }
+                        let ri = rinv[r];
+                        for j in 0..d { gw[j] += gr[j] * xr[j] * ri; }
                     }
                 }
                 Op::Transpose { x, rows, cols } => {
@@ -1201,6 +1258,9 @@ impl Tape {
             }
             // Return the buffer so grad() still reports this node.
             self.grads[i] = g;
+            if let Some(t) = t_arm {
+                BWD_STATS.lock().unwrap().push((self.ops[i].kind(), t.elapsed().as_secs_f32() * 1e3));
+            }
         }
         // A node no arm wrote (an unused leaf, a branch not reaching the
         // seed) must still report a zero gradient. On a fresh tape its

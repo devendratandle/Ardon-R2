@@ -67,6 +67,6 @@ fn main() {
                  format!("{m}x{k}x{n}"), v.len() / steps, pct(&v, 0.5), pct(&v, 0.9), pct(&v, 0.99), v[v.len() - 1], ms);
     }
     println!("{}", "-".repeat(74));
-    println!("small GEMMs (< 0.5 GFLOP): {total:.1} ms/step;  step p50 {:.1} ms, p90 {:.1}, max {:.1}",
+    println!("all parallel GEMMs: {total:.1} ms/step;  step p50 {:.1} ms, p90 {:.1}, max {:.1}",
              pct(&step_ms, 0.5), pct(&step_ms, 0.9), step_ms[step_ms.len() - 1]);
 }

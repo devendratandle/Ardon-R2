@@ -80,13 +80,19 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
 /// [`rmsnorm`] into a caller-owned buffer; every element is written.
 pub fn rmsnorm_into(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
     let d = weight.len();
-    let rows = x.len() / d;
     debug_assert_eq!(out.len(), x.len());
-    for r in 0..rows {
-        let row = &x[r * d..r * d + d];
-        let ms = sum_sq4(row) / d as f32;
+    let row = |xr: &[f32], o: &mut [f32]| {
+        let ms = sum_sq4(xr) / d as f32;
         let scale = 1.0 / (ms + eps).sqrt();
-        for j in 0..d { out[r * d + j] = row[j] * scale * weight[j]; }
+        for j in 0..d { o[j] = xr[j] * scale * weight[j]; }
+    };
+    // Rows are independent: parallel above the fork-join threshold,
+    // bit-identical either way.
+    if x.len() >= 1 << 15 {
+        use rayon::prelude::*;
+        out.par_chunks_mut(d).zip(x.par_chunks(d)).for_each(|(o, xr)| row(xr, o));
+    } else {
+        for (o, xr) in out.chunks_mut(d).zip(x.chunks(d)) { row(xr, o); }
     }
 }
 

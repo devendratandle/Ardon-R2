@@ -26,10 +26,14 @@ fn t_ms(reps: usize, mut f: impl FnMut()) -> f64 {
 }
 
 fn main() {
-    let cfg = Config { dim: 256, n_heads: 4, n_kv_heads: 2, n_layers: 4,
-                       vocab: 8000, ffn_hidden: 768, max_seq: 64,
+    fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
+        std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    }
+    let cfg = Config { dim: env("R2_DIM", 256), n_heads: env("R2_HEADS", 4), n_kv_heads: env("R2_KV", 2),
+                       n_layers: env("R2_LAYERS", 4), vocab: env("R2_VOCAB", 8000),
+                       ffn_hidden: env("R2_FFN", 768), max_seq: env("R2_SEQ", 64usize).max(64),
                        rope_base: 10000.0, eps: 1e-5 };
-    let (bn, seq) = (32usize, 64usize);
+    let (bn, seq) = (env("R2_BATCH", 32usize), env("R2_SEQ", 64usize));
     let t = bn * seq;
     let mut tr = Trainer::new(cfg, 3e-4, 7).expect("trainer");
     let batch: Vec<(Vec<usize>, Vec<usize>)> = (0..bn).map(|b| {
