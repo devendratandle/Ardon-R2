@@ -22,7 +22,7 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.29-1.50x FASTER than PyTorch at 7M parameters, 1.15-1.27x at 40M, and 1.25-1.28x faster end to end.**
+**R2 trains 1.5-1.66x FASTER than PyTorch at 7M parameters, 1.40-1.63x at 40M, and 1.25-1.28x faster end to end.**
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
@@ -40,6 +40,7 @@ than throttled.
 | 5 | **131.82 s** | 169.83 s | **R2 1.29x** (gradients pooled too, first writer assigns) |
 | 6 | **126.71 s** | 174.97 s | **R2 1.38x** (tiled attention; PyTorch's run drifted up in this window) |
 | 7 | **38.99 / 38.89 s** (100 steps) | 57.9 / 58.5 s | **R2 1.49-1.50x** (attention re-blocked, below; 100-step pairs, 2026-09-20) |
+| 8 | **36.33 / 35.86 s** (100 steps) | 60.4 / 59.4 s | **R2 1.66x / 1.66x** (`sgemm` column-group partition, section below; 2026-09-20) |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
@@ -213,8 +214,8 @@ and 5.6134), and identical to the runs before the change.
 
 ### How the lead scales with model size
 
-The 1.3x above is a small-model number and this measurement says so.
-Same harness, `R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4
+The headline is a small-model number; this is the same harness one
+size up. Same harness, `R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4
 R2_SEQ=256 R2_BATCH=8 R2_STEPS=20` (39.8M parameters, 2,048 tokens/step,
 every GEMM 3-9x larger than the 7M model's), one pair, clock 2375 MHz
 before and after (2026-09-20):
@@ -223,6 +224,7 @@ before and after (2026-09-20):
 |---|---:|---:|---|
 | 20 steps | **58.24 s** (2,912 ms/step) | 61.16 s (3,058) | **1.05x** — parity within noise |
 | 20 steps, attention re-blocked | **48.29 s / 43.43 s** | 55.45 / 55.20 s | **1.15x / 1.27x** |
+| 20 steps, + `sgemm` column groups | **41.33 s / 34.22 s** | 57.8 / 55.9 s | **1.40x / 1.63x** |
 | held-out loss | 6.1412 | 6.1412 | identical, before and after |
 
 The 1.05x was NOT the GEMMs going to parity, which is what the first
@@ -256,12 +258,87 @@ in-situ hook (`--example gemm_insitu`), p50 us:
 | all GEMMs | **1,669 ms** | 2,034 ms | R2 1.22x ahead |
 
 Every NN and NT shape ahead, every TN (`grad_B = Aᵀ·g`) shape behind:
-the first NAMED cause at this size. A cache-line theory about packing
-the transposed A (k-outer packing) was tried and measured no better;
-the remaining candidate is that TN packs the activation-sized operand
-as B (65 MB on the head) where NN packs the weight (24 MB) — test by
-computing `grad_B` as `(gᵀ·A)ᵀ`, the NT form, with a transposed
-write-back of the small result.
+the first NAMED cause at this size. Closed the same day — next section.
+
+### `grad_B` kernel to kernel, and the partition it needed (2026-09-20)
+
+PyTorch's `MmBackward0` computes `grad_A = grad.mm(B.t())` and `grad_B
+= A.t().mm(grad)`: two more `aten::mm` calls on stride-only views, which
+MKL takes as its NT and TN cases — operation for operation what R2's tape
+does through `sgemm(.., Trans::Yes, ..)`. So the like-for-like test is
+the three calls at the same shape, both sides in one window, and
+`benchmarks/llm/gemm_cases.py` (+ `--example gemm_cases`) runs exactly
+that over 23 shapes: the small and medium models, wider layers, 512 and
+8,192 tokens. Ratio > 1 is R2 ahead:
+
+| case | before: min / median / max | after: min / median / max |
+|---|---|---|
+| NN forward | 0.60 / 1.19 / 1.92 | **0.77 / 1.37 / 2.18** |
+| NT `grad_A` | 0.65 / 1.16 / 1.69 | **0.91 / 1.26 / 1.72** |
+| TN `grad_B` | **0.50** / 0.87 / 2.11 | **0.65 / 1.32 / 2.32** |
+
+Before: every TN shape with M <= 768 ran at 0.50-0.84x of MKL while the
+same kernel at M >= 2048 ran 1.1-1.7x ahead — and the plain NN case at
+768x2048x768 was just as slow, so it was the SHAPE (short M, long K),
+not the transpose. Load balance was the first theory and a 2-D
+partition alone measured nothing. Probes inside the kernel found it:
+the row-block partition packs one shared `KC x NC` panel of B per depth
+slab that every core then streams from L3 sixteen times per block; with
+8 row-blocks per fork the panel's cold fetch is never amortised (the
+micro-kernel ran 45% slower per FLOP than on the long-M shape) and there
+were three times as many forks.
+
+`gemm_colgroups`: A packed once for the whole depth (in parallel); each
+task owns a group of `NR`-wide column strips of C — plus a group of
+row-blocks when `n` is short — over every slab, packs its OWN strips of
+B slab by slab (kept in that core's L2 for every row block), accumulates
+into a private tile, folded into C once. Three forks per call instead
+of three per slab. Bit-identical to the serial kernel. Taken whenever A
+is not the large operand (<= 32 MB), the depth is >= 3 slabs or `m` is
+short, and `n` is wide or `m` is short; the row-block form keeps the
+rest (`grad_A` at 8,192 tokens, A = g = 75 MB, and the shallow K = 256
+forward of the small model). Two more things on the way: a fresh
+multi-MB scratch `Vec` per call was ~1,000 page faults per call (now
+per-thread scratch, reused), and the packers were element loops with
+two bounds tests each (now fixed-size array moves on the contiguous
+side).
+
+Best of two, same window, TN us (old -> new, MKL): 2048x768x768 13.3 ->
+**10.2** (7.7-10.6); 768x2304 41.9 -> **25.5** (31.6); 768x8000 145 ->
+**84** (109); 1024x4096 86 -> **60** (79); 8192x768x768 52 -> **38** (42).
+Below 1.0 after: only the dim-256 shapes with M or N = 256 (1-4 ms calls
+where both partitions sit at ~0.7x MKL), 2% of the small model's step.
+
+Training pairs, real corpus, same window: medium **41.33 vs 57.8 s and
+34.22 vs 55.9 s (1.40x, 1.63x)**; small at 100 steps **36.33 vs 60.4 and
+35.86 vs 59.4 (1.66x, 1.66x)**. Held-out loss identical to four decimals
+on every pair.
+
+Where the medium model's step goes NOW (same census, after both fixes;
+R2 1,678 ms/step in this window, PyTorch 2,745-3,000 in its stable
+windows — its run in this one throttled to 3,400 and is not quoted):
+
+| ms/step, dim 768 | R2 | PyTorch |
+|---|---:|---:|
+| forward GEMMs | 438 | 648-706 |
+| forward, everything else | 97 (attention 30) | 114-128 (SDPA 34-40) |
+| backward GEMMs | 876 | 1,272-1,394 |
+| backward, everything else | 191 (attention 84) | 377-407 (SDPA 78-91) |
+| optimizer | 61 | 162-189 |
+
+Nothing in R2's step is behind its PyTorch counterpart any more; the
+GEMMs are 1.5x ahead in situ and everything around them 2-3x.
+
+The FMA audit that the attention finding called for: every
+`#[target_feature(fma)]` kernel checked in the emitted assembly. The
+f32 kernels (exp, silu, softmax_ce, the sgemm micro-kernel) use explicit
+`_mm256_fmadd_ps` and were fine; Adam separates mul and add on purpose
+(bit-identity with its scalar reference). **`level3::dgemm` and
+`dot4` — f64, R's `%*%` — had the attention bug: plain `c += a*b` under
+`target_feature`, zero `vfmadd`.** Same fix (`mul_add` under a
+`const F: bool`); 500x500 dgemm 16-20 -> 19-27 GFLOP/s across four
+interleaved rounds. It has had none of the sgemm structure and remains
+the open f64 item.
 
 Backward census in situ (`R2_TAPE_STATS=1 --example phase_split`):
 matmul 82%, attention 12% (the kernel that turned out to be the medium
@@ -410,14 +487,16 @@ per-row verdict, so the comparison cannot be quietly skipped.
 |---|---|---:|
 | Tokenizer | **R2 ~10x AHEAD** | — |
 | Accuracy | **at parity or better** | — |
-| `sgemm` — forward, `grad_A`, `grad_B` | 1.0-1.7x behind MKL | **39%** |
-| Attention forward | **AHEAD of SDPA at 2,048 and 4,096 tokens** (0.8x, 0.6x); 1.4x behind at 512 | 4% |
-| Attention backward | 1.5x behind SDPA (fwd+bwd 1.3-1.7x) | (within the 4%) |
-| `softmax_ce` | fused; not separately compared | 7% |
+| `sgemm` — forward, `grad_A`, `grad_B` | **AHEAD of MKL kernel to kernel** on every case from dim 768 up: median NN 1.37x, NT 1.26x, TN 1.32x over 23 shapes (`gemm_cases.py`, 2026-09-20); dim-256 shapes with M or N = 256 ~0.7x | **39-80%** by size |
+| Attention forward | **parity with SDPA in situ** (30-34 vs 34-40 ms at dim 768 / seq 256); ahead at >= 2,048 tokens isolated | 4-5% |
+| Attention backward | **parity with SDPA in situ** (84-89 vs 78-101 ms) — was 3.3x behind | 5-8% |
+| `softmax_ce` | fused; not separately compared | 2-7% |
 | Embedding | 1.9-3.8x fwd+bwd | 0.07% |
 
-Only MKL's `sgemm` and `scaled_dot_product_attention` are clearly ahead,
-and both are hand-written assembly R2 does not ship.
+Nothing R2 ships is clearly behind its reference any more (2026-09-20);
+the two that were — MKL's `sgemm` on short-M shapes and SDPA's backward —
+were partitioning and memory traffic, not the hand-written assembly R2
+does not ship.
 
 ### Forward vs backward vs optimizer
 
@@ -454,6 +533,13 @@ part is cooler. The PHASE ratios are what this table adds.
 
 ### `sgemm` rates on the shapes a step runs
 
+**Superseded 2026-09-20** by the kernel-to-kernel sweep against MKL in
+section 1 ("`grad_B` kernel to kernel"): that table is R2 and MKL at the
+same shape in the same window; this one is R2 alone with hot operands,
+kept for the history of the micro-kernel. After the column-group
+partition the TN column below reads 260-390 GFLOP/s on the dim-768
+shapes.
+
 `cargo run --release -p r2-tensor --example gemm_rate` — GFLOP/s.
 
 | block | m x k x n | calls/step | NN | NT (`grad_A`) | TN (`grad_B`) |
@@ -481,6 +567,11 @@ registers, not a foreign library.
 
 `cargo run --release -p r2-train --example step_census`. **This is the map
 for anything done next.** Every target picked without it was picked wrongly.
+(2026-09-20: the in-situ censuses — `R2_TAPE_STATS=1 --example
+phase_split` against `op_profile.py` — supersede this op-level one for
+attribution, because they time ops inside a real step at any model size;
+the medium-model table in section 1 is the current map. This section is
+the small model on 2026-09-09.)
 
 The census warms to the sustained clock before measuring and re-takes the
 step total at the end, printing the drift — an earlier version timed the
@@ -554,12 +645,11 @@ Ranked by the census above, not by how interesting they are.
    copied into both) and laptop DRAM — which is what `bandwidth_sweep`
    measured. PyTorch faces the same wall: MKL scales 2.3-4.0x here.
 
-   **R2's actual deficit is confined to small-n and TN shapes:** k/v TN
-   117 vs 285, w1/w3 TN 157 vs 240, q/o TN 162 vs 245 — sub-millisecond
-   GEMMs where MKL scales 3.2-4.0x and R2 2.4x, so it is partitioning and
-   per-call overhead at small sizes, not the kernel. Closing all of it is
-   worth ~4% of a step. Everywhere else R2 is at parity or ahead (output
-   head NN 195 vs 168).
+   **R2's actual deficit was confined to short-M (TN) shapes** — and
+   CLOSED 2026-09-20 by the column-group partition (section 1, "`grad_B`
+   kernel to kernel"): it WAS partitioning, specifically every core
+   cold-fetching one shared packed B panel per slab. The paragraphs
+   below are the history of finding that.
 
    The `bandwidth_sweep` table stands as the measurement of the shared
    hierarchy; the conclusions drawn from it that the machine peak was
@@ -595,14 +685,16 @@ Ranked by the census above, not by how interesting they are.
    the same way as the subject.** MKL's isolated rates remain the
    per-core ceiling comparison; they are not a per-call comparison.
 
-3. **Attention is 1.5-2.7x behind `scaled_dot_product_attention`**, which
-   blocks over keys and keeps the running softmax in registers. Only 5% of
-   a step, so closing it entirely buys about 3%.
-4. **`level3::dgemm` is 11-28 GFLOP/s**, 5-12% of the f64 ceiling — it did
-   not benefit from any of this work. `sgemm` is a per-type macro, so f64
-   is a one-line instantiation; a column-major `C = A·B` is the row-major
-   `Cᵀ = Bᵀ·Aᵀ`, i.e. the same kernel with operands swapped. That would
-   lift `%*%` and every blocked LAPACK algorithm built on it.
+3. **Attention — CLOSED 2026-09-20** (section 1, "The second cut"):
+   parity with SDPA in situ, forward and backward, after (sequence, head)
+   work units, register-blocked accumulations and real FMA. At seq 256
+   it had been 17% of the backward and 3.3x behind.
+4. **`level3::dgemm` is 19-27 GFLOP/s** after its FMA fix (2026-09-20; it
+   was 16-20 with none) — still a fraction of the f64 ceiling, because it
+   has none of the sgemm structure. `sgemm` is a per-type macro, so f64
+   is close to a one-line instantiation; a column-major `C = A·B` is the
+   row-major `Cᵀ = Bᵀ·Aᵀ`, i.e. the same kernel with operands swapped.
+   That would lift `%*%` and every blocked LAPACK algorithm built on it.
 5. **13% of a step is still unattributed** — the memory traffic of writing
    every intermediate value and gradient buffer, spread across ops rather
    than concentrated anywhere.
@@ -688,6 +780,19 @@ cargo run --release -p r2-train --example lmo15_attention  && python benchmarks/
 cargo run --release -p r2-train  --example step_census
 cargo run --release -p r2-tensor --example gemm_rate
 cargo run --release -p r2-tensor --example gemm_scaling
+
+# IN SITU, any model size (the size knobs R2_DIM/LAYERS/FFN/HEADS/KV/SEQ/
+# BATCH/STEPS apply to every harness here): both phases by op on both
+# sides, and every GEMM call inside real steps by shape
+R2_TAPE_STATS=1 R2_GEMM_STATS=1 cargo run --release -p r2-train --example phase_split
+python benchmarks/llm/op_profile.py
+R2_GEMM_STATS=1 cargo run --release -p r2-train --example gemm_insitu
+python benchmarks/llm/mm_profile.py
+
+# KERNEL TO KERNEL: forward / grad_A / grad_B at 23 shapes, R2 and MKL
+# per shape in one window (the Python half runs both)
+cargo build --release -p r2-linalg --example gemm_cases
+python benchmarks/llm/gemm_cases.py
 ```
 
 Every `--release` build on this machine needs

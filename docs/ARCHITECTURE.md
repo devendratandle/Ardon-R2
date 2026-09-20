@@ -166,7 +166,7 @@ Shipped layers:
 - **LLM stack** (`r2-tensor`, `r2-autograd`, `r2-train`) — byte-level BPE
   tokenizer, reverse-mode autograd tape, fused batched attention, RMSNorm /
   RoPE / SwiGLU, log-sum-exp cross-entropy, Adam, checkpointing, and KV-cached
-  inference. Pure Rust, no C: it trains a transformer **1.3–1.5× faster than
+  inference. Pure Rust, no C: it trains a transformer **1.5–1.66× faster than
   PyTorch+MKL** and learns identically. The matrix path underneath it is
   `r2_linalg::gemm::sgemm` — blocked/packed Goto-BLIS with a hand-written
   AVX2 micro-kernel selected by `is_x86_feature_detected!` at **runtime**,
@@ -184,7 +184,13 @@ Householder QR; `solve`/`det`; **`na.rm=` honored** across all reductions.
 multiversioned** — the `dgemm` kernel is compiled at three tiers
 (AVX-512 → AVX2 → SSE2) and dispatched on `hw()` at runtime: ~2.9×/core
 from AVX2+FMA, **~7× combined** with cores (6-core AVX2 box), one binary
-running on any x86-64 CPU (`R2_SIMD`/`R2_NO_SIMD` knobs). `crossprod` is
+running on any x86-64 CPU (`R2_SIMD`/`R2_NO_SIMD` knobs). The FMA half
+of that tier only became real on 2026-09-20: Rust never contracts
+`a*b + c`, so the kernel now uses `mul_add` on the FMA tiers (500×500
+dgemm 16–20 → 19–27 GFLOP/s); the tiers agree to f64 rounding, not bit
+for bit. The f32 `sgemm` beside it is the better-structured kernel (two
+partitions chosen by shape, private packing) and `dgemm` is next in line
+for that structure. `crossprod` is
 multi-core too but memory-bandwidth-bound (small SIMD gain). Reaches users
 via `%*%`. GUI caches + pre-warms the SVG font DB (fast first plot).
 

@@ -13,9 +13,11 @@ sizes), GPU: `cargo run -p r2-gpu --release --features gpu --example flops`.
 > v0.3.9/v0.4.0 rewrote the **single-precision** matrix path — a
 > blocked/packed `sgemm` with a runtime-dispatched AVX2 micro-kernel — for
 > LLM training. R's `%*%` and every statistical routine here run in
-> **double** precision through `level3::dgemm`, which that work deliberately
-> did not touch. So the table below is unaffected by it; the f32 numbers
-> live in `benchmarks/llm/REPORT.md` and are a different measurement of a
+> **double** precision through `level3::dgemm`, which that work left alone
+> until 2026-09-20, when its AVX2 tier gained the fused multiply-adds it
+> had claimed all along (500×500: 16–20 → 19–27 GFLOP/s). So the table
+> below is, if anything, conservative for `%*%`; the f32 numbers live in
+> `benchmarks/llm/REPORT.md` and are a different measurement of a
 > different kernel. Re-run the harness above if you want them re-taken on
 > your own machine.
 

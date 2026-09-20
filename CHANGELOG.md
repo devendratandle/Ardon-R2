@@ -23,6 +23,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
   66 -> 34; medium model **1.15-1.27x faster than PyTorch** (48.3/43.4 vs
   55.5/55.2 s), small model **1.49-1.50x** at 100 steps. Held-out loss
   unchanged to four decimals on every pair. `benchmarks/llm/REPORT.md`.
+- **`grad_B` no longer trails MKL on any shape from dim 768 up.** Kernel
+  to kernel against PyTorch's own three GEMM calls
+  (`benchmarks/llm/gemm_cases.py`, 23 shapes, both sides per shape in
+  one window) the transposed-A case ran at 0.50-0.84x of MKL for every
+  M <= 768 — the shape, not the transpose: the shared B panel per depth
+  slab was re-fetched cold by every core when there were only eight
+  row-blocks per fork. `sgemm` now has a second partition for that
+  regime: A packed once for the whole depth, tasks that own column
+  groups of C and pack their own B strips, three forks per call instead
+  of three per slab, bit-identical results. TN median 0.87x -> 1.32x of
+  MKL, NN 1.19x -> 1.37x, NT 1.16x -> 1.26x. Medium model **1.40-1.63x
+  faster than PyTorch** (41.3/34.2 vs 57.8/55.9 s), small **1.66x**
+  (36.3/35.9 vs 60.4/59.4 s at 100 steps); held-out loss unchanged.
+- **`%*%` on doubles gets real fused multiply-adds.** The f64 GEMM's
+  "AVX2+FMA" build emitted separate multiplies and adds (Rust never
+  contracts `a*b+c`); `mul_add` under a const flag, 500x500 dgemm
+  16-20 -> 19-27 GFLOP/s. Results agree with the SSE2 build to f64
+  rounding rather than bit for bit.
 - **In-situ censuses for any model size.** `R2_TAPE_STATS=1` now times
   the forward too (between tape pushes), `--example phase_split` prints
   GEMM vs non-GEMM milliseconds inside each phase, and

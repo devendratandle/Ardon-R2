@@ -149,12 +149,26 @@ fn pack_b(ldb: usize, b: &[f64], pc: usize, jc: usize, kc: usize, nc: usize, pac
     }
 }
 
+/// `a*b + c`, fused on the FMA build. Rust never contracts `a * b + c`
+/// on its own — that changes the rounding — so the "AVX2+FMA" build of
+/// this kernel was emitting separate multiplies and adds (the same
+/// finding as the attention kernels, checked in the emitted assembly).
+/// `mul_add` is the one instruction where the feature is enabled; where
+/// it is not it would call libm's software `fma`, hundreds of times
+/// slower, so the baseline keeps the two-instruction form.
+#[inline(always)]
+fn fma<const F: bool>(a: f64, b: f64, c: f64) -> f64 {
+    if F { a.mul_add(b, c) } else { a * b + c }
+}
+
 /// The macro-kernel body. `#[inline(always)]` so it is *re-codegened*
 /// inside each multiversion wrapper below — the AVX2+FMA wrapper compiles
-/// this exact source with wider vectors + fused multiply-add, the baseline
-/// with SSE2. Single source, two machine-code variants.
+/// this exact source with wider vectors and (`F = true`) fused
+/// multiply-add, the baseline with SSE2. Single source, two machine-code
+/// variants; they agree to f64 rounding, not bit for bit, because the
+/// fused form rounds once per multiply-add.
 #[inline(always)]
-fn macro_kernel_impl(
+fn macro_kernel_impl<const F: bool>(
     mc: usize, nc: usize, kc: usize, alpha: f64,
     packed_a: &[f64], packed_b: &[f64],
     c: &mut [f64], ldc: usize, ic: usize, jc: usize,
@@ -170,9 +184,9 @@ fn macro_kernel_impl(
             let actual_mr = (mc - i).min(MR);
             let a_off = ir * kc * MR;
             if actual_mr == MR && actual_nr == NR {
-                micro_kernel_8x4(kc, alpha, &packed_a[a_off..], &packed_b[b_off..], c, ldc, ic + i, jc + j);
+                micro_kernel_8x4::<F>(kc, alpha, &packed_a[a_off..], &packed_b[b_off..], c, ldc, ic + i, jc + j);
             } else {
-                micro_kernel_generic(actual_mr, actual_nr, kc, alpha, &packed_a[a_off..], &packed_b[b_off..], c, ldc, ic + i, jc + j);
+                micro_kernel_generic::<F>(actual_mr, actual_nr, kc, alpha, &packed_a[a_off..], &packed_b[b_off..], c, ldc, ic + i, jc + j);
             }
         }
     }
@@ -180,9 +194,9 @@ fn macro_kernel_impl(
 
 /// Runtime-multiversioned macro-kernel: dispatch once to the AVX2+FMA
 /// build of `macro_kernel_impl` when the CPU has it (cached detection),
-/// else the SSE2 baseline. Identical numerical result. Mirrors how
-/// NumPy/OpenBLAS pick a CPU kernel at runtime — one binary, runs
-/// everywhere, fast where the hardware allows.
+/// else the SSE2 baseline. Mirrors how NumPy/OpenBLAS pick a CPU kernel
+/// at runtime — one binary, runs everywhere, fast where the hardware
+/// allows.
 #[inline]
 fn macro_kernel(
     mc: usize, nc: usize, kc: usize, alpha: f64,
@@ -198,7 +212,7 @@ fn macro_kernel(
             SimdTier::Sse2   => {}
         }
     }
-    macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
+    macro_kernel_impl::<false>(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -208,7 +222,7 @@ fn macro_kernel_avx2(
     packed_a: &[f64], packed_b: &[f64],
     c: &mut [f64], ldc: usize, ic: usize, jc: usize,
 ) {
-    macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
+    macro_kernel_impl::<true>(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -218,7 +232,7 @@ fn macro_kernel_avx512(
     packed_a: &[f64], packed_b: &[f64],
     c: &mut [f64], ldc: usize, ic: usize, jc: usize,
 ) {
-    macro_kernel_impl(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
+    macro_kernel_impl::<true>(mc, nc, kc, alpha, packed_a, packed_b, c, ldc, ic, jc);
 }
 
 /// The best SIMD code path this CPU can run for the GEMM kernel.
@@ -252,7 +266,7 @@ fn simd_tier() -> SimdTier {
 
 /// 8x4 micro-kernel: 32 register accumulators, 32 FMAs per iteration
 #[inline(always)]
-fn micro_kernel_8x4(
+fn micro_kernel_8x4<const F: bool>(
     kc: usize, alpha: f64, a: &[f64], b: &[f64],
     c: &mut [f64], ldc: usize, ci: usize, cj: usize,
 ) {
@@ -270,14 +284,14 @@ fn micro_kernel_8x4(
         let (a0,a1,a2,a3) = (a[ao],a[ao+1],a[ao+2],a[ao+3]);
         let (a4,a5,a6,a7) = (a[ao+4],a[ao+5],a[ao+6],a[ao+7]);
         let (b0,b1,b2,b3) = (b[bo],b[bo+1],b[bo+2],b[bo+3]);
-        c00+=a0*b0; c10+=a1*b0; c20+=a2*b0; c30+=a3*b0;
-        c40+=a4*b0; c50+=a5*b0; c60+=a6*b0; c70+=a7*b0;
-        c01+=a0*b1; c11+=a1*b1; c21+=a2*b1; c31+=a3*b1;
-        c41+=a4*b1; c51+=a5*b1; c61+=a6*b1; c71+=a7*b1;
-        c02+=a0*b2; c12+=a1*b2; c22+=a2*b2; c32+=a3*b2;
-        c42+=a4*b2; c52+=a5*b2; c62+=a6*b2; c72+=a7*b2;
-        c03+=a0*b3; c13+=a1*b3; c23+=a2*b3; c33+=a3*b3;
-        c43+=a4*b3; c53+=a5*b3; c63+=a6*b3; c73+=a7*b3;
+        c00=fma::<F>(a0,b0,c00); c10=fma::<F>(a1,b0,c10); c20=fma::<F>(a2,b0,c20); c30=fma::<F>(a3,b0,c30);
+        c40=fma::<F>(a4,b0,c40); c50=fma::<F>(a5,b0,c50); c60=fma::<F>(a6,b0,c60); c70=fma::<F>(a7,b0,c70);
+        c01=fma::<F>(a0,b1,c01); c11=fma::<F>(a1,b1,c11); c21=fma::<F>(a2,b1,c21); c31=fma::<F>(a3,b1,c31);
+        c41=fma::<F>(a4,b1,c41); c51=fma::<F>(a5,b1,c51); c61=fma::<F>(a6,b1,c61); c71=fma::<F>(a7,b1,c71);
+        c02=fma::<F>(a0,b2,c02); c12=fma::<F>(a1,b2,c12); c22=fma::<F>(a2,b2,c22); c32=fma::<F>(a3,b2,c32);
+        c42=fma::<F>(a4,b2,c42); c52=fma::<F>(a5,b2,c52); c62=fma::<F>(a6,b2,c62); c72=fma::<F>(a7,b2,c72);
+        c03=fma::<F>(a0,b3,c03); c13=fma::<F>(a1,b3,c13); c23=fma::<F>(a2,b3,c23); c33=fma::<F>(a3,b3,c33);
+        c43=fma::<F>(a4,b3,c43); c53=fma::<F>(a5,b3,c53); c63=fma::<F>(a6,b3,c63); c73=fma::<F>(a7,b3,c73);
     }
 
     let co0 = cj*ldc+ci;
@@ -295,7 +309,7 @@ fn micro_kernel_8x4(
 }
 
 #[inline(always)]
-fn micro_kernel_generic(
+fn micro_kernel_generic<const F: bool>(
     mr: usize, nr: usize, kc: usize, alpha: f64,
     a: &[f64], b: &[f64],
     c: &mut [f64], ldc: usize, ci: usize, cj: usize,
@@ -303,7 +317,7 @@ fn micro_kernel_generic(
     let mut acc = [0.0f64; MR * NR];
     for p in 0..kc {
         let ao = p * MR; let bo = p * NR;
-        for j in 0..nr { let bv = b[bo+j]; for i in 0..mr { acc[j*MR+i] += a[ao+i]*bv; } }
+        for j in 0..nr { let bv = b[bo+j]; for i in 0..mr { acc[j*MR+i] = fma::<F>(a[ao+i], bv, acc[j*MR+i]); } }
     }
     for j in 0..nr { let col = (cj+j)*ldc+ci; for i in 0..mr { c[col+i] += alpha*acc[j*MR+i]; } }
 }
@@ -355,19 +369,19 @@ pub fn dtranspose(m: usize, n: usize, a: &[f64], b: &mut [f64]) -> Result<(), Li
 /// isn't serialized (enables ILP + SIMD). `#[inline(always)]` so the
 /// multiversion wrappers below recodegen it under AVX2 / AVX-512.
 #[inline(always)]
-fn dot4_impl(x: &[f64], y: &[f64], m: usize) -> f64 {
+fn dot4_impl<const F: bool>(x: &[f64], y: &[f64], m: usize) -> f64 {
     let mut acc = [0.0f64; 4];
     let main = m - (m % 4);
     let mut p = 0;
     while p < main {
-        acc[0] += x[p] * y[p];
-        acc[1] += x[p + 1] * y[p + 1];
-        acc[2] += x[p + 2] * y[p + 2];
-        acc[3] += x[p + 3] * y[p + 3];
+        acc[0] = fma::<F>(x[p], y[p], acc[0]);
+        acc[1] = fma::<F>(x[p + 1], y[p + 1], acc[1]);
+        acc[2] = fma::<F>(x[p + 2], y[p + 2], acc[2]);
+        acc[3] = fma::<F>(x[p + 3], y[p + 3], acc[3]);
         p += 4;
     }
     let mut dot = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-    while p < m { dot += x[p] * y[p]; p += 1; }
+    while p < m { dot = fma::<F>(x[p], y[p], dot); p += 1; }
     dot
 }
 
@@ -384,16 +398,16 @@ fn dot4(x: &[f64], y: &[f64], m: usize) -> f64 {
             SimdTier::Sse2 => {}
         }
     }
-    dot4_impl(x, y, m)
+    dot4_impl::<false>(x, y, m)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn dot4_avx2(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
+fn dot4_avx2(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl::<true>(x, y, m) }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-fn dot4_avx512(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl(x, y, m) }
+fn dot4_avx512(x: &[f64], y: &[f64], m: usize) -> f64 { dot4_impl::<true>(x, y, m) }
 
 /// Crossproduct: C = Aᵀ·A (n×n) with unrolled dot products. Oracle-gated
 /// multi-core: parallel over output columns (each is an independent set of
