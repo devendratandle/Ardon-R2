@@ -1212,8 +1212,7 @@ impl Engine {
                                             let mut out = vec![0.0f64; m.ncol];
                                             let ok = h.try_call_matvec(&m.data, m.nrow, m.ncol, &vv, &mut out);
                                             if ok {
-                                                let res: Vec<Option<f64>> = out.into_iter().map(Some).collect();
-                                                return Ok(RVal::Numeric(res.into(), Attrs::default()));
+                                                return Ok(RVal::Numeric(Reals::from_dense_f64(out), Attrs::default()));
                                             }
                                         }
                                     }

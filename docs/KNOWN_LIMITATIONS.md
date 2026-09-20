@@ -80,6 +80,23 @@ to be worse than documented and was fixed here rather than scheduled.
   (`prcomp` on ≳100 features) are slower than R's LAPACK D&C routines. This
   is a *speed* gap, not an accuracy one. v1.0.
 
+## Graphics
+
+Shipped: `plot`/`hist`/`boxplot`/`barplot`/`pairs`/`pie`/`matplot`,
+`lines`/`points`/`abline`/`rect`/`text`/`legend`/`title`/`axis`,
+`xlim`/`ylim`, the `cex.*`/`font.*`/`col.*`/`las`/`sub` chrome on every
+plot type, `rgb`/`hsv`/`adjustcolor`, SVG/PDF devices, the CLI browser
+viewer and the GUI window. Not yet:
+
+- `mtext()`; `image()`, `contour()`, `persp()`; `col2rgb()`.
+- Log-scale axes (`log = "x"/"y"/"xy"`), `xaxt`/`yaxt = "n"`, `tck`/`tcl`,
+  `mgp`.
+- R's default axis labels come from `deparse(substitute(x))`; R2's
+  builtins do not receive the unevaluated argument, so `plot(x, y)` labels
+  the axes `"x"`/`"y"` by convention rather than by deparsing the
+  expression passed.
+- Per-bar `col=` vectors on `boxplot`/`barplot` fill uniformly.
+
 ## Packages / extensibility
 
 - **Addon packages — script packages work (functions, types & methods);

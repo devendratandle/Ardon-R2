@@ -3,7 +3,6 @@
 #![allow(clippy::all)]
 use std::sync::Arc;
 use r2_types::*;
-use std::collections::HashMap;
 use crate::Engine;
 use crate::formula::fmt_expr;
 

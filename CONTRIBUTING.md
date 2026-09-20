@@ -175,7 +175,7 @@ test(r2-base): verify iris row 143 matches canonical R values
 
 Sorted roughly by current impact:
 
-1. **Apple Silicon testing and Cranelift NEON dispatch** — Phase G prep work
+1. **Apple Silicon testing and Cranelift NEON dispatch** — the JIT falls back to the interpreter on aarch64 today
 2. **Out-of-core training data** — `r2-train/src/tokens.rs` (memmap) and `r2-arrow/src/parquet_io.rs` both exist, but nothing in the training path uses them, so a corpus must fit in RAM. Wiring them up is self-contained and high value
 3. **Coverage of remaining R idioms** — S4 dispatch, R5 reference classes, more of the long tail of CRAN-style helpers
 4. **Documentation and examples** — every `pub fn` deserves a doc comment with a runnable snippet

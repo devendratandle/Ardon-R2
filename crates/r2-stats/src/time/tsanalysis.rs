@@ -2,7 +2,7 @@
 //! (aggregate.ts / apply.* / to.*) — Phase R.T.4 & R.T.5.
 
 use super::*;
-use r2_types::{RVal, Attrs, EvalArg, R2Err, ErrKind};
+use r2_types::{RVal, Attrs, EvalArg, R2Err, ErrKind, Reals};
 use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -101,11 +101,10 @@ pub fn bi_pacf(a: &[EvalArg]) -> Result<RVal, R2Err> {
         v[k] = v[k-1] * (1.0 - pkk.powi(2));
         pacf_vals.push(pkk);
     }
-    let pacf_opt: Vec<Option<f64>> = pacf_vals.into_iter().map(Some).collect();
-    let lags: Vec<Option<f64>> = (1..=lag_max).map(|k| Some(k as f64)).collect();
+    let lags: Vec<f64> = (1..=lag_max).map(|k| k as f64).collect();
     Ok(RVal::List(vec![
-        (Some(Arc::from("acf")),    RVal::Numeric(pacf_opt.into(), Attrs::default())),
-        (Some(Arc::from("lag")),    RVal::Numeric(lags.into(), Attrs::default())),
+        (Some(Arc::from("acf")),    RVal::Numeric(Reals::from_dense_f64(pacf_vals), Attrs::default())),
+        (Some(Arc::from("lag")),    RVal::Numeric(Reals::from_dense_f64(lags), Attrs::default())),
         (Some(Arc::from("n.used")), RVal::Numeric(vec![Some(n as f64)].into(), Attrs::default())),
         (Some(Arc::from("type")),   RVal::Character(vec![Some(Arc::from("partial"))], Attrs::default())),
     ]))
@@ -205,7 +204,7 @@ pub fn bi_decompose(a: &[EvalArg]) -> Result<RVal, R2Err> {
         (Some(Arc::from("seasonal")), to_ts(seasonal)),
         (Some(Arc::from("trend")),    to_ts(trend)),
         (Some(Arc::from("random")),   to_ts(random)),
-        (Some(Arc::from("figure")),   RVal::Numeric(figure.into_iter().map(Some).collect::<Vec<_>>().into(), Attrs::default())),
+        (Some(Arc::from("figure")),   RVal::Numeric(Reals::from_dense_f64(figure), Attrs::default())),
         (Some(Arc::from("type")),     RVal::Character(vec![Some(Arc::from(kind.as_str()))], Attrs::default())),
     ]))
 }

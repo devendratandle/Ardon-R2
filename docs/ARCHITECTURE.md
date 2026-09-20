@@ -73,21 +73,21 @@ locked unless this file is changed.
 | Frontend | Parser → AST | ✅ built | `crates/r2-parser/src/parser.rs` (333 LoC) |
 | Frontend | REPL | ✅ built | `crates/r2-repl/src/main.rs` |
 | Frontend | Type Inferencer | ✅ built | `crates/r2-types/src/infer.rs` (typed annotation pass) |
-| Frontend | Notebook UI | ✗ not started | (out of scope until Phase 4) |
+| Frontend | GUI / panels / machine protocol | ✅ built | `crates/r2-gui` (desktop console), `crates/r2-panel` (declarative button apps from a manifest), `r2 --json` / `r2 --serve` (NDJSON, HTTP eval server with the security model in `FRONTEND_IO_CONTRACT.md`) |
 | IR | Typed SSA | ✅ built | `crates/r2-ir/src/lib.rs` (SSA-with-phi) |
 | Oracle | Auto-scheduler | ✅ V1 built | `crates/r2-oracle/`. `dispatch(Op, Shape) → Backend{Serial\|Rayon}`, hardware-scaled thresholds. V2 adds GPU/Cloud tiers. |
 | JIT | Cranelift backend | ◐ numeric + iterative algorithms → native | `crates/r2-jit/`. Compiles counted loops, imperative indexed element loops (`x[i]`, `y[i]<-…`), whole-vector/-matrix reductions & maps, and the statistics primitive set to native **checked** code — fused, CSE'd, F64X2-SIMD; guards deopt to the interpreter, NA propagates. Capability detail in §5. |
 | Rayon | Work-stealing | ✅ Oracle-dispatched | Parallelism owned by `r2-kernel` (never imported in builtins). Parallel: the numeric reductions, the apply family (`lapply`/`sapply`/`apply`/`tapply`/`aggregate`) over a pure-builtin allowlist, and the ML builtins (`rf`/`gbm`/`kmeans`/`cv`) via `par_for`. Closures & non-pure builtins fall back to serial. |
-| GPU | Dispatcher | ✗ not started | — |
-| Cloud-RAM | Shards | ✗ not started | — |
-| FFI Hub | 200–500 syscalls | ✗ not started | — |
-| Memory | R2-ARROW columnar | ◐ storage + kernels shipped; default-storage migration queued | `crates/r2-arrow/`. `ColumnarF64` with null bitmap; dense fast-path reductions + zero-copy element-wise binary kernels (NA via validity bitmaps); `i32`/`i64`/`bool` dtypes; mmap-backed out-of-core columns. *Remaining:* make columnar the **default** `RVal::Numeric` storage — a large atomic refactor (the `Reals` wrapper is staged in `r2-types`) — plus parquet/Utf8. |
+| GPU | Dispatcher | ◐ foundation | `crates/r2-gpu/` (feature `gpu`): wgpu device/queue, buffer upload/download, f32 element-wise and matmul kernels, CPU-reference-checked. Kernel breadth and the training path on it are the next phase (§5). |
+| Mesh | Topology / collectives / sharding | ✅ reference built | `crates/r2-mesh/`: `DeviceId` topology with bandwidth tiers, the `Collective` trait with `ThreadCollective` (multi-worker in-process reference), `Shard` descriptors; `r2-train::distributed::sync_grads` proves data-parallel == single-device to 1e-4. Hardware transports (NCCL/RCCL/MPI) are bring-ups behind the same trait (§5). `docs/LLM_TRILLION_ARCHITECTURE.md`. |
+| FFI Hub | — | ✗ dropped by decision | Reach is protocols over processes (`r2 --json` / `--serve`), never an unsafe boundary (`FRONTEND_IO_CONTRACT.md` §4). No C, no `cdylib`, no `libloading` anywhere. |
+| Memory | R2-ARROW columnar | ✅ default storage | `crates/r2-arrow/` + `r2-types::Reals`/`Ints`/`Logicals`/`Singles`: columnar is the canonical form with the boxed `Vec<Option<_>>` view materialised on demand; null bitmaps authoritative; `i32`/`i64`/`bool`/`f32` dtypes; mmap-backed out-of-core columns; `read.parquet`. `crates/r2-memory/` tracks heap use for the Oracle. Remaining: `Utf8` columnar dtype, Arrow-IPC reader (§5). |
 | Microkernel ① | Math kernel | ✅ built | `crates/r2-linalg/` (1,278 LoC, BLAS L1-L3, decompositions) |
 | Microkernel ② | BLAS/LAPACK | ◐ partial | LU, Cholesky, QR, SVD, symmetric eigen (`dsyev`), non-symmetric eigen (`dgeev`), triangular solve (`backsolve`/`forwardsolve`), condition number (`rcond`/`kappa`) — done. Pivoting QR, Lanczos, complex type — todo |
 | Microkernel ③ | Reduction/Map/Binary/ParFor kernels | ✅ complete | `crates/r2-kernel/`. Four op families (reduce/map/binary + generic `par_for`), each Oracle-dispatched to a Serial or Rayon backend — lets domain crates use parallelism without importing Rayon. |
 | Microkernel ③' | Stats domain crate | ✅ complete | `crates/r2-stats/`. Math + builtin layers; the `register_builtins() -> Vec<(name, fn)>` pattern; engine `bi_*` are 1-line adapters. |
 | Microkernel ③'' | ML domain crate | ✅ complete | `crates/r2-ml/`. All 8 ML builtins (`rpart`/`rf`/`gbm`/`kmeans`/`cv`/`knn`/`naive.bayes`/`prcomp`); engine `bi_*` delegate; parallelism via `kernel::par_for`. |
-| Microkernel ④ | Tensor | ✗ stub | `Tensor` type exists in `r2-types`, no ops |
+| Microkernel ④ | Tensor / LLM stack | ✅ built | `crates/r2-tensor` (f32 ops, bf16/f16/Q8/Q4 dtypes, BPE tokenizer, safetensors, KV-cached inference), `r2-autograd` (reverse-mode tape, pooled buffers, fused attention), `r2-train` (Adam, sharded training, checkpoints; `llm.*` builtins). 1.5–1.66× PyTorch+MKL on CPU training, `benchmarks/llm/REPORT.md`. |
 
 ---
 
@@ -200,34 +200,65 @@ via `%*%`. GUI caches + pre-warms the SVG font DB (fast first plot).
 (out-of-core scalar map), streaming `sd`/`var`/`prod`/`range`/`length`
 wired into the `bi_*` mmap interception. Surfaced as `mmap.map`.
 
-### Additional dtypes & on-disk formats (partial)
+### Not yet built — the one list
 
-Shipped: `i64` columnar dtype; **`read.parquet`** (pure-Rust parquet/arrow
-crates, row-group streaming). Pending: `Utf8` columnar dtype (native
-string columns) and an Arrow-IPC / Feather zero-copy reader.
+Everything below is unbuilt. There is no other plan document: when an
+item ships it moves up into "Current state" in the same change, and an
+item nobody intends to build is deleted, not kept.
 
-### Out-of-core compute ← NEXT
+**LLM training on the GPU (next phase).** `r2-gpu` has the device, the
+buffers and two kernels. Needed: the `sgemm` cases (NN/NT/TN), attention
+forward/backward, the element-wise tail (rmsnorm/silu/rope/softmax_ce)
+and Adam as wgpu kernels, CPU-reference-checked; Oracle V2 routing the
+tape's ops to them below the kernel layer so `Trainer` does not change;
+the same interleaved-pairs comparison against PyTorch on a GPU.
 
-Make "assign big data → stat/ML → result" real end-to-end, with bounded RAM:
+**LLM capability around the trainer.** A GGUF reader (mmap the tensor
+table; `safetensors` exists), LoRA adapters over frozen projections (the
+one-machine fine-tune path), and the R2-script NN tier: expose the
+tensor/autograd primitives as builtins and write layers, losses and
+optimizers as script recipes (`LLM_TRILLION_ARCHITECTURE.md`).
 
-- **A1 (shipped):** `mmap.csv` — stream a CSV to per-column packed-f64
-  sidecars, return a named list of `mmap.col` handles → a >RAM CSV is
-  analyzable with the existing out-of-core reductions.
-- **A2:** out-of-core `lm` / `cov` via **streaming normal equations**
-  (accumulate XᵀX + Xᵀy in one pass — reuses the parallel `crossprod` —
-  then solve the small p×p system).
-- **A3:** `quantile` / `median` (external sort / t-digest) + element-wise
-  and filter/subset over mmap columns.
+**Mesh at hardware scale.** `NcclCollective` / `RcclCollective` /
+`MpiCollective` behind the `Collective` trait; a 1F1B pipeline-parallel
+scheduler; elastic fault tolerance (node death mid-run); distributed
+checkpointing. Each is a bring-up against the proven reference, not a
+redesign.
 
-### Phase G — GPU dispatcher (wgpu), FFI hub, cloud RAM
+**CPU training, remaining named items** (`benchmarks/llm/REPORT.md` §5):
+the dim-256 GEMM shapes with M or N = 256 (~0.7× MKL, 2% of a step); the
+bandwidth tail (rmsnorm/mul/add/RoPE moving bytes twice); `level3::dgemm`
+getting `sgemm`'s structure (blocking, packing, the two partitions) so
+`%*%` and blocked LAPACK lift with it.
 
-Oracle V2 adds GPU / Cloud backends *below* the kernel layer; builtins
-stay unchanged. Best tackled once the CPU out-of-core/compute path above
-is complete.
+**Out-of-core compute.** `mmap.csv` (A1) shipped. A2: out-of-core `lm` /
+`cov` by streaming normal equations (XᵀX + Xᵀy in one pass through the
+parallel `crossprod`, then the small p×p solve). A3: `quantile` /
+`median` (external sort or t-digest), element-wise and filter/subset over
+mmap columns. Parquet is read but not yet wired into the training path.
 
-### Phase H — Accelerator hub (post-v0.5.0)
+**Storage.** `Utf8` columnar dtype (native string columns); an
+Arrow-IPC / Feather zero-copy reader.
 
-Pluggable accelerators behind the kernel/Oracle boundary.
+**Linear algebra.** Pivoting QR, Lanczos, a complex type.
+
+**JIT.** Counted-loop lowering for `for (v in a:b)` bodies so they JIT
+instead of falling back (`r2-ir` has no `Expr::For` arm; the
+`body_is_jit_lowerable` gate keeps them correct today).
+
+**Machine interface breadth** (`r2 --serve`): model registry save/load, a
+dataset catalog, an OpenAPI-style protocol document with client snippets,
+a fuzzed parser, load tests.
+
+**Graphics** — the gaps are user-facing and listed in
+`KNOWN_LIMITATIONS.md` (Graphics).
+
+**Designs awaiting a build-or-drop decision** (ratified, unbuilt, kept
+as design records until decided): the `db.*` datastore with nodal sync
+(`DATASTORE_DESIGN.md`), the `app.*` script-built app framework
+(`APP_FRAMEWORK_DESIGN.md`), and the two standalone MIT-licensed Rust
+libraries carved from R2's kernels (`rustR2_ai_library.md`,
+`rustR2_stats_library.md`).
 
 ### JIT compiler — capabilities available now
 
@@ -334,8 +365,11 @@ SAME shared SIMD waves — including loops nested inside J.4 iterative
 kernels and loops mixing whole-vector reductions (`mean(x)`). Guards:
 `1:length(v)` iterator (or alias), single additive accumulation, index
 used only as `vec[i]`, no accumulator recurrence; anything else falls
-back to the interpreter. See docs/MODULARITY_AUDIT.md for the
-one-formula-one-implementation audit.
+back to the interpreter. One formula, one implementation: the
+centring/SS/correlation primitives are shared by `var`/`sd`/`cov`/`cor`/
+`cor.test`/`density`/`lm` (all two-pass), and user helpers are inlined and
+CSE'd into the same waves, so an addon author writes clear formulas, not
+hand-optimised ones; `explain(f)` reports what the engine did.
 
 ### Differential-vs-R correctness harness — available now
 
@@ -396,8 +430,8 @@ These are tempting but explicitly **not** part of the architecture push:
 
 - Rich rpart summary (CP table, surrogate splits) — deferred indefinitely.
 - True categorical splits in tree models — deferred.
-- Notebook frontend — deferred to Phase 4+.
-- Distributed cluster execution — V3.0, do not design now.
+- Notebook frontend — not planned; the GUI, panels and the machine protocol are the faces.
+- Distributed cluster execution — the mesh interfaces exist (`r2-mesh`); the hardware transports are in the §5 list, the datacenter run is not on any schedule.
 - Replacing the parser — it works, leave it.
 
 ---

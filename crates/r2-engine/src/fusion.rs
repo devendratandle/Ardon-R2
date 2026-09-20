@@ -3,7 +3,6 @@
 #![allow(clippy::all)]
 use r2_types::*;
 use crate::Engine;
-use crate::err;
 
 impl Engine {
     pub(crate) fn try_fuse_scalar_chain(

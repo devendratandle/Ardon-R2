@@ -1,7 +1,7 @@
 //! `xts` irregular time series — Phase R.T.3.
 
 use super::*;
-use r2_types::{RVal, Attrs, EvalArg, R2Err, ErrKind};
+use r2_types::{RVal, Attrs, EvalArg, R2Err, ErrKind, Reals};
 use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -27,8 +27,7 @@ pub fn xts_attrs(nrow: usize, ncol: usize, index: Vec<f64>, index_class: &str, c
     let mut a = Attrs::default();
     a.class = Some(Arc::from("xts"));
     a.dim = Some(vec![nrow, ncol]);
-    a.custom.insert(Arc::from("index"), RVal::Numeric(
-        index.into_iter().map(Some).collect::<Vec<_>>().into(), Attrs::default()));
+    a.custom.insert(Arc::from("index"), RVal::Numeric(Reals::from_dense_f64(index), Attrs::default()));
     a.custom.insert(Arc::from("index.class"), RVal::Character(
         vec![Some(Arc::from(index_class))], Attrs::default()));
     if let Some(cn) = col_names {
@@ -133,7 +132,7 @@ pub fn bi_index(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let (_, _, _, idx, cls, _) = get_xts(v)?;
     let mut attrs = Attrs::default();
     attrs.class = Some(Arc::from(cls.as_str()));
-    Ok(RVal::Numeric(idx.into_iter().map(Some).collect::<Vec<_>>().into(), attrs))
+    Ok(RVal::Numeric(Reals::from_dense_f64(idx), attrs))
 }
 
 /// `coredata(x)` — returns the data without the index, as a plain matrix.
