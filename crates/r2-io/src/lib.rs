@@ -263,6 +263,88 @@ pub fn make_names(names: &[String], unique: bool) -> Vec<String> {
     out
 }
 
+/// Read a text file the way R on Windows does: whatever bytes are there
+/// become text, never an error about them.
+///
+/// `read.csv` failed on an Excel export with "stream did not contain
+/// valid UTF-8" — Excel writes CSV in the Windows code page (cp1252),
+/// where `é` is one byte, and `std::fs::read_to_string` refuses anything
+/// that is not UTF-8. R has no such refusal: it reads the native
+/// encoding and lets `fileEncoding=` override. So:
+///
+/// - a UTF-8 BOM is stripped; a UTF-16 BOM (either order) selects UTF-16;
+/// - `encoding` (from `fileEncoding=` / `encoding=`) forces `UTF-8`,
+///   `latin1` / `ISO-8859-1`, `windows-1252` / `cp1252`, `UTF-16` /
+///   `UTF-16LE` / `UTF-16BE`, case-insensitively;
+/// - otherwise the bytes are taken as UTF-8 if they are valid, else as
+///   cp1252 — the encoding a non-UTF-8 CSV on a Windows machine almost
+///   always is, and a superset of Latin-1 for the bytes that matter.
+///
+/// Decoding is total: no byte sequence produces an error, only text.
+pub fn read_text_file(path: &str, encoding: Option<&str>) -> Result<String, R2Err> {
+    let bytes = std::fs::read(path).map_err(|e| R2Err {
+        msg: format!("cannot read '{}': {}", path, e),
+        kind: ErrKind::Runtime,
+    })?;
+    Ok(decode_text(&bytes, encoding))
+}
+
+/// The decoding half of [`read_text_file`], on bytes already in hand.
+pub fn decode_text(bytes: &[u8], encoding: Option<&str>) -> String {
+    let enc = encoding.map(|e| e.trim().to_ascii_lowercase().replace('_', "-"));
+    let enc = enc.as_deref().filter(|e| !e.is_empty() && *e != "unknown" && *e != "native.enc");
+    // BOMs decide before anything else.
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) { return utf16(&bytes[2..], true); }
+    if bytes.starts_with(&[0xFE, 0xFF]) { return utf16(&bytes[2..], false); }
+    match enc {
+        Some("utf-8") | Some("utf8") => String::from_utf8_lossy(bytes).into_owned(),
+        Some("latin1") | Some("latin-1") | Some("iso-8859-1") | Some("iso8859-1") =>
+            bytes.iter().map(|&b| b as char).collect(),
+        Some("windows-1252") | Some("cp1252") | Some("windows1252") => cp1252(bytes),
+        Some("utf-16") | Some("utf16") | Some("utf-16le") | Some("utf16le") => utf16(bytes, true),
+        Some("utf-16be") | Some("utf16be") => utf16(bytes, false),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_owned(),
+            Err(_) => cp1252(bytes),
+        },
+    }
+}
+
+/// Windows-1252: Latin-1 plus the printable characters Microsoft put in
+/// 0x80..0x9F (curly quotes, the euro sign, dashes). The five undefined
+/// bytes there map to the C1 controls, as Latin-1 would.
+fn cp1252(bytes: &[u8]) -> String {
+    const HIGH: [u16; 32] = [
+        0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+        0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+        0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+        0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+    ];
+    bytes.iter().map(|&b| match b {
+        0x80..=0x9F => char::from_u32(HIGH[(b - 0x80) as usize] as u32).unwrap_or('\u{FFFD}'),
+        _ => b as char,
+    }).collect()
+}
+
+fn utf16(bytes: &[u8], little_endian: bool) -> String {
+    let units: Vec<u16> = bytes.chunks(2).map(|c| {
+        let (a, b) = (c[0] as u16, *c.get(1).unwrap_or(&0) as u16);
+        if little_endian { a | (b << 8) } else { (a << 8) | b }
+    }).collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// The `fileEncoding=` / `encoding=` argument, if given.
+pub fn encoding_arg(a: &[EvalArg]) -> Option<String> {
+    gn(a, "fileEncoding").or_else(|| gn(a, "encoding")).and_then(|v| match v {
+        RVal::Character(s, _) => s.first().cloned().flatten().map(|s| s.to_string()),
+        _ => None,
+    })
+}
+
 /// The `check.names=` argument: R's default is TRUE.
 pub fn check_names_arg(a: &[EvalArg]) -> bool {
     gn(a, "check.names")
@@ -270,11 +352,9 @@ pub fn check_names_arg(a: &[EvalArg]) -> bool {
         .unwrap_or(true)
 }
 
-fn read_delimited(path: &str, sep: &str, header: bool, check_names: bool) -> Result<RVal, R2Err> {
-    let content = std::fs::read_to_string(path).map_err(|e| R2Err {
-        msg: format!("cannot read '{}': {}", path, e),
-        kind: ErrKind::Runtime,
-    })?;
+fn read_delimited(path: &str, sep: &str, header: bool, check_names: bool,
+                  encoding: Option<&str>) -> Result<RVal, R2Err> {
+    let content = read_text_file(path, encoding)?;
     let mut rows = parse_csv(&content, sep);
     let col_names: Vec<String> = if header && !rows.is_empty() {
         let raw = rows.remove(0);
@@ -318,14 +398,14 @@ fn sep_arg(a: &[EvalArg], default: &str) -> String {
 pub fn bi_read_csv(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let path = require_path(&gv(a, 0), "read.csv")?;
     let header = header_arg(a);
-    read_delimited(&path, ",", header, check_names_arg(a))
+    read_delimited(&path, ",", header, check_names_arg(a), encoding_arg(a).as_deref())
 }
 
 pub fn bi_read_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let path = require_path(&gv(a, 0), "read.table")?;
     let header = header_arg(a);
     let sep = sep_arg(a, "\t");
-    read_delimited(&path, &sep, header, check_names_arg(a))
+    read_delimited(&path, &sep, header, check_names_arg(a), encoding_arg(a).as_deref())
 }
 
 pub fn bi_read_delim(a: &[EvalArg]) -> Result<RVal, R2Err> {
@@ -450,6 +530,24 @@ pub fn register_builtins() -> Vec<(&'static str, fn(&[EvalArg]) -> Result<RVal, 
 
 #[cfg(test)]
 mod tests {
+    /// A CSV as Excel writes it on Windows — cp1252, `é` as one byte,
+    /// a euro sign at 0x80 — must read as text, not fail as "not UTF-8".
+    /// BOMs are stripped, UTF-16 is recognised by its BOM, and an
+    /// explicit `fileEncoding=` wins over the guess.
+    #[test]
+    fn text_files_in_any_encoding_read_as_text() {
+        use super::decode_text;
+        let cp = b"name,price\nCaf\xe9,\x8012\n";
+        assert_eq!(decode_text(cp, None), "name,price\nCafé,€12\n");
+        assert_eq!(decode_text(cp, Some("latin1")), "name,price\nCafé,\u{80}12\n");
+        assert_eq!(decode_text("Café".as_bytes(), None), "Café");
+        assert_eq!(decode_text(b"\xEF\xBB\xBFa,b", None), "a,b");
+        let mut u16le = vec![0xFF, 0xFE];
+        for u in "x,é".encode_utf16() { u16le.extend_from_slice(&u.to_le_bytes()); }
+        assert_eq!(decode_text(&u16le, None), "x,é");
+        assert_eq!(decode_text(b"Caf\xe9", Some("UTF-8")), "Caf\u{FFFD}");
+    }
+
     use super::*;
     use std::io::Write;
 

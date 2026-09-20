@@ -11,6 +11,8 @@ path = "src/main.rs"
 r2-types = { path = "../r2-types" }
 r2-parser = { path = "../r2-parser" }
 r2-engine = { path = "../r2-engine" }
+# r2-io: read_text_file — scripts in any encoding Excel or Notepad writes.
+r2-io = { path = "../r2-io" }
 # Shared frontend console logic — the single auto-print rule
 # (should_autoprint) + is_silent live here so CLI and GUI behave identically.
 r2-console = { path = "../r2-console" }

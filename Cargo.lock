@@ -3138,6 +3138,7 @@ dependencies = [
  "r2-console",
  "r2-engine",
  "r2-graphics",
+ "r2-io",
  "r2-parser",
  "r2-types",
  "winresource",

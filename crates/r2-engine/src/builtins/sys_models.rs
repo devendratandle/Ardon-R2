@@ -24,7 +24,7 @@ use crate::err;
 
 pub(crate) fn bi_source(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let path = match &gv(a,0) { RVal::Character(v,_) => v[0].as_ref().map(|s| s.to_string()).ok_or(R2Err{msg:"NA path".into(),kind:ErrKind::Runtime})?, _ => return err!(Runtime, "source() needs file path") };
-    let content = std::fs::read_to_string(&path).map_err(|e| R2Err{msg:format!("cannot read '{}': {}", path, e),kind:ErrKind::Runtime})?;
+    let content = r2_io::read_text_file(&path, r2_io::encoding_arg(a).as_deref())?;
     let stmts = r2_parser::Parser::parse(&content).map_err(|pe| R2Err{msg:format!("parse error in '{}': {}", path, pe),kind:ErrKind::Runtime})?;
     let mut last = RVal::Null;
     for stmt in &stmts {

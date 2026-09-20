@@ -137,9 +137,9 @@ fn json_main() -> i32 {
 }
 
 fn run_script(path: &str) -> i32 {
-    let source = match std::fs::read_to_string(path) {
+    let source = match r2_io::read_text_file(path, None) {
         Ok(s) => s,
-        Err(e) => { eprintln!("r2: cannot read {}: {}", path, e); return 1; }
+        Err(e) => { eprintln!("r2: {}", e.msg); return 1; }
     };
     let exprs = match Parser::parse(&source) {
         Ok(e) => e,

@@ -731,8 +731,8 @@ pub(crate) fn bi_substring(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 }
 pub(crate) fn bi_read_lines(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let path = val_to_str(&gv(a,0));
-    let content = std::fs::read_to_string(&path)
-        .map_err(|err| R2Err { msg: format!("readLines: cannot open '{}': {}", path, err), kind: ErrKind::Runtime })?;
+    let content = r2_io::read_text_file(&path, r2_io::encoding_arg(a).as_deref())
+        .map_err(|err| R2Err { msg: format!("readLines: {}", err.msg), kind: ErrKind::Runtime })?;
     let mut lines: Vec<Option<Arc<str>>> = content.lines().map(|l| Some(Arc::from(l))).collect();
     if let Some(n) = e.scalar_f64(&gv(a,1)).ok().flatten() {
         if n >= 0.0 { lines.truncate(n as usize); }

@@ -811,7 +811,7 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
     let sep = gn(a,"sep").and_then(|v| match v { RVal::Character(s,_) => s[0].as_ref().map(|s| s.to_string()), _ => None }).unwrap_or(",".into());
     let na_strings = vec!["NA", "na", "N/A", "n/a", "", ".", "NULL", "null", "None", "none"];
 
-    let content = std::fs::read_to_string(&path).map_err(|e| R2Err{msg:format!("cannot read '{}': {}", path, e),kind:ErrKind::Runtime})?;
+    let content = r2_io::read_text_file(&path, r2_io::encoding_arg(a).as_deref())?;
     let mut lines = content.lines();
 
     // Parse header
