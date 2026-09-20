@@ -148,6 +148,13 @@ impl ConsoleBuffer {
         !self.continuation.is_empty()
     }
 
+    /// Esc: drop a half-typed multi-line expression and return to a
+    /// fresh `R2>` — what R does on Esc. Nothing is evaluated.
+    pub fn cancel_continuation(&mut self) {
+        self.continuation.clear();
+        self.history_cursor = None;
+    }
+
     // ── Submission ────────────────────────────────────────────────────
 
     /// User pressed Enter with `line` as their typed text. Returns
@@ -492,6 +499,22 @@ mod tests {
         }
         assert!(!b.in_continuation());
         assert_eq!(b.current_prompt(), "R2>");
+    }
+
+    /// Esc drops a half-typed expression without evaluating any of it,
+    /// and the next complete line runs on its own.
+    #[test]
+    fn escape_cancels_continuation_without_evaluating() {
+        let mut b = ConsoleBuffer::new();
+        b.submit_line("x <- c(1,".into());
+        assert!(b.in_continuation());
+        b.cancel_continuation();
+        assert!(!b.in_continuation());
+        assert_eq!(b.current_prompt(), "R2>");
+        match b.submit_line("y <- 2".into()) {
+            SubmitAction::Submit(src) => assert_eq!(src, "y <- 2"),
+            _ => panic!("a complete line after Esc must submit on its own"),
+        }
     }
 
     #[test]

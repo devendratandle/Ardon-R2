@@ -99,10 +99,84 @@ pub(crate) fn take_engine_svg() -> Option<String> {
     if svg.is_empty() { None } else { Some(svg) }
 }
 
+// ── Esc while the engine is busy ───────────────────────────────────────
+//
+// The GUI evaluates on its UI thread, so while a computation runs no key
+// event can reach it — the window is frozen until `eval` returns. R's
+// Esc-to-interrupt still has to work, so a poller thread asks the OS
+// directly whether Esc is down in OUR window (the same idea as the CLI's
+// `EscPoller`, which polls the console). When it is, it raises the
+// engine's global INTERRUPT flag; the eval loop observes that at its next
+// expression boundary and unwinds with `ErrKind::Interrupt`. The poller
+// stops itself when the evaluation ends.
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(vkey: i32) -> i16;
+    fn GetForegroundWindow() -> *mut core::ffi::c_void;
+    fn GetWindowThreadProcessId(hwnd: *mut core::ffi::c_void, pid: *mut u32) -> u32;
+}
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcessId() -> u32;
+}
+
+/// Is Esc held down while one of this process's windows is in front?
+/// The foreground test keeps an Esc pressed in some other program from
+/// interrupting an R2 computation.
+#[cfg(windows)]
+fn esc_down_in_our_window() -> bool {
+    const VK_ESCAPE: i32 = 0x1B;
+    // SAFETY: plain Win32 queries with no pointers into our memory except
+    // `pid`, which lives for the call.
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+        pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_ESCAPE) as u16 & 0x8000) != 0
+    }
+}
+#[cfg(not(windows))]
+fn esc_down_in_our_window() -> bool { false }
+
+struct EscPoller {
+    active: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EscPoller {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let active = Arc::new(AtomicBool::new(true));
+        let flag = active.clone();
+        let handle = std::thread::Builder::new()
+            .name("r2gui-esc-poll".into())
+            .spawn(move || {
+                while flag.load(Ordering::Relaxed) {
+                    if esc_down_in_our_window() {
+                        r2_types::request_interrupt();
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+            .ok();
+        EscPoller { active, handle }
+    }
+
+    fn stop(mut self) {
+        self.active.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() { let _ = h.join(); }
+    }
+}
+
 /// Drive one user-submitted source string through the engine — parse
 /// each top-level statement, evaluate it, apply R's auto-print rule
 /// (silent for assignments / control flow / side-effect calls), short-
-/// circuit on q() / quit() by setting `quit_requested`.
+/// circuit on q() / quit() by setting `quit_requested`. Esc interrupts
+/// (see `EscPoller`): the running statement unwinds, the rest of the
+/// submission is dropped, and the console says so.
 pub(crate) fn run_source(
     src: &str,
     engine: &mut Engine,
@@ -116,10 +190,13 @@ pub(crate) fn run_source(
             return;
         }
     };
+    // An Esc pressed at the prompt must not interrupt the next command.
+    r2_types::clear_interrupt();
+    let poller = EscPoller::start();
     for stmt in stmts {
         if r2_console::is_quit_call(&stmt) {
             *quit_requested.borrow_mut() = true;
-            return;
+            break;
         }
         match engine.eval(&stmt) {
             Ok(val) => {
@@ -129,6 +206,12 @@ pub(crate) fn run_source(
                     buffer.lock().unwrap().push_output(&format!("{}", val));
                 }
             }
+            Err(err) if matches!(err.kind, r2_types::ErrKind::Interrupt) => {
+                // Bindings made before the interrupt stay, as in R.
+                buffer.lock().unwrap().push_error("interrupted — returning to prompt");
+                r2_types::clear_interrupt();
+                break;
+            }
             Err(err) => {
                 // Display formatting — the SAME text the CLI prints. Debug
                 // ({:?}) leaked `R2Err { msg: ..., kind: ... }` to users.
@@ -136,6 +219,7 @@ pub(crate) fn run_source(
             }
         }
     }
+    poller.stop();
     // Homogeneity with the CLI: accumulated warnings surface after the
     // submission, on the error stream (the CLI prints them to stderr).
     // Without this the GUI silently swallowed every warning() / NaN note.

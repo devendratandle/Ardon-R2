@@ -543,6 +543,9 @@ fn read_line_with_history(prompt: &str, history: &[String]) -> Option<String> {
         match ch {
             13 | 10 => { println!(); return Some(line); }        // Enter (CR or LF)
             3 => { println!("^C"); return Some(String::new()); } // Ctrl+C
+            // Esc: abandon the line, and — as a blank submission — any
+            // pending `+` continuation, back to a fresh prompt (R's Esc).
+            27 => { println!(); return Some(String::new()); }
             4 if line.is_empty() => { println!(); return None; } // Ctrl+D
             8 | 127 => {                                        // Backspace
                 if cursor > 0 {

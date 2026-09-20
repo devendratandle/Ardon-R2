@@ -729,6 +729,11 @@ fn main() -> Result<(), String> {
                             // matching graphics window.
                         }
                     }
+                    if resp.escaped {
+                        // Esc at the prompt: the field already cleared its
+                        // line; a pending `+` continuation goes with it.
+                        buffer.lock().unwrap().cancel_continuation();
+                    }
                     if resp.history_up {
                         if let Some(s) = buffer.lock().unwrap().history_up()   { input_mut.set_line(s); }
                     }

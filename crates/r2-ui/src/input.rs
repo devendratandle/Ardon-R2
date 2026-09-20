@@ -65,6 +65,7 @@ impl InputField {
         let mut submitted: Option<String> = None;
         let mut history_up   = false;
         let mut history_down = false;
+        let mut escaped = false;
         let mut auto_submit_lines: Vec<String> = Vec::new();
 
         for ev in events {
@@ -116,6 +117,12 @@ impl InputField {
                     KeyCode::End  => self.cursor = self.current.len(),
                     KeyCode::Up   => history_up   = true,
                     KeyCode::Down => history_down = true,
+                    // Esc — R's "abandon what I was typing": the line goes,
+                    // and the host drops any pending continuation too.
+                    KeyCode::Escape => {
+                        self.clear();
+                        escaped = true;
+                    }
                     KeyCode::KeyV if mods.ctrl => {
                         if let Some(s) = clipboard.get_text() {
                             let s = s.replace('\r', "");
@@ -163,6 +170,7 @@ impl InputField {
             submitted,
             history_up,
             history_down,
+            escaped,
             auto_submit_lines,
         }
     }
@@ -222,6 +230,9 @@ pub struct InputFieldResponse {
     pub history_up: bool,
     /// User pressed Down — `buffer.history_down()` + `set_line`.
     pub history_down: bool,
+    /// User pressed Esc — the line was cleared here; the host should
+    /// also cancel any continuation the console buffer is holding.
+    pub escaped: bool,
     /// Lines that arrived from a MULTI-LINE clipboard paste, in order.
     /// The host should feed each one to `ConsoleBuffer::submit_line`
     /// (and dispatch the resulting `SubmitAction`) before processing

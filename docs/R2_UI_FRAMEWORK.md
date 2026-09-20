@@ -403,6 +403,8 @@ one needs a doc revision.
 | Tab | (reserved for future completion) |
 | Ctrl+C (when transcript focused) | Copy selection |
 | Ctrl+C (when input focused) | Cancel current input (R-style — clear input, fresh prompt) |
+| Esc (at the prompt) | Abandon the line and any pending `+` continuation, fresh prompt — nothing is evaluated |
+| Esc (while a command runs) | Interrupt it, as in R: the statement unwinds at its next expression boundary, the rest of the submission is dropped, bindings made before the interrupt stay, and the console prints "interrupted — returning to prompt". The window is busy during evaluation, so this is read straight from the OS (`GetAsyncKeyState`, only while an R2 window is in front); the CLI polls the console the same way |
 | Ctrl+L | Clear transcript |
 | Ctrl+A (when transcript focused) | Select all transcript |
 | Ctrl+A (when input focused) | Select all input |

@@ -228,12 +228,25 @@ unsafe fn exp_shift_sum_avx2(x: &[f32], m: f32, out: &mut [f32]) -> f32 {
     let mut sum = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
         + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
     while i < n {
-        let e = (x[i] - m).exp();
+        let e = exp_flush(x[i] - m);
         out[i] = e;
         sum += e;
         i += 1;
     }
     sum
+}
+
+/// Scalar `exp` with the vector kernel's contract: results below the
+/// normal range flush to zero instead of going subnormal. The AVX2 `exp8`
+/// does this by construction (its `2^n` assembly cannot represent them);
+/// the scalar fallback and the 8-wide loops' tails must agree with it,
+/// or a row's answer would depend on which lane computed it — and on
+/// aarch64, where only this path runs, the kernel test failed on exactly
+/// that.
+#[inline]
+fn exp_flush(x: f32) -> f32 {
+    let e = x.exp();
+    if e < f32::MIN_POSITIVE { 0.0 } else { e }
 }
 
 /// `out[j] = exp(x[j] - m)`, returning the sum. Dispatches to AVX2.
@@ -246,7 +259,7 @@ pub fn exp_shift_sum(x: &[f32], m: f32, out: &mut [f32]) -> f32 {
         return unsafe { exp_shift_sum_avx2(x, m, out) };
     }
     let mut sum = 0.0f32;
-    for (o, &v) in out.iter_mut().zip(x) { let e = (v - m).exp(); *o = e; sum += e; }
+    for (o, &v) in out.iter_mut().zip(x) { let e = exp_flush(v - m); *o = e; sum += e; }
     sum
 }
 
@@ -269,7 +282,7 @@ unsafe fn exp_shift_sum_only_avx2(x: &[f32], m: f32) -> f32 {
     _mm256_storeu_ps(lanes.as_mut_ptr(), acc);
     let mut sum = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
         + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
-    while i < n { sum += (x[i] - m).exp(); i += 1; }
+    while i < n { sum += exp_flush(x[i] - m); i += 1; }
     sum
 }
 
@@ -281,7 +294,7 @@ pub fn exp_shift_sum_only(x: &[f32], m: f32) -> f32 {
         return unsafe { exp_shift_sum_only_avx2(x, m) };
     }
     let mut sum = 0.0f32;
-    for &v in x { sum += (v - m).exp(); }
+    for &v in x { sum += exp_flush(v - m); }
     sum
 }
 
@@ -435,7 +448,7 @@ unsafe fn softmax_ce_grad_avx2(x: &[f32], lse: f32, t: usize, inv: f32, gout: &m
         i += 8;
     }
     while i < n {
-        let d = inv * (x[i] - lse).exp();
+        let d = inv * exp_flush(x[i] - lse);
         if accumulate { gout[i] += d; } else { gout[i] = d; }
         i += 1;
     }
@@ -460,7 +473,7 @@ pub fn softmax_ce_grad_acc(x: &[f32], lse: f32, t: usize, inv: f32, gout: &mut [
         return;
     }
     for (j, (go, &v)) in gout.iter_mut().zip(x).enumerate() {
-        let d = inv * ((v - lse).exp() - if j == t { 1.0 } else { 0.0 });
+        let d = inv * (exp_flush(v - lse) - if j == t { 1.0 } else { 0.0 });
         if accumulate { *go += d; } else { *go = d; }
     }
 }

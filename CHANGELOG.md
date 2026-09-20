@@ -8,6 +8,23 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## Unreleased
 
+- **Esc works like R's, in the GUI and the CLI.** At the prompt it
+  abandons the line and any pending `+` continuation without evaluating
+  anything; while a command runs it interrupts it — the statement
+  unwinds, the rest of the submission is dropped, bindings made before
+  the interrupt stay, and the console prints "interrupted — returning to
+  prompt". The GUI is busy during evaluation, so Esc is read straight
+  from the OS and only while an R2 window is in front.
+- **`read.csv` reads the files Excel writes.** A CSV in the Windows code
+  page (cp1252 — an accented letter as one byte) failed with "stream did
+  not contain valid UTF-8". `read.csv`, `read.table`/`read.delim`,
+  `readLines`, `source` and `r2 script.r2` now strip BOMs, recognise
+  UTF-16, honour `fileEncoding=`, and take non-UTF-8 bytes as cp1252
+  when unasked, as R on Windows does. No byte sequence is an error.
+- **Fixed: the vectorised `exp` test failed on Apple Silicon** (the
+  macOS CI job). The scalar `exp` fallback — the only path on aarch64 —
+  produced subnormals where the AVX2 kernel flushes to zero; the two
+  paths and the 8-wide loops' tails now agree.
 - **Attention no longer slows down as the sequence gets longer or the
   batch gets smaller.** At dim 768 / seq 256 / batch 8 the medium model
   trained at parity with PyTorch (1.05x) while the small one led by
