@@ -4,8 +4,8 @@
 //! profiled inside its steps). Op-level timings with hot operands do not
 //! predict a step — the pack-free experiment ran 0.7x in isolation and
 //! +9..22% worse in training — so both sides are compared here, in situ.
-//! `R2_GEMM_STATS=1` makes `sgemm` record every parallel call under
-//! 0.5 GFLOP; this prints percentiles per shape and the step total.
+//! `R2_GEMM_STATS=1` makes `sgemm` record every parallel call;
+//! this prints percentiles per shape and the step total.
 //! Takes the same shape knobs as `tinystories_train`.
 //!
 //!     R2_GEMM_STATS=1 cargo run --release -p r2-train --example gemm_insitu

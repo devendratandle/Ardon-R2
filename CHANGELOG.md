@@ -6,6 +6,30 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
+## Unreleased
+
+- **Attention no longer slows down as the sequence gets longer or the
+  batch gets smaller.** At dim 768 / seq 256 / batch 8 the medium model
+  trained at parity with PyTorch (1.05x) while the small one led by
+  1.38x; a full in-situ census of both sides found the whole gap in one
+  kernel, attention backward (286 ms a step vs SDPA's 78). Two causes:
+  the work was split across cores by sequence, so a batch of 8 on 6 cores
+  ran at 67% utilisation and a batch of 1 ran serial; and the gradient
+  accumulation read-modify-wrote three rows per (query, key) pair. Work
+  units are now (sequence, head), and the accumulations are register
+  blocked. On the way: the "AVX2+FMA" kernels had been emitting no FMA
+  instructions at all (Rust never contracts `a*b + c`; they use
+  `mul_add` now). Attention backward 286 -> 89 ms in situ, forward
+  66 -> 34; medium model **1.15-1.27x faster than PyTorch** (48.3/43.4 vs
+  55.5/55.2 s), small model **1.49-1.50x** at 100 steps. Held-out loss
+  unchanged to four decimals on every pair. `benchmarks/llm/REPORT.md`.
+- **In-situ censuses for any model size.** `R2_TAPE_STATS=1` now times
+  the forward too (between tape pushes), `--example phase_split` prints
+  GEMM vs non-GEMM milliseconds inside each phase, and
+  `benchmarks/llm/op_profile.py` gives PyTorch's per-op self time forward
+  and backward separately — the like-for-like table that found the
+  attention deficit.
+
 ## v0.4.0 (September 2026)
 
 **Train a real model and compare it, in two commands.** `cargo run

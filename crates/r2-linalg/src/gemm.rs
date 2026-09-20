@@ -112,7 +112,7 @@ const PACK_PAR_MIN: usize = 1 << 13;
 
 /// Per-call timing of the small GEMMs inside a real step, for
 /// `--example gemm_insitu`. Off unless `R2_GEMM_STATS=1`; then every
-/// parallel call under 0.5 GFLOP records (shape key, microseconds). This
+/// parallel call records (shape key, microseconds). This
 /// is the measurement that closed the small-shape question: op-level
 /// timings with hot operands do not predict a step.
 fn stats_on() -> bool {
@@ -125,19 +125,6 @@ static STATS: std::sync::Mutex<Vec<(u64, f32, bool)>> = std::sync::Mutex::new(Ve
 /// Drain the recorded per-call timings: `(m<<40 | k<<20 | n, microseconds, team)`.
 pub fn take_gemm_stats() -> Vec<(u64, f32, bool)> {
     std::mem::take(&mut *STATS.lock().unwrap())
-}
-
-/// A raw pointer that may cross into worker closures. Every use site
-/// carries its own proof of disjointness or of ordering by a barrier.
-#[derive(Clone, Copy)]
-struct SyncPtr<T>(*mut T);
-unsafe impl<T> Send for SyncPtr<T> {}
-unsafe impl<T> Sync for SyncPtr<T> {}
-impl<T> SyncPtr<T> {
-    /// Read through a METHOD, not the field: a 2021-edition closure that
-    /// names `p.0` captures the raw pointer alone (which is not `Sync`)
-    /// rather than the wrapper.
-    #[inline] fn get(self) -> *mut T { self.0 }
 }
 
 
@@ -410,7 +397,6 @@ macro_rules! blocked_gemm_for {
 
             let wide = have_wide();
 
-            let flops = 2.0 * m as f64 * k as f64 * n as f64;
             if stats_on() && parallel {
                 let t = std::time::Instant::now();
                 gemm_forkjoin(a, ta, b, tb, m, k, n, c, parallel, assign, wide);

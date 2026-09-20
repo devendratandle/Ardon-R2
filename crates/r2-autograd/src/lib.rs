@@ -151,6 +151,11 @@ pub struct Tape {
     /// How many of this tape's gradient buffers came back from the pool
     /// holding last step's gradients (contents stale).
     recycled_grads: usize,
+    /// Forward census (`R2_TAPE_STATS=1`): the instant of the last push.
+    /// The forward is sequential, so the time between two pushes is the
+    /// cost of the op pushed second — recorded in `push`, no timer in any
+    /// builder.
+    last_push: Option<std::time::Instant>,
     /// Per node: has a backward arm written this node's gradient yet?
     /// The FIRST writer assigns, every later one accumulates — so no
     /// gradient buffer is ever zeroed, recycled or not. See
@@ -248,17 +253,23 @@ impl Op {
     }
 }
 
-/// In-situ backward census: time per op kind across `backward_from`
-/// arms, on unless... off unless `R2_TAPE_STATS=1`. Read with
-/// [`take_backward_stats`]. The op-level census (`step_census`) times
-/// each op in isolation with hot inputs; this is what the backward
-/// actually pays, inside a step, at whatever shape is being trained.
+/// In-situ census: time per op kind across the forward (between pushes)
+/// and across `backward_from` arms. Off unless `R2_TAPE_STATS=1`. Read
+/// with [`take_forward_stats`] / [`take_backward_stats`]. The op-level
+/// census (`step_census`) times each op in isolation with hot inputs;
+/// this is what a step actually pays, at whatever shape is being trained.
 fn tape_stats_on() -> bool {
     use std::sync::OnceLock;
     static S: OnceLock<bool> = OnceLock::new();
     *S.get_or_init(|| std::env::var("R2_TAPE_STATS").map(|v| v == "1").unwrap_or(false))
 }
 static BWD_STATS: std::sync::Mutex<Vec<(&'static str, f32)>> = std::sync::Mutex::new(Vec::new());
+static FWD_STATS: std::sync::Mutex<Vec<(&'static str, f32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Drain the forward census: `(op kind, milliseconds)` per node pushed.
+pub fn take_forward_stats() -> Vec<(&'static str, f32)> {
+    std::mem::take(&mut *FWD_STATS.lock().unwrap())
+}
 
 /// Drain the backward census: `(op kind, milliseconds)` per arm executed.
 pub fn take_backward_stats() -> Vec<(&'static str, f32)> {
@@ -275,7 +286,7 @@ impl Tape {
     pub fn with_pool(pool: BufPool) -> Self {
         Tape { vals: Vec::new(), grads: Vec::new(), ops: Vec::new(),
                requires: Vec::new(), differentiated: false, pool,
-               recycled_grads: 0, gwritten: Vec::new() }
+               recycled_grads: 0, last_push: None, gwritten: Vec::new() }
     }
 
     /// Dismantle the tape: every value buffer goes into the pool for the
@@ -298,15 +309,14 @@ impl Tape {
     /// write every element.
     fn alloc(&mut self, n: usize) -> Vec<f32> { self.pool.take(n) }
 
-    /// As [`Tape::alloc`], zero-filled — for the few ops that accumulate
-    /// into their output rather than assigning it.
-    fn alloc_zeroed(&mut self, n: usize) -> Vec<f32> {
-        let mut v = self.pool.take(n);
-        for x in v.iter_mut() { *x = 0.0; }
-        v
-    }
-
     fn push(&mut self, val: Vec<f32>, op: Op, requires: bool) -> Var {
+        if tape_stats_on() {
+            let now = std::time::Instant::now();
+            if let Some(t) = self.last_push {
+                FWD_STATS.lock().unwrap().push((op.kind(), (now - t).as_secs_f32() * 1e3));
+            }
+            self.last_push = Some(now);
+        }
         let idx = self.vals.len();
         let (g, recycled) = self.pool.take_tagged(val.len());
         if recycled { self.recycled_grads += 1; }
@@ -625,21 +635,24 @@ impl Tape {
         let mut out = self.alloc(rows * nh * hd);
         {
             let (vq, vk, vv) = (&self.vals[q.0], &self.vals[k.0], &self.vals[v.0]);
-            // Split by SEQUENCE. Sequence `s` reads and writes only its own
-            // `seq` rows of q/k/v/out, so the workers are disjoint without
-            // any coordination — and a token still cannot see another
-            // example's tokens, which is the property the whole block
-            // exists to preserve.
-            let work = |s: usize, oblk: &mut [f32]| {
-                attn_forward_seq(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale);
+            // One work unit per (sequence, query head). Units were whole
+            // sequences until the medium model showed why that is wrong:
+            // the batch there is 8 sequences on 6 cores — two rounds, the
+            // second with four cores idle — and at batch 1 it is serial.
+            // A head's columns are strided through `out`, so the disjoint
+            // pieces each unit writes are collected by `head_pieces`
+            // (reborrows, no copy). A token still cannot see another
+            // example's tokens: the kernel reads only its own sequence's
+            // rows.
+            let mut units = head_pieces(&mut out, seq, nh, hd);
+            let work = |u: usize, orows: &mut Vec<&mut [f32]>| {
+                attn_forward_head(vq, vk, vv, orows, u / nh, u % nh, seq, nh, nkv, hd, scale);
             };
-            if nseq > 1 && rows * nh * hd >= PAR_MIN {
+            if rows * nh * hd >= PAR_MIN {
                 use rayon::prelude::*;
-                out.par_chunks_mut(seq * nh * hd).enumerate()
-                    .for_each(|(s, oblk)| work(s, oblk));
+                units.par_iter_mut().enumerate().for_each(|(u, orows)| work(u, orows));
             } else {
-                out.chunks_mut(seq * nh * hd).enumerate()
-                    .for_each(|(s, oblk)| work(s, oblk));
+                units.iter_mut().enumerate().for_each(|(u, orows)| work(u, orows));
             }
         }
         let req = self.requires[q.0] || self.requires[k.0] || self.requires[v.0];
@@ -1168,36 +1181,37 @@ impl Tape {
                         // cannot be borrowed mutably at once, and the adds
                         // are O(size) against an O(nseq*nh*seq^2*hd)
                         // backward.
-                        // Scratch from the pool (warm pages), zeroed in
-                        // parallel: the sequence kernel accumulates into it.
-                        let mut gq = self.pool.take(rows * nh * hd);  zero_par(&mut gq);
-                        let mut gk = self.pool.take(rows * nkv * hd); zero_par(&mut gk);
-                        let mut gv = self.pool.take(rows * nkv * hd); zero_par(&mut gv);
+                        // Scratch from the pool (warm pages). Not zeroed:
+                        // every element is assigned by exactly one unit.
+                        let mut gq = self.pool.take(rows * nh * hd);
+                        let mut gk = self.pool.take(rows * nkv * hd);
+                        let mut gv = self.pool.take(rows * nkv * hd);
                         {
                             let (vq, vk, vv) = (&self.vals[qi], &self.vals[ki], &self.vals[vi]);
-                            // Same disjoint-by-sequence split as the
-                            // forward. Within a worker the query heads run
-                            // in order, so several heads sharing one kv
-                            // head accumulate into it serially — grouped
-                            // query attention needs that and it is free
-                            // here.
-                            let work = |s: usize, gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32]| {
-                                attn_backward_seq(vq, vk, vv, &g, gqb, gkb, gvb,
-                                                  s, seq, nh, nkv, hd, scale);
+                            // One work unit per (sequence, kv head): the
+                            // unit runs every query head of the GQA group,
+                            // so the kv head's dK/dV are complete inside
+                            // it and no two units share a row. Same
+                            // reason as the forward: units were sequences,
+                            // and the batch is not always larger than the
+                            // core count. `head_pieces` hands each unit its
+                            // strided pieces of the three buffers.
+                            let group = nh / nkv;
+                            let mut uq = head_pieces(&mut gq, seq, nkv, group * hd);
+                            let mut uk = head_pieces(&mut gk, seq, nkv, hd);
+                            let mut uv = head_pieces(&mut gv, seq, nkv, hd);
+                            let work = |u: usize, dq: &mut Vec<&mut [f32]>, dk: &mut Vec<&mut [f32]>, dv: &mut Vec<&mut [f32]>| {
+                                attn_backward_group(vq, vk, vv, &g, dq, dk, dv,
+                                                    u / nkv, u % nkv, seq, nh, nkv, hd, scale);
                             };
-                            if nseq > 1 && rows * nh * hd >= PAR_MIN {
+                            if rows * nh * hd >= PAR_MIN {
                                 use rayon::prelude::*;
-                                gq.par_chunks_mut(seq * nh * hd)
-                                    .zip(gk.par_chunks_mut(seq * nkv * hd))
-                                    .zip(gv.par_chunks_mut(seq * nkv * hd))
+                                uq.par_iter_mut().zip(uk.par_iter_mut()).zip(uv.par_iter_mut())
                                     .enumerate()
-                                    .for_each(|(s, ((gqb, gkb), gvb))| work(s, gqb, gkb, gvb));
+                                    .for_each(|(u, ((dq, dk), dv))| work(u, dq, dk, dv));
                             } else {
-                                for s in 0..nseq {
-                                    let (a, b, c) = (seq * nh * hd, seq * nkv * hd, seq * nkv * hd);
-                                    work(s, &mut gq[s * a..(s + 1) * a],
-                                         &mut gk[s * b..(s + 1) * b],
-                                         &mut gv[s * c..(s + 1) * c]);
+                                for (u, ((dq, dk), dv)) in uq.iter_mut().zip(uk.iter_mut()).zip(uv.iter_mut()).enumerate() {
+                                    work(u, dq, dk, dv);
                                 }
                             }
                         }
@@ -1426,6 +1440,13 @@ mod tests {
             (1usize, 4usize, 2usize, 1usize, 4usize),   // MQA, one sequence
             (3, 5, 4, 2, 6),                            // GQA, ragged-ish
             (2, 6, 3, 3, 4),                            // MHA, no grouping
+            // Kernel widths and blocks: hd 8 / 16 / 64 pick the 8-, 16-
+            // lane accumulators; seq 21 / 33 / 40 span several 16-query
+            // blocks with a ragged last one; the last case is large enough
+            // to take the parallel (sequence, head) path.
+            (2, 21, 2, 1, 8),
+            (1, 33, 3, 3, 16),
+            (4, 40, 4, 2, 64),
         ] {
             let rows = nseq * seq;
             let mk = |n: usize, ph: f32| -> Vec<f32> {
@@ -1797,173 +1818,185 @@ fn have_avx2() -> bool {
     }
 }
 
-/// One sequence of fused causal attention, forward — flash-style.
+/// `a*b + c`, fused when the kernel was compiled for FMA hardware.
 ///
-/// `oblk` is that sequence's `seq x (nh*hd)` slice of the output; `vq`,
-/// `vk`, `vv` are the WHOLE tensors and `s` selects the rows. Reading the
-/// full tensors rather than slices of them is the point of the op: a slice
-/// would be a copy.
+/// Rust never contracts `a * b + c` into one FMA on its own — that would
+/// change the rounding — so the AVX2 attention kernels below asked for
+/// FMA and got separate `vmulps`/`vaddps` pairs (checked in the emitted
+/// assembly: zero `vfmadd`). `mul_add` compiles to the one instruction
+/// where the feature is enabled; where it is not, it would call libm's
+/// software `fma`, hundreds of times slower, so the baseline build keeps
+/// the two-instruction form.
+#[inline(always)]
+fn fma<const F: bool>(a: f32, b: f32, c: f32) -> f32 {
+    if F { a.mul_add(b, c) } else { a * b + c }
+}
+
+/// One `BR x 16` tile of `A · Bᵀ`, B packed transposed (`bt[d*seqp + j]
+/// = B[j][d]`): for each head-dim `d`, one row of sixteen keys is loaded
+/// and `BR` elements of A are broadcast against it. `BR` is a constant so
+/// the accumulator — `BR` x 2 vector registers — never leaves the register
+/// file; a runtime row count made LLVM keep it on the stack, at three
+/// memory operations per FMA. The ragged last block of a sequence runs
+/// this with `BR = 1`.
+#[inline(always)]
+fn tile16<const BR: usize, const F: bool>(a: &[f32], aoff: &[usize; BR], bt: &[f32], seqp: usize,
+                           hd: usize, j0: usize, out: &mut [[f32; 16]; BR]) {
+    for d in 0..hd {
+        let br = &bt[d * seqp + j0..d * seqp + j0 + 16];
+        for ii in 0..BR {
+            let x = a[aoff[ii] + d];
+            let row = &mut out[ii];
+            for jj in 0..16 { row[jj] = fma::<F>(x, br[jj], row[jj]); }
+        }
+    }
+}
+
+/// Fused causal attention, forward, for ONE (sequence, query head).
 ///
-/// # Why it is blocked and why the softmax is online
+/// `orows` are that head's `seq` output pieces — row `i` of the output,
+/// columns `qh*hd..(qh+1)*hd` — handed in as disjoint slices so that the
+/// work units can be (sequence, head) rather than sequence: see
+/// [`head_pieces`]. `vq`, `vk`, `vv` are the WHOLE tensors and `s`
+/// selects the rows; a slice of them would be a copy.
 ///
-/// The straightforward form walks one query at a time: compute its whole
-/// score row, find the max, exponentiate, normalise, then accumulate the
-/// output. That is three passes over the row, and — the expensive part —
-/// EVERY query re-reads all of K and all of V. Per head-pass that is
-/// `seq^2 * hd` element reads; at seq 64, hd 64 it is 1 MB per head-pass
-/// and 134 MB for one attention block.
+/// # Why it is tiled the way a GEMM is
 ///
-/// Blocking the queries fixes the traffic: a `BC`-wide block of K and V is
-/// loaded once and used by `BR` queries, so K/V traffic falls by `BR`.
-/// What makes that legal is the ONLINE softmax (Milakov & Gimelshein; the
-/// same identity flash-attention is built on) — a running max `m` and
-/// running denominator `l` per query, with the accumulator rescaled by
-/// `exp(m_old - m_new)` whenever a block raises the max:
+/// The scores of a block of queries against a tile of keys are formed
+/// lane-parallel — one query element broadcast against a row of sixteen
+/// keys — so no horizontal reduction ever happens ([`tile16`]). That
+/// needs Kᵀ (a row of keys per head-dim), packed once per call; at seq
+/// 256 it is 64 KB. The softmax over the finished score row is the plain
+/// two-pass form (row max, `exp_shift_sum`, normalise); the row is `seq`
+/// floats, so nothing quadratic is materialised, and the online (flash)
+/// rescaling measured nothing here (REPORT.md).
 ///
-/// ```text
-///   m' = max(m, max(block))
-///   acc = acc * exp(m - m')  +  Σ_j exp(s_j - m') · v_j
-///   l   = l   * exp(m - m')  +  Σ_j exp(s_j - m')
-/// ```
+/// P·V accumulates `CW` lanes of the output in registers over the keys;
+/// `CW` is the widest of 64/32/16/8 that divides `hd`, because each lane
+/// group is one dependent FMA chain and Zen 2 needs eight chains in
+/// flight to reach its FMA throughput — sixteen lanes (two chains) ran
+/// at a fifth of it.
 ///
-/// so the result is the ordinary softmax, computed in one pass over the
-/// keys with nothing quadratic ever materialised.
-///
-/// The causal mask is structural, not a `-inf` fill: key blocks entirely
-/// above the diagonal are never visited, and only the diagonal block needs
-/// a per-element check. A token cannot read its future because the loop
-/// bound stops it, not because a large negative number was added.
+/// The causal mask is structural: keys beyond the last query of a block
+/// are never computed, and only the diagonal tile is checked per element.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn attn_forward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
-                    s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
-    // ── why this is tiled the way a GEMM is ──
-    //
-    // The previous kernel computed every score as `dot4(q_row, k_row)`:
-    // eight FMAs and then a HORIZONTAL REDUCTION per (query, key) pair.
-    // The reduction is the cost — a dozen shuffles and adds per eight
-    // FMAs — and it is exactly what `scaled_dot_product_attention` does
-    // not pay: it forms a TILE of scores lane-parallel, broadcasting one
-    // query element against a row of keys, so every FMA lane holds a
-    // different key and no reduction ever happens. That needs K
-    // transposed (a row of keys per head-dim), which is packed ONCE per
-    // sequence and kv-head here — 16 KB at seq 64, L2-resident at 2,048
-    // — and shared by every query head in the GQA group.
-    //
-    // With the whole score row of a query block available at once, the
-    // softmax is the plain two-pass form: row max, `exp_shift_sum`,
-    // normalise. The online (flash) rescaling the previous kernel carried
-    // measured nothing here (K/V re-reads were already L1-served; see
-    // REPORT.md), and the score row is 4 x seq floats — 32 KB at 2,048 —
-    // so nothing quadratic is materialised.
-    //
-    // The causal mask is still structural: keys beyond the last query of
-    // a block are never computed, and only the diagonal tile is checked
-    // per element.
-    /// Queries per block.
+fn attn_forward_head_impl<const CW: usize, const F: bool>(vq: &[f32], vk: &[f32], vv: &[f32],
+                          orows: &mut [&mut [f32]],
+                          s: usize, qh: usize, seq: usize, nh: usize, nkv: usize,
+                          hd: usize, scale: f32) {
+    /// Queries per score block.
     const BR: usize = 4;
     /// Keys per register tile.
     const BC: usize = 16;
+    debug_assert_eq!(hd % CW, 0);
 
     let group = nh / nkv;
+    let kvh = qh / group;
     let (qw, kw) = (nh * hd, nkv * hd);
     let base = s * seq;
-    // Kᵀ, padded to a multiple of the tile width so the tile loop needs
-    // no ragged edge: kt[d * seqp + j] = K[j][d].
     let seqp = seq.next_multiple_of(BC);
-    let mut kt = vec![0.0f32; hd * seqp];
-    // Score rows for one query block, then their exponentials.
+    let mut kt = vec![0.0f32; hd * seqp];          // kt[d * seqp + j] = K[j][d]
     let mut sc = vec![0.0f32; BR * seqp];
     let mut ex = vec![0.0f32; seqp];
-    let mut acc = vec![0.0f32; hd];
+    for j in 0..seq {
+        let koff = (base + j) * kw + kvh * hd;
+        let krow = &vk[koff..koff + hd];
+        for d in 0..hd { kt[d * seqp + j] = krow[d]; }
+    }
+    let qoff = |i: usize| (base + i) * qw + qh * hd;
 
-    for kvh in 0..nkv {
-        // ── pack Kᵀ for this kv-head ──
-        for j in 0..seq {
-            let koff = (base + j) * kw + kvh * hd;
-            let krow = &vk[koff..koff + hd];
-            for d in 0..hd { kt[d * seqp + j] = krow[d]; }
-        }
-        for qh in kvh * group..(kvh + 1) * group {
-            for i0 in (0..seq).step_by(BR) {
-                let br = BR.min(seq - i0);
-                let jmax = i0 + br - 1;           // furthest key any query here can see
-                let tiles = (jmax / BC) + 1;      // key tiles that reach it
-                // ── scores: BR x (tiles*BC), lane-parallel over keys ──
-                for t in 0..tiles {
-                    let j0 = t * BC;
-                    let mut tile = [[0.0f32; BC]; BR];
-                    for d in 0..hd {
-                        let kr = &kt[d * seqp + j0..d * seqp + j0 + BC];
-                        for ii in 0..br {
-                            let q = vq[(base + i0 + ii) * qw + qh * hd + d];
-                            let row = &mut tile[ii];
-                            for jj in 0..BC { row[jj] += q * kr[jj]; }
-                        }
-                    }
-                    for ii in 0..br {
-                        let dst = &mut sc[ii * seqp + j0..ii * seqp + j0 + BC];
-                        for jj in 0..BC { dst[jj] = tile[ii][jj] * scale; }
-                    }
-                }
-                // ── softmax + PV per query ──
+    for i0 in (0..seq).step_by(BR) {
+        let br = BR.min(seq - i0);
+        let jmax = i0 + br - 1;
+        let tiles = (jmax / BC) + 1;
+        // ── scores: BR x (tiles*BC), lane-parallel over keys ──
+        for t in 0..tiles {
+            let j0 = t * BC;
+            let mut tile = [[0.0f32; BC]; BR];
+            if br == BR {
+                tile16::<BR, F>(vq, &[qoff(i0), qoff(i0 + 1), qoff(i0 + 2), qoff(i0 + 3)], &kt, seqp, hd, j0, &mut tile);
+            } else {
                 for ii in 0..br {
-                    let qi = i0 + ii;
-                    let row = &mut sc[ii * seqp..ii * seqp + qi + 1];  // causal: keys 0..=qi
-                    let mut m = f32::NEG_INFINITY;
-                    for &x in row.iter() { if x > m { m = x; } }
-                    let l = r2_tensor::ops::exp_shift_sum(row, m, &mut ex[..qi + 1]);
-                    for x in acc.iter_mut() { *x = 0.0; }
-                    for j in 0..=qi {
-                        let e = ex[j];
-                        if e == 0.0 { continue; }
-                        let voff = (base + j) * kw + kvh * hd;
-                        let vrow = &vv[voff..voff + hd];
-                        for c in 0..hd { acc[c] += e * vrow[c]; }
-                    }
-                    let inv = 1.0 / l;
-                    // `oblk` is this sequence's own slice: local row index.
-                    let dst = &mut oblk[qi * qw + qh * hd..qi * qw + qh * hd + hd];
-                    for (d, v) in dst.iter_mut().zip(&acc) { *d = v * inv; }
+                    let mut one = [[0.0f32; BC]; 1];
+                    tile16::<1, F>(vq, &[qoff(i0 + ii)], &kt, seqp, hd, j0, &mut one);
+                    tile[ii] = one[0];
                 }
+            }
+            for ii in 0..br {
+                let dst = &mut sc[ii * seqp + j0..ii * seqp + j0 + BC];
+                for jj in 0..BC { dst[jj] = tile[ii][jj] * scale; }
+            }
+        }
+        // ── softmax + P·V per query ──
+        for ii in 0..br {
+            let qi = i0 + ii;
+            let n = qi + 1;                                   // causal: keys 0..=qi
+            let row = &sc[ii * seqp..ii * seqp + n];
+            let mut m = f32::NEG_INFINITY;
+            for &x in row { if x > m { m = x; } }
+            let inv = 1.0 / r2_tensor::ops::exp_shift_sum(row, m, &mut ex[..n]);
+            let dst = &mut orows[qi];
+            for c0 in (0..hd).step_by(CW) {
+                let mut acc = [0.0f32; CW];
+                for j in 0..n {
+                    let e = ex[j];
+                    let voff = (base + j) * kw + kvh * hd + c0;
+                    let vr = &vv[voff..voff + CW];
+                    for c in 0..CW { acc[c] = fma::<F>(e, vr[c], acc[c]); }
+                }
+                for c in 0..CW { dst[c0 + c] = acc[c] * inv; }
             }
         }
     }
 }
 
-/// One sequence of fused causal attention, backward.
+/// Fused causal attention, backward, for ONE (sequence, kv head) — every
+/// query head of its GQA group, so dK and dV for the kv head are complete
+/// on return and no unit writes another's rows.
 ///
-/// `d out[i] = Σ_j p[i,j] v[j]` gives, with `s[i,j] = scale · q[i]·k[j]`:
+/// `dqrows[i]` is row `i`'s `group*hd` columns of the q gradient for this
+/// group; `dkrows[i]` / `dvrows[i]` are row `i`'s `hd` columns of the k /
+/// v gradients for this kv head. All are ASSIGNED here (dK/dV zeroed at
+/// the start, dQ complete per query), so the caller zeroes nothing.
+///
+/// Per query i, with P its softmax row and dP = dO_i·Vᵀ:
 ///
 /// ```text
-/// grad_v[j] += Σ_i p[i,j] g[i]
-/// grad_p[i,j] = g[i]·v[j]
-/// grad_s[i,j] = p[i,j] (grad_p[i,j] − Σ_l p[i,l] grad_p[i,l])   (softmax)
-/// grad_q[i] += scale Σ_j grad_s[i,j] k[j]
-/// grad_k[j] += scale Σ_i grad_s[i,j] q[i]
+///   D_i  = Σ_j P_ij dP_ij
+///   dS_j = P_ij (dP_ij − D_i) · scale
+///   dQ_i  = Σ_j dS_j K_j      dK_j += dS_j Q_i      dV_j += P_ij dO_i
 /// ```
 ///
 /// Masked positions (`j > i`) never enter any sum, which is what stops a
 /// token receiving gradient from its future.
+///
+/// # Why the accumulations are blocked
+///
+/// The scores and dP are [`tile16`] register tiles over packed Kᵀ / Vᵀ,
+/// formed in two passes so each fits the register file. The three
+/// accumulations used to be one loop over (query, key) pairs that
+/// read-modify-wrote three `hd`-float rows per pair — 384 loads and 384
+/// stores for 384 FLOPs at hd 64, on rows that live in L2 at seq 256.
+/// Measured in situ at dim 768 / seq 256 that was 290 ms a step, 3.3x
+/// PyTorch's SDPA backward. Now a block of `QB` queries is finished at
+/// once: dV_j, then dK_j, are reduced over the block's queries in `CW`
+/// register lanes and touched in memory once per block; dQ_i is reduced
+/// over all its keys in registers and written once.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
-                     gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
-                     s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
-    // Same tiling as the forward, for the same reason. Two products here
-    // were per-pair dot products with a horizontal reduction each — the
-    // scores `Q·Kᵀ` (recomputed rather than stored, see the forward) and
-    // `dP = dO·Vᵀ`. Both are now register tiles over a packed Kᵀ and Vᵀ,
-    // lane-parallel across keys. The three accumulations — dQ, dK, dV —
-    // were already in broadcast form (one scalar against a contiguous row)
-    // and stay as they were.
-    //
-    // Per query i, with P its softmax row and dP = dO_i·Vᵀ:
-    //   D_i  = Σ_j P_ij dP_ij
-    //   dS_j = P_ij (dP_ij − D_i) · scale
-    //   dQ_i += Σ_j dS_j K_j      dK_j += dS_j Q_i      dV_j += P_ij dO_i
+fn attn_backward_group_impl<const CW: usize, const F: bool>(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
+                            dqrows: &mut [&mut [f32]], dkrows: &mut [&mut [f32]],
+                            dvrows: &mut [&mut [f32]],
+                            s: usize, kvh: usize, seq: usize, nh: usize, nkv: usize,
+                            hd: usize, scale: f32) {
+    /// Queries per score tile.
     const BR: usize = 4;
+    /// Keys per register tile.
     const BC: usize = 16;
+    /// Queries finished per block (the dK/dV reduction width).
+    const QB: usize = 16;
+    debug_assert_eq!(hd % CW, 0);
 
     let group = nh / nkv;
     let (qw, kw) = (nh * hd, nkv * hd);
@@ -1971,83 +2004,109 @@ fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
     let seqp = seq.next_multiple_of(BC);
     let mut kt = vec![0.0f32; hd * seqp];
     let mut vt = vec![0.0f32; hd * seqp];
-    let mut sc = vec![0.0f32; BR * seqp];   // scores, then probabilities
-    let mut dp = vec![0.0f32; BR * seqp];   // dO·Vᵀ
+    let mut sc = vec![0.0f32; QB * seqp];   // scores, then probabilities P
+    let mut dp = vec![0.0f32; QB * seqp];   // dO·Vᵀ, then dS
     let mut ex = vec![0.0f32; seqp];
+    for j in 0..seq {
+        let off = (base + j) * kw + kvh * hd;
+        let (krow, vrow) = (&vk[off..off + hd], &vv[off..off + hd]);
+        for d in 0..hd { kt[d * seqp + j] = krow[d]; vt[d * seqp + j] = vrow[d]; }
+        for x in dkrows[j].iter_mut() { *x = 0.0; }
+        for x in dvrows[j].iter_mut() { *x = 0.0; }
+    }
 
-    for kvh in 0..nkv {
-        for j in 0..seq {
-            let off = (base + j) * kw + kvh * hd;
-            let (krow, vrow) = (&vk[off..off + hd], &vv[off..off + hd]);
-            for d in 0..hd { kt[d * seqp + j] = krow[d]; vt[d * seqp + j] = vrow[d]; }
-        }
-        for qh in kvh * group..(kvh + 1) * group {
-            for i0 in (0..seq).step_by(BR) {
-                let br = BR.min(seq - i0);
-                let jmax = i0 + br - 1;
-                let tiles = (jmax / BC) + 1;
-                // ── scores and dP, both lane-parallel over keys ──
+    for qh in kvh * group..(kvh + 1) * group {
+        let qcol = (qh - kvh * group) * hd;                 // this head's columns in dqrows
+        let qoff = |i: usize| (base + i) * qw + qh * hd;    // q and dO share the layout
+        for i0 in (0..seq).step_by(QB) {
+            let qb = QB.min(seq - i0);
+            let jmax = i0 + qb - 1;
+            // ── scores (into sc) and dP (into dp), BR x BC tiles ──
+            for ii0 in (0..qb).step_by(BR) {
+                let br = BR.min(qb - ii0);
+                let tiles = ((i0 + ii0 + br - 1) / BC) + 1;
                 for t in 0..tiles {
                     let j0 = t * BC;
                     let mut ts = [[0.0f32; BC]; BR];
                     let mut td = [[0.0f32; BC]; BR];
-                    for d in 0..hd {
-                        let kr = &kt[d * seqp + j0..d * seqp + j0 + BC];
-                        let vr = &vt[d * seqp + j0..d * seqp + j0 + BC];
+                    if br == BR {
+                        let offs = [qoff(i0 + ii0), qoff(i0 + ii0 + 1), qoff(i0 + ii0 + 2), qoff(i0 + ii0 + 3)];
+                        tile16::<BR, F>(vq, &offs, &kt, seqp, hd, j0, &mut ts);
+                        tile16::<BR, F>(g, &offs, &vt, seqp, hd, j0, &mut td);
+                    } else {
                         for ii in 0..br {
-                            let off = (base + i0 + ii) * qw + qh * hd + d;
-                            let (q, go) = (vq[off], g[off]);
-                            let (rs, rd) = (&mut ts[ii], &mut td[ii]);
-                            for jj in 0..BC { rs[jj] += q * kr[jj]; rd[jj] += go * vr[jj]; }
+                            let (mut a, mut b) = ([[0.0f32; BC]; 1], [[0.0f32; BC]; 1]);
+                            tile16::<1, F>(vq, &[qoff(i0 + ii0 + ii)], &kt, seqp, hd, j0, &mut a);
+                            tile16::<1, F>(g, &[qoff(i0 + ii0 + ii)], &vt, seqp, hd, j0, &mut b);
+                            ts[ii] = a[0]; td[ii] = b[0];
                         }
                     }
                     for ii in 0..br {
-                        let (ds, dd) = (&mut sc[ii * seqp + j0..ii * seqp + j0 + BC],
-                                        &mut dp[ii * seqp + j0..ii * seqp + j0 + BC]);
+                        let r = (ii0 + ii) * seqp + j0;
+                        let (ds, dd) = (&mut sc[r..r + BC], &mut dp[r..r + BC]);
                         for jj in 0..BC { ds[jj] = ts[ii][jj] * scale; dd[jj] = td[ii][jj]; }
                     }
                 }
-                // ── per query: softmax P, D, and dS (written over dp) ──
-                for ii in 0..br {
-                    let qi = i0 + ii;
-                    let n = qi + 1;                    // causal: keys 0..=qi
-                    let prow = &mut sc[ii * seqp..ii * seqp + n];
-                    let mut m = f32::NEG_INFINITY;
-                    for &x in prow.iter() { if x > m { m = x; } }
-                    let sum = r2_tensor::ops::exp_shift_sum(prow, m, &mut ex[..n]);
-                    let inv = 1.0 / sum;
-                    for j in 0..n { prow[j] = ex[j] * inv; }
-                    let dprow = &mut dp[ii * seqp..ii * seqp + n];
-                    let mut dot = 0.0f32;
-                    for j in 0..n { dot += prow[j] * dprow[j]; }
-                    for j in 0..n { dprow[j] = prow[j] * (dprow[j] - dot) * scale; }
-                    // keys this query cannot see contribute nothing
-                    for j in n..jmax + 1 { sc[ii * seqp + j] = 0.0; dp[ii * seqp + j] = 0.0; }
-                }
-                // ── accumulate, KEY-OUTER: each dK_j / dV_j row is read and
-                // written once per query block, not once per query. The
-                // previous order did that read-modify-write of two 256-byte
-                // rows for every (query, key) pair — the backward's cost was
-                // that traffic, not the arithmetic.
-                for j in 0..=jmax {
-                    let gvo = j * kw + kvh * hd;
-                    let koff = (base + j) * kw + kvh * hd;
-                    let krow = &vk[koff..koff + hd];
-                    for ii in 0..br {
-                        let qi = i0 + ii;
-                        if j > qi { continue; }
-                        let pj = sc[ii * seqp + j];
-                        let d = dp[ii * seqp + j];
-                        let qoff = (base + qi) * qw + qh * hd;
-                        let qrow = &vq[qoff..qoff + hd];
-                        let grow = &g[qoff..qoff + hd];
-                        let gqo = qi * qw + qh * hd;
-                        for c in 0..hd {
-                            gvb[gvo + c] += pj * grow[c];
-                            gkb[gvo + c] += d * qrow[c];
-                            gqb[gqo + c] += d * krow[c];
-                        }
+            }
+            // ── per query: P, D, dS (over sc / dp); masked keys zeroed ──
+            for ii in 0..qb {
+                let qi = i0 + ii;
+                let n = qi + 1;
+                let prow = &mut sc[ii * seqp..ii * seqp + jmax + 1];
+                let mut m = f32::NEG_INFINITY;
+                for &x in &prow[..n] { if x > m { m = x; } }
+                let inv = 1.0 / r2_tensor::ops::exp_shift_sum(&prow[..n], m, &mut ex[..n]);
+                for j in 0..n { prow[j] = ex[j] * inv; }
+                for j in n..jmax + 1 { prow[j] = 0.0; }
+                let drow = &mut dp[ii * seqp..ii * seqp + jmax + 1];
+                let mut dot = 0.0f32;
+                for j in 0..n { dot += prow[j] * drow[j]; }
+                for j in 0..n { drow[j] = prow[j] * (drow[j] - dot) * scale; }
+                for j in n..jmax + 1 { drow[j] = 0.0; }
+            }
+            // ── dV_j += Σ_ii P_ij dO_i, then dK_j += Σ_ii dS_ij Q_i — key-outer,
+            // reduced over the block's queries in registers, one
+            // read-modify-write of each row per block. Two passes so each
+            // has the whole register file. ──
+            for j in 0..=jmax {
+                let ii_lo = j.saturating_sub(i0);             // queries that can see key j
+                let dv = &mut dvrows[j];
+                for c0 in (0..hd).step_by(CW) {
+                    let mut av = [0.0f32; CW];
+                    for ii in ii_lo..qb {
+                        let p = sc[ii * seqp + j];
+                        let off = qoff(i0 + ii) + c0;
+                        let gr = &g[off..off + CW];
+                        for c in 0..CW { av[c] = fma::<F>(p, gr[c], av[c]); }
                     }
+                    for c in 0..CW { dv[c0 + c] += av[c]; }
+                }
+                let dk = &mut dkrows[j];
+                for c0 in (0..hd).step_by(CW) {
+                    let mut ak = [0.0f32; CW];
+                    for ii in ii_lo..qb {
+                        let d = dp[ii * seqp + j];
+                        let off = qoff(i0 + ii) + c0;
+                        let qr = &vq[off..off + CW];
+                        for c in 0..CW { ak[c] = fma::<F>(d, qr[c], ak[c]); }
+                    }
+                    for c in 0..CW { dk[c0 + c] += ak[c]; }
+                }
+            }
+            // ── dQ_i = Σ_j dS_ij K_j — query-outer, every key in registers,
+            // written once ──
+            for ii in 0..qb {
+                let qi = i0 + ii;
+                let dq = &mut dqrows[qi];
+                for c0 in (0..hd).step_by(CW) {
+                    let mut aq = [0.0f32; CW];
+                    for j in 0..=qi {
+                        let d = dp[ii * seqp + j];
+                        let koff = (base + j) * kw + kvh * hd + c0;
+                        let kr = &vk[koff..koff + CW];
+                        for c in 0..CW { aq[c] = fma::<F>(d, kr[c], aq[c]); }
+                    }
+                    for c in 0..CW { dq[qcol + c0 + c] = aq[c]; }
                 }
             }
         }
@@ -2058,51 +2117,90 @@ fn attn_backward_seq_impl(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 #[allow(clippy::too_many_arguments)]
-fn attn_forward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
-                                s: usize, seq: usize, nh: usize, nkv: usize,
-                                hd: usize, scale: f32) {
-    attn_forward_seq_impl(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale)
+fn attn_forward_head_avx2<const CW: usize>(vq: &[f32], vk: &[f32], vv: &[f32],
+                          orows: &mut [&mut [f32]],
+                          s: usize, qh: usize, seq: usize, nh: usize, nkv: usize,
+                          hd: usize, scale: f32) {
+    attn_forward_head_impl::<CW, true>(vq, vk, vv, orows, s, qh, seq, nh, nkv, hd, scale)
 }
 
 /// AVX2+FMA build of the backward kernel.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 #[allow(clippy::too_many_arguments)]
-fn attn_backward_seq_avx2(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
-                                 gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
-                                 s: usize, seq: usize, nh: usize, nkv: usize,
-                                 hd: usize, scale: f32) {
-    attn_backward_seq_impl(vq, vk, vv, g, gqb, gkb, gvb, s, seq, nh, nkv, hd, scale)
+fn attn_backward_group_avx2<const CW: usize>(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
+                            dqrows: &mut [&mut [f32]], dkrows: &mut [&mut [f32]],
+                            dvrows: &mut [&mut [f32]],
+                            s: usize, kvh: usize, seq: usize, nh: usize, nkv: usize,
+                            hd: usize, scale: f32) {
+    attn_backward_group_impl::<CW, true>(vq, vk, vv, g, dqrows, dkrows, dvrows, s, kvh, seq, nh, nkv, hd, scale)
 }
 
-/// Dispatch. The branch is per SEQUENCE, not per element.
+/// Dispatch: instruction set once per process, accumulator width by
+/// `hd` (the widest of 64/32/16/8 lanes that divides it, else one — the
+/// same code at every width). The branch is per work unit, not per
+/// element.
 #[allow(clippy::too_many_arguments)]
-fn attn_forward_seq(vq: &[f32], vk: &[f32], vv: &[f32], oblk: &mut [f32],
-                    s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
+fn attn_forward_head(vq: &[f32], vk: &[f32], vv: &[f32], orows: &mut [&mut [f32]],
+                     s: usize, qh: usize, seq: usize, nh: usize, nkv: usize,
+                     hd: usize, scale: f32) {
+    macro_rules! go {
+        ($f:ident $(, $F:literal)?) => {
+            if hd % 64 == 0 { $f::<64 $(, $F)?>(vq, vk, vv, orows, s, qh, seq, nh, nkv, hd, scale) }
+            else if hd % 32 == 0 { $f::<32 $(, $F)?>(vq, vk, vv, orows, s, qh, seq, nh, nkv, hd, scale) }
+            else if hd % 16 == 0 { $f::<16 $(, $F)?>(vq, vk, vv, orows, s, qh, seq, nh, nkv, hd, scale) }
+            else if hd % 8 == 0 { $f::<8 $(, $F)?>(vq, vk, vv, orows, s, qh, seq, nh, nkv, hd, scale) }
+            else { $f::<1 $(, $F)?>(vq, vk, vv, orows, s, qh, seq, nh, nkv, hd, scale) }
+        };
+    }
     #[cfg(target_arch = "x86_64")]
     if have_avx2() {
         // SAFETY: guarded by the runtime feature check; the callee's body
         // is the same safe code, compiled with wider instructions.
-        unsafe { attn_forward_seq_avx2(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale) };
+        unsafe { go!(attn_forward_head_avx2) };
         return;
     }
-    attn_forward_seq_impl(vq, vk, vv, oblk, s, seq, nh, nkv, hd, scale)
+    go!(attn_forward_head_impl, false)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attn_backward_seq(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
-                     gqb: &mut [f32], gkb: &mut [f32], gvb: &mut [f32],
-                     s: usize, seq: usize, nh: usize, nkv: usize, hd: usize, scale: f32) {
+fn attn_backward_group(vq: &[f32], vk: &[f32], vv: &[f32], g: &[f32],
+                       dqrows: &mut [&mut [f32]], dkrows: &mut [&mut [f32]],
+                       dvrows: &mut [&mut [f32]],
+                       s: usize, kvh: usize, seq: usize, nh: usize, nkv: usize,
+                       hd: usize, scale: f32) {
+    macro_rules! go {
+        ($f:ident $(, $F:literal)?) => {
+            if hd % 64 == 0 { $f::<64 $(, $F)?>(vq, vk, vv, g, dqrows, dkrows, dvrows, s, kvh, seq, nh, nkv, hd, scale) }
+            else if hd % 32 == 0 { $f::<32 $(, $F)?>(vq, vk, vv, g, dqrows, dkrows, dvrows, s, kvh, seq, nh, nkv, hd, scale) }
+            else if hd % 16 == 0 { $f::<16 $(, $F)?>(vq, vk, vv, g, dqrows, dkrows, dvrows, s, kvh, seq, nh, nkv, hd, scale) }
+            else if hd % 8 == 0 { $f::<8 $(, $F)?>(vq, vk, vv, g, dqrows, dkrows, dvrows, s, kvh, seq, nh, nkv, hd, scale) }
+            else { $f::<1 $(, $F)?>(vq, vk, vv, g, dqrows, dkrows, dvrows, s, kvh, seq, nh, nkv, hd, scale) }
+        };
+    }
     #[cfg(target_arch = "x86_64")]
     if have_avx2() {
         // SAFETY: as above.
-        unsafe {
-            attn_backward_seq_avx2(vq, vk, vv, g, gqb, gkb, gvb,
-                                   s, seq, nh, nkv, hd, scale)
-        };
+        unsafe { go!(attn_backward_group_avx2) };
         return;
     }
-    attn_backward_seq_impl(vq, vk, vv, g, gqb, gkb, gvb, s, seq, nh, nkv, hd, scale)
+    go!(attn_backward_group_impl, false)
+}
+
+/// Split a row-major `[nseq*seq][nunits_per_row * piece]` buffer into
+/// one `Vec` of row pieces per (sequence, unit): `out[s * per_row + u][i]`
+/// is row `s*seq + i`, columns `u*piece..(u+1)*piece`. Plain reborrows —
+/// no copy, no unsafe — so attention can hand each (sequence, head) to a
+/// different worker although a head's columns are strided through the
+/// tensor. `nseq * per_row * seq` pointers: at 8 x 12 x 256 that is 24 K.
+fn head_pieces(buf: &mut [f32], seq: usize, per_row: usize, piece: usize) -> Vec<Vec<&mut [f32]>> {
+    let nseq = buf.len() / (seq * per_row * piece);
+    let mut out: Vec<Vec<&mut [f32]>> = (0..nseq * per_row).map(|_| Vec::with_capacity(seq)).collect();
+    for (r, row) in buf.chunks_mut(per_row * piece).enumerate() {
+        let s = r / seq;
+        for (u, p) in row.chunks_mut(piece).enumerate() { out[s * per_row + u].push(p); }
+    }
+    out
 }
 
 /// Transpose a row-major `rows × cols` matrix. Used by the GPU backward

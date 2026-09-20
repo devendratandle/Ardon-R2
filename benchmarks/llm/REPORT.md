@@ -1,6 +1,6 @@
 # Ardon-R2 vs PyTorch — LLM model training
 
-**Current status, 2026-09-09.** This is the only performance report for LLM
+**Current status, 2026-09-20.** This is the only performance report for LLM
 training. Earlier ones were deleted rather than kept: a superseded number is
 worse than no number. Everything below describes the code as it stands, not
 how it got there.
@@ -22,7 +22,7 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.29-1.38x FASTER than PyTorch, and 1.25-1.28x faster end to end.**
+**R2 trains 1.29-1.50x FASTER than PyTorch at 7M parameters, 1.15-1.27x at 40M, and 1.25-1.28x faster end to end.**
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
@@ -39,6 +39,7 @@ than throttled.
 | 4 | **140.63 s** | 172.30 s | **R2 1.23x** (with the tape's value-buffer pool, below) |
 | 5 | **131.82 s** | 169.83 s | **R2 1.29x** (gradients pooled too, first writer assigns) |
 | 6 | **126.71 s** | 174.97 s | **R2 1.38x** (tiled attention; PyTorch's run drifted up in this window) |
+| 7 | **38.99 / 38.89 s** (100 steps) | 57.9 / 58.5 s | **R2 1.49-1.50x** (attention re-blocked, below; 100-step pairs, 2026-09-20) |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
@@ -146,13 +147,69 @@ score row of a query block is 4 x seq floats).
 | fwd+bwd | 10,889 us (1.9x) | **8,643 us (1.5x)** | 5,619 |
 
 Ahead of SDPA on the forward at 2,048 and 4,096 tokens (0.8x, 0.6x).
-The backward's remaining 1.5x is the L1 traffic of the accumulations
-(three row loads, three read-modify-writes per pair), not arithmetic;
-register-tiling dK/dV is the next cut. Finite-difference gradient test
-and decomposition test pass. Two 300-step pairs, R2 alone: **131.18 ->
-128.05 s and 132.46 -> 126.71 s** (-2.4%, -4.3%), loss curve identical
-to four decimals. Against PyTorch in the same window: 126.71 vs 174.97
-s, **1.38x**.
+Finite-difference gradient test and decomposition test pass. Two
+300-step pairs, R2 alone: **131.18 -> 128.05 s and 132.46 -> 126.71 s**
+(-2.4%, -4.3%), loss curve identical to four decimals. Against PyTorch
+in the same window: 126.71 vs 174.97 s, **1.38x**.
+
+#### The second cut: why the medium model was only 1.05x (2026-09-20)
+
+The medium model (dim 768, seq 256, batch 8; section below) trained at
+parity while the small one led by 1.38x, and the reason was found by a
+full in-situ census of both sides at that size — R2's forward census (a
+timer between tape pushes) and backward census by op, PyTorch's
+`torch.profiler` self-time per aten op, forward and backward profiled
+separately (`op_profile.py`). Every non-GEMM op in R2 was ahead of its
+PyTorch counterpart except one: **attention backward, 286-293 ms a step
+against SDPA's 78-90** — 17% of R2's backward. Its cost per token grows
+with `seq`; the GEMMs' does not, so at 4x the sequence length it grew
+4x relative to everything else. Two structural causes in the kernel:
+
+1. **Parallelism was the batch size.** The work was split by sequence.
+   32 sequences on 6 cores is 89% utilisation; 8 sequences is two rounds
+   with four cores idle in the second, 67% at best; batch 1 was serial.
+   Units are now (sequence, query head) in the forward — 96 at this
+   shape — and (sequence, kv head) in the backward, 32, where a unit runs
+   its GQA group so dK/dV are complete inside it. A head's columns are
+   strided through the tensor, so `head_pieces` collects each unit's row
+   pieces as reborrowed slices: no copy, no unsafe.
+2. **The accumulation was memory-bound.** For every (query, key) pair the
+   backward read-modify-wrote three `hd`-float rows: 384 loads and 384
+   stores per 384 FLOPs, on rows that live in L2 at seq 256. Now sixteen
+   queries are finished per block; dV_j and dK_j are reduced over the
+   block's queries in 64-lane register accumulators and touched in memory
+   once per block, dQ_i is reduced over all its keys in registers and
+   written once.
+
+And three things found on the way, each measured with the kernel in
+isolation (`lmo15_attention`, 8 x 256, 12/4 heads, one thread):
+
+- A runtime tile-row count (`br <= 4`) made LLVM keep the score tile on
+  the stack, three memory operations per FMA; the ragged tail now runs a
+  `BR = 1` instance of the same constant-row tile.
+- Sixteen-lane accumulators are two dependent FMA chains; Zen 2 needs
+  eight in flight, so the accumulator is now the widest of 64/32/16/8
+  lanes that divides `hd` (a const generic, the same code at every width).
+- **The AVX2+FMA kernels contained no FMA instructions.** Rust never
+  contracts `a * b + c` — that would change rounding — whatever
+  `#[target_feature(enable = "fma")]` says; the emitted assembly had zero
+  `vfmadd`. `f32::mul_add` under a `const F: bool` (true on the FMA
+  build; plain `a*b + c` on the baseline, so no machine falls into libm's
+  software `fma`). Worth checking every hand-written kernel for.
+
+| ms per step, in situ, dim 768 | before | **after** | SDPA |
+|---|---:|---:|---:|
+| attention forward | 66-75 | **34** | 36 |
+| attention backward | 286-293 | **89** | 78 |
+| backward, everything but GEMMs | 374-378 | **183** | 377 |
+| forward, everything but GEMMs | 139-145 | **100** | 118 |
+
+Isolated, one thread, backward: 123 -> 87 (blocking) -> 78 ms (FMA).
+Training pairs, real corpus, same window, 2026-09-20: medium model
+**48.29 vs 55.45 s and 43.43 vs 55.20 s (1.15x, 1.27x)** from 1.05x;
+small model at 100 steps **38.99 vs 57.9 s and 38.89 vs 58.5 s (1.49x,
+1.50x)**. Held-out loss identical to four decimals on every pair (6.1412
+and 5.6134), and identical to the runs before the change.
 
 ### How the lead scales with model size
 
@@ -165,18 +222,19 @@ before and after (2026-09-20):
 | | R2 | PyTorch | |
 |---|---:|---:|---|
 | 20 steps | **58.24 s** (2,912 ms/step) | 61.16 s (3,058) | **1.05x** — parity within noise |
-| held-out loss | 6.1412 | 6.1412 | identical |
+| 20 steps, attention re-blocked | **48.29 s / 43.43 s** | 55.45 / 55.20 s | **1.15x / 1.27x** |
+| held-out loss | 6.1412 | 6.1412 | identical, before and after |
 
-Expected, and the reason is structural: at 7M parameters the GEMMs are
-57% of a step and R2's lead comes from everything around them (no
-dispatch, fused elementwise, Adam in place, the tape, tiled attention).
-At 40M the GEMMs are ~85-90%, R2's `sgemm` equals MKL per core and
-scales the same on six threads, so the ratio goes to ~1.0. At billions
-of parameters it stays there. **The only lever that moves the ratio at
-scale is beating MKL per core** — both sit at 50-70% of the 124 GFLOP/s
-per-core FMA peak, so the headroom exists and neither has taken it.
-R2 sustained ~240 GFLOP/s at this size, the same as on the small model;
-nothing degraded with shape.
+The 1.05x was NOT the GEMMs going to parity, which is what the first
+reading of it said. The census (previous section) put the GEMMs at
+~80% of R2's step here and R2 ahead on them; the missing 25% was one
+kernel, attention backward, whose cost per token grows with the
+sequence length. With it fixed the medium model is 1.15-1.27x ahead:
+GEMMs ahead 1.1-1.2x in situ, everything around them 2.3x ahead
+(270 vs 610 ms a step). The remaining lever at scale is the per-core
+`sgemm`: both sides sit at 50-70% of the 124 GFLOP/s per-core FMA peak,
+the TN (`grad_B`) shapes are the ones where R2 is behind (next section),
+and at billions of parameters the GEMM share only grows.
 
 ### Where the medium model's step goes (dim 768, in situ, 2026-09-20)
 
@@ -206,9 +264,10 @@ computing `grad_B` as `(gᵀ·A)ᵀ`, the NT form, with a transposed
 write-back of the small result.
 
 Backward census in situ (`R2_TAPE_STATS=1 --example phase_split`):
-matmul 82%, attention 12% (seq 256; not yet compared to SDPA at this
-length), rmsnorm 4% before it was made row-parallel (119 -> 33 ms; the
-forward was serial too). Run length, two 20-step pairs: 46.97 -> 46.89 s
+matmul 82%, attention 12% (the kernel that turned out to be the medium
+model's whole deficit — see "The second cut" above; now 5%), rmsnorm 4%
+before it was made row-parallel (119 -> 33 ms; the forward was serial
+too). Run length, two 20-step pairs: 46.97 -> 46.89 s
 and 48.09 -> 46.19 s — under the bar, kept as strictly less work.
 
 ### How it got here: three pieces of pure waste

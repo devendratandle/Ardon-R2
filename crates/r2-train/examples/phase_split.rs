@@ -52,6 +52,12 @@ fn main() {
 
     let (mut fw, mut bw, mut op, mut whole) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut take, mut adam, mut dropt) = (Vec::new(), Vec::new(), Vec::new());
+    // GEMM ms inside each phase (R2_GEMM_STATS=1), so the non-GEMM part of
+    // forward and backward can be read off directly.
+    let gemm_ms = || r2_linalg::gemm::take_gemm_stats().iter().map(|r| r.1 as f64).sum::<f64>() / 1e3;
+    let (mut gf, mut gb) = (Vec::new(), Vec::new());
+    let _ = gemm_ms();
+    let _ = (r2_autograd::take_forward_stats(), r2_autograd::take_backward_stats());   // drop the warm-up census
     let use_pool = std::env::var("R2_POOL").map(|v| v != "0").unwrap_or(true);
     let mut pool = r2_autograd::BufPool::new();
     for _ in 0..steps {
@@ -64,10 +70,12 @@ fn main() {
         let loss = tape.softmax_ce(logits, cfg.vocab, tgts.clone());
         std::hint::black_box(tape.value(loss)[0]);
         let t_f = s0.elapsed().as_secs_f64() * 1e3;
+        gf.push(gemm_ms());
 
         let s1 = std::time::Instant::now();
         tape.backward(loss);
         let t_b = s1.elapsed().as_secs_f64() * 1e3;
+        gb.push(gemm_ms());
 
         let s2 = std::time::Instant::now();
         for (i, &lv) in leaves.iter().enumerate() { tr.params[i] = tape.take_value(lv); }
@@ -89,6 +97,7 @@ fn main() {
         let s3 = std::time::Instant::now();
         let _ = tr.train_step(&batch).expect("step");
         whole.push(s3.elapsed().as_secs_f64() * 1e3);
+        let _ = gemm_ms();
     }
     let (f, b, o, w) = (median(fw), median(bw), median(op), median(whole));
     println!("\n{:<12} {:>10} {:>8}", "phase", "ms/step", "share");
@@ -102,22 +111,30 @@ fn main() {
     println!("{:<12} {:>10.1}", "phase sum", f + b + o);
     println!("{:<12} {:>10.1}   (train_step timed whole; should match the sum)", "whole step", w);
     println!("\nR2_PHASES forward={f:.2} backward={b:.2} optimizer={o:.2} whole={w:.2}");
+    let (gfm, gbm) = (median(gf), median(gb));
+    if gfm + gbm > 0.0 {
+        println!("GEMM ms inside forward {gfm:.1} (non-GEMM {:.1}), inside backward {gbm:.1} (non-GEMM {:.1})",
+                 f - gfm, b - gbm);
+    }
 
-    // In-situ backward census (R2_TAPE_STATS=1): ms per step by op kind,
-    // over the split steps AND the whole steps timed above (2 x steps).
-    let stats = r2_autograd::take_backward_stats();
-    if !stats.is_empty() {
+    // In-situ census (R2_TAPE_STATS=1): ms per step by op kind, forward
+    // and backward, over the split steps AND the whole steps timed above
+    // (2 x steps).
+    let census = |title: &str, stats: Vec<(&str, f32)>| {
+        if stats.is_empty() { return; }
         let mut by: std::collections::BTreeMap<&str, (usize, f64)> = Default::default();
         for (k, ms) in &stats { let e = by.entry(k).or_insert((0, 0.0)); e.0 += 1; e.1 += *ms as f64; }
         let denom = (2 * steps) as f64;
         let mut rows: Vec<_> = by.into_iter().collect();
         rows.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap());
-        println!("\nbackward census (in situ), ms per step:");
-        println!("{:<14} {:>8} {:>10} {:>8}", "op", "arms", "ms/step", "share");
+        println!("\n{title} census (in situ), ms per step:");
+        println!("{:<14} {:>8} {:>10} {:>8}", "op", "nodes", "ms/step", "share");
         let total: f64 = rows.iter().map(|r| r.1 .1).sum::<f64>() / denom;
         for (k, (n, ms)) in &rows {
             println!("{k:<14} {:>8} {:>10.1} {:>7.1}%", n / (2 * steps), ms / denom, ms / denom / total * 100.0);
         }
         println!("{:<14} {:>8} {:>10.1}", "total", "", total);
-    }
+    };
+    census("forward", r2_autograd::take_forward_stats());
+    census("backward", r2_autograd::take_backward_stats());
 }

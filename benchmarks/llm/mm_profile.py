@@ -1,5 +1,5 @@
 """PyTorch's per-GEMM times INSIDE a training step, by shape - the
-like-for-like baseline for R2's `team_diag`.
+like-for-like baseline for R2's `--example gemm_insitu`.
 
 Every earlier "R2 vs MKL" figure on the small shapes compared R2 measured
 inside a real step (cold operands) against MKL in an isolated loop (hot
