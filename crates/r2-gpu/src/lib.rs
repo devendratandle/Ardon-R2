@@ -147,6 +147,8 @@ pub fn adapter_info() -> String {
 pub mod device;
 #[cfg(feature = "gpu")]
 pub mod gemm;
+#[cfg(feature = "gpu")]
+pub mod attention;
 
 #[cfg(feature = "gpu")]
 mod gpu {

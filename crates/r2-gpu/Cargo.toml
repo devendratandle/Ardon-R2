@@ -28,7 +28,13 @@ required-features = ["gpu"]
 [dev-dependencies]
 # The CPU sgemm is the reference every GPU kernel is checked against.
 r2-linalg = { path = "../r2-linalg" }
+# The tape's CPU attention is the reference for the GPU one.
+r2-autograd = { path = "../r2-autograd" }
 
 [[example]]
 name = "gemm_bench"
+required-features = ["gpu"]
+
+[[example]]
+name = "attn_bench"
 required-features = ["gpu"]

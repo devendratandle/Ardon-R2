@@ -3206,6 +3206,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "pollster",
+ "r2-autograd",
  "r2-linalg",
  "wgpu 30.0.1",
 ]
