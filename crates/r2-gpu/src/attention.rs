@@ -89,7 +89,7 @@ fn kernels(hd: usize) -> Option<&'static Kernels> {
         })
     };
     let k: &'static Kernels = Box::leak(Box::new(Kernels {
-        forward: make("r2gpu-attn-fwd", forward_wgsl(hd)),
+        forward: make("r2gpu-attn-fwd", if crate::attn_tiled::supports(hd) { crate::attn_tiled::forward_wgsl(hd) } else { forward_wgsl(hd) }),
         delta: make("r2gpu-attn-delta", delta_wgsl(hd)),
         dv: make("r2gpu-attn-dv", dkv_wgsl(hd, false)),
         dk: make("r2gpu-attn-dk", dkv_wgsl(hd, true)),

@@ -1,16 +1,19 @@
-//! `cargo run -p r2-gpu --features gpu --example probe`
-//! Reports the adapter wgpu selects (integrated GPUs count) and checks a
-//! kernel against the CPU reference. Proves offload works with no discrete
-//! card required.
+//! What this machine's adapter is and the limits the kernels are sized
+//! against: workgroup storage, invocations per workgroup, dispatch dims.
+//!
+//!     cargo run --release -p r2-gpu --features gpu --example probe
+
 fn main() {
     println!("adapter: {}", r2_gpu::adapter_info());
-    r2_gpu::set_gpu_enabled(true);
-    let n = r2_gpu::GPU_MIN_ELEMS;
-    let xs: Vec<f32> = (0..n).map(|i| (i as f32) * 1e-3 - 30.0).collect();
-    for op in [r2_gpu::Op::Relu, r2_gpu::Op::Sigmoid, r2_gpu::Op::Tanh] {
-        let g = r2_gpu::dispatch(op, &xs);
-        let c = r2_gpu::cpu::map(op, &xs);
-        let maxerr = g.iter().zip(&c).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        println!("{:?}: n={} maxerr(GPU vs CPU)={:.2e}", op, n, maxerr);
+    #[cfg(feature = "gpu")]
+    if let Some(g) = r2_gpu::device::gpu() {
+        let l = g.device.limits();
+        println!("max_compute_workgroup_storage_size   {} bytes", l.max_compute_workgroup_storage_size);
+        println!("max_compute_invocations_per_workgroup {}", l.max_compute_invocations_per_workgroup);
+        println!("max_compute_workgroup_size            {} x {} x {}", l.max_compute_workgroup_size_x, l.max_compute_workgroup_size_y, l.max_compute_workgroup_size_z);
+        println!("max_compute_workgroups_per_dimension  {}", l.max_compute_workgroups_per_dimension);
+        println!("max_storage_buffer_binding_size       {} MB", l.max_storage_buffer_binding_size / (1 << 20));
+        println!("max_buffer_size                       {} MB", l.max_buffer_size / (1 << 20));
+        println!("features: subgroup {}", g.device.features().contains(wgpu::Features::SUBGROUP));
     }
 }
