@@ -26,9 +26,9 @@ use r2_gpu::gemm::gemm;
 use r2_gpu::optim::adam_step;
 use r2_tensor::model::Config;
 
-/// One layer's saved activations for the backward.
+/// A layer's activations past its input: what the backward needs, or
+/// recomputes from `x` under checkpointing.
 struct LayerActs {
-    x: Tensor,      // residual stream in       t x d
     h: Tensor,      // rmsnorm(x)               t x d
     q: Tensor,      // h·Wq                     t x d
     k: Tensor,      // h·Wk                     t x kv
@@ -49,7 +49,10 @@ struct LayerActs {
 struct Acts {
     t: usize,
     seq: usize,
-    layers: Vec<LayerActs>,
+    x: Vec<Tensor>,         // each layer's input residual stream, t x d
+    /// One work set per layer, or ONE for all of them under
+    /// checkpointing, refilled from `x[l]` before layer l's backward.
+    work: Vec<LayerActs>,
     x_out: Tensor,      // residual stream after the last layer
     xn: Tensor,         // final rmsnorm
     logits: Tensor,     // t x vocab
@@ -75,6 +78,11 @@ pub struct GpuTrainer {
     lr: f32, beta1: f32, beta2: f32, eps: f32,
     t: u64,
     pub step: u64,
+    /// Activation checkpointing: keep only each layer's input, recompute
+    /// the rest in the backward. One layer's work set instead of one per
+    /// layer — at dim d and t tokens, 14·t·d + t·nh floats per layer
+    /// become t·d — for a quarter more forward arithmetic.
+    pub checkpoint: bool,
     acts: Option<Acts>,
 }
 
@@ -99,7 +107,8 @@ impl GpuTrainer {
             off += n;
         }
         Ok(GpuTrainer { cfg: tr.cfg, w, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
-                        beta2: tr.opt.beta2, eps: tr.opt.eps, t: tr.opt.t, step: tr.step, acts: None })
+                        beta2: tr.opt.beta2, eps: tr.opt.eps, t: tr.opt.t, step: tr.step,
+                        checkpoint: false, acts: None })
     }
 
     /// Weights and optimizer state back to the CPU trainer.
@@ -116,21 +125,24 @@ impl GpuTrainer {
     }
 
     fn acts(&mut self, t: usize, seq: usize) -> Result<&Acts, String> {
-        if self.acts.as_ref().map(|a| a.t == t && a.seq == seq).unwrap_or(false) {
+        let sets = if self.checkpoint { 1 } else { self.cfg.n_layers };
+        if self.acts.as_ref().map(|a| a.t == t && a.seq == seq && a.work.len() == sets).unwrap_or(false) {
             return Ok(self.acts.as_ref().unwrap());
         }
         let c = &self.cfg;
         let (d, kv, ffn, nh) = (c.dim, c.kv_dim(), c.ffn_hidden, c.n_heads);
-        let mut layers = Vec::with_capacity(c.n_layers);
-        for _ in 0..c.n_layers {
-            layers.push(LayerActs {
-                x: tz(t * d)?, h: tz(t * d)?, q: tz(t * d)?, k: tz(t * kv)?, v: tz(t * kv)?,
+        let mut x = Vec::with_capacity(c.n_layers);
+        for _ in 0..c.n_layers { x.push(tz(t * d)?); }
+        let mut work = Vec::with_capacity(sets);
+        for _ in 0..sets {
+            work.push(LayerActs {
+                h: tz(t * d)?, q: tz(t * d)?, k: tz(t * kv)?, v: tz(t * kv)?,
                 qr: tz(t * d)?, kr: tz(t * kv)?, ctx: tz(t * d)?, lse: tz(t * nh)?, x1: tz(t * d)?,
                 h2: tz(t * d)?, gate: tz(t * ffn)?, up: tz(t * ffn)?, sg: tz(t * ffn)?, act: tz(t * ffn)?,
             });
         }
         self.acts = Some(Acts {
-            t, seq, layers,
+            t, seq, x, work,
             x_out: tz(t * d)?, xn: tz(t * d)?, logits: tz(t * c.vocab)?, lse_ce: tz(t)?, loss_rows: tz(t)?,
             gres: tz(t * d)?, gh: tz(t * d)?, gq: tz(t * d)?, gk: tz(t * kv)?, gv: tz(t * kv)?,
             gqr: tz(t * d)?, gkr: tz(t * kv)?, gctx: tz(t * d)?,
@@ -212,11 +224,16 @@ impl GpuTrainer {
         };
         let blk = |l: usize, p: usize| 3 + l * 9 + p;
 
-        // ── forward ──
-        ok(ew::embed_fwd(&w[0], &ids, &a.layers[0].x, t, d), "embed")?;
-        for l in 0..c.n_layers {
-            let la = &a.layers[l];
-            ok(ew::rmsnorm_fwd(&la.x, &w[blk(l, 0)], &la.h, t, d, c.eps), "rmsnorm")?;
+        // which work set layer l's activations live in
+        let ck = self.checkpoint;
+        let ws = |l: usize| -> &LayerActs { &a.work[if ck { 0 } else { l }] };
+
+        // one layer's forward from its input `x`, into its work set; the
+        // output residual stream (x of the next layer) only when `out`
+        // is given — the recompute in the backward already has it
+        let layer_fwd = |l: usize, out: Option<&Tensor>| -> Result<(), String> {
+            let (x, la) = (&a.x[l], ws(l));
+            ok(ew::rmsnorm_fwd(x, &w[blk(l, 0)], &la.h, t, d, c.eps), "rmsnorm")?;
             ok(gemm(&la.h, false, &w[blk(l, 1)], false, t, d, d, &la.q, false), "wq")?;
             ok(gemm(&la.h, false, &w[blk(l, 2)], false, t, d, kv, &la.k, false), "wk")?;
             ok(gemm(&la.h, false, &w[blk(l, 3)], false, t, d, kv, &la.v, false), "wv")?;
@@ -225,16 +242,25 @@ impl GpuTrainer {
             ok(attention::forward(&la.qr, &la.kr, &la.v, &la.ctx, &la.lse, &shape), "attention")?;
             // x1 = ctx·Wo, then += x (the residual, in place)
             ok(gemm(&la.ctx, false, &w[blk(l, 4)], false, t, d, d, &la.x1, false), "wo")?;
-            ok(ew::flat_fwd(ew::Flat::AddInto, &la.x, &la.x, &la.x1, t * d), "residual")?;
+            ok(ew::flat_fwd(ew::Flat::AddInto, x, x, &la.x1, t * d), "residual")?;
             ok(ew::rmsnorm_fwd(&la.x1, &w[blk(l, 5)], &la.h2, t, d, c.eps), "ffn rmsnorm")?;
             ok(gemm(&la.h2, false, &w[blk(l, 6)], false, t, d, ffn, &la.gate, false), "w1")?;
             ok(gemm(&la.h2, false, &w[blk(l, 8)], false, t, d, ffn, &la.up, false), "w3")?;
             ok(ew::flat_fwd(ew::Flat::Silu, &la.gate, &la.gate, &la.sg, t * ffn), "silu")?;
             ok(ew::flat_fwd(ew::Flat::Mul, &la.sg, &la.up, &la.act, t * ffn), "gate*up")?;
-            // next residual stream = act·W2 + x1
-            let xnext = if l + 1 < c.n_layers { &a.layers[l + 1].x } else { &a.x_out };
-            ok(gemm(&la.act, false, &w[blk(l, 7)], false, t, ffn, d, xnext, false), "w2")?;
-            ok(ew::flat_fwd(ew::Flat::AddInto, &la.x1, &la.x1, xnext, t * d), "residual")?;
+            if let Some(xnext) = out {
+                // next residual stream = act·W2 + x1
+                ok(gemm(&la.act, false, &w[blk(l, 7)], false, t, ffn, d, xnext, false), "w2")?;
+                ok(ew::flat_fwd(ew::Flat::AddInto, &la.x1, &la.x1, xnext, t * d), "residual")?;
+            }
+            Ok(())
+        };
+
+        // ── forward ──
+        ok(ew::embed_fwd(&w[0], &ids, &a.x[0], t, d), "embed")?;
+        for l in 0..c.n_layers {
+            let xnext = if l + 1 < c.n_layers { &a.x[l + 1] } else { &a.x_out };
+            layer_fwd(l, Some(xnext))?;
         }
         ok(ew::rmsnorm_fwd(&a.x_out, &w[1], &a.xn, t, d, c.eps), "final rmsnorm")?;
         ok(gemm(&a.xn, false, &w[2], false, t, d, vocab, &a.logits, false), "head")?;
@@ -249,7 +275,11 @@ impl GpuTrainer {
         ok(gemm(&a.glogits, false, &w[2], true, t, vocab, d, &a.gh, false), "head grad_A")?;
         ok(ew::rmsnorm_bwd(&a.x_out, &w[1], &a.gh, &a.gres, &g[1], &a.rinv, t, d, c.eps, true, true), "final rmsnorm bwd")?;
         for l in (0..c.n_layers).rev() {
-            let la = &a.layers[l];
+            // under checkpointing the layer's activations are rebuilt
+            // from its input first (the shared work set holds the layer
+            // above's until now)
+            if ck { layer_fwd(l, None)?; }
+            let (x, la) = (&a.x[l], ws(l));
             // x2 = x1 + act·W2
             ok(gemm(&la.act, true, &a.gres, false, ffn, t, d, &g[blk(l, 7)], false), "w2 grad_B")?;
             ok(gemm(&a.gres, false, &w[blk(l, 7)], true, t, d, ffn, &a.gact, false), "w2 grad_A")?;
@@ -278,7 +308,7 @@ impl GpuTrainer {
             ok(gemm(&a.gk, false, &w[blk(l, 2)], true, t, kv, d, &a.gh, true), "wk grad_A")?;
             ok(gemm(&a.gv, false, &w[blk(l, 3)], true, t, kv, d, &a.gh, true), "wv grad_A")?;
             // h = rmsnorm(x): dx accumulates onto gres (x also feeds x1)
-            ok(ew::rmsnorm_bwd(&la.x, &w[blk(l, 0)], &a.gh, &a.gres, &g[blk(l, 0)], &a.rinv, t, d, c.eps, false, true), "rmsnorm bwd")?;
+            ok(ew::rmsnorm_bwd(x, &w[blk(l, 0)], &a.gh, &a.gres, &g[blk(l, 0)], &a.rinv, t, d, c.eps, false, true), "rmsnorm bwd")?;
         }
         ok(ew::embed_bwd(&a.gres, &index, &g[0], vocab, d, true), "embed bwd")?;
 
@@ -351,6 +381,11 @@ mod tests {
         let (loss2, g2) = gt.loss_and_grads(&b).unwrap();
         assert_eq!(loss2.to_bits(), loss_gpu.to_bits());
         assert!(g2 == g_gpu, "the device did not reproduce its own gradients");
+        // checkpointing recomputes the same activations: the same bits
+        gt.checkpoint = true;
+        let (loss3, g3) = gt.loss_and_grads(&b).unwrap();
+        assert_eq!(loss3.to_bits(), loss_gpu.to_bits(), "checkpointed loss");
+        assert!(g3 == g_gpu, "checkpointing changed the gradients");
     }
 
     /// Three optimizer steps on each side from the same state: the losses
