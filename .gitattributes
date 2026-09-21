@@ -2,3 +2,25 @@
 # (bash errors on a `\r` in the shebang / commands), regardless of a
 # contributor's core.autocrlf setting.
 *.sh text eol=lf
+
+# ── GitHub's language bar ──────────────────────────────────────────────
+# Ardon-R2 is Rust, with no C. Everything else in the tree is either an
+# R2 script, a reference harness in another language (the comparisons
+# against R, PyTorch and JAX that back the accuracy and speed claims), a
+# test input, or packaging — none of it is the product, and linguist
+# should not count it as such.
+#
+# `.r2` is one of Rebol's extensions in linguist's table, so R2's own
+# scripts were being reported as "Rebol". Linguist has no R2 entry; R is
+# the honest nearest, since R2 scripts are R.
+*.r2  linguist-language=R
+*.r   linguist-language=R
+# Reference harnesses and the R inputs of the differential test: needed
+# to measure R2, not part of it.
+benchmarks/**           linguist-documentation
+tests/differential/**   linguist-documentation
+# Packaging and CI glue.
+installer/**            linguist-vendored
+.github/**              linguist-vendored
+*.ps1                   linguist-vendored
+*.sh                    linguist-vendored
