@@ -171,7 +171,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 }
 
 /// `Y = f(A, B)` over `n` elements; `p.b` selects the op:
-/// 0 silu(A), 1 A*B, 2 A+B, 3 silu(A)*B.
+/// 0 silu(A), 1 A*B, 2 A+B, 3 silu(A)*B, 4 Y + A (in place; B unused).
 fn flat_fwd_src() -> String {
     bindings(&[("A", "read"), ("B", "read"), ("Y", "read_write")]) + &format!(r#"
 @compute @workgroup_size({T}, 1, 1)
@@ -184,7 +184,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         case 0u: {{ y = a / (1.0 + exp(-a)); }}
         case 1u: {{ y = a * B[i]; }}
         case 2u: {{ y = a + B[i]; }}
-        default: {{ y = a / (1.0 + exp(-a)) * B[i]; }}
+        case 3u: {{ y = a / (1.0 + exp(-a)) * B[i]; }}
+        default: {{ y = Y[i] + a; }}
     }}
     Y[i] = y;
 }}
@@ -347,30 +348,39 @@ pub fn rmsnorm_bwd(x: &Tensor, w: &Tensor, g: &Tensor, gx: &Tensor, gw: &Tensor,
         && launch(pw, &[&x.buf, &g.buf, &rinv.buf, &gw.buf], [0, d as u32, rows as u32, (!assign_w) as u32, 0, 0, 0, 0], [0.0; 4], ceil_div(d, FLAT)).is_some()
 }
 
-/// The flat forward ops.
+/// The flat forward ops. `AddInto` is `y += a` in place — the residual
+/// connection — and ignores `b`; `Silu` ignores `b` too.
 #[derive(Clone, Copy)]
-pub enum Flat { Silu, Mul, Add, SiluMul }
+pub enum Flat { Silu, Mul, Add, SiluMul, AddInto }
 
-/// `y = op(a, b)` over `n` elements (`b` is ignored for `Silu`).
+/// The one-element scratch bound wherever a kernel has an operand nobody
+/// reads: binding a buffer twice in one dispatch (once read-only, once
+/// read-write) is a usage conflict, so unused slots get this instead.
+fn dummy() -> Option<&'static Tensor> {
+    static DUMMY: std::sync::OnceLock<Option<Tensor>> = std::sync::OnceLock::new();
+    DUMMY.get_or_init(|| Tensor::zeros(1)).as_ref()
+}
+
+/// `y = op(a, b)` over `n` elements.
 pub fn flat_fwd(op: Flat, a: &Tensor, b: &Tensor, y: &Tensor, n: usize) -> bool {
     let Some(p) = pipeline("flat_fwd", flat_fwd_src) else { return false };
-    let code = match op { Flat::Silu => 0, Flat::Mul => 1, Flat::Add => 2, Flat::SiluMul => 3 };
-    launch(p, &[&a.buf, &b.buf, &y.buf], [n as u32, 0, 0, 0, code, 0, 0, 0], [0.0; 4], ceil_div(n, FLAT)).is_some()
+    let code = match op { Flat::Silu => 0, Flat::Mul => 1, Flat::Add => 2, Flat::SiluMul => 3, Flat::AddInto => 4 };
+    // an unused read-only slot aliases A: two read bindings of one buffer
+    // are allowed, a read and a read_write of one buffer are not
+    let bb = if matches!(op, Flat::Silu | Flat::AddInto) { &a.buf } else { &b.buf };
+    launch(p, &[&a.buf, bb, &y.buf], [n as u32, 0, 0, 0, code, 0, 0, 0], [0.0; 4], ceil_div(n, FLAT)).is_some()
 }
 
 /// Backward of `Silu` / `Mul` / `Add`: `ga`, `gb` each `Some((buffer,
 /// assign))` when wanted.
 pub fn flat_bwd(op: Flat, a: &Tensor, b: &Tensor, g: &Tensor, ga: Option<(&Tensor, bool)>, gb: Option<(&Tensor, bool)>, n: usize) -> bool {
     let Some(p) = pipeline("flat_bwd", flat_bwd_src) else { return false };
-    let code = match op { Flat::Silu => 0, Flat::Mul => 1, Flat::Add => 2, Flat::SiluMul => 1 };
-    // An output nobody wants still needs a distinct binding (binding `g`
-    // twice, once read-only and once read-write, is a usage conflict), so
-    // it gets a shared one-element scratch buffer that is never touched.
-    static DUMMY: std::sync::OnceLock<Option<Tensor>> = std::sync::OnceLock::new();
-    let Some(dummy) = DUMMY.get_or_init(|| Tensor::zeros(1)).as_ref() else { return false };
+    let code = match op { Flat::Silu => 0, Flat::Mul => 1, Flat::Add | Flat::AddInto => 2, Flat::SiluMul => 1 };
+    let Some(dummy) = dummy() else { return false };
     let (gab, ga_acc, ga_on) = match ga { Some((t, assign)) => (&t.buf, (!assign) as u32, 1), None => (&dummy.buf, 0, 0) };
     let (gbb, gb_acc, gb_on) = match gb { Some((t, assign)) => (&t.buf, (!assign) as u32, 1), None => (&dummy.buf, 0, 0) };
-    launch(p, &[&a.buf, &b.buf, &g.buf, gab, gbb], [n as u32, 0, 0, ga_acc, code, gb_acc, ga_on, gb_on], [0.0; 4], ceil_div(n, FLAT)).is_some()
+    let bb = if matches!(op, Flat::Silu) { &a.buf } else { &b.buf };
+    launch(p, &[&a.buf, bb, &g.buf, gab, gbb], [n as u32, 0, 0, ga_acc, code, gb_acc, ga_on, gb_on], [0.0; 4], ceil_div(n, FLAT)).is_some()
 }
 
 /// RoPE forward: `y = rotate(x)`, positions restarting every `period`

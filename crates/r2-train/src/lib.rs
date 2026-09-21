@@ -328,3 +328,7 @@ mod tests {
         for _ in 0..100 { assert_eq!(a.next_f32(), b.next_f32()); }
     }
 }
+
+/// The training step with everything resident on the GPU (`--features gpu`).
+#[cfg(feature = "gpu")]
+pub mod gpu_llm;

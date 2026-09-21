@@ -310,6 +310,20 @@ fn main() {
     let val_before = tr.eval_loss(&val).unwrap_or_else(|e| die("eval", e));
 
     // ── train ───────────────────────────────────────────────────────────
+    // `R2_GPU=1` runs the same steps on the device (`--features gpu`):
+    // weights, activations, gradients and Adam state stay resident, the
+    // CPU trainer gets the state back at the end for the held-out
+    // evaluation, the save and the generation below.
+    let on_gpu = std::env::var("R2_GPU").map(|v| v == "1").unwrap_or(false);
+    #[cfg(feature = "gpu")]
+    let mut gpu_tr = if on_gpu {
+        let g = r2_train::gpu_llm::GpuTrainer::from_trainer(&tr).unwrap_or_else(|e| die("gpu", e));
+        println!("  device     {}\n", r2_gpu::adapter_info());
+        Some(g)
+    } else { None };
+    #[cfg(not(feature = "gpu"))]
+    if on_gpu { die("gpu", "this binary was built without `--features gpu`"); }
+
     let mut curve: Vec<(usize, f32)> = Vec::new();
     let every = (steps / 10).max(1);
     let t0 = std::time::Instant::now();
@@ -317,6 +331,12 @@ fn main() {
     let mut last = 0.0f32;
     for s in 0..steps {
         let batch = batch_at(&train, s, bn, seq);
+        #[cfg(feature = "gpu")]
+        let loss = match gpu_tr.as_mut() {
+            Some(g) => g.train_step(&batch).unwrap_or_else(|e| die("train_step (gpu)", e)),
+            None => tr.train_step(&batch).unwrap_or_else(|e| die("train_step", e)),
+        };
+        #[cfg(not(feature = "gpu"))]
         let loss = tr.train_step(&batch).unwrap_or_else(|e| die("train_step", e));
         if s == 0 { first = loss; }
         last = loss;
@@ -326,6 +346,8 @@ fn main() {
                      s + 1, t0.elapsed().as_secs_f64());
         }
     }
+    #[cfg(feature = "gpu")]
+    if let Some(g) = &gpu_tr { g.download_into(&mut tr); }
     let train_s = t0.elapsed().as_secs_f64();
     let val_after = tr.eval_loss(&val).unwrap_or_else(|e| die("eval", e));
 

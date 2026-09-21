@@ -18,4 +18,4 @@ r2-linalg = { path = "../r2-linalg" }   # step_census measures sgemm directly
 memmap2 = "0.9"
 
 [features]
-gpu = ["r2-tensor/gpu"]
+gpu = ["r2-tensor/gpu", "r2-gpu/gpu"]
