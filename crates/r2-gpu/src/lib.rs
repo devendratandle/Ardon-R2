@@ -153,6 +153,8 @@ pub mod attention;
 pub mod attn_tiled;
 #[cfg(feature = "gpu")]
 pub mod elementwise;
+#[cfg(feature = "gpu")]
+pub mod optim;
 
 #[cfg(feature = "gpu")]
 mod gpu {

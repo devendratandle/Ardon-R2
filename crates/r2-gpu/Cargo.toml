@@ -30,6 +30,8 @@ required-features = ["gpu"]
 r2-linalg = { path = "../r2-linalg" }
 # The tape's CPU attention is the reference for the GPU one.
 r2-autograd = { path = "../r2-autograd" }
+# The CPU Adam is the bit-for-bit reference for the GPU one.
+r2-train = { path = "../r2-train" }
 
 [[example]]
 name = "gemm_bench"
