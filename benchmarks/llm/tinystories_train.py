@@ -53,14 +53,28 @@ ATTN = os.environ.get("TS_ATTN", "sdpa")
 # TS_DEVICE=dml runs the same script on the GPU through torch-directml
 # (the PyTorch route to an AMD/Intel integrated GPU on Windows); that is
 # the reference for R2's `R2_GPU=1` step. Default: CPU.
+# TS_DEVICE=cuda is the reference on an NVIDIA card: PyTorch+CUDA, with
+# SDPA choosing its flash kernel — the bar every published number uses.
 DEVICE = os.environ.get("TS_DEVICE", "cpu")
 if DEVICE == "dml":
     import torch_directml
     DEV = torch_directml.device()
     DEV_NAME = f"DirectML: {torch_directml.device_name(0)}"
+elif DEVICE == "cuda":
+    if not torch.cuda.is_available():
+        sys.exit("TS_DEVICE=cuda but torch.cuda.is_available() is False")
+    DEV = torch.device("cuda")
+    DEV_NAME = f"CUDA: {torch.cuda.get_device_name(0)}, torch {torch.__version__}"
 else:
     DEV = torch.device("cpu")
     DEV_NAME = "cpu"
+
+
+def device_sync():
+    """CUDA runs asynchronously; a timing that does not wait for the
+    device measures the launch queue, not the work."""
+    if DEVICE == "cuda":
+        torch.cuda.synchronize()
 
 
 def die(msg):
@@ -278,6 +292,7 @@ def main():
                            foreach=False if DEVICE == "dml" else None)
     every = max(steps // 10, 1)
     curve = []
+    device_sync()
     t0 = time.perf_counter()
     first = last = 0.0
     for s in range(steps):
@@ -293,6 +308,7 @@ def main():
             curve.append((s + 1, last))
             print(f"  step {s+1:>4}/{steps}  loss {last:.4f}   "
                   f"{time.perf_counter()-t0:.1f} s elapsed")
+    device_sync()
     train_s = time.perf_counter() - t0
     val_after = eval_loss(model, val_ids, bn, seq, d["val_batches"])
     bpb = val_after / math.log(2) * (d["val_tokens"] / d["val_bytes"])
