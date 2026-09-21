@@ -151,6 +151,8 @@ pub mod gemm;
 pub mod attention;
 #[cfg(feature = "gpu")]
 pub mod attn_tiled;
+#[cfg(feature = "gpu")]
+pub mod elementwise;
 
 #[cfg(feature = "gpu")]
 mod gpu {
