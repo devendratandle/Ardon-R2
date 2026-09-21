@@ -34,6 +34,20 @@
 //! in a fixed order — across query blocks, and across the heads of a GQA
 //! group for dK/dV — so every result is bit-reproducible run to run.
 //!
+//! # What this costs, and what did not help
+//!
+//! Every thread re-reads the staged rows it pairs with — one workgroup-
+//! memory load per FMA — so these kernels run at 20-30 GFLOP/s here
+//! against the GEMM's 400: at the small model (32 x 64 tokens, hd 64)
+//! the forward is 2.1 ms and the backward 14.8 (dV 3.9, dK 7.9, dQ 5.9),
+//! 14% of a training step. Splitting the reduction axis into chunks with
+//! partial slabs and a fixed-order sum (the GEMM's split-K, for more
+//! workgroups) was measured interleaved at splits 1/2/4/8/16: 14.8, 16.2,
+//! 19.6, 26.1, 40.7 ms — monotonically worse, the per-workgroup staging
+//! and row loads outweighing any occupancy gained. Closed. What remains
+//! is the register-tiled backward (`attn_tiled`'s shape for dV, dK, dQ),
+//! which cuts the loads per FMA the way the GEMM does.
+//!
 //! # Registers, not arrays
 //!
 //! The head dimension is a compile-time constant of a generated shader,
@@ -71,6 +85,16 @@ struct Kernels {
     dq: wgpu::ComputePipeline,
 }
 
+/// Whether `attn_tiled`'s register-tiled forward is used where it
+/// applies (`hd % 32 == 0`). Off: measured against this reference kernel
+/// in one process it was SLOWER on this adapter — 2.24 vs 2.12 ms at
+/// 32 x 64 tokens (4/2 heads, hd 64) and 11.70 vs 9.37 ms at 8 x 256
+/// (12/4 heads) — its 128-thread workgroups and 23 KB of workgroup
+/// memory leave the six CUs emptier than the reference's do. It stays as
+/// the FlashAttention-2 shape to build the backward on for a device with
+/// more to fill.
+const TILED_FORWARD: bool = false;
+
 static KERNELS: Mutex<Option<HashMap<usize, &'static Kernels>>> = Mutex::new(None);
 
 fn kernels(hd: usize) -> Option<&'static Kernels> {
@@ -89,7 +113,7 @@ fn kernels(hd: usize) -> Option<&'static Kernels> {
         })
     };
     let k: &'static Kernels = Box::leak(Box::new(Kernels {
-        forward: make("r2gpu-attn-fwd", if crate::attn_tiled::supports(hd) { crate::attn_tiled::forward_wgsl(hd) } else { forward_wgsl(hd) }),
+        forward: make("r2gpu-attn-fwd", if TILED_FORWARD && crate::attn_tiled::supports(hd) { crate::attn_tiled::forward_wgsl(hd) } else { forward_wgsl(hd) }),
         delta: make("r2gpu-attn-delta", delta_wgsl(hd)),
         dv: make("r2gpu-attn-dv", dkv_wgsl(hd, false)),
         dk: make("r2gpu-attn-dk", dkv_wgsl(hd, true)),
@@ -519,6 +543,26 @@ mod tests {
             close(&dq.download(), tape.grad(q), "grad_q");
             close(&dk.download(), tape.grad(k), "grad_k");
             close(&dv.download(), tape.grad(v), "grad_v");
+
+            // the tiled forward, kept off the dispatch on this adapter,
+            // still has to agree
+            if crate::attn_tiled::supports(hd) {
+                let g = gpu().unwrap();
+                let module = g.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("r2gpu-attn-fwd-tiled"),
+                    source: wgpu::ShaderSource::Wgsl(crate::attn_tiled::forward_wgsl(hd).into()),
+                });
+                let tiled = g.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("r2gpu-attn-fwd-tiled"), layout: None, module: &module,
+                    entry_point: Some("main"), compilation_options: Default::default(), cache: None,
+                });
+                let (to2, tl2) = (Tensor::zeros(rows * nh * hd).unwrap(), Tensor::zeros(rows * nh).unwrap());
+                let dims = dims_buffer(&sh).unwrap();
+                launch(&tiled, &[&tq.buf, &tk.buf, &tv.buf, &to2.buf, &tl2.buf], &dims,
+                       ((seq as u32).div_ceil(BQ), nh as u32, nseq as u32)).unwrap();
+                close(&to2.download(), tape.value(o), "tiled output");
+                close(&tl2.download(), &tl.download(), "tiled lse");
+            }
         }
     }
 }
