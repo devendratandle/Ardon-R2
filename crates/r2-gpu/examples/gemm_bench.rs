@@ -22,8 +22,9 @@ fn main() {
     println!("adapter: {}", r2_gpu::adapter_info());
     println!("{:>18} {:>5} {:>10} {:>10} {:>8}", "t x k x n", "case", "GPU GF/s", "CPU GF/s", "GPU/CPU");
     println!("{}", "-".repeat(56));
-    let shapes = [(2048usize, 256usize, 768usize), (2048, 768, 768), (2048, 768, 2304),
-                  (2048, 2304, 768), (2048, 768, 8000), (512, 768, 2304), (2048, 2048, 2048)];
+    // the small model's shapes first (dim 256, kv 128, ffn 768, vocab 8000), then the medium's
+    let shapes = [(2048usize, 256usize, 256usize), (2048, 256, 128), (2048, 256, 768), (2048, 768, 256), (2048, 256, 8000),
+                  (2048, 768, 768), (2048, 768, 2304), (2048, 2304, 768), (2048, 768, 8000), (512, 768, 2304), (2048, 2048, 2048)];
     for &(t, k, n) in &shapes {
         let fill = |len: usize, ph: f32| -> Vec<f32> { (0..len).map(|i| ((i as f32) * 0.0007 + ph).sin()).collect() };
         let a = fill(t * k, 0.0);          // activations t x k

@@ -62,7 +62,7 @@ struct Acts {
     gact: Tensor, gup: Tensor, gsg: Tensor,
     glogits: Tensor,
     delta: Tensor,      // t x nh, attention backward scratch
-    rinv: Tensor,       // t, rmsnorm backward scratch
+    rinv: Tensor,       // rmsnorm backward scratch (rinv + dW partials)
 }
 
 pub struct GpuTrainer {
@@ -135,7 +135,7 @@ impl GpuTrainer {
             gres: tz(t * d)?, gh: tz(t * d)?, gq: tz(t * d)?, gk: tz(t * kv)?, gv: tz(t * kv)?,
             gqr: tz(t * d)?, gkr: tz(t * kv)?, gctx: tz(t * d)?,
             gact: tz(t * ffn)?, gup: tz(t * ffn)?, gsg: tz(t * ffn)?,
-            glogits: tz(t * c.vocab)?, delta: tz(t * nh)?, rinv: tz(t)?,
+            glogits: tz(t * c.vocab)?, delta: tz(t * nh)?, rinv: tz(ew::rmsnorm_scratch_len(t, d))?,
         });
         Ok(self.acts.as_ref().unwrap())
     }

@@ -57,6 +57,17 @@ fn pipeline(name: &'static str, src: fn() -> String) -> Option<&'static wgpu::Co
 const PARAMS: &str = "struct P { n: u32, d: u32, rows: u32, a: u32, b: u32, c: u32, e: u32, f: u32, x: f32, y: f32, z: f32, w: f32 };\n";
 
 fn launch(p: &wgpu::ComputePipeline, bufs: &[&wgpu::Buffer], ints: [u32; 8], floats: [f32; 4], groups: u32) -> Option<()> {
+    let res: Vec<wgpu::BindingResource> = bufs.iter().map(|b| b.as_entire_binding()).collect();
+    launch_bufs(p, &res, ints, floats, groups)
+}
+
+/// A whole-buffer or sub-range binding at byte `off` (which must be a
+/// multiple of 256, the storage-binding alignment every adapter honours).
+fn range(buf: &wgpu::Buffer, off: u64) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: buf, offset: off, size: None })
+}
+
+fn launch_bufs(p: &wgpu::ComputePipeline, bufs: &[wgpu::BindingResource], ints: [u32; 8], floats: [f32; 4], groups: u32) -> Option<()> {
     let g = gpu()?;
     let mut words = [0u32; 12];
     words[..8].copy_from_slice(&ints);
@@ -65,7 +76,7 @@ fn launch(p: &wgpu::ComputePipeline, bufs: &[&wgpu::Buffer], ints: [u32; 8], flo
         label: Some("r2gpu-params"), contents: bytemuck::cast_slice(&words), usage: wgpu::BufferUsages::UNIFORM,
     });
     let mut entries: Vec<wgpu::BindGroupEntry> = bufs.iter().enumerate()
-        .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() }).collect();
+        .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.clone() }).collect();
     entries.push(wgpu::BindGroupEntry { binding: bufs.len() as u32, resource: ubuf.as_entire_binding() });
     let bind = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None, layout: &p.get_bind_group_layout(0), entries: &entries,
@@ -105,66 +116,139 @@ fn tree_sum() -> String {
 
 // ── shaders ─────────────────────────────────────────────────────────────
 
+/// The row layout of the rmsnorm kernels: `RM_LANES` threads per row,
+/// `RM_ROWS` rows per workgroup. One workgroup per row (the obvious
+/// layout) put 2,048 workgroups of 256 threads through an 8-stage barrier
+/// tree to reduce 256 elements each — 1.5 ms for 2 MB, latency, not
+/// bandwidth. Eight rows per workgroup with 32 lanes each amortise the
+/// barriers eight ways and shorten the tree to five stages.
+const RM_LANES: u32 = 32;
+const RM_ROWS: u32 = 8;
+/// Row blocks the dW reduction is split across (a fixed-order two-stage
+/// sum, so the result does not depend on scheduling).
+const RM_PARTS: u32 = 64;
+
+/// Scratch `rmsnorm_bwd` needs for `rows` x `d`: the per-row `rinv`, then
+/// `RM_PARTS x d` dW partials.
+pub fn rmsnorm_scratch_len(rows: usize, d: usize) -> usize { rm_part_off(rows) + RM_PARTS as usize * d }
+
+/// Where the dW partials start in the scratch: after `rinv`, rounded up to
+/// the 256-byte storage-binding alignment (in floats).
+fn rm_part_off(rows: usize) -> usize { rows.div_ceil(64) * 64 }
+
+/// The per-row prologue shared by the forward and the dX pass: which row
+/// this thread serves, whether it exists, and where it starts (an absent
+/// row reads row 0 so every lane keeps to the barriers in step).
+const RM_ROW: &str = r#"
+    let lane = tid % LANES;
+    let r = wg.x * ROWS + tid / LANES;
+    let valid = r < p.rows;
+    let base = select(0u, r * p.d, valid);
+"#;
+
+/// A fixed-order sum of each row's `LANES` partials into its first lane.
+const RM_TREE: &str = r#"
+    workgroupBarrier();
+    for (var s = LANES / 2u; s > 0u; s = s >> 1u) {
+        if (lane < s) { red[tid] = red[tid] + red[tid + s]; }
+        workgroupBarrier();
+    }
+"#;
+
+fn rm_consts() -> String {
+    format!("const LANES: u32 = {RM_LANES}u;
+const ROWS: u32 = {RM_ROWS}u;
+const T: u32 = {}u;
+", RM_LANES * RM_ROWS)
+}
+
 fn rmsnorm_fwd_src() -> String {
-    bindings(&[("X", "read"), ("W", "read"), ("Y", "read_write")]) + &format!(r#"
-var<workgroup> red: array<f32, {T}u>;
+    bindings(&[("X", "read"), ("W", "read"), ("Y", "read_write")]) + &rm_consts() + &format!(r#"
+var<workgroup> red: array<f32, T>;
 @compute @workgroup_size({T}, 1, 1)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) tid: u32) {{
-    let r = wg.x;
+{RM_ROW}
     var ss = 0.0;
-    for (var j = tid; j < p.d; j = j + {T}u) {{ let v = X[r * p.d + j]; ss = fma(v, v, ss); }}
+    for (var j = lane; j < p.d; j = j + LANES) {{ let v = X[base + j]; ss = fma(v, v, ss); }}
     red[tid] = ss;
-{tree}
-    let scale = 1.0 / sqrt(red[0] / f32(p.d) + p.x);
-    for (var j = tid; j < p.d; j = j + {T}u) {{ Y[r * p.d + j] = X[r * p.d + j] * scale * W[j]; }}
+{RM_TREE}
+    let scale = 1.0 / sqrt(red[tid - lane] / f32(p.d) + p.x);
+    if (valid) {{
+        for (var j = lane; j < p.d; j = j + LANES) {{ Y[base + j] = X[base + j] * scale * W[j]; }}
+    }}
 }}
-"#, T = ROW_THREADS, tree = tree_sum())
+"#, T = RM_LANES * RM_ROWS)
 }
 
 /// dX (assign or accumulate) and the per-row `rinv` the dW pass needs.
 fn rmsnorm_bwd_x_src() -> String {
-    bindings(&[("X", "read"), ("W", "read"), ("G", "read"), ("GX", "read_write"), ("RI", "read_write")]) + &format!(r#"
-var<workgroup> red: array<f32, {T}u>;
-var<workgroup> red2: array<f32, {T}u>;
+    bindings(&[("X", "read"), ("W", "read"), ("G", "read"), ("GX", "read_write"), ("RI", "read_write")]) + &rm_consts() + &format!(r#"
+var<workgroup> red: array<f32, T>;
+var<workgroup> red2: array<f32, T>;
 @compute @workgroup_size({T}, 1, 1)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) tid: u32) {{
-    let r = wg.x;
+{RM_ROW}
     var ss = 0.0;
     var sg = 0.0;
-    for (var j = tid; j < p.d; j = j + {T}u) {{
-        let v = X[r * p.d + j];
+    for (var j = lane; j < p.d; j = j + LANES) {{
+        let v = X[base + j];
         ss = fma(v, v, ss);
-        sg = fma(G[r * p.d + j] * W[j], v, sg);
+        sg = fma(G[base + j] * W[j], v, sg);
     }}
     red[tid] = ss;
     red2[tid] = sg;
     workgroupBarrier();
-    for (var s = {half}u; s > 0u; s = s >> 1u) {{
-        if (tid < s) {{ red[tid] = red[tid] + red[tid + s]; red2[tid] = red2[tid] + red2[tid + s]; }}
+    for (var s = LANES / 2u; s > 0u; s = s >> 1u) {{
+        if (lane < s) {{ red[tid] = red[tid] + red[tid + s]; red2[tid] = red2[tid] + red2[tid + s]; }}
         workgroupBarrier();
     }}
-    let ri = 1.0 / sqrt(red[0] / f32(p.d) + p.x);
-    let coef = ri * ri * ri / f32(p.d) * red2[0];
-    if (tid == 0u) {{ RI[r] = ri; }}
-    for (var j = tid; j < p.d; j = j + {T}u) {{
-        let o = r * p.d + j;
-        let dx = G[o] * W[j] * ri - coef * X[o];
-        if (p.a == 0u) {{ GX[o] = dx; }} else {{ GX[o] = GX[o] + dx; }}
+    let ri = 1.0 / sqrt(red[tid - lane] / f32(p.d) + p.x);
+    let coef = ri * ri * ri / f32(p.d) * red2[tid - lane];
+    if (valid) {{
+        if (lane == 0u) {{ RI[r] = ri; }}
+        for (var j = lane; j < p.d; j = j + LANES) {{
+            let o = base + j;
+            let dx = G[o] * W[j] * ri - coef * X[o];
+            if (p.a == 0u) {{ GX[o] = dx; }} else {{ GX[o] = GX[o] + dx; }}
+        }}
     }}
 }}
-"#, T = ROW_THREADS, half = ROW_THREADS / 2)
+"#, T = RM_LANES * RM_ROWS)
 }
 
-/// dW[j] += Σ_r G[r][j] X[r][j] rinv[r] — one thread per column, rows in
-/// order.
-fn rmsnorm_bwd_w_src() -> String {
-    bindings(&[("X", "read"), ("G", "read"), ("RI", "read"), ("GW", "read_write")]) + &format!(r#"
+/// dW, stage one: `PART[b][j] = Σ_(r in block b) G[r][j] X[r][j] rinv[r]`,
+/// one thread per (block, column), rows in order. One thread per column
+/// over ALL rows was a single workgroup walking 2,048 rows — 4 ms.
+fn rmsnorm_bwd_w_part_src() -> String {
+    // RI and PART are two ranges of ONE scratch buffer; wgpu tracks usage
+    // per buffer, so both are declared read_write (one usage merges, a
+    // read beside a read_write does not)
+    bindings(&[("X", "read"), ("G", "read"), ("RI", "read_write"), ("PART", "read_write")]) + &format!(r#"
+@compute @workgroup_size({T}, 1, 1)
+fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) tid: u32) {{
+    let cg = (p.d + {T}u - 1u) / {T}u;
+    let b = wg.x / cg;
+    let j = (wg.x % cg) * {T}u + tid;
+    if (j >= p.d) {{ return; }}
+    let chunk = (p.rows + p.b - 1u) / p.b;
+    let r0 = b * chunk;
+    let r1 = min(r0 + chunk, p.rows);
+    var acc = 0.0;
+    for (var r = r0; r < r1; r = r + 1u) {{ acc = fma(G[r * p.d + j] * X[r * p.d + j], RI[r], acc); }}
+    PART[b * p.d + j] = acc;
+}}
+"#, T = FLAT)
+}
+
+/// dW, stage two: `GW[j] (=|+=) Σ_b PART[b][j]`, blocks in order.
+fn rmsnorm_bwd_w_sum_src() -> String {
+    bindings(&[("PART", "read"), ("GW", "read_write")]) + &format!(r#"
 @compute @workgroup_size({T}, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let j = gid.x;
     if (j >= p.d) {{ return; }}
     var acc = 0.0;
-    for (var r = 0u; r < p.rows; r = r + 1u) {{ acc = fma(G[r * p.d + j] * X[r * p.d + j], RI[r], acc); }}
+    for (var b = 0u; b < p.b; b = b + 1u) {{ acc = acc + PART[b * p.d + j]; }}
     if (p.a == 0u) {{ GW[j] = acc; }} else {{ GW[j] = GW[j] + acc; }}
 }}
 "#, T = FLAT)
@@ -335,17 +419,28 @@ fn ceil_div(n: usize, d: u32) -> u32 { (n as u32).div_ceil(d) }
 /// `y[r] = x[r] / rms(x[r]) * w`, rows of `d`.
 pub fn rmsnorm_fwd(x: &Tensor, w: &Tensor, y: &Tensor, rows: usize, d: usize, eps: f32) -> bool {
     let Some(p) = pipeline("rmsnorm_fwd", rmsnorm_fwd_src) else { return false };
-    launch(p, &[&x.buf, &w.buf, &y.buf], [0, d as u32, rows as u32, 0, 0, 0, 0, 0], [eps, 0.0, 0.0, 0.0], rows as u32).is_some()
+    launch(p, &[&x.buf, &w.buf, &y.buf], [0, d as u32, rows as u32, 0, 0, 0, 0, 0], [eps, 0.0, 0.0, 0.0], ceil_div(rows, RM_ROWS)).is_some()
 }
 
 /// rmsnorm backward: `gx (=|+=)` per `assign_x`, `gw (=|+=)` per
 /// `assign_w`; `rinv` is scratch of length `rows`.
 #[allow(clippy::too_many_arguments)]
-pub fn rmsnorm_bwd(x: &Tensor, w: &Tensor, g: &Tensor, gx: &Tensor, gw: &Tensor, rinv: &Tensor,
+pub fn rmsnorm_bwd(x: &Tensor, w: &Tensor, g: &Tensor, gx: &Tensor, gw: &Tensor, scratch: &Tensor,
                    rows: usize, d: usize, eps: f32, assign_x: bool, assign_w: bool) -> bool {
-    let (Some(px), Some(pw)) = (pipeline("rmsnorm_bwd_x", rmsnorm_bwd_x_src), pipeline("rmsnorm_bwd_w", rmsnorm_bwd_w_src)) else { return false };
-    launch(px, &[&x.buf, &w.buf, &g.buf, &gx.buf, &rinv.buf], [0, d as u32, rows as u32, (!assign_x) as u32, 0, 0, 0, 0], [eps, 0.0, 0.0, 0.0], rows as u32).is_some()
-        && launch(pw, &[&x.buf, &g.buf, &rinv.buf, &gw.buf], [0, d as u32, rows as u32, (!assign_w) as u32, 0, 0, 0, 0], [0.0; 4], ceil_div(d, FLAT)).is_some()
+    if scratch.len < rmsnorm_scratch_len(rows, d) { return false; }
+    let (Some(px), Some(pp), Some(ps)) = (pipeline("rmsnorm_bwd_x", rmsnorm_bwd_x_src),
+                                          pipeline("rmsnorm_bwd_w_part", rmsnorm_bwd_w_part_src),
+                                          pipeline("rmsnorm_bwd_w_sum", rmsnorm_bwd_w_sum_src)) else { return false };
+    // the scratch, split: rinv is its first `rows` floats, the partials follow
+    let po = (rm_part_off(rows) * 4) as u64;
+    let (ri, part) = (range(&scratch.buf, 0), range(&scratch.buf, po));
+    let parts = RM_PARTS.min(rows as u32).max(1);
+    launch_bufs(px, &[x.buf.as_entire_binding(), w.buf.as_entire_binding(), g.buf.as_entire_binding(), gx.buf.as_entire_binding(), ri.clone()],
+                [0, d as u32, rows as u32, (!assign_x) as u32, 0, 0, 0, 0], [eps, 0.0, 0.0, 0.0], ceil_div(rows, RM_ROWS)).is_some()
+        && launch_bufs(pp, &[x.buf.as_entire_binding(), g.buf.as_entire_binding(), ri, part.clone()],
+                       [0, d as u32, rows as u32, 0, parts, 0, 0, 0], [0.0; 4], ceil_div(d, FLAT) * parts).is_some()
+        && launch_bufs(ps, &[part, gw.buf.as_entire_binding()],
+                       [0, d as u32, rows as u32, (!assign_w) as u32, parts, 0, 0, 0], [0.0; 4], ceil_div(d, FLAT)).is_some()
 }
 
 /// The flat forward ops. `AddInto` is `y += a` in place — the residual
@@ -484,7 +579,7 @@ mod tests {
         tape.backward_from(vy, &g);
         assert!(rmsnorm_fwd(&tx, &tw, &y, rows, d, 1e-5));
         close(&y.download(), tape.value(vy), 1e-5, "rmsnorm");
-        let (gx, gw, ri) = (Tensor::upload(&b).unwrap(), Tensor::upload(&w).unwrap(), Tensor::zeros(rows).unwrap());
+        let (gx, gw, ri) = (Tensor::upload(&b).unwrap(), Tensor::upload(&w).unwrap(), Tensor::zeros(rmsnorm_scratch_len(rows, d)).unwrap());
         assert!(rmsnorm_bwd(&tx, &tw, &tg, &gx, &gw, &ri, rows, d, 1e-5, false, false));
         let want_gx: Vec<f32> = tape.grad(vx).iter().zip(&b).map(|(a, c)| a + c).collect();
         let want_gw: Vec<f32> = tape.grad(vw).iter().zip(&w).map(|(a, c)| a + c).collect();

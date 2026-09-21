@@ -17,10 +17,21 @@
 //! # Determinism
 //!
 //! Every element of C is produced by exactly one thread, which sums its
-//! `K` products in a fixed order. No atomics, no split-K reductions. The
-//! same inputs give the same bits on every run and on every device that
-//! rounds FMA the same way (all of them) — the reproducibility cuBLAS
-//! does not promise by default.
+//! `K` products in a fixed order. No atomics. When the output has too few
+//! tiles to fill the device (`grad_B` of a 256-wide projection is a
+//! 256 x 256 result over a depth of 2,048: four tiles on six CUs, and it
+//! ran at 53-110 GFLOP/s), the depth is split across workgroups — but
+//! each split writes its own partial tile and a second pass sums the
+//! partials in split order, so the result is still a fixed-order sum.
+//! The same inputs give the same bits on every run and on every device
+//! that rounds FMA the same way (all of them) — the reproducibility
+//! cuBLAS does not promise by default.
+//!
+//! Split-K was chosen against a 64 x 64 tile and a register-prefetching
+//! slab loop, all three interleaved in one process: the small tile gained
+//! nothing over the split, and prefetching cost 25-30% everywhere (the
+//! slot tables and the staged registers spilled the occupancy the big
+//! tile lives on).
 //!
 //! # Accuracy
 //!
@@ -76,7 +87,8 @@ fn shader() -> String {
                 let col = j * 4 + l;
                 stores += &format!(
                     "        if (nbase + {col}u < d.n) {{ let o = (mbase + {i}u) * d.ldc + nbase + {col}u; \
-                     if (d.acc == 0u) {{ C[o] = c{i}_{j}.{comp}; }} else {{ C[o] = C[o] + c{i}_{j}.{comp}; }} }}\n");
+                     if (d.ksplit > 1u) {{ P[wg.z * d.m * d.n + o] = c{i}_{j}.{comp}; }} \
+                     else if (d.acc == 0u) {{ C[o] = c{i}_{j}.{comp}; }} else {{ C[o] = C[o] + c{i}_{j}.{comp}; }} }}\n");
             }
         }
         stores += "    }\n";
@@ -85,12 +97,14 @@ fn shader() -> String {
 struct Dims {{
     m: u32, k: u32, n: u32, lda: u32,
     ldb: u32, ldc: u32, ta: u32, tb: u32,
-    acc: u32, pad0: u32, pad1: u32, pad2: u32,
+    acc: u32, ksplit: u32, kchunk: u32, pad2: u32,
 }};
 @group(0) @binding(0) var<storage, read> A: array<f32>;
 @group(0) @binding(1) var<storage, read> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @group(0) @binding(3) var<uniform> d: Dims;
+// split-K partials, [ksplit][m][n]; written instead of C when ksplit > 1
+@group(0) @binding(4) var<storage, read_write> P: array<f32>;
 
 const BM: u32 = {BM}u;
 const BN: u32 = {BN}u;
@@ -111,8 +125,11 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         @builtin(local_invocation_index) tid: u32) {{
     let m0 = wg.y * BM;
     let n0 = wg.x * BN;
+    // this workgroup's share of the depth (all of it when ksplit == 1)
+    let kbeg = wg.z * d.kchunk;
+    let kend = min(kbeg + d.kchunk, d.k);
 {acc_decl}
-    for (var k0 = 0u; k0 < d.k; k0 = k0 + BK) {{
+    for (var k0 = kbeg; k0 < kend; k0 = k0 + BK) {{
         // ── stage A: BM x BK elements, {LOADS_A} per thread. The slab
         // index is walked so that consecutive threads read consecutive
         // addresses of A whichever way A is stored: along k for NN, along
@@ -124,7 +141,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             let mm = m0 + r;
             let kk = k0 + c;
             var v = 0.0;
-            if (mm < d.m && kk < d.k) {{
+            if (mm < d.m && kk < kend) {{
                 if (d.ta == 0u) {{ v = A[mm * d.lda + kk]; }} else {{ v = A[kk * d.lda + mm]; }}
             }}
             As[c * (BM / 4u) + r / 4u][r % 4u] = v;
@@ -138,7 +155,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             let kk = k0 + r;
             let nn = n0 + c;
             var v = 0.0;
-            if (kk < d.k && nn < d.n) {{
+            if (kk < kend && nn < d.n) {{
                 if (d.tb == 0u) {{ v = B[kk * d.ldb + nn]; }} else {{ v = B[nn * d.ldb + kk]; }}
             }}
             Bs[r * (BN / 4u) + c / 4u][c % 4u] = v;
@@ -165,32 +182,80 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     )
 }
 
+/// The split-K reduction: `C (=|+=) Σ_z P[z]`, splits in order, one
+/// thread per element — the fixed-order sum that keeps split-K
+/// deterministic.
+const REDUCE: &str = r#"
+struct Dims {
+    m: u32, k: u32, n: u32, lda: u32,
+    ldb: u32, ldc: u32, ta: u32, tb: u32,
+    acc: u32, ksplit: u32, kchunk: u32, pad2: u32,
+};
+@group(0) @binding(0) var<storage, read> P: array<f32>;
+@group(0) @binding(1) var<storage, read_write> C: array<f32>;
+@group(0) @binding(2) var<uniform> d: Dims;
+@compute @workgroup_size(256, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let o = gid.x;
+    let mn = d.m * d.n;
+    if (o >= mn) { return; }
+    var s = 0.0;
+    for (var z = 0u; z < d.ksplit; z = z + 1u) { s = s + P[z * mn + o]; }
+    if (d.acc == 0u) { C[o] = s; } else { C[o] = C[o] + s; }
+}
+"#;
+
+/// Below this many output tiles the depth is split. 24 measured best of
+/// {none, 24, 48} interleaved: 48 started to cost the shapes that were
+/// already fine (2048 x 256 x 256 NN, 199 -> 158 GFLOP/s).
+const SPLIT_BELOW: u32 = 24;
+/// Never split the depth finer than this (a multiple of BK): a partial
+/// tile costs a write and a read of m x n, and a chunk this deep pays
+/// for it. It also means a depth of 256 or less is never split.
+const MIN_CHUNK: u32 = 256;
+
+/// How many ways to split the depth `k` for an output of `tiles`
+/// workgroups, and the chunk each takes.
+fn split(tiles: u32, k: u32) -> (u32, u32) {
+    if tiles >= SPLIT_BELOW || k <= MIN_CHUNK { return (1, k.max(1)); }
+    let want = SPLIT_BELOW.div_ceil(tiles);
+    let chunk = k.div_ceil(want).max(MIN_CHUNK).div_ceil(BK) * BK;
+    (k.div_ceil(chunk), chunk)
+}
+
 struct Pipeline {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
-static PIPELINE: OnceLock<Option<Pipeline>> = OnceLock::new();
+/// The GEMM and the split-K reduction.
+static PIPELINES: OnceLock<Option<[Pipeline; 2]>> = OnceLock::new();
 
-fn pipeline() -> Option<&'static Pipeline> {
-    PIPELINE.get_or_init(|| {
-        let g = gpu()?;
-        let module = g.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("r2gpu-sgemm"),
-            source: wgpu::ShaderSource::Wgsl(shader().into()),
-        });
-        let pipeline = g.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("r2gpu-sgemm"),
-            layout: None,
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let layout = pipeline.get_bind_group_layout(0);
-        Some(Pipeline { pipeline, layout })
-    }).as_ref()
+fn pipelines() -> Option<&'static [Pipeline; 2]> {
+    PIPELINES.get_or_init(|| Some([build(&shader())?, build(REDUCE)?])).as_ref()
 }
+
+fn build(src: &str) -> Option<Pipeline> {
+    let g = gpu()?;
+    let module = g.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("r2gpu-sgemm"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    });
+    let pipeline = g.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("r2gpu-sgemm"),
+        layout: None,
+        module: &module,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let layout = pipeline.get_bind_group_layout(0);
+    Some(Pipeline { pipeline, layout })
+}
+
+/// The split-K partials buffer, grown on demand and reused: queue order
+/// keeps one call's partials safe from the next.
+static SCRATCH: std::sync::Mutex<Option<Tensor>> = std::sync::Mutex::new(None);
 
 /// `C (=|+=) op(A) · op(B)` on the device, row-major.
 ///
@@ -203,11 +268,21 @@ fn pipeline() -> Option<&'static Pipeline> {
 pub fn gemm(a: &Tensor, ta: bool, b: &Tensor, tb: bool,
             m: usize, k: usize, n: usize, c: &Tensor, accumulate: bool) -> bool {
     debug_assert!(a.len >= m * k && b.len >= k * n && c.len >= m * n);
-    let (Some(g), Some(p)) = (gpu(), pipeline()) else { return false };
+    let (Some(g), Some(ps)) = (gpu(), pipelines()) else { return false };
+    let p = &ps[0];
+    let tiles = (m as u32).div_ceil(BM) * (n as u32).div_ceil(BN);
+    let (ksplit, kchunk) = split(tiles, k as u32);
     let (lda, ldb) = (if ta { m } else { k }, if tb { k } else { n });
     let dims: [u32; 12] = [m as u32, k as u32, n as u32, lda as u32,
                            ldb as u32, n as u32, ta as u32, tb as u32,
-                           accumulate as u32, 0, 0, 0];
+                           accumulate as u32, ksplit, kchunk, 0];
+    let need = if ksplit > 1 { ksplit as usize * m * n } else { 1 };
+    let mut scratch = SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
+    if scratch.as_ref().map(|t| t.len < need).unwrap_or(true) {
+        let Some(t) = Tensor::zeros(need) else { return false };
+        *scratch = Some(t);
+    }
+    let part = scratch.as_ref().unwrap();
     let ubuf = g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("r2gpu-sgemm-dims"),
         contents: bytemuck::cast_slice(&dims),
@@ -221,6 +296,7 @@ pub fn gemm(a: &Tensor, ta: bool, b: &Tensor, tb: bool,
             wgpu::BindGroupEntry { binding: 1, resource: b.buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: c.buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: ubuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: part.buf.as_entire_binding() },
         ],
     });
     let mut enc = g.device.create_command_encoder(&Default::default());
@@ -228,7 +304,23 @@ pub fn gemm(a: &Tensor, ta: bool, b: &Tensor, tb: bool,
         let mut pass = enc.begin_compute_pass(&Default::default());
         pass.set_pipeline(&p.pipeline);
         pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups((n as u32).div_ceil(BN), (m as u32).div_ceil(BM), 1);
+        pass.dispatch_workgroups((n as u32).div_ceil(BN), (m as u32).div_ceil(BM), ksplit);
+    }
+    if ksplit > 1 {
+        let r = &ps[1];
+        let bind = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &r.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: part.buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: c.buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: ubuf.as_entire_binding() },
+            ],
+        });
+        let mut pass = enc.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&r.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(((m * n) as u32).div_ceil(256), 1, 1);
     }
     g.queue.submit(Some(enc.finish()));
     true
@@ -260,7 +352,8 @@ mod tests {
     fn gpu_sgemm_matches_the_cpu_kernel() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
         for &(m, k, n) in &[(1usize, 1usize, 1usize), (64, 16, 64), (65, 17, 66),
-                            (7, 300, 19), (130, 70, 200), (256, 2048, 128), (200, 768, 300)] {
+                            (7, 300, 19), (130, 70, 200), (256, 2048, 128), (200, 768, 300),
+                            (256, 2048, 256), (700, 40, 640)] {  // split-K (4 tiles, depth 2048) and unsplit
             for &(ta, tb) in &[(false, false), (false, true), (true, false), (true, true)] {
                 let a = mk(m * k, 0.0);
                 let b = mk(k * n, 1.7);
