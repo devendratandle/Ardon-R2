@@ -78,7 +78,7 @@ locked unless this file is changed.
 | Oracle | Auto-scheduler | ✅ V1 built | `crates/r2-oracle/`. `dispatch(Op, Shape) → Backend{Serial\|Rayon}`, hardware-scaled thresholds. V2 adds GPU/Cloud tiers. |
 | JIT | Cranelift backend | ◐ numeric + iterative algorithms → native | `crates/r2-jit/`. Compiles counted loops, imperative indexed element loops (`x[i]`, `y[i]<-…`), whole-vector/-matrix reductions & maps, and the statistics primitive set to native **checked** code — fused, CSE'd, F64X2-SIMD; guards deopt to the interpreter, NA propagates. Capability detail in §5. |
 | Rayon | Work-stealing | ✅ Oracle-dispatched | Parallelism owned by `r2-kernel` (never imported in builtins). Parallel: the numeric reductions, the apply family (`lapply`/`sapply`/`apply`/`tapply`/`aggregate`) over a pure-builtin allowlist, and the ML builtins (`rf`/`gbm`/`kmeans`/`cv`) via `par_for`. Closures & non-pure builtins fall back to serial. |
-| GPU | Dispatcher | ◐ foundation + `sgemm` | `crates/r2-gpu/` (feature `gpu`, wgpu 30): device/queue once per process, resident `Tensor` buffers, f32 element-wise kernels, and a deterministic `sgemm` (NN/NT/TN, 128x128 tile, 8x8 register tile) at 330-425 GFLOP/s on the laptop's integrated Radeon — 1.05-1.35x the six-core CPU kernel — CPU-reference-checked. Attention, the elementwise tail, Adam and the GPU-resident tape are the next phase (§5). |
+| GPU | Training step | ✅ built | `crates/r2-gpu/` (feature `gpu`, wgpu 30): device/queue once per process, resident `Tensor` buffers; deterministic kernels for `sgemm` (NN/NT/TN, 128x128 tile, split-K through ordered partials, 330-425 GFLOP/s here), causal GQA attention forward/backward (flash form), rmsnorm/silu/mul/add/RoPE/softmax-CE/embedding forward and backward, and Adam — every one checked against the tape. `crates/r2-train/src/gpu_llm.rs` runs the whole step on the device (`R2_GPU=1`; activation checkpointing `R2_GPU_CKPT=1`), matches the CPU trainer's losses exactly, and is 1.34-1.37x faster than PyTorch-DirectML at 7M / 1.5-2.0x at 40M on the same integrated GPU (REPORT.md §4b). Not yet: Oracle-routed use of these kernels by the tape, mixed precision, the register-tiled attention backward (§5). |
 | Mesh | Topology / collectives / sharding | ✅ reference built | `crates/r2-mesh/`: `DeviceId` topology with bandwidth tiers, the `Collective` trait with `ThreadCollective` (multi-worker in-process reference), `Shard` descriptors; `r2-train::distributed::sync_grads` proves data-parallel == single-device to 1e-4. Hardware transports (NCCL/RCCL/MPI) are bring-ups behind the same trait (§5). `docs/LLM_TRILLION_ARCHITECTURE.md`. |
 | FFI Hub | — | ✗ dropped by decision | Reach is protocols over processes (`r2 --json` / `--serve`), never an unsafe boundary (`FRONTEND_IO_CONTRACT.md` §4). No C, no `cdylib`, no `libloading` anywhere. |
 | Memory | R2-ARROW columnar | ✅ default storage | `crates/r2-arrow/` + `r2-types::Reals`/`Ints`/`Logicals`/`Singles`: columnar is the canonical form with the boxed `Vec<Option<_>>` view materialised on demand; null bitmaps authoritative; `i32`/`i64`/`bool`/`f32` dtypes; mmap-backed out-of-core columns; `read.parquet`. `crates/r2-memory/` tracks heap use for the Oracle. Remaining: `Utf8` columnar dtype, Arrow-IPC reader (§5). |
@@ -206,12 +206,17 @@ Everything below is unbuilt. There is no other plan document: when an
 item ships it moves up into "Current state" in the same change, and an
 item nobody intends to build is deleted, not kept.
 
-**LLM training on the GPU (next phase).** `r2-gpu` has the device, the
-buffers and two kernels. Needed: the `sgemm` cases (NN/NT/TN), attention
-forward/backward, the element-wise tail (rmsnorm/silu/rope/softmax_ce)
-and Adam as wgpu kernels, CPU-reference-checked; Oracle V2 routing the
-tape's ops to them below the kernel layer so `Trainer` does not change;
-the same interleaved-pairs comparison against PyTorch on a GPU.
+**LLM training on the GPU — what is left.** The step runs on the device
+end to end and beats PyTorch-DirectML on the same integrated GPU (above).
+Left: mixed precision (f16 activations and weight copies, f32 master and
+accumulation, loss scaling — the adapter here offers `shader-f16`; the
+speed it buys is only measurable on a discrete GPU); the register-tiled
+attention backward (attention is 14% of the small step at 20-30
+GFLOP/s, one thread per row; `attn_tiled` holds the FlashAttention-2
+shape, which measured slower than the reference on THIS device);
+Oracle V2 routing the tape's ops to the kernels so `Trainer` itself
+runs on a GPU without `GpuTrainer`; cooperative-matrix WGSL once a
+device with matrix cores is available to run it (Vega has none).
 
 **LLM capability around the trainer.** A GGUF reader (mmap the tensor
 table; `safetensors` exists), LoRA adapters over frozen projections (the

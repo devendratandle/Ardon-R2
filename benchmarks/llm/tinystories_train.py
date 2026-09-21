@@ -50,6 +50,17 @@ OUT = os.environ.get("TS_OUT", "ts_run")
 # for speed. It computes the same causal-softmax attention; set
 # TS_ATTN=explicit to run the written-out form instead.
 ATTN = os.environ.get("TS_ATTN", "sdpa")
+# TS_DEVICE=dml runs the same script on the GPU through torch-directml
+# (the PyTorch route to an AMD/Intel integrated GPU on Windows); that is
+# the reference for R2's `R2_GPU=1` step. Default: CPU.
+DEVICE = os.environ.get("TS_DEVICE", "cpu")
+if DEVICE == "dml":
+    import torch_directml
+    DEV = torch_directml.device()
+    DEV_NAME = f"DirectML: {torch_directml.device_name(0)}"
+else:
+    DEV = torch.device("cpu")
+    DEV_NAME = "cpu"
 
 
 def die(msg):
@@ -74,7 +85,7 @@ def batch_at(ids, s, bn, seq):
     off = [((s * bn + b) * seq) % span for b in range(bn)]
     inp = np.stack([ids[o:o + seq] for o in off]).astype(np.int64)
     tgt = np.stack([ids[o + 1:o + seq + 1] for o in off]).astype(np.int64)
-    return torch.from_numpy(inp), torch.from_numpy(tgt)
+    return torch.from_numpy(inp).to(DEV), torch.from_numpy(tgt).to(DEV)
 
 
 class R2Model(torch.nn.Module):
@@ -111,7 +122,7 @@ class R2Model(torch.nn.Module):
             half = self.hd // 2
             freq = self.base ** (-2.0 * torch.arange(half, dtype=torch.float32) / self.hd)
             ang = torch.arange(t, dtype=torch.float32)[:, None] * freq[None, :]
-            self.rope_cos, self.rope_sin = ang.cos(), ang.sin()
+            self.rope_cos, self.rope_sin = ang.cos().to(x.device), ang.sin().to(x.device)
         c = self.rope_cos[:t][None, :, None, :]
         s = self.rope_sin[:t][None, :, None, :]
         a, b = x[..., 0::2], x[..., 1::2]
@@ -130,13 +141,23 @@ class R2Model(torch.nn.Module):
             k = self.rope((h @ wk.view(dim, self.kvd)).view(bn, t, self.nkv, hd), t)
             v = (h @ wv.view(dim, self.kvd)).view(bn, t, self.nkv, hd)
             rep = self.nh // self.nkv
-            k = k.repeat_interleave(rep, dim=2)
-            v = v.repeat_interleave(rep, dim=2)
+            if DEVICE == "dml":
+                # The same expansion as `repeat_interleave`, element for
+                # element — but DirectML's backward through
+                # repeat_interleave (or expand) into SDPA takes 3.4 s per
+                # layer on this machine's GPU, and through `cat` 18 ms.
+                # Measured op by op in benchmarks/llm/dml_phase_split.py;
+                # the reference is run at its best, not at its default.
+                k = torch.cat([k[:, :, i:i + 1] for i in range(self.nkv) for _ in range(rep)], dim=2)
+                v = torch.cat([v[:, :, i:i + 1] for i in range(self.nkv) for _ in range(rep)], dim=2)
+            else:
+                k = k.repeat_interleave(rep, dim=2)
+                v = v.repeat_interleave(rep, dim=2)
             q, k, v = (z.transpose(1, 2) for z in (q, k, v))
             if ATTN == "sdpa":
                 ctx = F.scaled_dot_product_attention(q, k, v, is_causal=True)
             else:
-                mask = torch.full((t, t), float("-inf")).triu(1)
+                mask = torch.full((t, t), float("-inf"), device=q.device).triu(1)
                 att = (q @ k.transpose(-2, -1)) / math.sqrt(hd) + mask
                 ctx = att.softmax(-1) @ v
             ctx = ctx.transpose(1, 2).reshape(bn, t, dim)
@@ -169,7 +190,7 @@ def generate(model, prompt_ids, n):
     """Greedy decode, matching R2's temperature-0 sampler."""
     ids = list(prompt_ids)
     for _ in range(n):
-        idx = torch.tensor([ids], dtype=torch.long)
+        idx = torch.tensor([ids], dtype=torch.long, device=DEV)
         nxt = int(model(idx)[0, -1].argmax().item())
         ids.append(nxt)
     return ids
@@ -224,13 +245,13 @@ def main():
 
     print("PyTorch — same model, same tokens, same initial weights")
     print(f"  torch      {torch.__version__}, {torch.get_num_threads()} threads, "
-          f"attention: {ATTN}")
+          f"attention: {ATTN}, device: {DEV_NAME}")
     print(f"  model      {d['n_params']/1e6:.2f}M parameters, dim {d['dim']} x "
           f"{d['n_layers']} layers, ffn {d['ffn_hidden']}, vocab {d['vocab']}")
     print(f"  schedule   {steps} steps x {bn} x {seq} = {steps*bn*seq} tokens, "
           f"Adam lr {d['lr']}")
 
-    model = R2Model(d, max(seq, 64))
+    model = R2Model(d, max(seq, 64)).to(DEV)
     n = sum(p.numel() for p in model.parameters())
     if n != d["n_params"]:
         die(f"parameter count {n} != R2's {d['n_params']} — different models")
@@ -249,8 +270,12 @@ def main():
     print("  same function, same starting point — the comparison is valid\n")
 
     # ── train ───────────────────────────────────────────────────────────
+    # `foreach=False` on DirectML: the fused multi-tensor Adam uses
+    # `_foreach_lerp_`, which DML lacks — every step would fall back to the
+    # CPU and copy the moments across.
     opt = torch.optim.Adam(model.parameters(), lr=d["lr"],
-                           betas=(0.9, 0.999), eps=1e-8)
+                           betas=(0.9, 0.999), eps=1e-8,
+                           foreach=False if DEVICE == "dml" else None)
     every = max(steps // 10, 1)
     curve = []
     t0 = time.perf_counter()

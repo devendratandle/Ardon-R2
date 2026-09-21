@@ -14,6 +14,6 @@ fn main() {
         println!("max_compute_workgroups_per_dimension  {}", l.max_compute_workgroups_per_dimension);
         println!("max_storage_buffer_binding_size       {} MB", l.max_storage_buffer_binding_size / (1 << 20));
         println!("max_buffer_size                       {} MB", l.max_buffer_size / (1 << 20));
-        println!("features: subgroup {}", g.device.features().contains(wgpu::Features::SUBGROUP));
+        println!("features: subgroup {}, shader-f16 {} (adapter offers f16 {})", g.device.features().contains(wgpu::Features::SUBGROUP), g.device.features().contains(wgpu::Features::SHADER_F16), r2_gpu::device::adapter_offers_f16());
     }
 }

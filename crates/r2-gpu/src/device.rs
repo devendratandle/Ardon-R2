@@ -55,6 +55,18 @@ async fn open() -> Option<Gpu> {
     Some(Gpu { device, queue, info })
 }
 
+/// Whether the adapter can run `enable f16;` shaders (asked of a fresh
+/// adapter, so it says what the hardware offers, not what was requested).
+pub fn adapter_offers_f16() -> bool {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let Ok(adapter) = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default()
+        }).await else { return false };
+        adapter.features().contains(wgpu::Features::SHADER_F16)
+    })
+}
+
 /// One line about the adapter, for reports.
 pub fn adapter_line() -> String {
     match gpu() {

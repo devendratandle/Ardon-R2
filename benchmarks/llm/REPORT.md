@@ -1,6 +1,6 @@
 # Ardon-R2 vs PyTorch — LLM model training
 
-**Current status, 2026-09-20.** This is the only performance report for LLM
+**Current status, 2026-09-22.** This is the only performance report for LLM
 training. Earlier ones were deleted rather than kept: a superseded number is
 worse than no number. Everything below describes the code as it stands, not
 how it got there.
@@ -605,6 +605,93 @@ remaining work is one large item and a long thin tail.
 
 ---
 
+## 4b. The GPU step — R2 vs PyTorch-DirectML on the same integrated GPU (2026-09-22)
+
+R2's training step runs on the device end to end (`R2_GPU=1`,
+`crates/r2-train/src/gpu_llm.rs`): weights, activations, gradients and
+Adam state resident, tokens in, a loss out, one kernel launch per op and
+no allocator in the loop — the same model as the tape, written as a
+static graph. Every kernel is deterministic (fixed-order sums, no
+atomics; split-K and the rmsnorm dW reduction go through partial slabs
+summed in order), matches the tape's loss and every gradient block to
+f32 rounding (`gpu_loss_and_gradients_match_the_tape_block_by_block`,
+max relative error 3-7e-7 per block), and trains TinyStories to the
+SAME losses as the CPU trainer — 9.1095 -> 6.3693 at every checkpoint,
+held-out 6.2690 on both.
+
+The reference is PyTorch on the same GPU through **torch-directml
+0.2.5** (torch 2.4.1 — the version it pins), the PyTorch route to an
+AMD/Intel integrated GPU on Windows: `TS_DEVICE=dml python
+benchmarks/llm/tinystories_train.py`, same manifest, same tokens, same
+initial weights, same validity gate. **It is run at its best, not its
+default:** DirectML's backward through `repeat_interleave` (the GQA head
+expansion) into SDPA took **3.4 s per layer** here (14 s per step —
+`benchmarks/llm/dml_phase_split.py` and the op probes found it: SDPA
+alone 10 ms, `repeat_interleave` alone 1 ms, the two together 3,364
+ms), and the same expansion written as a `cat` of head slices takes 18
+ms, so the script uses that under DML. What remains in its step is its
+own: Adam's `lerp` has no DML kernel and falls back to the CPU every
+step.
+
+```
+GPU      AMD Radeon Vega 6 (Ryzen 5 4500U), Vulkan via wgpu 30; no VRAM,
+         shares the CPU's ~20 GB/s DDR4; ~1.1 TFLOP/s f32 peak; 6 CUs;
+         32 KB workgroup memory; no subgroups; offers shader-f16
+torch    2.4.1+cpu + torch-directml 0.2.5.dev240914, SDPA attention
+```
+
+**Small model, 7.24M, 30 steps x 32 x 64, three interleaved pairs, clock
+2375 MHz before and after:**
+
+| pair | R2 GPU step | PyTorch-DirectML step | | held-out |
+|---|---:|---:|---|---|
+| 1 | **370.9 ms** | 506.2 ms | **R2 1.37x** | 6.2690 vs 6.2690 |
+| 2 | **363.9 ms** | 487.7 ms | **R2 1.34x** | 6.2690 vs 6.2690 |
+| 3 | **362.7 ms** | 488.5 ms | **R2 1.35x** | 6.2690 vs 6.2690 |
+
+**Medium model, 39.8M (dim 768, 4 layers, ffn 2304, 12/4 heads, 8 x
+256), 20 steps, two pairs:**
+
+| pair | R2 GPU step | PyTorch-DirectML step | | held-out |
+|---|---:|---:|---|---|
+| 1 | **1,665 ms** | 3,277 ms | **R2 1.97x** | 6.1603 vs 6.1603 |
+| 2 | **1,909 ms** | 2,886 ms | **R2 1.51x** | 6.1603 vs 6.1603 |
+
+**R2's GPU step is 1.34-1.37x faster than PyTorch-DirectML at 7M and
+1.5-2.0x at 40M, on the same integrated GPU, learning identically.**
+
+For scale, on this machine the CPU trainer is faster than either: 395
+ms/step at 7M (the R2 CPU step is 1.66x PyTorch+MKL) — a 1.1 TFLOP/s
+integrated GPU that shares the CPU's memory bus is a correctness and
+portability platform for this code, not a speed platform. The kernels
+are the ones that will run on a discrete GPU; their rates here:
+
+| kernel | rate here | note |
+|---|---:|---|
+| `sgemm` 128x128 tile, 8x8 per thread | 330-425 GFLOP/s | split-K below 24 output tiles (deterministic partials); `gemm_bench` |
+| `sgemm` short-output shapes (`grad_B` of a 256-wide projection) | 150-210 | was 53-110 before split-K |
+| attention fwd / bwd (one thread per row) | 20-30 | 14% of the small step; see below |
+| rmsnorm fwd / bwd | ~6.5 GB/s | 8 rows per workgroup, dW reduced in row blocks; was 50 ms a step, now 19 |
+| Adam | one launch per block | a few ULP from the CPU (WGSL may contract a*b+c), bit-identical to itself |
+
+Where the GPU step goes at 7M (`R2_GPU_STATS=<step>` drains the queue
+after every launch and prints the table): GEMMs 54% (the 8000-wide head
+alone 20%), attention backward 14%, attention forward 2%, rmsnorm 5%,
+the rest under 3% each. The step is 157 launches.
+
+Activation checkpointing (`R2_GPU_CKPT=1`) keeps one layer's work set
+instead of every layer's — 14·t·d + t·nh floats per layer become t·d —
+for +15% step time (438 vs 382 ms), the same bits.
+
+**Measured and closed on this device (do not retry here):** a 64 x 64
+GEMM tile (nothing over split-K), a register-prefetching slab loop
+(25-30% slower everywhere: the staged registers cost the occupancy the
+big tile lives on), the tiled FlashAttention-2 forward (`attn_tiled`,
+2.24 vs 2.12 ms and 11.7 vs 9.4 ms against the one-thread-per-row
+kernel; kept under test as the shape the backward needs), and splitting
+attention's reduction axis into partial slabs (splits 1/2/4/8/16: 14.8,
+16.2, 19.6, 26.1, 40.7 ms — monotonically worse).
+
 ## 5. Open
 
 Ranked by the census above, not by how interesting they are.
@@ -761,6 +848,17 @@ a real one**; benchmark at the length the claim is about.
 # prints the one table, so the halves cannot be paired by hand.
 cargo run --release -p r2-train --example tinystories_train
 python benchmarks/llm/tinystories_train.py
+
+# the GPU step (section 4b): R2 on the device, then PyTorch-DirectML on
+# the same device from the same manifest. torch-directml pins torch 2.4.1,
+# so it lives in its own venv (here G:/r2-target/venv-dml).
+cargo build --release -p r2-train --features gpu --example tinystories_train
+R2_GPU=1 target/release/examples/tinystories_train
+TS_DEVICE=dml G:/r2-target/venv-dml/Scripts/python.exe benchmarks/llm/tinystories_train.py
+R2_GPU=1 R2_GPU_STATS=4 target/release/examples/tinystories_train    # the GPU step census
+G:/r2-target/venv-dml/Scripts/python.exe benchmarks/llm/dml_phase_split.py   # DirectML's phases
+cargo run --release -p r2-gpu --features gpu --example gemm_bench      # GPU sgemm vs CPU sgemm per shape
+cargo run --release -p r2-gpu --features gpu --example attn_bench      # attention kernels vs the tape's
 
 # byte-level vs BPE arms (does NOT auto-join — read section 5, item 6)
 cargo run --release -p r2-train --example pipeline_phases

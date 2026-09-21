@@ -8,6 +8,33 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## Unreleased
 
+### GPU training step (`r2-gpu`, `r2-train --features gpu`) — 2026-09-21/22
+
+- `GpuTrainer` (`crates/r2-train/src/gpu_llm.rs`): the whole training step
+  on the device — weights, activations, gradients and Adam state resident,
+  tokens in, a loss out, one launch per op, no allocator in the loop. Built
+  from a `Trainer` (`from_trainer`), hands its state back
+  (`download_into`) for evaluation and checkpoints. Matches the tape's loss
+  and every gradient block to f32 rounding; trains TinyStories to
+  identical losses. `R2_GPU=1` in `tinystories_train`; `R2_GPU_STATS=<n>`
+  prints a per-kernel census of step n; `R2_GPU_CKPT=1` activation
+  checkpointing (one layer's work set, recomputed in the backward, same
+  bits, +15% time).
+- **1.34-1.37x faster than PyTorch-DirectML at 7M parameters and
+  1.5-2.0x at 40M on the same integrated GPU**, learning identically —
+  the reference run at its best (its `repeat_interleave` backward into
+  SDPA measured 3.4 s per layer here and was replaced by an equal `cat`).
+  `TS_DEVICE=dml` in `benchmarks/llm/tinystories_train.py`;
+  `benchmarks/llm/dml_phase_split.py`. REPORT.md §4b.
+- `r2-gpu`: deterministic split-K in `sgemm` (partial slabs summed in
+  order) for outputs under 24 tiles — the short-output `grad_B` shapes
+  53-110 -> 150-210 GFLOP/s; rmsnorm kernels re-laid out (8 rows per
+  workgroup, dW reduced in row blocks), 50 -> 19 ms a step; the
+  one-thread-per-row attention forward selected over the tiled one
+  (measured faster here; the tiled kernel stays under test). Closed by
+  measurement: a 64x64 tile, a register-prefetching slab loop, splitting
+  attention's reduction axis.
+
 - **GPU `sgemm`** (`r2-gpu`, `--features gpu`, wgpu 30): one WGSL kernel
   for the NN / NT / TN cases a training step runs — 128x128 workgroup
   tile, 8x8 register tile per thread, transposes handled where the slab

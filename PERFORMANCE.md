@@ -84,6 +84,11 @@ guards (the r2sem pattern). R2 inlines and compiles the whole chain native.
 
 ## 5. GPU — CPU vs integrated GPU (element maps, f32)
 
+*The LLM training step also runs on the GPU end to end (`R2_GPU=1`) and
+is 1.34-1.37x faster than PyTorch-DirectML at 7M parameters, 1.5-2.0x at
+40M, on the same integrated GPU — `benchmarks/llm/REPORT.md` §4b. The
+table below is the older element-map dispatcher.*
+
 Machine: AMD Radeon integrated GPU (Vulkan). **Integrated GPUs need no
 dedicated hardware** — wgpu reaches any Vulkan/DX12/Metal device.
 
