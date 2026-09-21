@@ -8,6 +8,15 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## Unreleased
 
+- **GPU `sgemm`** (`r2-gpu`, `--features gpu`, wgpu 30): one WGSL kernel
+  for the NN / NT / TN cases a training step runs — 128x128 workgroup
+  tile, 8x8 register tile per thread, transposes handled where the slab
+  is staged so the inner loop never strides — checked against the CPU
+  `sgemm` at ragged shapes in every case and bit-reproducible run to run
+  (every element summed in one thread, in one order). On this laptop's
+  integrated Radeon it runs 330-425 GFLOP/s, 1.05-1.35x the six-core CPU
+  kernel; `--example gemm_bench`. Device, queue and pipelines are created
+  once per process; `Tensor` keeps buffers resident across calls.
 - **Esc works like R's, in the GUI and the CLI.** At the prompt it
   abandons the line and any pending `+` continuation without evaluating
   anything; while a command runs it interrupts it — the statement
