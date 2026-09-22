@@ -8,6 +8,25 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## Unreleased
 
+### Chi-squared matches R; `lower.tail` / `log.p` work — 2026-09-23
+
+- **`pchisq`, `qchisq`, `dchisq` now agree with R 4.5.3 to 1.5e-13** on a
+  492-value grid (261 values bit-identical). They were up to **10%** off:
+  `pchisq(1101, 1000)` returned 1 (R: 0.98615), `qchisq(0.95, 10000)`
+  returned 10100 (R: 10233.7), and df within 0.01 of 1 or 2 was treated
+  as exactly 1 or 2. Rebuilt the way R's nmath does it.
+- **`lower.tail = FALSE` and `log.p = TRUE` were silently ignored by every
+  p-function** — `pnorm(10, lower.tail = FALSE)` returned the lower tail,
+  1. Now honoured by `pnorm`, `pt`, `pf`, `pexp`, `pbinom`, `ppois`,
+  `pchisq` and their q-functions, with each tail computed directly so a
+  tiny p-value keeps its digits (`pchisq(300, 100, lower.tail = FALSE)` =
+  7.41e-22; `pnorm(-40, log.p = TRUE)` = -804.61).
+- `chisq.test` p-values come from the upper tail directly: a table whose
+  p-value is 1.24e-279 reported 0.
+- `df` is recycled like R's (`pchisq(3, c(1, 2, 5))` is three values);
+  a missing `df` is an error; `ncp != 0` is an explicit "not implemented"
+  error rather than a silently central answer.
+
 ### GPU training step (`r2-gpu`, `r2-train --features gpu`) — 2026-09-21/22
 
 - `GpuTrainer` (`crates/r2-train/src/gpu_llm.rs`): the whole training step

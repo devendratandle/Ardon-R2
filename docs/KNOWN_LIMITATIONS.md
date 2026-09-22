@@ -42,6 +42,14 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Language / evaluation
 
+- **Display functions diverge from R** (found 2026-09-23, while checking
+  the chi-squared against R): `sprintf` does not vectorise over its
+  arguments and ignores a `%.Ng` precision, printing the full value, and
+  prints infinity as `inf` rather than `Inf`; `print(x, digits = n)`
+  ignores `digits`; `print(v)` inside a function also auto-prints the
+  function's value, so it appears twice; `chisq.test(...)$p.value` prints
+  the whole test report before the value. The NUMBERS are right — these
+  are formatting and visibility semantics.
 - **No lazy promises.** Arguments are evaluated eagerly, so `substitute()`
   works but the captured expression must still be evaluable, and R's
   skip-unused-argument semantics don't apply.
@@ -57,6 +65,13 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Statistics
 
+- **Non-central chi-squared** (`ncp != 0` in `dchisq`/`pchisq`/`qchisq`) is
+  not implemented and says so with an error. Parameter recycling
+  (`pchisq(3, c(1, 2, 5))`) is implemented for the chi-squared family;
+  the other d/p/q functions still take their parameters as scalars. In
+  `pt`, `pf`, `pbinom` and `ppois`, `log.p = TRUE` is the log of the
+  computed tail, so a tail below ~1e-308 gives -Inf where R's log-scale
+  arithmetic continues (`pnorm` and `pchisq` do continue).
 - **`manova()` eigenvalues** of E⁻¹H drift ~1–3% from R's values on some
   designs (R2 routes through a symmetric solver; an exact non-symmetric
   eigensolver would close it). The four test statistics and their ordering
