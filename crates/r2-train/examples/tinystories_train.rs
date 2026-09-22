@@ -294,8 +294,30 @@ fn main() {
     println!("  model      {:.2}M parameters, dim {} x {} layers, ffn {}, {} q / {} kv heads",
              cfg.n_params() as f64 / 1e6, cfg.dim, cfg.n_layers, cfg.ffn_hidden,
              cfg.n_heads, cfg.n_kv_heads);
-    println!("  schedule   {steps} steps x {bn} x {seq} = {} tokens, Adam lr {lr}\n",
+    println!("  schedule   {steps} steps x {bn} x {seq} = {} tokens, Adam lr {lr}",
              steps * bn * seq);
+
+    // What this configuration will ask for, before it asks. A run that
+    // does not fit dies inside an allocator with a byte count and no
+    // context; on a rented GPU that costs money to find out. The GPU
+    // figure is what `GpuTrainer` holds resident: four copies of the
+    // parameters (weights, gradients, Adam m and v), the logits, and the
+    // per-layer activations the backward needs — which checkpointing cuts
+    // to the residual stream alone.
+    {
+        let (p, t, d) = (cfg.n_params() as f64, (bn * seq) as f64, cfg.dim as f64);
+        let per_layer = 14.0 * t * d + t * cfg.n_heads as f64;
+        let acts = if std::env::var("R2_GPU_CKPT").map(|v| v == "1").unwrap_or(false) {
+            cfg.n_layers as f64 * t * d + per_layer
+        } else {
+            cfg.n_layers as f64 * (t * d + per_layer)
+        };
+        let gpu_gb = (4.0 * p + acts + 3.0 * t * cfg.vocab as f64) * 4.0 / 1e9;
+        let host_gb = 4.0 * p * 4.0 / 1e9;
+        println!("  memory     ~{host_gb:.2} GB host (weights + Adam + gradients), \
+                  ~{gpu_gb:.2} GB on the device with R2_GPU=1");
+    }
+    println!();
 
     // The initial weights, so the other side starts from this exact point
     // rather than from its own RNG.

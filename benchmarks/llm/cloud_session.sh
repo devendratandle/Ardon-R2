@@ -26,30 +26,37 @@ STEPS="${STEPS:-100}"
 
 log() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
+# python may be python3; keep whichever exists
+PY="${PY:-$(command -v python || command -v python3)}"
+
 setup() {
     log "tools"
-    if ! command -v vulkaninfo >/dev/null; then
+    if [ -f /etc/debian_version ] && ! command -v vulkaninfo >/dev/null; then
         apt-get update -qq && apt-get install -y -qq build-essential curl git vulkan-tools libvulkan1 >/dev/null
     fi
     log "Vulkan sees the card? (R2 talks to the GPU through wgpu/Vulkan, not CUDA)"
-    if ! vulkaninfo --summary 2>/dev/null | grep -E "deviceName|driverName"; then
-        echo "!! vulkaninfo found no device. The container lacks the Vulkan ICD."
-        echo "   On vast.ai pick a host that lists 'vulkan' / has NVIDIA_DRIVER_CAPABILITIES=all;"
-        echo "   on RunPod choose a different template. PyTorch will run; R2's GPU path cannot."
-        exit 1
+    if command -v vulkaninfo >/dev/null; then
+        if ! vulkaninfo --summary 2>/dev/null | grep -E "deviceName|driverName"; then
+            echo "!! vulkaninfo found no device. The container lacks the Vulkan ICD."
+            echo "   On vast.ai pick a host that lists 'vulkan' / has NVIDIA_DRIVER_CAPABILITIES=all;"
+            echo "   on RunPod choose a different template. PyTorch will run; R2's GPU path cannot."
+            exit 1
+        fi
+    else
+        echo "   (no vulkaninfo; the adapter probe below is the real test)"
     fi
     log "Rust"
     if ! command -v cargo >/dev/null; then
         curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
     fi
     # shellcheck disable=SC1091
-    . "$HOME/.cargo/env"
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
     rustc --version
     log "Python side"
-    python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
-    python -c "import numpy, tokenizers" 2>/dev/null || pip install -q numpy tokenizers
+    "$PY" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+    "$PY" -c "import numpy, tokenizers" 2>/dev/null || "$PY" -m pip install -q numpy tokenizers
     nvidia-smi --query-gpu=name,memory.total,clocks.max.sm --format=csv
-    [ -f corpus.txt ] || { echo "!! corpus.txt missing in $(pwd) — scp it up"; exit 1; }
+    [ -f corpus.txt ] || { echo "!! corpus.txt missing in $(pwd) — copy it up (19 MB of TinyStories)"; exit 1; }
 }
 
 build() {
@@ -72,7 +79,7 @@ pairs_at() {
     for i in $(seq 1 "$PAIRS"); do
         env "$@" R2_STEPS="$STEPS" R2_GPU=1 ./target/release/examples/tinystories_train \
             2>&1 | tee "$OUT/$name-pair$i-r2.txt" | grep -E "device|model |trained|HELD-OUT"
-        env "$@" TS_DEVICE=cuda python benchmarks/llm/tinystories_train.py \
+        env "$@" TS_DEVICE=cuda "$PY" benchmarks/llm/tinystories_train.py \
             2>&1 | tee "$OUT/$name-pair$i-torch.txt" | grep -E "torch |^ms/step|held-out loss|FAIL"
     done
 }
@@ -82,10 +89,15 @@ pairs() {
     . "$HOME/.cargo/env"
     mkdir -p "$OUT"
     nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader | tee "$OUT/clock-before.txt"
-    pairs_at small  R2_DIM=256 R2_LAYERS=4 R2_FFN=768  R2_HEADS=4  R2_KV=2 R2_SEQ=64  R2_BATCH=32
-    pairs_at medium R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8
-    # ~125M: GPT-2 small's shape, the size this laptop cannot run at all
-    pairs_at large  R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8
+    # Each harness prints what it will ask for before it asks
+    # ("memory ~X GB host, ~Y GB on the device"); the figures below are
+    # what that estimate gives, so a card can be matched to a size.
+    pairs_at small  R2_DIM=256 R2_LAYERS=4 R2_FFN=768  R2_HEADS=4  R2_KV=2 R2_SEQ=64  R2_BATCH=32   # 7.2M,  0.4 GB
+    pairs_at medium R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8    # 39.8M, 1.2 GB
+    # ~125M, GPT-2 small's shape: 4.7 GB on the device and 2 GB of host
+    # RAM, which is why the development laptop (7.4 GB shared with its
+    # iGPU) cannot run it at all and a rented card is the point.
+    pairs_at large  R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  # 125.5M, 4.7 GB
     nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader | tee "$OUT/clock-after.txt"
     log "summary"
     grep -H "^ms/step" "$OUT"/*-torch.txt | sed 's|.*/||'
@@ -100,7 +112,7 @@ kernels() {
     log "attention kernels vs the tape's"
     ./target/release/examples/attn_bench | tee "$OUT/attn_bench.txt"
     log "cuBLAS and SDPA on the same shapes, for the kernel-to-kernel row"
-    python - <<'EOF' | tee "$OUT/torch_kernels.txt"
+    "$PY" - <<'EOF' | tee "$OUT/torch_kernels.txt"
 import time, torch, torch.nn.functional as F
 dev = torch.device("cuda")
 def t(fn, reps=50):
