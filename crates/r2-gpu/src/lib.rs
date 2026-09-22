@@ -148,6 +148,8 @@ pub mod device;
 #[cfg(feature = "gpu")]
 pub mod half;
 #[cfg(feature = "gpu")]
+pub mod numerics;
+#[cfg(feature = "gpu")]
 pub mod gemm;
 #[cfg(feature = "gpu")]
 pub mod attention;

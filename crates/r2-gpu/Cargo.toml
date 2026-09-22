@@ -40,3 +40,7 @@ required-features = ["gpu"]
 [[example]]
 name = "attn_bench"
 required-features = ["gpu"]
+
+[[example]]
+name = "precision_probe"
+required-features = ["gpu"]

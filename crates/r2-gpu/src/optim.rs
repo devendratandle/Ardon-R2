@@ -2,14 +2,17 @@
 //! resident, the update in place.
 //!
 //! The arithmetic is the CPU kernel's (`r2_train::optim::adam_scalar`)
-//! operation for operation — `div` and `sqrt`, the same association — and
-//! `/` and `sqrt` are IEEE-correct on every backend wgpu ships. It is
-//! still not bit-identical to the CPU: WGSL lets the driver's compiler
-//! contract `a * b + c` into an FMA (the language has no `precise`, and
-//! naga cannot emit SPIR-V's `NoContraction`), and on this adapter it
-//! does so for ~0.2% of elements, a few ULP each. So the contract is:
-//! the device agrees with the CPU to a few ULP, and with itself to the bit —
-//! the same run gives the same weights every time.
+//! operation for operation, in the same association, and **bit-identical
+//! to it** — which took one correction.
+//!
+//! This doc used to say the gap was the driver contracting `a * b + c`
+//! into an FMA. It was not: `numerics::probe` shows this adapter never
+//! contracts (0 of 1,048,576), but its builtin `/` is off in 29% of cases
+//! (up to 2 ULP — WGSL allows 2.5) and `sqrt` in 15%. Adam has four
+//! divisions and a square root per element. They now go through
+//! `numerics::CR_WGSL`'s `div_cr` / `sqrt_cr` — the builtin's answer plus
+//! one exact-`fma` correction step, 100% correctly rounded on the probe —
+//! and the update matches the CPU to the bit.
 
 use crate::device::{gpu, Tensor};
 use std::sync::OnceLock;
@@ -18,7 +21,7 @@ use wgpu::util::DeviceExt;
 const THREADS: u32 = 256;
 
 fn src() -> String {
-    format!(r#"
+    format!(r#"{CR}
 struct P {{ n: u32, pad0: u32, pad1: u32, pad2: u32, b1: f32, b2: f32, bc1: f32, bc2: f32, lr: f32, eps: f32, scale: f32, pad3: f32 }};
 @group(0) @binding(0) var<storage, read_write> W: array<f32>;
 @group(0) @binding(1) var<storage, read> G: array<f32>;
@@ -30,16 +33,16 @@ struct P {{ n: u32, pad0: u32, pad1: u32, pad2: u32, b1: f32, b2: f32, bc1: f32,
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let i = gid.x;
     if (i >= p.n) {{ return; }}
-    let gi = G[i] / p.scale;
+    let gi = div_cr(G[i], p.scale);
     let m = p.b1 * M[i] + (1.0 - p.b1) * gi;
     let v = p.b2 * V[i] + (1.0 - p.b2) * gi * gi;
     M[i] = m;
     V[i] = v;
-    let mh = m / p.bc1;
-    let vh = v / p.bc2;
-    W[i] = W[i] - p.lr * mh / (sqrt(vh) + p.eps);
+    let mh = div_cr(m, p.bc1);
+    let vh = div_cr(v, p.bc2);
+    W[i] = W[i] - div_cr(p.lr * mh, sqrt_cr(vh) + p.eps);
 }}
-"#, T = THREADS)
+"#, T = THREADS, CR = crate::numerics::CR_WGSL)
 }
 
 static PIPE: OnceLock<Option<wgpu::ComputePipeline>> = OnceLock::new();
@@ -95,11 +98,10 @@ mod tests {
     use r2_train::optim::Adam;
 
     /// Three steps on the device against three on the CPU, from the same
-    /// state: within a few ULP everywhere (the driver may fuse a multiply-
-    /// add the CPU keeps separate), and the device agrees with itself to
-    /// the bit.
+    /// state: bit-identical, weights and all — the correctly rounded
+    /// division and square root close the gap the builtins left.
     #[test]
-    fn gpu_adam_matches_the_cpu_adam_to_a_few_ulp_and_itself_to_the_bit() {
+    fn gpu_adam_is_bit_identical_to_the_cpu_adam() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
         let n = 10_007usize;
         let init: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.011).sin()).collect();
@@ -120,10 +122,10 @@ mod tests {
             w = blocks.remove(0);
         }
         let got = tw.download();
-        for (i, (a, b)) in got.iter().zip(&w).enumerate() {
-            let ulps = (a.to_bits() as i64 - b.to_bits() as i64).abs();
-            assert!(ulps <= 4, "parameter {i}: gpu {a} vs cpu {b}, {ulps} ULP apart");
-        }
+        let off: Vec<usize> = got.iter().zip(&w).enumerate()
+            .filter(|(_, (a, b))| a.to_bits() != b.to_bits()).map(|(i, _)| i).collect();
+        assert!(off.is_empty(), "{} of {n} parameters differ from the CPU; first: {:?}", off.len(),
+                off.first().map(|&i| (i, got[i], w[i])));
         // reproducibility: the same three steps again give the same bits
         let (tw2, tm2, tv2) = (Tensor::upload(&init).unwrap(), Tensor::zeros(n).unwrap(), Tensor::zeros(n).unwrap());
         for t in 1..=3u32 {
