@@ -717,6 +717,36 @@ Held-out loss unchanged to four decimals on both. dQ is untouched — its
 rows belong to another workgroup, so tiling it needs atomics or a second
 reduction pass — and it is now the larger half of what attention costs.
 
+### What the adapter's arithmetic actually does (2026-09-23)
+
+Cross-vendor bit identity needs every float operation to give the same
+bits everywhere, and the WGSL/Vulkan precision rules don't require it.
+`--example precision_probe` measures each operation over 1,048,576 inputs
+against the correctly rounded f32:
+
+| operation | exact | max ULP |
+|---|---:|---:|
+| `a * b + c` | 100% | 0 — **never contracted** |
+| `fma(a, b, c)` | 100% | 0 |
+| `a / b` | 71.1% | 2 |
+| `1 / b` | 89.3% | 1 |
+| `sqrt(a)` | 84.9% | 1 |
+| `exp(x)`, x in [-10, 10] | 30.9% | 8 |
+| `log(a)` | 51.3% | 2 |
+| `sin(x)`, x in [-10, 10] | 17.5% | 2,131,839 (absolute-error bound near zeros) |
+| **`div_cr(a, b)`** (R2's) | **100%** | 0 |
+| **`sqrt_cr(a)`** (R2's) | **100%** | 0 |
+
+The Adam kernel's doc blamed the driver fusing `a * b + c`; that was
+wrong — this driver never fuses. The gap was division and square root.
+`div_cr` / `sqrt_cr` take the builtin's answer and apply one correction
+step whose remainder is computed with the exact `fma`; with them **the
+GPU Adam is bit-identical to the CPU Adam**, and its test now asserts
+that. `exp`, `log`, `sin` and `cos` (softmax, silu, attention, RoPE) are
+the next to replace with R2's own; run the probe on every device the
+guarantee should cover — it is the first cross-vendor data point the
+office card will give.
+
 ### Mixed precision (2026-09-22)
 
 `Precision::Mixed` (`R2_GPU_PREC=mixed`) is the standard recipe: f32
