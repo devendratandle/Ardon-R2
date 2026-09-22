@@ -272,6 +272,44 @@ pub fn exp_r2(x: f32) -> f32 {
     y * f32::from_bits(((n as i32 + 127) as u32) << 23)
 }
 
+/// R2's natural log: the Cephes `logf` reduction and polynomial, every
+/// multiply-add a fused `mul_add`, so — like [`exp_r2`] — the result is
+/// fully determined by the input on any CPU, and the GPU's `log_r2`
+/// (`r2_gpu::numerics::LOG_WGSL`) runs the identical instruction sequence.
+///
+/// `x = 2^e * m` with `m` in `[sqrt(1/2), sqrt(2))` from the bits, then
+/// `log x = e*ln2 + log1p(m-1)` with `ln2` split hi/lo and a degree-9
+/// polynomial for `log1p`. Within 2 ULP of the correctly rounded log for
+/// normal inputs; `log 0 = -inf`, `log inf = inf`, negative and NaN give
+/// NaN. Subnormal inputs are not served (a GPU may flush them); every
+/// caller here takes the log of a softmax sum, which is at least 1.
+#[inline(always)]
+pub fn log_r2(x: f32) -> f32 {
+    if x.is_nan() || x < 0.0 { return f32::NAN; }
+    if x == 0.0 { return f32::NEG_INFINITY; }
+    if x == f32::INFINITY { return x; }
+    let bits = x.to_bits();
+    let mut e = ((bits >> 23) & 0xff) as i32 - 126;
+    let mut m = f32::from_bits((bits & 0x807f_ffff) | 0x3f00_0000);   // [0.5, 1)
+    if m < std::f32::consts::FRAC_1_SQRT_2 { e -= 1; m = (m + m) - 1.0; } else { m -= 1.0; }
+    let fe = e as f32;
+    let z = m * m;
+    let mut y: f32 = 7.037_683_6e-2;
+    y = y.mul_add(m, -1.151_461_0e-1);
+    y = y.mul_add(m, 1.167_699_9e-1);
+    y = y.mul_add(m, -1.242_014_1e-1);
+    y = y.mul_add(m, 1.424_932_3e-1);
+    y = y.mul_add(m, -1.666_805_8e-1);
+    y = y.mul_add(m, 2.000_071_5e-1);
+    y = y.mul_add(m, -2.499_999_4e-1);
+    y = y.mul_add(m, 3.333_333_1e-1);
+    y = (y * m) * z;
+    y = fe.mul_add(-2.121_944_4e-4, y);
+    y = (-0.5f32).mul_add(z, y);
+    let r = m + y;
+    fe.mul_add(0.693_359_38, r)
+}
+
 /// The vector kernels' scalar tails and fallbacks: [`exp_r2`], which
 /// already flushes below the normal range.
 #[inline(always)]
@@ -669,6 +707,28 @@ mod tests {
         }
         assert_eq!(off, 0, "{off} of {n} vector lanes differ from exp_r2");
         assert!(worst <= 2, "exp_r2 is {worst} ULP from the correctly rounded exp");
+    }
+
+    #[test]
+    fn log_r2_is_within_2_ulp_of_log() {
+        let n = 1 << 20;
+        let mut worst = (0u64, 0.0f32);
+        for i in 0..n {
+            // log-uniform over 2^-100 .. 2^100, plus the neighbourhood of 1
+            let x = if i % 2 == 0 { 2f32.powf(-100.0 + 200.0 * i as f32 / n as f32) }
+                    else { 0.5 + 1.5 * i as f32 / n as f32 };
+            let (got, want) = (log_r2(x), (x as f64).ln() as f32);
+            let d = (got.to_bits() as i32 as i64 - want.to_bits() as i32 as i64).unsigned_abs();
+            // near log(x) = 0 the result is tiny and ULPs are fine-grained;
+            // judge there by absolute error instead
+            let d = if want.abs() < 1e-3 { if (got - want).abs() <= 2.0 * f32::EPSILON * 1e-3 { 0 } else { d } } else { d };
+            if d > worst.0 { worst = (d, x); }
+        }
+        assert!(worst.0 <= 2, "log_r2 is {} ULP off at x = {}", worst.0, worst.1);
+        assert_eq!(log_r2(1.0), 0.0);
+        assert_eq!(log_r2(0.0), f32::NEG_INFINITY);
+        assert_eq!(log_r2(f32::INFINITY), f32::INFINITY);
+        assert!(log_r2(-1.0).is_nan() && log_r2(f32::NAN).is_nan());
     }
 
     #[test]

@@ -100,10 +100,50 @@ fn exp_r2(x0: f32) -> f32 {{
         p3 = b(4.166_579_6e-2), p4 = b(1.666_666_5e-1), p5 = b(5.000_000_1e-1))
 }
 
+/// R2's natural log in WGSL: `r2_tensor::ops::log_r2` instruction for
+/// instruction — the exponent and mantissa taken from the bits, the same
+/// `[sqrt(1/2), sqrt(2))` fold, the same Horner chain in `fma`, the same
+/// split-ln2 recombination. Constants as the CPU literals' bit patterns.
+pub fn log_wgsl() -> String {
+    let b = |x: f32| format!("bitcast<f32>({:#010x}u)", x.to_bits());
+    format!(r#"
+fn log_r2(x: f32) -> f32 {{
+    let bits = bitcast<u32>(x);
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {{ return x; }}                 // NaN
+    if ((bits & 0x7fffffffu) == 0u) {{ return bitcast<f32>(0xff800000u); }}  // +-0 -> -inf
+    if ((bits >> 31u) != 0u) {{ return bitcast<f32>(0x7fc00000u); }}        // negative -> NaN
+    if (bits == 0x7f800000u) {{ return x; }}                                // +inf
+    var e = i32((bits >> 23u) & 0xffu) - 126;
+    var m = bitcast<f32>((bits & 0x807fffffu) | 0x3f000000u);
+    if (m < {sqrth}) {{ e = e - 1; m = (m + m) - 1.0; }} else {{ m = m - 1.0; }}
+    let fe = f32(e);
+    let z = m * m;
+    var y = {c0};
+    y = fma(y, m, {c1});
+    y = fma(y, m, {c2});
+    y = fma(y, m, {c3});
+    y = fma(y, m, {c4});
+    y = fma(y, m, {c5});
+    y = fma(y, m, {c6});
+    y = fma(y, m, {c7});
+    y = fma(y, m, {c8});
+    y = (y * m) * z;
+    y = fma(fe, {q1}, y);
+    y = fma(-0.5, z, y);
+    let r = m + y;
+    return fma(fe, {q2}, r);
+}}
+"#, sqrth = b(std::f32::consts::FRAC_1_SQRT_2),
+        c0 = b(7.037_683_6e-2), c1 = b(-1.151_461_0e-1), c2 = b(1.167_699_9e-1),
+        c3 = b(-1.242_014_1e-1), c4 = b(1.424_932_3e-1), c5 = b(-1.666_805_8e-1),
+        c6 = b(2.000_071_5e-1), c7 = b(-2.499_999_4e-1), c8 = b(3.333_333_1e-1),
+        q1 = b(-2.121_944_4e-4), q2 = b(0.693_359_38))
+}
+
 /// Everything a kernel needs to compute the same bits on every device:
-/// correctly rounded division and square root, and R2's `exp`. Prepended
-/// to every kernel after its `enable` directives.
-pub fn prelude() -> String { format!("{CR_WGSL}{}", exp_wgsl()) }
+/// correctly rounded division and square root, and R2's `exp` and `log`.
+/// Prepended to every kernel after its `enable` directives.
+pub fn prelude() -> String { format!("{CR_WGSL}{}{}", exp_wgsl(), log_wgsl()) }
 
 /// How one operation compared with the correctly rounded result.
 #[derive(Debug, Clone, Copy, Default)]
@@ -245,9 +285,12 @@ mod tests {
     }
 
     /// `y[i] = f(x[i])` on the device, for a WGSL expression in `x`.
-    fn gpu_map(expr: &str, xs: &[f32]) -> Vec<f32> {
+    fn gpu_map(expr: &str, xs: &[f32]) -> Vec<f32> { gpu_map_with("", expr, xs) }
+
+    /// [`gpu_map`] with extra WGSL declarations the expression may call.
+    fn gpu_map_with(pre: &str, expr: &str, xs: &[f32]) -> Vec<f32> {
         let g = gpu().unwrap();
-        let src = format!("{}
+        let src = format!("{}{pre}
 @group(0) @binding(0) var<storage, read> X: array<f32>;
 @group(0) @binding(1) var<storage, read_write> Y: array<f32>;
 @compute @workgroup_size(256, 1, 1)
@@ -319,6 +362,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
                 assert!(same, "{expr} at x = {x}: gpu {g} vs cpu {w}");
             }
         }
+    }
+
+
+
+    /// `log_r2` is NOT bit-identical to the CPU, and this test records how
+    /// far it is and why. Every stage matches through `fma(-0.5, z, y)`;
+    /// then `m + y` differs in a third of cases, because the compiler
+    /// REASSOCIATES `m + fma(-0.5, z, y)` — it never contracts `a*b + c`
+    /// (the probe), but it does regroup a sum that has an fma inside it, and
+    /// WGSL has no way to forbid that. Returning early from any stage
+    /// matches, which is how it was located. The fix is SPIR-V, where the
+    /// operations can be marked against reassociation (Track C); until then
+    /// `log_r2` is held to 2 ULP of the CPU (5 in a million reach 2) and is
+    /// not used by the kernels.
+    #[test]
+    fn gpu_log_r2_is_within_two_ulp_of_the_cpu() {
+        if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        let n = 1 << 20;
+        let mut xs: Vec<f32> = (0..n).map(|i| 2f32.powf(-100.0 + 200.0 * i as f32 / n as f32)).collect();
+        xs.extend((0..4096).map(|i| 0.5 + i as f32 / 2048.0));        // around 1, where log is small
+        xs.extend_from_slice(&[1.0, 0.0, -0.0, f32::INFINITY, f32::MIN_POSITIVE, f32::MAX]);
+        let got = gpu_map("log_r2(x)", &xs);
+        let far: Vec<usize> = (0..xs.len()).filter(|&i| ulps(got[i], r2_tensor::ops::log_r2(xs[i])) > 2).collect();
+        assert!(far.is_empty(), "{} of {} are more than 2 ULP from the CPU; first: {:?}", far.len(), xs.len(),
+                far.first().map(|&i| (xs[i], got[i], r2_tensor::ops::log_r2(xs[i]))));
     }
 
     /// And so a whole elementwise op: silu on the GPU, written the way the

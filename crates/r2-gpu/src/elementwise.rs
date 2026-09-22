@@ -330,8 +330,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
 /// RoPE, one thread per (row, head, pair). `p.b` = 1 for the backward
 /// (the inverse rotation), `p.a` the assign flag (backward only).
+///
+/// The angles come from TAB, `(cos, sin)` per (position, pair), built on
+/// the host by [`rope_table`] — the CPU tape's own table, value for value.
+/// This kernel used to compute `pow`, `cos` and `sin` itself; the probe
+/// found this adapter's `sin` 2.1 million ULP off near its zeros (Vulkan
+/// only bounds it in absolute terms), and those are vendor functions that
+/// no two devices share. With the table there is no transcendental on the
+/// device at all, the rotation is the tape's `a*c - b*s` / `a*s + b*c`,
+/// and the GPU's RoPE gives the CPU's bits.
 fn rope_src(sig: Sig) -> String {
-    bindings(sig, &[("X", "read"), ("Y", "read_write")]) + &format!(r#"
+    bindings(sig, &[("X", "read"), ("TAB", "read"), ("Y", "read_write")]) + &format!(r#"
 @compute @workgroup_size({T}, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let half = p.d / 2u;                    // pairs per head; p.d = head_dim
@@ -341,11 +350,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let pr = i % half;
     let h = (i / half) % p.c;
     let r = i / (half * p.c);
-    let pos = f32(r % p.a);                 // p.a = period
-    let freq = 1.0 / pow(p.x, 2.0 * f32(pr) / f32(p.d));
-    let th = pos * freq;
-    let c = cos(th);
-    let s = sin(th);
+    let t = ((r % p.a) * half + pr) * 2u;   // p.a = period
+    let c = ld_TAB(t);
+    let s = ld_TAB(t + 1u);
     let o = r * p.c * p.d + h * p.d + 2u * pr;
     let a = ld_X(o);
     let b = ld_X(o + 1u);
@@ -528,19 +535,53 @@ pub fn flat_bwd(op: Flat, a: &Tensor, b: &Tensor, g: &Tensor, ga: Option<(&Tenso
     launch(p, &[&a.buf, bb, &g.buf, gab, gbb], [n as u32, 0, 0, ga_acc, code, gb_acc, ga_on, gb_on], [0.0; 4], ceil_div(n, FLAT)).is_some()
 }
 
+/// `(cos, sin)` per (position, pair), flattened — `r2_tensor::ops::
+/// rope_table`, the CPU tape's table, by the same expressions in the same
+/// order (so the same bits; `rope_table_matches_the_cpu` pins it). It is
+/// computed on the host, where `powf` and `sin_cos` are one library for
+/// both the CPU tape and the device.
+pub fn rope_table(period: usize, head_dim: usize, base: f32) -> Vec<f32> {
+    let half = head_dim / 2;
+    let mut t = Vec::with_capacity(period.max(1) * half * 2);
+    for pos in 0..period.max(1) {
+        for p in 0..half {
+            let freq = 1.0 / base.powf(2.0 * p as f32 / head_dim as f32);
+            let theta = pos as f32 * freq;
+            let (s, c) = theta.sin_cos();
+            t.push(c);
+            t.push(s);
+        }
+    }
+    t
+}
+
+/// The table on the device, built once per (period, head_dim, base).
+fn rope_table_dev(period: usize, head_dim: usize, base: f32) -> Option<&'static Tensor> {
+    static TABLES: Mutex<Option<HashMap<(usize, usize, u32), &'static Tensor>>> = Mutex::new(None);
+    let key = (period.max(1), head_dim, base.to_bits());
+    let mut guard = TABLES.lock().ok()?;
+    let table = guard.get_or_insert_with(HashMap::new);
+    if let Some(t) = table.get(&key) { return Some(t); }
+    let t: &'static Tensor = Box::leak(Box::new(Tensor::upload(&rope_table(period, head_dim, base))?));
+    table.insert(key, t);
+    Some(t)
+}
+
 /// RoPE forward: `y = rotate(x)`, positions restarting every `period`
 /// rows; rows are `heads x head_dim` wide.
 pub fn rope_fwd(x: &Tensor, y: &Tensor, rows: usize, period: usize, heads: usize, head_dim: usize, base: f32) -> bool {
-    let Some(p) = pipeline("rope", &sig_of(&[x, y]), rope_src) else { return false };
+    let Some(tab) = rope_table_dev(period, head_dim, base) else { return false };
+    let Some(p) = pipeline("rope", &sig_of(&[x, tab, y]), rope_src) else { return false };
     let total = rows * heads * (head_dim / 2);
-    launch(p, &[&x.buf, &y.buf], [0, head_dim as u32, rows as u32, period.max(1) as u32, 0, heads as u32, 0, 0], [base, 0.0, 0.0, 0.0], ceil_div(total, FLAT)).is_some()
+    launch(p, &[&x.buf, &tab.buf, &y.buf], [0, head_dim as u32, rows as u32, period.max(1) as u32, 0, heads as u32, 0, 0], [0.0; 4], ceil_div(total, FLAT)).is_some()
 }
 
 /// RoPE backward: `gx (=|+=) rotate⁻¹(g)`.
 pub fn rope_bwd(g: &Tensor, gx: &Tensor, rows: usize, period: usize, heads: usize, head_dim: usize, base: f32, assign: bool) -> bool {
-    let Some(p) = pipeline("rope", &sig_of(&[g, gx]), rope_src) else { return false };
+    let Some(tab) = rope_table_dev(period, head_dim, base) else { return false };
+    let Some(p) = pipeline("rope", &sig_of(&[g, tab, gx]), rope_src) else { return false };
     let total = rows * heads * (head_dim / 2);
-    launch(p, &[&g.buf, &gx.buf], [0, head_dim as u32, rows as u32, period.max(1) as u32, 1, heads as u32, (!assign) as u32, 0], [base, 0.0, 0.0, 0.0], ceil_div(total, FLAT)).is_some()
+    launch(p, &[&g.buf, &tab.buf, &gx.buf], [0, head_dim as u32, rows as u32, period.max(1) as u32, 1, heads as u32, (!assign) as u32, 0], [0.0; 4], ceil_div(total, FLAT)).is_some()
 }
 
 /// Token ids on the device.
@@ -621,6 +662,17 @@ mod tests {
         let scale = want.iter().fold(0.0f32, |s, v| s.max(v.abs())).max(1.0);
         for (i, (a, b)) in got.iter().zip(want).enumerate() {
             assert!((a - b).abs() <= tol * scale, "{what}[{i}]: gpu {a} vs cpu {b}");
+        }
+    }
+
+    /// The device's RoPE table is the CPU tape's, value for value.
+    #[test]
+    fn rope_table_matches_the_cpu() {
+        for &(per, hd, base) in &[(64usize, 64usize, 10000.0f32), (256, 64, 10000.0), (8, 32, 500000.0)] {
+            let flat: Vec<f32> = r2_tensor::ops::rope_table(per, hd, base).into_iter().flat_map(|(c, s)| [c, s]).collect();
+            let ours = rope_table(per, hd, base);
+            assert!(ours.iter().zip(&flat).all(|(a, b)| a.to_bits() == b.to_bits()) && ours.len() == flat.len(),
+                    "table differs at period {per}, head_dim {hd}");
         }
     }
 
@@ -734,9 +786,12 @@ mod tests {
         let (txr, tgr) = (up(&xr), up(&gr));
         let yr = zeros(xr.len());
         assert!(rope_fwd(&txr, &yr, nseq * seq, seq, nh, hd, 10000.0));
-        close(&yr.download(), tape.value(vy), 2e-5, "rope");
+        // with the host table there is no device transcendental left: in f32
+        // storage the GPU's RoPE is the tape's, bit for bit
+        let rope_tol = if dt == Dtype::F32 { 0.0 } else { 2e-5 };
+        close(&yr.download(), tape.value(vy), rope_tol, "rope");
         assert!(rope_bwd(&tgr, &yr, nseq * seq, seq, nh, hd, 10000.0, true));
-        close(&yr.download(), tape.grad(vx), 2e-5, "rope dx");
+        close(&yr.download(), tape.grad(vx), rope_tol, "rope dx");
 
         // softmax cross-entropy: 19 rows of vocab 300
         let (r, v) = (19usize, 300usize);
