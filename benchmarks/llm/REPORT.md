@@ -670,14 +670,68 @@ are the ones that will run on a discrete GPU; their rates here:
 |---|---:|---|
 | `sgemm` 128x128 tile, 8x8 per thread | 330-425 GFLOP/s | split-K below 24 output tiles (deterministic partials); `gemm_bench` |
 | `sgemm` short-output shapes (`grad_B` of a 256-wide projection) | 150-210 | was 53-110 before split-K |
-| attention fwd / bwd (one thread per row) | 20-30 | 14% of the small step; see below |
+| attention forward (one thread per row) | 20-30 | 2% of the small step |
+| attention backward (register-tiled dK+dV, one thread per row dQ) | — | **2x the untiled pair** (6.55 vs 13.35 ms at 32x64, 39.4 vs 77.4 at 8x256); 14% -> 8% of the small step |
 | rmsnorm fwd / bwd | ~6.5 GB/s | 8 rows per workgroup, dW reduced in row blocks; was 50 ms a step, now 19 |
 | Adam | one launch per block | a few ULP from the CPU (WGSL may contract a*b+c), bit-identical to itself |
 
 Where the GPU step goes at 7M (`R2_GPU_STATS=<step>` drains the queue
-after every launch and prints the table): GEMMs 54% (the 8000-wide head
-alone 20%), attention backward 14%, attention forward 2%, rmsnorm 5%,
-the rest under 3% each. The step is 157 launches.
+after every launch and prints the table): GEMMs ~58% (the 8000-wide head
+alone 20%), attention backward 8%, attention forward 2%, rmsnorm 5%, the
+rest under 3% each. The step is 157 launches.
+
+### The tiled attention backward (2026-09-22)
+
+`attn_tiled::dkv_wgsl` replaces the two one-thread-per-row kernels that
+computed dV and dK separately, each re-reading every staged row once per
+FMA and each recomputing `P` from scratch. One workgroup owns 32 keys and
+walks the query blocks once: `Sᵀ = K·Qᵀ` and `dPᵀ = V·dOᵀ` are
+register-blocked GEMMs over `hd` in 16-deep slabs (4 x 4 per thread, two
+loads per four FMAs), and the `32 x hd` dK and dV tiles stay in registers
+— 4 keys x `hd/8` columns per thread — for the whole walk, including
+across the query heads that share a kv head. Every element is still summed
+by one thread in a fixed order, so it is bit-reproducible, and it agrees
+with the reference kernels to f32 rounding.
+
+| | tiled | one thread per row | |
+|---|---:|---:|---|
+| backward, 32 x 64 tokens, 4/2 heads, hd 64 | **6.55 ms** | 13.35 ms | **2.04x** (CPU 7.21) |
+| backward, 8 x 256, 12/4 heads, hd 64 | **39.4 ms** | 77.4 ms | **1.96x** (CPU 29.6) |
+
+On the whole step, interleaved pairs (`R2_GPU_ATTN_TILED_BWD` switches
+the two inside one process, so both are measured in one window):
+
+| model | tiled | untiled | |
+|---|---:|---:|---|
+| 7M, four pairs | 334.6 / 339.7 / 382.1 / 357.9 ms | 359.9 / 375.3 / 406.2 / 379.1 | **1.06-1.10x** |
+| 40M, two pairs | 1,637.8 / 1,629.0 ms | 1,745.8 / 1,779.9 | **1.07-1.09x** |
+
+Held-out loss unchanged to four decimals on both. dQ is untouched — its
+rows belong to another workgroup, so tiling it needs atomics or a second
+reduction pass — and it is now the larger half of what attention costs.
+
+### Mixed precision (2026-09-22)
+
+`Precision::Mixed` (`R2_GPU_PREC=mixed`) is the standard recipe: f32
+master weights and Adam state, an f16 copy of every GEMM weight cast once
+per step, f16 activations and activation gradients, f32 residual stream,
+logits, row statistics and weight gradients, f32 accumulation in every
+kernel, and dynamic loss scaling. `Tensor` carries its storage type and
+each kernel is compiled per type signature.
+
+**It changes nothing on this machine** — 382.7 / 386.3 ms against 375.7 /
+392.4 f32, within the noise, held-out 6.2691 vs 6.2690 — and that is the
+expected answer: Vega 6 has no f16 arithmetic units, so halving the bytes
+buys nothing when the step is bound by launch latency on six CUs, and the
+per-step weight cast is new work. It is built and verified for hardware
+that does have them.
+
+One thing it found, which would bite silently elsewhere: **this adapter
+SATURATES an overflowing f32 -> f16 store to ±65,504 instead of producing
+an infinity.** The textbook overflow test for loss scaling looks for
+inf/nan and would never fire here; training would drift on quietly
+corrupted gradients. `nonfinite_flag` tests magnitude as well, and the
+kernel test asserts the saturating case.
 
 Activation checkpointing (`R2_GPU_CKPT=1`) keeps one layer's work set
 instead of every layer's — 14·t·d + t·nh floats per layer become t·d —
@@ -688,9 +742,10 @@ GEMM tile (nothing over split-K), a register-prefetching slab loop
 (25-30% slower everywhere: the staged registers cost the occupancy the
 big tile lives on), the tiled FlashAttention-2 forward (`attn_tiled`,
 2.24 vs 2.12 ms and 11.7 vs 9.4 ms against the one-thread-per-row
-kernel; kept under test as the shape the backward needs), and splitting
-attention's reduction axis into partial slabs (splits 1/2/4/8/16: 14.8,
-16.2, 19.6, 26.1, 40.7 ms — monotonically worse).
+kernel; kept under test as the shape the backward needs — whose tiling
+DID pay, above), and splitting attention's reduction axis into partial
+slabs (splits 1/2/4/8/16: 14.8, 16.2, 19.6, 26.1, 40.7 ms —
+monotonically worse).
 
 ## 5. Open
 

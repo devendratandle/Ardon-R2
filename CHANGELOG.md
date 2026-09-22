@@ -26,6 +26,21 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
   SDPA measured 3.4 s per layer here and was replaced by an equal `cat`).
   `TS_DEVICE=dml` in `benchmarks/llm/tinystories_train.py`;
   `benchmarks/llm/dml_phase_split.py`. REPORT.md §4b.
+- **The tiled attention backward** (`attn_tiled::dkv_wgsl`): dK and dV in
+  one workgroup per key block, the score and dP tiles as register-blocked
+  GEMMs, the result tiles held in registers for the whole query walk —
+  **twice as fast as the two kernels it replaces** (6.55 vs 13.35 ms at
+  32 x 64 tokens, 39.4 vs 77.4 at 8 x 256), 6-10% of a whole GPU step,
+  same losses, still bit-reproducible. `R2_GPU_ATTN_TILED_BWD=0` selects
+  the reference kernels, which remain correct for any head dimension.
+- **Mixed precision** (`R2_GPU_PREC=mixed`): `Tensor` carries a storage
+  type, every kernel compiles per type signature and accumulates in f32;
+  f32 master weights and Adam, f16 weight copies and activations, dynamic
+  loss scaling. Same losses; no speedup on an integrated GPU with no f16
+  arithmetic units, as expected — built for hardware that has them. Its
+  overflow test also catches a *saturated* f16 store (this adapter clamps
+  to 65,504 rather than producing an infinity, which the textbook
+  inf/nan check would miss).
 - `r2-gpu`: deterministic split-K in `sgemm` (partial slabs summed in
   order) for outputs under 24 tiles — the short-output `grad_B` shapes
   53-110 -> 150-210 GFLOP/s; rmsnorm kernels re-laid out (8 rows per

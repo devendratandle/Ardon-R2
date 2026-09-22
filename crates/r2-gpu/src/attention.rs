@@ -44,9 +44,18 @@
 //! partial slabs and a fixed-order sum (the GEMM's split-K, for more
 //! workgroups) was measured interleaved at splits 1/2/4/8/16: 14.8, 16.2,
 //! 19.6, 26.1, 40.7 ms — monotonically worse, the per-workgroup staging
-//! and row loads outweighing any occupancy gained. Closed. What remains
-//! is the register-tiled backward (`attn_tiled`'s shape for dV, dK, dQ),
-//! which cuts the loads per FMA the way the GEMM does.
+//! and row loads outweighing any occupancy gained. Closed.
+//!
+//! What DID pay is register tiling: `attn_tiled::dkv_wgsl` computes dK
+//! and dV in one workgroup per key block, with the score and dP tiles as
+//! register-blocked GEMMs, and runs **twice as fast** as the dV and dK
+//! kernels here put together (6.55 vs 13.35 ms at 32 x 64 tokens, 39.4
+//! vs 77.4 at 8 x 256) — 6-10% of a whole training step. It is the
+//! default wherever its head dimension is served; these kernels remain
+//! the reference, correct for any `hd`, and `R2_GPU_ATTN_TILED_BWD=0`
+//! selects them. dQ is still one thread per query: its rows belong to a
+//! different workgroup, so tiling it needs either atomics or a second
+//! reduction pass, and it is now the larger half of what is left.
 //!
 //! # Storage types
 //!
