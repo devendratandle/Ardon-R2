@@ -648,6 +648,12 @@ torch    2.4.1+cpu + torch-directml 0.2.5.dev240914, SDPA attention
 | 1 | **370.9 ms** | 506.2 ms | **R2 1.37x** | 6.2690 vs 6.2690 |
 | 2 | **363.9 ms** | 487.7 ms | **R2 1.34x** | 6.2690 vs 6.2690 |
 | 3 | **362.7 ms** | 488.5 ms | **R2 1.35x** | 6.2690 vs 6.2690 |
+| 4 | **337.1 ms** | 513.9 ms | **R2 1.52x** | 6.2690 vs 6.2690 |
+| 5 | **336.6 ms** | 518.5 ms | **R2 1.54x** | 6.2690 vs 6.2690 |
+
+Pairs 4-5 are after the tiled attention backward below; 1-3 are kept
+because the DirectML side is the same code in both and drifts by 6% on
+its own, which is the honest width of this comparison.
 
 **Medium model, 39.8M (dim 768, 4 layers, ffn 2304, 12/4 heads, 8 x
 256), 20 steps, two pairs:**
@@ -657,11 +663,12 @@ torch    2.4.1+cpu + torch-directml 0.2.5.dev240914, SDPA attention
 | 1 | **1,665 ms** | 3,277 ms | **R2 1.97x** | 6.1603 vs 6.1603 |
 | 2 | **1,909 ms** | 2,886 ms | **R2 1.51x** | 6.1603 vs 6.1603 |
 
-**R2's GPU step is 1.34-1.37x faster than PyTorch-DirectML at 7M and
+**R2's GPU step is 1.34-1.54x faster than PyTorch-DirectML at 7M and
 1.5-2.0x at 40M, on the same integrated GPU, learning identically.**
 
-For scale, on this machine the CPU trainer is faster than either: 395
-ms/step at 7M (the R2 CPU step is 1.66x PyTorch+MKL) — a 1.1 TFLOP/s
+For scale, on this machine the CPU trainer is about level at 7M: 395
+ms/step against the GPU's 337 (the R2 CPU step is itself 1.66x
+PyTorch+MKL) — a 1.1 TFLOP/s
 integrated GPU that shares the CPU's memory bus is a correctness and
 portability platform for this code, not a speed platform. The kernels
 are the ones that will run on a discrete GPU; their rates here:
