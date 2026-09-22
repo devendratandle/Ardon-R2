@@ -445,21 +445,44 @@ pub fn deparse(e: &Expr) -> String {
     }
 }
 
-/// Central numeric formatting: 7 decimal places, scientific for extreme values
+thread_local! {
+    /// Significant digits `fmt_num` prints: R's `digits`, 7 by default.
+    static PRINT_DIGITS: std::cell::Cell<usize> = const { std::cell::Cell::new(7) };
+}
+
+/// Run `f` with `fmt_num` printing `digits` significant digits (R's
+/// `print(x, digits = n)`), restoring the previous setting afterwards —
+/// also on error, so one call cannot leak its digits into the next.
+pub fn with_print_digits<R>(digits: usize, f: impl FnOnce() -> R) -> R {
+    struct Restore(usize);
+    impl Drop for Restore { fn drop(&mut self) { PRINT_DIGITS.with(|d| d.set(self.0)); } }
+    let _restore = Restore(PRINT_DIGITS.with(|d| d.replace(digits.clamp(1, 22))));
+    f()
+}
+
+/// Central numeric formatting: `digits` (7 unless `with_print_digits`)
+/// significant digits, scientific for extreme values. At 7 every branch
+/// is exactly what it always was.
 pub fn fmt_num(n: f64) -> String {
     if n.is_nan() { return "NaN".into(); }
     if n.is_infinite() { return if n > 0.0 { "Inf".into() } else { "-Inf".into() }; }
     if n == 0.0 { return "0".into(); }
+    let digits = PRINT_DIGITS.with(|d| d.get());
     let abs = n.abs();
+    // the integer-valued test must not swallow digits the caller asked for
+    let int_tol = if digits <= 7 { 1e-10 } else { 10f64.powi(-(digits as i32 + 2)) };
     if abs >= 1e15 || (abs < 1e-4 && abs > 0.0) {
-        // Scientific notation
-        let s = format!("{:.7e}", n);
+        // Scientific notation as R writes it: `digits` significant digits
+        // (trailing zeros dropped) and a signed exponent of at least two
+        // digits — `3.333333e-09`, `1e+15`. Rust's `{:e}` writes `3.3e-9`,
+        // and this used one digit too many as well.
+        let s = format!("{:.prec$e}", n, prec = digits - 1);
         if let Some(pos) = s.find('e') {
             let mantissa = s[..pos].trim_end_matches('0').trim_end_matches('.').to_string();
-            let exp = &s[pos..];
-            format!("{}{}", mantissa, exp)
+            let e: i32 = s[pos + 1..].parse().unwrap_or(0);
+            format!("{}e{}{:02}", mantissa, if e < 0 { '-' } else { '+' }, e.abs())
         } else { s }
-    } else if (n - n.round()).abs() < 1e-10 && abs < 1e12 {
+    } else if (n - n.round()).abs() < int_tol && abs < 1e12 {
         // Integer-valued float: show without decimals.
         // Bug fix: use `n.round()` not `n as i64` — the latter truncates
         // toward zero so 0.9999999999999998 became "0" instead of "1".
@@ -469,7 +492,7 @@ pub fn fmt_num(n: f64) -> String {
         // so 0.03177295 keeps all 7 (the old per-magnitude table capped
         // sub-1 values at 7 DECIMALS, silently dropping a digit for
         // leading-zero values like 0.03…).
-        let decimals = (6 - abs.log10().floor() as i32).clamp(0, 15) as usize;
+        let decimals = (digits as i32 - 1 - abs.log10().floor() as i32).clamp(0, 22) as usize;
         let s = format!("{:.prec$}", n, prec = decimals);
         let s = s.trim_end_matches('0');
         let s = s.trim_end_matches('.');

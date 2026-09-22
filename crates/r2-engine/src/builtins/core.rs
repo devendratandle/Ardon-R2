@@ -32,7 +32,17 @@ pub(crate) fn bi_length(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     }
     Ok(rint(rval_length(&gv(a,0)) as i32))
 }
-pub(crate) fn bi_print(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+pub(crate) fn bi_print(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    // print(x, digits = n): n significant digits for this one print
+    let digits = a.iter().find(|x| x.name.as_deref() == Some("digits"))
+        .and_then(|x| x.value.scalar_f64().ok().flatten());
+    match digits {
+        Some(d) if d >= 1.0 => r2_types::with_print_digits(d as usize, || print_value(e, a, env)),
+        _ => print_value(e, a, env),
+    }
+}
+
+fn print_value(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
     // Phase R.T.1 — class-aware print for Date / POSIXct. R prints these in
     // human form (`"2024-03-15"`) rather than the raw days/seconds f64. We
