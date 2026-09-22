@@ -320,7 +320,14 @@ fn main() {
         let mut g = r2_train::gpu_llm::GpuTrainer::from_trainer(&tr).unwrap_or_else(|e| die("gpu", e));
         // R2_GPU_CKPT=1: keep one layer's activations instead of every layer's
         g.checkpoint = std::env::var("R2_GPU_CKPT").map(|v| v == "1").unwrap_or(false);
-        println!("  device     {}{}\n", r2_gpu::adapter_info(), if g.checkpoint { ", activation checkpointing" } else { "" });
+        // R2_GPU_PREC=mixed: f16 activations and weight copies, f32 master
+        // weights, accumulation and Adam, dynamic loss scaling
+        if std::env::var("R2_GPU_PREC").map(|v| v == "mixed").unwrap_or(false) {
+            g.set_precision(r2_train::gpu_llm::Precision::Mixed).unwrap_or_else(|e| die("gpu", e));
+        }
+        println!("  device     {}{}{}\n", r2_gpu::adapter_info(),
+                 if g.checkpoint { ", activation checkpointing" } else { "" },
+                 if g.precision == r2_train::gpu_llm::Precision::Mixed { ", mixed precision" } else { "" });
         Some(g)
     } else { None };
     #[cfg(not(feature = "gpu"))]
@@ -349,7 +356,12 @@ fn main() {
         }
     }
     #[cfg(feature = "gpu")]
-    if let Some(g) = &gpu_tr { g.download_into(&mut tr); }
+    if let Some(g) = &gpu_tr {
+        g.download_into(&mut tr);
+        if g.precision == r2_train::gpu_llm::Precision::Mixed {
+            println!("  loss scale {} at the end, {} overflowed steps skipped", g.loss_scale, g.overflows);
+        }
+    }
     let train_s = t0.elapsed().as_secs_f64();
     let val_after = tr.eval_loss(&val).unwrap_or_else(|e| die("eval", e));
 

@@ -36,7 +36,7 @@ const THREADS: u32 = (TQ / 4) * (TK / 4);
 /// is `hd / 8` columns per thread, in vec4s.)
 pub fn supports(hd: usize) -> bool { hd % 32 == 0 && hd >= 32 }
 
-pub fn forward_wgsl(hd: usize) -> String {
+pub fn forward_wgsl(hd: usize, act: crate::device::Dtype) -> String {
     let v4 = hd / 4;                 // vec4s per row of V / O
     let cpt = hd / 8;                // output columns per thread
     let cv4 = cpt / 4;               // vec4s of output per row per thread
@@ -58,18 +58,18 @@ pub fn forward_wgsl(hd: usize) -> String {
         o_store += &format!("    if (qb * TQ + ty * 4u + {i}u < d.seq) {{\n        let inv{i} = 1.0 / ls[ty * 4u + {i}u];\n        let off{i} = (base + qb * TQ + ty * 4u + {i}u) * qw + qh * HD + tx * {cpt}u;\n");
         for c in 0..cv4 {
             for (l, comp) in ["x", "y", "z", "w"].iter().enumerate() {
-                o_store += &format!("        O[off{i} + {}u] = o{i}_{c}.{comp} * inv{i};\n", c * 4 + l);
+                o_store += &format!("        O[off{i} + {}u] = {ty}(o{i}_{c}.{comp} * inv{i});\n", c * 4 + l, ty = act.wgsl());
             }
         }
         o_store += &format!("        if (tx == 0u) {{ L[(base + qb * TQ + ty * 4u + {i}u) * d.nh + qh] = ms[ty * 4u + {i}u] + log(ls[ty * 4u + {i}u]); }}\n    }}\n");
     }
 
     format!(r#"
-struct Dims {{ nseq: u32, seq: u32, nh: u32, nkv: u32, hd: u32, group: u32, pad0: u32, pad1: u32, scale: f32, pad2: f32, pad3: f32, pad4: f32 }};
-@group(0) @binding(0) var<storage, read> Q: array<f32>;
-@group(0) @binding(1) var<storage, read> K: array<f32>;
-@group(0) @binding(2) var<storage, read> V: array<f32>;
-@group(0) @binding(3) var<storage, read_write> O: array<f32>;
+{enable}struct Dims {{ nseq: u32, seq: u32, nh: u32, nkv: u32, hd: u32, group: u32, pad0: u32, pad1: u32, scale: f32, pad2: f32, pad3: f32, pad4: f32 }};
+@group(0) @binding(0) var<storage, read> Q: array<{ty}>;
+@group(0) @binding(1) var<storage, read> K: array<{ty}>;
+@group(0) @binding(2) var<storage, read> V: array<{ty}>;
+@group(0) @binding(3) var<storage, read_write> O: array<{ty}>;
 @group(0) @binding(4) var<storage, read_write> L: array<f32>;
 @group(0) @binding(5) var<uniform> d: Dims;
 
@@ -123,7 +123,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
                 var qv = vec4<f32>(0.0);
                 if (row < d.seq) {{
                     let off = (base + row) * qw + qh * HD + d0 + d4 * 4u;
-                    qv = vec4<f32>(Q[off], Q[off + 1u], Q[off + 2u], Q[off + 3u]);
+                    qv = vec4<f32>(f32(Q[off]), f32(Q[off + 1u]), f32(Q[off + 2u]), f32(Q[off + 3u]));
                 }}
                 Qt[(d4 * 4u + 0u) * (TQ / 4u) + i / 4u][i % 4u] = qv.x;
                 Qt[(d4 * 4u + 1u) * (TQ / 4u) + i / 4u][i % 4u] = qv.y;
@@ -139,7 +139,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
                 var kv = vec4<f32>(0.0);
                 if (row < d.seq) {{
                     let off = (base + row) * kw + kvh * HD + d0 + d4 * 4u;
-                    kv = vec4<f32>(K[off], K[off + 1u], K[off + 2u], K[off + 3u]);
+                    kv = vec4<f32>(f32(K[off]), f32(K[off + 1u]), f32(K[off + 2u]), f32(K[off + 3u]));
                 }}
                 Kt[(d4 * 4u + 0u) * (TK / 4u) + j / 4u][j % 4u] = kv.x;
                 Kt[(d4 * 4u + 1u) * (TK / 4u) + j / 4u][j % 4u] = kv.y;
@@ -178,7 +178,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
                 var vv = vec4<f32>(0.0);
                 if (row < d.seq) {{
                     let off = (base + row) * kw + kvh * HD + c4 * 4u;
-                    vv = vec4<f32>(V[off], V[off + 1u], V[off + 2u], V[off + 3u]);
+                    vv = vec4<f32>(f32(V[off]), f32(V[off + 1u]), f32(V[off + 2u]), f32(V[off + 3u]));
                 }}
                 Vs[idx] = vv;
             }}
@@ -214,6 +214,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
 {o_store}}}
 "#,
         hd = hd, TQ = TQ, TK = TK, DC = DC, THREADS = THREADS,
+        enable = if act == crate::device::Dtype::F16 { "enable f16;\n" } else { "" }, ty = act.wgsl(),
         qt_len = DC as usize * TQ as usize / 4, kt_len = DC as usize * TK as usize / 4,
         ss_len = TQ as usize * TK as usize, vs_len = TK as usize * v4,
         vs_per = (TK as usize * v4).div_ceil(THREADS as usize),

@@ -33,6 +33,15 @@
 //! slot tables and the staged registers spilled the occupancy the big
 //! tile lives on).
 //!
+//! # Storage types
+//!
+//! A and B may be f16 (`Tensor::dtype`); they are converted to f32 as
+//! they are staged, and the accumulators are f32 whatever the operands.
+//! C is written in its own type. One kernel per (A, B, C) signature,
+//! compiled on first use. f16 operands halve the bytes a GEMM reads —
+//! the point of mixed precision on a bandwidth-bound device — and are
+//! what a cooperative-matrix kernel will consume.
+//!
 //! # Accuracy
 //!
 //! Checked against `r2_linalg::gemm::sgemm` in the tests, at ragged
@@ -40,8 +49,9 @@
 //! kernel sums K in slabs of 256 with a different association, so the two
 //! agree to f32 rounding, not bit for bit.
 
-use crate::device::{gpu, Tensor};
-use std::sync::OnceLock;
+use crate::device::{gpu, Dtype, Tensor};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use wgpu::util::DeviceExt;
 
 /// Rows of C per workgroup.
@@ -63,7 +73,14 @@ const THREADS: u32 = (BM / TM) * (BN / TN);
 /// GFLOP/s; the same arithmetic in named registers runs at 300. With the
 /// accumulators, loads and stores unrolled here, the tile shape is a
 /// constant to change rather than a kernel to rewrite.
-fn shader() -> String {
+/// The operand and result types of one compiled kernel: A and B are read
+/// (f32 or f16, converted to f32 as they are staged — the arithmetic and
+/// the accumulators are always f32), C is written in its own type. The
+/// split-K partials stay f32.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Sig { a: Dtype, b: Dtype, c: Dtype }
+
+fn shader(sig: Sig) -> String {
     let (tm, tn4) = (TM as usize, (TN / 4) as usize);
     let tm4 = (TM / 4) as usize;
     let mut acc_decl = String::new();
@@ -88,20 +105,22 @@ fn shader() -> String {
                 stores += &format!(
                     "        if (nbase + {col}u < d.n) {{ let o = (mbase + {i}u) * d.ldc + nbase + {col}u; \
                      if (d.ksplit > 1u) {{ P[wg.z * d.m * d.n + o] = c{i}_{j}.{comp}; }} \
-                     else if (d.acc == 0u) {{ C[o] = c{i}_{j}.{comp}; }} else {{ C[o] = C[o] + c{i}_{j}.{comp}; }} }}\n");
+                     else if (d.acc == 0u) {{ C[o] = {tc}(c{i}_{j}.{comp}); }} else {{ C[o] = {tc}(f32(C[o]) + c{i}_{j}.{comp}); }} }}\n",
+                    tc = sig.c.wgsl());
             }
         }
         stores += "    }\n";
     }
-    format!(r#"
+    let enable = if [sig.a, sig.b, sig.c].contains(&Dtype::F16) { "enable f16;\n" } else { "" };
+    format!(r#"{enable}
 struct Dims {{
     m: u32, k: u32, n: u32, lda: u32,
     ldb: u32, ldc: u32, ta: u32, tb: u32,
     acc: u32, ksplit: u32, kchunk: u32, pad2: u32,
 }};
-@group(0) @binding(0) var<storage, read> A: array<f32>;
-@group(0) @binding(1) var<storage, read> B: array<f32>;
-@group(0) @binding(2) var<storage, read_write> C: array<f32>;
+@group(0) @binding(0) var<storage, read> A: array<{ta}>;
+@group(0) @binding(1) var<storage, read> B: array<{tb}>;
+@group(0) @binding(2) var<storage, read_write> C: array<{tc}>;
 @group(0) @binding(3) var<uniform> d: Dims;
 // split-K partials, [ksplit][m][n]; written instead of C when ksplit > 1
 @group(0) @binding(4) var<storage, read_write> P: array<f32>;
@@ -142,7 +161,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             let kk = k0 + c;
             var v = 0.0;
             if (mm < d.m && kk < kend) {{
-                if (d.ta == 0u) {{ v = A[mm * d.lda + kk]; }} else {{ v = A[kk * d.lda + mm]; }}
+                if (d.ta == 0u) {{ v = f32(A[mm * d.lda + kk]); }} else {{ v = f32(A[kk * d.lda + mm]); }}
             }}
             As[c * (BM / 4u) + r / 4u][r % 4u] = v;
         }}
@@ -156,7 +175,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             let nn = n0 + c;
             var v = 0.0;
             if (kk < kend && nn < d.n) {{
-                if (d.tb == 0u) {{ v = B[kk * d.ldb + nn]; }} else {{ v = B[nn * d.ldb + kk]; }}
+                if (d.tb == 0u) {{ v = f32(B[kk * d.ldb + nn]); }} else {{ v = f32(B[nn * d.ldb + kk]); }}
             }}
             Bs[r * (BN / 4u) + c / 4u][c % 4u] = v;
         }}
@@ -174,6 +193,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 {stores}}}
 "#,
         BM = BM, BN = BN, BK = BK, TM = TM, TN = TN, THREADS = THREADS,
+        enable = enable, ta = sig.a.wgsl(), tb = sig.b.wgsl(), tc = sig.c.wgsl(),
         WX = BN / TN, WY = BM / TM,
         AS4 = BK * BM / 4, BS4 = BK * BN / 4,
         LOADS_A = (BM * BK) / THREADS,
@@ -185,25 +205,27 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 /// The split-K reduction: `C (=|+=) Σ_z P[z]`, splits in order, one
 /// thread per element — the fixed-order sum that keeps split-K
 /// deterministic.
-const REDUCE: &str = r#"
-struct Dims {
+fn reduce_shader(c: Dtype) -> String {
+    format!(r#"{enable}
+struct Dims {{
     m: u32, k: u32, n: u32, lda: u32,
     ldb: u32, ldc: u32, ta: u32, tb: u32,
     acc: u32, ksplit: u32, kchunk: u32, pad2: u32,
-};
+}};
 @group(0) @binding(0) var<storage, read> P: array<f32>;
-@group(0) @binding(1) var<storage, read_write> C: array<f32>;
+@group(0) @binding(1) var<storage, read_write> C: array<{tc}>;
 @group(0) @binding(2) var<uniform> d: Dims;
 @compute @workgroup_size(256, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let o = gid.x;
     let mn = d.m * d.n;
-    if (o >= mn) { return; }
+    if (o >= mn) {{ return; }}
     var s = 0.0;
-    for (var z = 0u; z < d.ksplit; z = z + 1u) { s = s + P[z * mn + o]; }
-    if (d.acc == 0u) { C[o] = s; } else { C[o] = C[o] + s; }
+    for (var z = 0u; z < d.ksplit; z = z + 1u) {{ s = s + P[z * mn + o]; }}
+    if (d.acc == 0u) {{ C[o] = {tc}(s); }} else {{ C[o] = {tc}(f32(C[o]) + s); }}
+}}
+"#, enable = if c == Dtype::F16 { "enable f16;\n" } else { "" }, tc = c.wgsl())
 }
-"#;
 
 /// Below this many output tiles the depth is split. 24 measured best of
 /// {none, 24, 48} interleaved: 48 started to cost the shapes that were
@@ -228,11 +250,17 @@ struct Pipeline {
     layout: wgpu::BindGroupLayout,
 }
 
-/// The GEMM and the split-K reduction.
-static PIPELINES: OnceLock<Option<[Pipeline; 2]>> = OnceLock::new();
+/// The GEMM and the split-K reduction, one pair per type signature,
+/// compiled on first use.
+static PIPELINES: Mutex<Option<HashMap<Sig, &'static [Pipeline; 2]>>> = Mutex::new(None);
 
-fn pipelines() -> Option<&'static [Pipeline; 2]> {
-    PIPELINES.get_or_init(|| Some([build(&shader())?, build(REDUCE)?])).as_ref()
+fn pipelines(sig: Sig) -> Option<&'static [Pipeline; 2]> {
+    let mut guard = PIPELINES.lock().unwrap_or_else(|e| e.into_inner());
+    let table = guard.get_or_insert_with(HashMap::new);
+    if let Some(p) = table.get(&sig) { return Some(p); }
+    let p: &'static [Pipeline; 2] = Box::leak(Box::new([build(&shader(sig))?, build(&reduce_shader(sig.c))?]));
+    table.insert(sig, p);
+    Some(p)
 }
 
 fn build(src: &str) -> Option<Pipeline> {
@@ -268,7 +296,8 @@ static SCRATCH: std::sync::Mutex<Option<Tensor>> = std::sync::Mutex::new(None);
 pub fn gemm(a: &Tensor, ta: bool, b: &Tensor, tb: bool,
             m: usize, k: usize, n: usize, c: &Tensor, accumulate: bool) -> bool {
     debug_assert!(a.len >= m * k && b.len >= k * n && c.len >= m * n);
-    let (Some(g), Some(ps)) = (gpu(), pipelines()) else { return false };
+    let sig = Sig { a: a.dtype, b: b.dtype, c: c.dtype };
+    let (Some(g), Some(ps)) = (gpu(), pipelines(sig)) else { return false };
     let p = &ps[0];
     let tiles = (m as u32).div_ceil(BM) * (n as u32).div_ceil(BN);
     let (ksplit, kchunk) = split(tiles, k as u32);
@@ -382,6 +411,33 @@ mod tests {
 
     /// Same inputs, same bits, every run: the determinism the kernel is
     /// built for.
+    /// f16 operands and an f16 result against the f32 CPU kernel run on
+    /// the SAME rounded inputs: the only differences are f32 accumulation
+    /// order and the final f16 rounding of C.
+    #[test]
+    fn gpu_sgemm_reads_f16_operands_and_writes_either_type() {
+        if gpu().map(|g| g.f16) != Some(true) { eprintln!("no f16 on this adapter; skipped"); return; }
+        use crate::half::{f16_to_f32, f32_to_f16};
+        let round = |v: &[f32]| -> Vec<f32> { v.iter().map(|&x| f16_to_f32(f32_to_f16(x))).collect() };
+        for &(m, k, n) in &[(65usize, 130usize, 70usize), (256, 2048, 256), (200, 768, 300)] {
+            for &(ta, tb) in &[(false, false), (false, true), (true, false)] {
+                let a = round(&mk(m * k, 0.3)); let b = round(&mk(k * n, 1.7));
+                let want = cpu_sgemm(&a, if ta { Trans::Yes } else { Trans::No }, &b, if tb { Trans::Yes } else { Trans::No }, m, k, n, true);
+                let (da, db) = (Tensor::upload_as(&a, Dtype::F16).unwrap(), Tensor::upload_as(&b, Dtype::F16).unwrap());
+                for cdt in [Dtype::F32, Dtype::F16] {
+                    let dc = Tensor::zeros_as(m * n, cdt).unwrap();
+                    assert!(gemm(&da, ta, &db, tb, m, k, n, &dc, false));
+                    let got = dc.download();
+                    let scale = want.iter().fold(0.0f32, |s, v| s.max(v.abs())).max(1.0);
+                    let tol = if cdt == Dtype::F16 { 2e-3 } else { 1e-5 };
+                    for (i, (x, y)) in got.iter().zip(&want).enumerate() {
+                        assert!((x - y).abs() <= tol * scale, "{m}x{k}x{n} ta {ta} tb {tb} C {cdt:?} [{i}]: {x} vs {y}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn gpu_sgemm_is_bit_reproducible() {
         if gpu().is_none() { return; }

@@ -48,6 +48,13 @@
 //! is the register-tiled backward (`attn_tiled`'s shape for dV, dK, dQ),
 //! which cuts the loads per FMA the way the GEMM does.
 //!
+//! # Storage types
+//!
+//! Q, K, V, O and every gradient may be stored f16 (one kernel set per
+//! head dimension and type); the log-sum-exp and `D` rows stay f32, and
+//! so does all the arithmetic — f16 is read through `f32()` and written
+//! through `f16()` at the edges only.
+//!
 //! # Registers, not arrays
 //!
 //! The head dimension is a compile-time constant of a generated shader,
@@ -56,7 +63,7 @@
 //! dynamically indexed `array` in a thread's private storage is where the
 //! GEMM lost a factor of twenty on this compiler.
 
-use crate::device::{gpu, Tensor};
+use crate::device::{gpu, Dtype, Tensor};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use wgpu::util::DeviceExt;
@@ -95,13 +102,16 @@ struct Kernels {
 /// more to fill.
 const TILED_FORWARD: bool = false;
 
-static KERNELS: Mutex<Option<HashMap<usize, &'static Kernels>>> = Mutex::new(None);
+/// Kernels per (head dimension, storage type of Q/K/V/O and their
+/// gradients). The row statistics `L` and `D` are always f32.
+static KERNELS: Mutex<Option<HashMap<(usize, Dtype), &'static Kernels>>> = Mutex::new(None);
 
-fn kernels(hd: usize) -> Option<&'static Kernels> {
+fn kernels(hd: usize, act: Dtype) -> Option<&'static Kernels> {
+    let g = gpu()?;
+    if act == Dtype::F16 && !g.f16 { return None; }
     let mut guard = KERNELS.lock().ok()?;
     let table = guard.get_or_insert_with(HashMap::new);
-    if let Some(k) = table.get(&hd) { return Some(k); }
-    let g = gpu()?;
+    if let Some(k) = table.get(&(hd, act)) { return Some(k); }
     let make = |label: &str, src: String| -> wgpu::ComputePipeline {
         let module = g.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(label),
@@ -113,24 +123,30 @@ fn kernels(hd: usize) -> Option<&'static Kernels> {
         })
     };
     let k: &'static Kernels = Box::leak(Box::new(Kernels {
-        forward: make("r2gpu-attn-fwd", if TILED_FORWARD && crate::attn_tiled::supports(hd) { crate::attn_tiled::forward_wgsl(hd) } else { forward_wgsl(hd) }),
-        delta: make("r2gpu-attn-delta", delta_wgsl(hd)),
-        dv: make("r2gpu-attn-dv", dkv_wgsl(hd, false)),
-        dk: make("r2gpu-attn-dk", dkv_wgsl(hd, true)),
-        dq: make("r2gpu-attn-dq", dq_wgsl(hd)),
+        forward: make("r2gpu-attn-fwd", if TILED_FORWARD && crate::attn_tiled::supports(hd) { crate::attn_tiled::forward_wgsl(hd, act) } else { forward_wgsl(hd, act) }),
+        delta: make("r2gpu-attn-delta", delta_wgsl(hd, act)),
+        dv: make("r2gpu-attn-dv", dkv_wgsl(hd, act, false)),
+        dk: make("r2gpu-attn-dk", dkv_wgsl(hd, act, true)),
+        dq: make("r2gpu-attn-dq", dq_wgsl(hd, act)),
     }));
-    table.insert(hd, k);
+    table.insert((hd, act), k);
     Some(k)
 }
 
 // ── shader generation ────────────────────────────────────────────────────
 
 /// The uniform block and bindings every kernel shares.
-fn header(hd: usize, bindings: &[(&str, &str)]) -> String {
-    let mut s = String::from(
-        "struct Dims { nseq: u32, seq: u32, nh: u32, nkv: u32, hd: u32, group: u32, pad0: u32, pad1: u32, scale: f32, pad2: f32, pad3: f32, pad4: f32 };\n");
+/// The uniform block and bindings every kernel shares. Q/K/V/O/dO and
+/// the gradients are stored as `act`; `L` and `Dl` stay f32. Every
+/// element read of an `act` buffer is wrapped in `f32()` and every
+/// store in `act`'s constructor, so the arithmetic is f32 throughout.
+pub(crate) fn header(hd: usize, act: Dtype, bindings: &[(&str, &str)]) -> String {
+    let mut s = String::new();
+    if act == Dtype::F16 { s += "enable f16;\n"; }
+    s += "struct Dims { nseq: u32, seq: u32, nh: u32, nkv: u32, hd: u32, group: u32, pad0: u32, pad1: u32, scale: f32, pad2: f32, pad3: f32, pad4: f32 };\n";
     for (i, (name, access)) in bindings.iter().enumerate() {
-        s += &format!("@group(0) @binding({i}) var<storage, {access}> {name}: array<f32>;\n");
+        let ty = if *name == "L" || *name == "Dl" { "f32" } else { act.wgsl() };
+        s += &format!("@group(0) @binding({i}) var<storage, {access}> {name}: array<{ty}>;\n");
     }
     s += &format!("@group(0) @binding({}) var<uniform> d: Dims;\n", bindings.len());
     s += &format!("const HD: u32 = {hd}u;\nconst V4: u32 = {}u;\nconst BQ: u32 = {BQ}u;\nconst BKV: u32 = {BKV}u;\n", hd / 4);
@@ -140,7 +156,7 @@ fn header(hd: usize, bindings: &[(&str, &str)]) -> String {
 /// `let name{i} = vec4(src[off + 4i .. +4])` for i in 0..hd/4.
 fn load_row(name: &str, src: &str, off: &str, hd: usize) -> String {
     (0..hd / 4).map(|i| format!(
-        "    let {name}{i} = vec4<f32>({src}[{off} + {a}u], {src}[{off} + {b}u], {src}[{off} + {c}u], {src}[{off} + {d}u]);\n",
+        "    let {name}{i} = vec4<f32>(f32({src}[{off} + {a}u]), f32({src}[{off} + {b}u]), f32({src}[{off} + {c}u]), f32({src}[{off} + {d}u]));\n",
         a = 4 * i, b = 4 * i + 1, c = 4 * i + 2, d = 4 * i + 3)).collect()
 }
 
@@ -170,11 +186,11 @@ fn scale_row(acc: &str, s: &str, hd: usize) -> String {
 }
 
 /// Store `row{i}` (optionally times `mul`) to `dst[off + 4i..]`.
-fn store_row(dst: &str, off: &str, row: &str, mul: &str, hd: usize) -> String {
+fn store_row(dst: &str, off: &str, row: &str, mul: &str, hd: usize, act: Dtype) -> String {
     let mut s = String::new();
     for i in 0..hd / 4 {
         for (l, c) in ["x", "y", "z", "w"].iter().enumerate() {
-            s += &format!("    {dst}[{off} + {}u] = {row}{i}.{c}{mul};\n", 4 * i + l);
+            s += &format!("    {dst}[{off} + {}u] = {ty}({row}{i}.{c}{mul});\n", 4 * i + l, ty = act.wgsl());
         }
     }
     s
@@ -194,7 +210,7 @@ fn stage(ws: &str, src: &str, rows: u32, hd: usize, threads: u32) -> String {
                 let row = kb * BKV + r;
                 if (row < d.seq) {{
                     let off = (base + row) * kw + kvh * HD + c4 * 4u;
-                    {ws}[idx] = vec4<f32>({src}[off], {src}[off + 1u], {src}[off + 2u], {src}[off + 3u]);
+                    {ws}[idx] = vec4<f32>(f32({src}[off]), f32({src}[off + 1u]), f32({src}[off + 2u]), f32({src}[off + 3u]));
                 }} else {{
                     {ws}[idx] = vec4<f32>(0.0);
                 }}
@@ -203,8 +219,8 @@ fn stage(ws: &str, src: &str, rows: u32, hd: usize, threads: u32) -> String {
 "#)
 }
 
-fn forward_wgsl(hd: usize) -> String {
-    let mut s = header(hd, &[("Q", "read"), ("K", "read"), ("V", "read"), ("O", "read_write"), ("L", "read_write")]);
+fn forward_wgsl(hd: usize, act: Dtype) -> String {
+    let mut s = header(hd, act, &[("Q", "read"), ("K", "read"), ("V", "read"), ("O", "read_write"), ("L", "read_write")]);
     s += &format!("var<workgroup> Ks: array<vec4<f32>, {n}u>;\nvar<workgroup> Vs: array<vec4<f32>, {n}u>;\n", n = BKV as usize * hd / 4);
     s += &format!(r#"
 @compute @workgroup_size({BQ}, 1, 1)
@@ -261,7 +277,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
     if (live) {
         let inv = 1.0 / l;
 "#;
-    s += &store_row("O", "qoff", "acc", " * inv", hd);
+    s += &store_row("O", "qoff", "acc", " * inv", hd, act);
     s += r#"
         L[(base + qi) * d.nh + qh] = m + log(l);
     }
@@ -271,8 +287,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
 }
 
 /// `D_i = dO_i · O_i`, one thread per (row, head).
-fn delta_wgsl(hd: usize) -> String {
-    let mut s = header(hd, &[("O", "read"), ("dO", "read"), ("Dl", "read_write")]);
+fn delta_wgsl(hd: usize, act: Dtype) -> String {
+    let mut s = header(hd, act, &[("O", "read"), ("dO", "read"), ("Dl", "read_write")]);
     s += &format!(r#"
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
@@ -292,9 +308,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 /// dV (`dk = false`) or dK (`dk = true`): one thread per key of a kv head,
 /// looping over every query head of the group and every query block at
 /// or after the key's block.
-fn dkv_wgsl(hd: usize, dk: bool) -> String {
+fn dkv_wgsl(hd: usize, act: Dtype, dk: bool) -> String {
     let out = if dk { "dK" } else { "dV" };
-    let mut s = header(hd, &[("Q", "read"), ("K", "read"), ("V", "read"), ("dO", "read"),
+    let mut s = header(hd, act, &[("Q", "read"), ("K", "read"), ("V", "read"), ("dO", "read"),
                              ("L", "read"), ("Dl", "read"), (out, "read_write")]);
     s += &format!("var<workgroup> Qs: array<vec4<f32>, {n}u>;\nvar<workgroup> Gs: array<vec4<f32>, {n}u>;\nvar<workgroup> Ls: array<f32, {BQ}u>;\nvar<workgroup> Ds: array<f32, {BQ}u>;\n", n = BQ as usize * hd / 4);
     s += &format!(r#"
@@ -325,8 +341,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
                 let row = qb * BQ + r;
                 if (row < d.seq) {
                     let off = (base + row) * qw + qh * HD + c4 * 4u;
-                    Qs[idx] = vec4<f32>(Q[off], Q[off + 1u], Q[off + 2u], Q[off + 3u]);
-                    Gs[idx] = vec4<f32>(dO[off], dO[off + 1u], dO[off + 2u], dO[off + 3u]);
+                    Qs[idx] = vec4<f32>(f32(Q[off]), f32(Q[off + 1u]), f32(Q[off + 2u]), f32(Q[off + 3u]));
+                    Gs[idx] = vec4<f32>(f32(dO[off]), f32(dO[off + 1u]), f32(dO[off + 2u]), f32(dO[off + 3u]));
                 } else {
                     Qs[idx] = vec4<f32>(0.0);
                     Gs[idx] = vec4<f32>(0.0);
@@ -360,14 +376,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
     }
     if (live) {
 "#;
-    s += &store_row(out, "koff", "acc", "", hd);
+    s += &store_row(out, "koff", "acc", "", hd, act);
     s += "    }\n}\n";
     s
 }
 
 /// dQ: one thread per query, looping over the key blocks it can see.
-fn dq_wgsl(hd: usize) -> String {
-    let mut s = header(hd, &[("Q", "read"), ("K", "read"), ("V", "read"), ("dO", "read"),
+fn dq_wgsl(hd: usize, act: Dtype) -> String {
+    let mut s = header(hd, act, &[("Q", "read"), ("K", "read"), ("V", "read"), ("dO", "read"),
                              ("L", "read"), ("Dl", "read"), ("dQ", "read_write")]);
     s += &format!("var<workgroup> Ks: array<vec4<f32>, {n}u>;\nvar<workgroup> Vs: array<vec4<f32>, {n}u>;\n", n = BKV as usize * hd / 4);
     s += &format!(r#"
@@ -413,7 +429,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
     }
     if (live) {
 "#;
-    s += &store_row("dQ", "qoff", "acc", "", hd);
+    s += &store_row("dQ", "qoff", "acc", "", hd, act);
     s += "    }\n}\n";
     s
 }
@@ -461,7 +477,7 @@ fn valid(sh: &Shape) -> bool {
 /// unsupported (`hd` must be a multiple of 4).
 pub fn forward(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, sh: &Shape) -> bool {
     if !valid(sh) { return false; }
-    let (Some(ks), Some(dims)) = (kernels(sh.hd), dims_buffer(sh)) else { return false };
+    let (Some(ks), Some(dims)) = (kernels(sh.hd, q.dtype), dims_buffer(sh)) else { return false };
     let qblocks = (sh.seq as u32).div_ceil(BQ);
     launch(&ks.forward, &[&q.buf, &k.buf, &v.buf, &o.buf, &lse.buf], &dims,
            (qblocks, sh.nh as u32, sh.nseq as u32)).is_some()
@@ -479,7 +495,7 @@ pub fn backward(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, g:
 #[allow(clippy::too_many_arguments)]
 fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, g: &Tensor,
                   delta: &Tensor, dq: &Tensor, dk: &Tensor, dv: &Tensor, sh: &Shape) -> Option<()> {
-    let (ks, dims) = (kernels(sh.hd)?, dims_buffer(sh)?);
+    let (ks, dims) = (kernels(sh.hd, q.dtype)?, dims_buffer(sh)?);
     let rows = (sh.nseq * sh.seq * sh.nh) as u32;
     let qblocks = (sh.seq as u32).div_ceil(BQ);
     let kblocks = (sh.seq as u32).div_ceil(BKV);
@@ -509,6 +525,24 @@ mod tests {
     #[test]
     fn gpu_attention_matches_the_tape() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        attention_matches_the_tape(Dtype::F32, 3e-5);
+    }
+
+    /// Q/K/V/O and the gradients stored f16 (inputs rounded on the host
+    /// so the tape sees the same numbers): one f16 ULP of the output
+    /// plus the f32 accumulation differences.
+    #[test]
+    fn gpu_attention_matches_the_tape_in_f16_storage() {
+        if gpu().map(|g| g.f16) != Some(true) { eprintln!("no f16 on this adapter; skipped"); return; }
+        attention_matches_the_tape(Dtype::F16, 1.5e-3);
+    }
+
+    fn attention_matches_the_tape(act: Dtype, tol: f32) {
+        use crate::half::{f16_to_f32, f32_to_f16};
+        let mk = |n: usize, ph: f32| -> Vec<f32> {
+            let v = mk(n, ph);
+            if act == Dtype::F16 { v.iter().map(|&x| f16_to_f32(f32_to_f16(x))).collect() } else { v }
+        };
         for &(nseq, seq, nh, nkv, hd) in &[(1usize, 8usize, 2usize, 1usize, 8usize),
                                            (2, 65, 4, 2, 16), (3, 130, 3, 3, 32), (2, 70, 4, 2, 64)] {
             let rows = nseq * seq;
@@ -522,20 +556,21 @@ mod tests {
             let o = tape.attention(q, k, v, nseq, seq, nh, nkv, hd, scale);
             tape.backward_from(o, &gv);
 
-            let (tq, tk, tv) = (Tensor::upload(&qv).unwrap(), Tensor::upload(&kv).unwrap(), Tensor::upload(&vv).unwrap());
-            let to = Tensor::zeros(rows * nh * hd).unwrap();
+            let up = |v: &[f32]| Tensor::upload_as(v, act).unwrap();
+            let (tq, tk, tv) = (up(&qv), up(&kv), up(&vv));
+            let to = Tensor::zeros_as(rows * nh * hd, act).unwrap();
             let tl = Tensor::zeros(rows * nh).unwrap();
             assert!(forward(&tq, &tk, &tv, &to, &tl, &sh));
-            let tg = Tensor::upload(&gv).unwrap();
+            let tg = up(&gv);
             let td = Tensor::zeros(rows * nh).unwrap();
-            let (dq, dk, dv) = (Tensor::zeros(rows * nh * hd).unwrap(), Tensor::zeros(rows * nkv * hd).unwrap(), Tensor::zeros(rows * nkv * hd).unwrap());
+            let (dq, dk, dv) = (Tensor::zeros_as(rows * nh * hd, act).unwrap(), Tensor::zeros_as(rows * nkv * hd, act).unwrap(), Tensor::zeros_as(rows * nkv * hd, act).unwrap());
             assert!(backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh));
 
             let close = |got: &[f32], want: &[f32], what: &str| {
                 assert_eq!(got.len(), want.len(), "{what}: length");
                 let scale = want.iter().fold(0.0f32, |s, v| s.max(v.abs())).max(1.0);
                 for (i, (a, b)) in got.iter().zip(want).enumerate() {
-                    assert!((a - b).abs() <= 3e-5 * scale,
+                    assert!((a - b).abs() <= tol * scale,
                             "{what}[{i}] gpu {a} vs cpu {b} (nseq {nseq} seq {seq} nh {nh} nkv {nkv} hd {hd})");
                 }
             };
@@ -550,13 +585,13 @@ mod tests {
                 let g = gpu().unwrap();
                 let module = g.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("r2gpu-attn-fwd-tiled"),
-                    source: wgpu::ShaderSource::Wgsl(crate::attn_tiled::forward_wgsl(hd).into()),
+                    source: wgpu::ShaderSource::Wgsl(crate::attn_tiled::forward_wgsl(hd, act).into()),
                 });
                 let tiled = g.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("r2gpu-attn-fwd-tiled"), layout: None, module: &module,
                     entry_point: Some("main"), compilation_options: Default::default(), cache: None,
                 });
-                let (to2, tl2) = (Tensor::zeros(rows * nh * hd).unwrap(), Tensor::zeros(rows * nh).unwrap());
+                let (to2, tl2) = (Tensor::zeros_as(rows * nh * hd, act).unwrap(), Tensor::zeros(rows * nh).unwrap());
                 let dims = dims_buffer(&sh).unwrap();
                 launch(&tiled, &[&tq.buf, &tk.buf, &tv.buf, &to2.buf, &tl2.buf], &dims,
                        ((seq as u32).div_ceil(BQ), nh as u32, nseq as u32)).unwrap();
