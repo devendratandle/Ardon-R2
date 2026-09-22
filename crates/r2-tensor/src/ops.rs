@@ -236,18 +236,46 @@ unsafe fn exp_shift_sum_avx2(x: &[f32], m: f32, out: &mut [f32]) -> f32 {
     sum
 }
 
-/// Scalar `exp` with the vector kernel's contract: results below the
-/// normal range flush to zero instead of going subnormal. The AVX2 `exp8`
-/// does this by construction (its `2^n` assembly cannot represent them);
-/// the scalar fallback and the 8-wide loops' tails must agree with it,
-/// or a row's answer would depend on which lane computed it — and on
-/// aarch64, where only this path runs, the kernel test failed on exactly
-/// that.
-#[inline]
-fn exp_flush(x: f32) -> f32 {
-    let e = x.exp();
-    if e < f32::MIN_POSITIVE { 0.0 } else { e }
+/// R2's `exp`: `exp8`'s algorithm for one float, instruction for
+/// instruction — the same clamp, the same ties-to-even rounding of `n`,
+/// the same split-ln2 reduction and Horner chain in fused multiply-adds
+/// (`mul_add` is one rounding, exactly `vfmadd`/`vfnmadd`), the same `2^n`
+/// assembly. Every step is an operation IEEE rounds exactly, so the
+/// result is fully determined by the input: it equals `exp8`'s lane for
+/// the same value, on any CPU, and — because WGSL's `fma`, `round` and
+/// bit casts are the same operations — the GPU's `exp_r2`
+/// (`r2_gpu::numerics::EXP_WGSL`) too. That is what makes a softmax or a
+/// silu give the same bits in a vector lane, a scalar tail, on aarch64,
+/// and on a GPU of any vendor.
+///
+/// It replaces the platform `exp` in every scalar path here: the 8-wide
+/// loops' tails used to call `libm`, so a row's bits depended on its
+/// length mod 8, and aarch64 (scalar only) disagreed with x86.
+///
+/// Results below the normal range flush to zero, as `exp8`'s do.
+#[inline(always)]
+pub fn exp_r2(x: f32) -> f32 {
+    const LO: f32 = -87.336_54;
+    if x < LO || x.is_nan() { return if x.is_nan() { x } else { 0.0 }; }
+    let x = x.min(88.376_26);
+    let n = (x * std::f32::consts::LOG2_E).round_ties_even();
+    let r = (-n).mul_add(0.693_359_38, x);
+    let r = (-n).mul_add(-2.121_944_4e-4, r);
+    let mut y: f32 = 1.987_569_1e-4;
+    y = y.mul_add(r, 1.398_199_9e-3);
+    y = y.mul_add(r, 8.333_452e-3);
+    y = y.mul_add(r, 4.166_579_6e-2);
+    y = y.mul_add(r, 1.666_666_5e-1);
+    y = y.mul_add(r, 5.000_000_1e-1);
+    y = y.mul_add(r * r, r);
+    y += 1.0;
+    y * f32::from_bits(((n as i32 + 127) as u32) << 23)
 }
+
+/// The vector kernels' scalar tails and fallbacks: [`exp_r2`], which
+/// already flushes below the normal range.
+#[inline(always)]
+fn exp_flush(x: f32) -> f32 { exp_r2(x) }
 
 /// `out[j] = exp(x[j] - m)`, returning the sum. Dispatches to AVX2.
 pub fn exp_shift_sum(x: &[f32], m: f32, out: &mut [f32]) -> f32 {
@@ -355,7 +383,7 @@ pub unsafe fn silu_bwd_torch_form_avx2(v: &[f32], g: &[f32], out: &mut [f32]) {
         i += 8;
     }
     while i < n {
-        let s = 1.0 / (1.0 + (-v[i]).exp());
+        let s = 1.0 / (1.0 + exp_r2(-v[i]));
         out[i] = g[i] * s * (1.0 + v[i] * (1.0 - s));
         i += 1;
     }
@@ -371,7 +399,7 @@ pub fn silu_bwd_torch_form(v: &[f32], g: &[f32], out: &mut [f32]) {
         return;
     }
     for ((o, &vv), &gg) in out.iter_mut().zip(v).zip(g) {
-        let s = 1.0 / (1.0 + (-vv).exp());
+        let s = 1.0 / (1.0 + exp_r2(-vv));
         *o = gg * s * (1.0 + vv * (1.0 - s));
     }
 }
@@ -401,7 +429,7 @@ unsafe fn silu_bwd_avx2(v: &[f32], g: &[f32], gout: &mut [f32], accumulate: bool
         i += 8;
     }
     while i < n {
-        let s = 1.0 / (1.0 + (-v[i]).exp());
+        let s = 1.0 / (1.0 + exp_r2(-v[i]));
         let d = g[i] * (s + v[i] * s * (1.0 - s));
         if accumulate { gout[i] += d; } else { gout[i] = d; }
         i += 1;
@@ -425,7 +453,7 @@ pub fn silu_bwd_acc(v: &[f32], g: &[f32], gout: &mut [f32], accumulate: bool) {
         return;
     }
     for ((go, &vv), &gg) in gout.iter_mut().zip(v).zip(g) {
-        let s = 1.0 / (1.0 + (-vv).exp());
+        let s = 1.0 / (1.0 + exp_r2(-vv));
         let d = gg * (s + vv * s * (1.0 - s));
         if accumulate { *go += d; } else { *go = d; }
     }
@@ -551,7 +579,7 @@ pub fn dot3_4(x: &[f32], y: &[f32], z: &[f32]) -> f32 {
 
 /// SiLU (a.k.a. swish): x * sigmoid(x). The SwiGLU activation half.
 #[inline]
-pub fn silu(x: f32) -> f32 { x / (1.0 + (-x).exp()) }
+pub fn silu(x: f32) -> f32 { x / (1.0 + exp_r2(-x)) }
 
 /// SwiGLU FFN gate: elementwise silu(gate) * up. Llama-family FFN.
 pub fn swiglu(gate: &[f32], up: &[f32]) -> Vec<f32> {
@@ -620,6 +648,30 @@ mod tests {
     /// no downstream gradient notices. Checked across the whole range the
     /// clamp admits, plus the awkward values.
     #[test]
+    fn exp_r2_is_bit_identical_to_the_vector_lanes_and_close_to_exp() {
+        // 2^20 values across the whole clamped range, in a length divisible
+        // by 8 so EVERY value goes through an AVX2 lane (where there is one)
+        let n = 1 << 20;
+        let xs: Vec<f32> = (0..n).map(|i| -90.0 + 180.0 * i as f32 / n as f32).collect();
+        let mut lanes = vec![0.0f32; n];
+        exp_shift_sum(&xs, 0.0, &mut lanes);
+        let (mut off, mut worst) = (0usize, 0u64);
+        for (&x, &l) in xs.iter().zip(&lanes) {
+            let s = exp_r2(x);
+            if s.to_bits() != l.to_bits() { off += 1; }
+            // accuracy inside the unclamped range (exp8 clamps above
+            // 88.376 by design — every caller subtracts the row max first)
+            if s > 0.0 && x <= 88.3 {
+                let want = (x as f64).exp() as f32;
+                let d = (s.to_bits() as i64 - want.to_bits() as i64).unsigned_abs();
+                worst = worst.max(d);
+            }
+        }
+        assert_eq!(off, 0, "{off} of {n} vector lanes differ from exp_r2");
+        assert!(worst <= 2, "exp_r2 is {worst} ULP from the correctly rounded exp");
+    }
+
+    #[test]
     fn vectorised_exp_matches_scalar() {
         let mut xs: Vec<f32> = Vec::new();
         let mut v = -88.0f32;
@@ -678,7 +730,7 @@ mod tests {
         let mut got = vec![0.0f32; v.len()];
         silu_bwd(&v, &g, &mut got);
         for (i, ((&gg, &vv), &go)) in g.iter().zip(&v).zip(&got).enumerate() {
-            let s = 1.0 / (1.0 + (-vv).exp());
+            let s = 1.0 / (1.0 + exp_r2(-vv));
             let want = gg * (s + vv * s * (1.0 - s));
             assert!((go - want).abs() <= 1e-5 * (1.0 + want.abs()),
                     "silu_bwd[{i}]: {go} vs {want}");

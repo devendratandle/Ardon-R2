@@ -32,6 +32,8 @@ r2-linalg = { path = "../r2-linalg" }
 r2-autograd = { path = "../r2-autograd" }
 # The CPU Adam is the bit-for-bit reference for the GPU one.
 r2-train = { path = "../r2-train" }
+# The CPU exp_r2 / silu are the bit-for-bit references for the GPU ones.
+r2-tensor = { path = "../r2-tensor" }
 
 [[example]]
 name = "gemm_bench"

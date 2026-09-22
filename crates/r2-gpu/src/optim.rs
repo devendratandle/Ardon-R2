@@ -105,7 +105,12 @@ mod tests {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
         let n = 10_007usize;
         let init: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.011).sin()).collect();
-        let grad = |t: u32| -> Vec<f32> { (0..n).map(|i| ((i as f32) * 0.07 + t as f32).cos() * 0.5).collect() };
+        // every seventh parameter never gets a gradient — an embedding row
+        // no batch contained: v stays 0, and sqrt(v) = 0 is exactly the case
+        // that once turned such weights into NaN on the device
+        let grad = |t: u32| -> Vec<f32> {
+            (0..n).map(|i| if i % 7 == 0 { 0.0 } else { ((i as f32) * 0.07 + t as f32).cos() * 0.5 }).collect()
+        };
 
         let (tw, tm, tv) = (Tensor::upload(&init).unwrap(), Tensor::zeros(n).unwrap(), Tensor::zeros(n).unwrap());
         for t in 1..=3u32 {

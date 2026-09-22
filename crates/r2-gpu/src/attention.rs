@@ -171,6 +171,7 @@ fn kernels(hd: usize, act: Dtype) -> Option<&'static Kernels> {
 pub(crate) fn header(hd: usize, act: Dtype, bindings: &[(&str, &str)]) -> String {
     let mut s = String::new();
     if act == Dtype::F16 { s += "enable f16;\n"; }
+    s += &crate::numerics::prelude();          // exp_r2, div_cr, sqrt_cr: the CPU's bits
     s += "struct Dims { nseq: u32, seq: u32, nh: u32, nkv: u32, hd: u32, group: u32, pad0: u32, pad1: u32, scale: f32, pad2: f32, pad3: f32, pad4: f32 };\n";
     for (i, (name, access)) in bindings.iter().enumerate() {
         let ty = if *name == "L" || *name == "Dl" { "f32" } else { act.wgsl() };
@@ -285,14 +286,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
     s += &format!("        let sc = ({}) * d.scale;\n", dot("q", "k", hd));
     s += r#"
         if (sc > m) {
-            let corr = exp(m - sc);
+            let corr = exp_r2(m - sc);
             l = l * corr;
 "#;
     s += &scale_row("acc", "corr", hd);
     s += r#"
             m = sc;
         }
-        let p = exp(sc - m);
+        let p = exp_r2(sc - m);
         l = l + p;
 "#;
     s += &load_ws_row("v", "Vs", "j * HD", hd);
@@ -388,7 +389,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
                 if (live && kj <= qi) {
 "#;
     s += &load_ws_row("q", "Qs", "i * HD", hd);
-    s += &format!("        let p = exp(({}) * d.scale - Ls[i]);\n", dot("q", "k", hd));
+    s += &format!("        let p = exp_r2(({}) * d.scale - Ls[i]);\n", dot("q", "k", hd));
     s += &load_ws_row("g", "Gs", "i * HD", hd);
     if dk {
         s += &format!("        let ds = p * (({}) - Ds[i]) * d.scale;\n", dot("g", "v", hd));
@@ -447,7 +448,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
 "#;
     s += &load_ws_row("k", "Ks", "j * HD", hd);
     s += &load_ws_row("v", "Vs", "j * HD", hd);
-    s += &format!("        let p = exp(({}) * d.scale - li);\n", dot("q", "k", hd));
+    s += &format!("        let p = exp_r2(({}) * d.scale - li);\n", dot("q", "k", hd));
     s += &format!("        let ds = p * (({}) - di) * d.scale;\n", dot("g", "v", hd));
     s += &axpy("acc", "ds", "k", hd);
     s += r#"

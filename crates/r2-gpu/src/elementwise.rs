@@ -111,6 +111,7 @@ fn launch_bufs(p: &wgpu::ComputePipeline, bufs: &[wgpu::BindingResource], ints: 
 fn bindings(sig: Sig, names: &[(&str, &str)]) -> String {
     let mut s = String::new();
     if sig.contains(&Dtype::F16) { s += "enable f16;\n"; }
+    s += &crate::numerics::prelude();          // exp_r2, div_cr, sqrt_cr: the CPU's bits
     s += PARAMS;
     for (i, (name, access)) in names.iter().enumerate() {
         let ints = *name == "ids" || *name == "offs" || *name == "pos";
@@ -291,10 +292,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let a = ld_A(i);
     var y = 0.0;
     switch p.b {{
-        case 0u: {{ y = a / (1.0 + exp(-a)); }}
+        case 0u: {{ y = div_cr(a, 1.0 + exp_r2(-a)); }}
         case 1u: {{ y = a * ld_B(i); }}
         case 2u: {{ y = a + ld_B(i); }}
-        case 3u: {{ y = a / (1.0 + exp(-a)) * ld_B(i); }}
+        case 3u: {{ y = div_cr(a, 1.0 + exp_r2(-a)) * ld_B(i); }}
         case 4u: {{ y = ld_Y(i) + a; }}
         default: {{ y = a; }}
     }}
@@ -317,7 +318,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     var da = 0.0;
     var db = 0.0;
     switch p.b {{
-        case 0u: {{ let a = ld_A(i); let s = 1.0 / (1.0 + exp(-a)); da = g * (s + a * s * (1.0 - s)); }}
+        case 0u: {{ let a = ld_A(i); let s = div_cr(1.0, 1.0 + exp_r2(-a)); da = g * (s + a * s * (1.0 - s)); }}
         case 1u: {{ da = g * ld_B(i); db = g * ld_A(i); }}
         default: {{ da = g; db = g; }}
     }}
@@ -378,7 +379,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
     let mx = red[0];
     workgroupBarrier();
     var sum = 0.0;
-    for (var j = tid; j < p.d; j = j + {T}u) {{ sum = sum + exp(ld_X(r * p.d + j) - mx); }}
+    for (var j = tid; j < p.d; j = j + {T}u) {{ sum = sum + exp_r2(ld_X(r * p.d + j) - mx); }}
     red[tid] = sum;
 {tree}
     if (tid == 0u) {{
@@ -399,7 +400,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     if (i >= p.n) {{ return; }}
     let r = i / p.d;
     let j = i % p.d;
-    var v = exp(ld_X(i) - ld_LSE(r));
+    var v = exp_r2(ld_X(i) - ld_LSE(r));
     if (j == ids[r]) {{ v = v - 1.0; }}
     v = v * p.x;
     if (p.a == 0u) {{ st_GX(i, v); }} else {{ st_GX(i, ld_GX(i) + v); }}

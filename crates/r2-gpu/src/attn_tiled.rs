@@ -201,10 +201,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
             var mloc = NEG;
             for (var j = 0u; j < TK; j = j + 1u) {{ mloc = max(mloc, Ss[tid * TK + j]); }}
             let mnew = max(ms[tid], mloc);
-            let corr = exp(ms[tid] - mnew);
+            let corr = exp_r2(ms[tid] - mnew);
             var sum = 0.0;
             for (var j = 0u; j < TK; j = j + 1u) {{
-                let p = exp(Ss[tid * TK + j] - mnew);
+                let p = exp_r2(Ss[tid * TK + j] - mnew);
                 Ss[tid * TK + j] = p;
                 sum = sum + p;
             }}
@@ -226,7 +226,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
 {o_store}}}
 "#,
         hd = hd, TQ = TQ, TK = TK, DC = DC, THREADS = THREADS,
-        enable = if act == crate::device::Dtype::F16 { "enable f16;\n" } else { "" }, ty = act.wgsl(),
+        enable = format!("{}{}", if act == crate::device::Dtype::F16 { "enable f16;\n" } else { "" },
+                         crate::numerics::prelude()),
+        ty = act.wgsl(),
         qt_len = DC as usize * TQ as usize / 4, kt_len = DC as usize * TK as usize / 4,
         ss_len = TQ as usize * TK as usize, vs_len = TK as usize * v4,
         vs_per = (TK as usize * v4).div_ceil(THREADS as usize),
@@ -316,7 +318,7 @@ pub fn dkv_wgsl(hd: usize, act: crate::device::Dtype) -> String {
                 var p = 0.0;
                 var ds = 0.0;
                 if (kj <= qi && qi < d.seq && kj < d.seq) {{
-                    p = exp(sv[c] * d.scale - Ls[tx * 4u + c]);
+                    p = exp_r2(sv[c] * d.scale - Ls[tx * 4u + c]);
                     ds = p * (gv[c] - Ds[tx * 4u + c]) * d.scale;
                 }}
                 Ps[(ty * 4u + {r}u) * BT + tx * 4u + c] = p;
@@ -452,7 +454,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
 {store}}}
 "#,
         hd = hd, BT = BT, DC = DC, BTHREADS = BTHREADS, cpt = cpt,
-        enable = if act == crate::device::Dtype::F16 { "enable f16;\n" } else { "" }, elt = elt,
+        enable = format!("{}{}", if act == crate::device::Dtype::F16 { "enable f16;\n" } else { "" },
+                         crate::numerics::prelude()),
+        elt = elt,
         slab = DC as usize * BT as usize / 4,
         tile_len = BT as usize * BT as usize,
         bs_len = BT as usize * v4,
