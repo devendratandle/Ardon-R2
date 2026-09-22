@@ -473,51 +473,112 @@ pub fn bi_trimws(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
-/// `sprintf(fmt, ...)` — subset implementation (see crate docstring).
-/// Scalar f64 from an arg (first element), for numeric sprintf conversions.
-fn sp_num(v: &RVal) -> f64 {
+/// One element of a `sprintf` argument.
+enum SpVal { Num(Option<f64>), Lgl(Option<bool>), Str(Option<String>) }
+
+fn sp_len(v: &RVal) -> usize {
     match v {
-        RVal::Numeric(n, _) => n.as_vec().first().copied().flatten().unwrap_or(0.0),
-        RVal::Integer(n, _) => n.as_vec().first().copied().flatten().map(|i| i as f64).unwrap_or(0.0),
-        RVal::Logical(l, _) => l.as_vec().first().copied().flatten().map(|b| if b { 1.0 } else { 0.0 }).unwrap_or(0.0),
-        _ => 0.0,
-    }
-}
-fn sp_str(v: &RVal) -> String {
-    match v {
-        RVal::Character(c, _) => c.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
-        _ => val_to_str(v),
+        RVal::Numeric(n, _) => n.as_vec().len(),
+        RVal::Integer(n, _) => n.as_vec().len(),
+        RVal::Logical(l, _) => l.as_vec().len(),
+        RVal::Character(c, _) => c.len(),
+        RVal::Null => 0,
+        _ => 1,
     }
 }
 
-/// C-style `sprintf` supporting `%[flags][width][.precision]conv` —
-/// flags `-`/`0`/`+`/space, width, precision, and conversions
-/// d/i/f/e/E/g/x/X/s/%. (Previously only bare `%d/%f/%s/%e` worked, so
-/// `%-12s`, `%.3f`, `%05d` were emitted literally — see test_real_program.)
-pub fn bi_sprintf(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let fmt = match &gv(a, 0) {
-        RVal::Character(v, _) => v.first().and_then(|x| x.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
-        _ => return Err(runtime_err("sprintf needs format string")),
+/// Element `i` of an argument, recycled — R's `sprintf` is vectorised over
+/// the format and every argument, to the longest length.
+fn sp_elem(v: &RVal, i: usize) -> SpVal {
+    match v {
+        RVal::Numeric(n, _) => { let n = n.as_vec(); SpVal::Num(n[i % n.len()]) }
+        RVal::Integer(n, _) => { let n = n.as_vec(); SpVal::Num(n[i % n.len()].map(|x| x as f64)) }
+        RVal::Logical(l, _) => { let l = l.as_vec(); SpVal::Lgl(l[i % l.len()]) }
+        RVal::Character(c, _) => SpVal::Str(c[i % c.len()].as_ref().map(|s| s.to_string())),
+        other => SpVal::Str(Some(val_to_str(other))),
+    }
+}
+
+/// C's `%e` body for a non-negative finite value: the mantissa with `prec`
+/// digits and an exponent of at least two digits with its sign
+/// (`1.500000e+03`) — Rust's `{:e}` writes `1.5e3`.
+fn c_exp(v: f64, prec: usize, upper: bool) -> String {
+    let s = format!("{:.*e}", prec, v);
+    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let e: i32 = exp.parse().unwrap_or(0);
+    let out = format!("{mant}e{}{:02}", if e < 0 { '-' } else { '+' }, e.abs());
+    if upper { out.to_uppercase() } else { out }
+}
+
+/// C's `%g` body for a non-negative finite value: `prec` significant
+/// digits (6 by default, 0 meaning 1), `%e` style when the exponent is
+/// below -4 or at least the precision, `%f` style otherwise, trailing
+/// zeros removed unless `#`.
+fn c_g(v: f64, prec: Option<usize>, alt: bool, upper: bool) -> String {
+    let p = match prec { None => 6, Some(0) => 1, Some(p) => p };
+    let x = if v == 0.0 { 0 } else {
+        let s = format!("{:.*e}", p - 1, v);
+        s.split_once('e').and_then(|(_, e)| e.parse::<i32>().ok()).unwrap_or(0)
     };
+    let (mut body, exp_part) = if x < -4 || x >= p as i32 {
+        let s = c_exp(v, p - 1, upper);
+        let at = s.find(['e', 'E']).unwrap_or(s.len());
+        (s[..at].to_string(), s[at..].to_string())
+    } else {
+        (format!("{:.*}", (p as i32 - 1 - x).max(0) as usize, v), String::new())
+    };
+    if !alt && body.contains('.') {
+        while body.ends_with('0') { body.pop(); }
+        if body.ends_with('.') { body.pop(); }
+    }
+    body + &exp_part
+}
+
+/// A double as R's `as.character` writes it: 15 significant digits, in
+/// fixed or scientific notation, whichever is narrower (fixed on a tie) —
+/// `100000` is `"1e+05"`, `123456` is `"123456"`, `0.1 + 0.2` is `"0.3"`.
+fn num_as_character(n: f64) -> String {
+    if n.is_nan() { return "NaN".into(); }
+    if n.is_infinite() { return if n > 0.0 { "Inf".into() } else { "-Inf".into() }; }
+    if n == 0.0 { return "0".into(); }
+    let neg = if n < 0.0 { "-" } else { "" };
+    let v = n.abs();
+    // the significant digits R keeps: 15, trailing zeros dropped
+    let s = format!("{:.14e}", v);
+    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let e: i32 = exp.parse().unwrap_or(0);
+    let digits: String = mant.replace('.', "").trim_end_matches('0').to_string();
+    let nsig = digits.len().max(1) as i32;
+    let sci_w = nsig + if nsig > 1 { 1 } else { 0 } + if e.abs() >= 100 { 5 } else { 4 };
+    let fix_w = if e >= 0 { e + 1 + if nsig > e + 1 { nsig - e } else { 0 } } else { 1 + (-e) + nsig };
+    if fix_w <= sci_w {
+        let dec = if e >= 0 { (nsig - e - 1).max(0) } else { nsig - e - 1 } as usize;
+        format!("{neg}{:.*}", dec, v)
+    } else {
+        let m = if nsig > 1 { format!("{}.{}", &digits[..1], &digits[1..]) } else { digits };
+        format!("{neg}{m}e{}{:02}", if e < 0 { '-' } else { '+' }, e.abs())
+    }
+}
+
+/// One output string: `fmt` with its conversions filled from element `k`
+/// of each argument.
+fn sprintf_one(fmt: &str, args: &[RVal], k: usize) -> Result<String, R2Err> {
     let ch: Vec<char> = fmt.chars().collect();
     let mut out = String::new();
-    let mut arg_idx = 1usize;
+    let mut arg_idx = 0usize;
     let mut i = 0usize;
     while i < ch.len() {
         if ch[i] != '%' { out.push(ch[i]); i += 1; continue; }
         let start = i;
         i += 1;
         if i < ch.len() && ch[i] == '%' { out.push('%'); i += 1; continue; }
-        // flags
-        let (mut left, mut zero, mut plus, mut space) = (false, false, false, false);
+        let (mut left, mut zero, mut plus, mut space, mut alt) = (false, false, false, false, false);
         while i < ch.len() {
-            match ch[i] { '-' => left = true, '0' => zero = true, '+' => plus = true, ' ' => space = true, '#' => {}, _ => break }
+            match ch[i] { '-' => left = true, '0' => zero = true, '+' => plus = true, ' ' => space = true, '#' => alt = true, _ => break }
             i += 1;
         }
-        // width
         let (mut width, mut has_w) = (0usize, false);
         while i < ch.len() && ch[i].is_ascii_digit() { has_w = true; width = width * 10 + (ch[i] as usize - '0' as usize); i += 1; }
-        // precision
         let mut prec: Option<usize> = None;
         if i < ch.len() && ch[i] == '.' {
             i += 1; let mut p = 0usize;
@@ -526,46 +587,84 @@ pub fn bi_sprintf(a: &[EvalArg]) -> Result<RVal, R2Err> {
         }
         if i >= ch.len() { out.extend(ch[start..].iter()); break; }
         let conv = ch[i]; i += 1;
-        let argv = gv(a, arg_idx);
-        let mut body = match conv {
-            'd' | 'i' => {
-                arg_idx += 1;
-                let n = sp_num(&argv).round() as i64;
-                let mut s = n.unsigned_abs().to_string();
+        if !matches!(conv, 'd' | 'i' | 'f' | 'e' | 'E' | 'g' | 'G' | 'x' | 'X' | 's') {
+            out.extend(ch[start..i].iter()); continue;             // unknown spec: literal
+        }
+        let arg = args.get(arg_idx).ok_or_else(|| runtime_err("too few arguments"))?;
+        arg_idx += 1;
+        let el = sp_elem(arg, k);
+        let sign = |neg: bool| if neg { "-" } else if plus { "+" } else if space { " " } else { "" };
+        // NA and the non-finite values print as R prints them, for every
+        // numeric conversion, and pad with spaces, never zeros
+        let mut numeric_special = false;
+        let mut body = match (conv, el) {
+            ('s', SpVal::Str(s)) => { let s = s.unwrap_or_else(|| "NA".into()); match prec { Some(p) => s.chars().take(p).collect(), None => s } }
+            ('s', SpVal::Lgl(b)) => match b { Some(true) => "TRUE".into(), Some(false) => "FALSE".into(), None => "NA".into() },
+            // as.character(): 15 significant digits
+            ('s', SpVal::Num(n)) => match n { Some(n) => { let s = num_as_character(n); match prec { Some(p) => s.chars().take(p).collect(), None => s } } None => "NA".into() },
+            (_, SpVal::Str(_)) => return Err(runtime_err(&format!("invalid format '%{conv}'; use format %s for character objects"))),
+            (c, SpVal::Lgl(b)) if matches!(c, 'd' | 'i') => match b { Some(b) => format!("{}{}", sign(false), b as i32), None => { numeric_special = true; "NA".into() } },
+            (_, SpVal::Lgl(_)) => return Err(runtime_err(&format!("invalid format '%{conv}'; use format %d or %i for logical objects"))),
+            (_, SpVal::Num(None)) => { numeric_special = true; "NA".into() }
+            (_, SpVal::Num(Some(n))) if !n.is_finite() => {
+                numeric_special = true;
+                if n.is_nan() { "NaN".into() } else if n > 0.0 { format!("{}Inf", if plus { "+" } else if space { " " } else { "" }) } else { "-Inf".into() }
+            }
+            ('d' | 'i', SpVal::Num(Some(n))) => {
+                if n != n.trunc() {
+                    return Err(runtime_err(&format!("invalid format '%{conv}'; use format %f, %e, %g or %a for numeric objects")));
+                }
+                let mut s = format!("{}", n.abs() as i64);
                 if let Some(p) = prec { while s.len() < p { s.insert(0, '0'); } }
-                let sign = if n < 0 { "-" } else if plus { "+" } else if space { " " } else { "" };
-                format!("{}{}", sign, s)
+                format!("{}{}", sign(n < 0.0), s)
             }
-            'f' => {
-                arg_idx += 1;
-                let n = sp_num(&argv);
-                let s = format!("{:.*}", prec.unwrap_or(6), n.abs());
-                let sign = if n.is_sign_negative() && n != 0.0 { "-" } else if plus { "+" } else if space { " " } else { "" };
-                format!("{}{}", sign, s)
-            }
-            'e' | 'E' => { arg_idx += 1; let s = format!("{:.*e}", prec.unwrap_or(6), sp_num(&argv)); if conv == 'E' { s.to_uppercase() } else { s } }
-            'g' | 'G' => { arg_idx += 1; format!("{}", sp_num(&argv)) }
-            'x' => { arg_idx += 1; format!("{:x}", sp_num(&argv) as i64) }
-            'X' => { arg_idx += 1; format!("{:X}", sp_num(&argv) as i64) }
-            's' => { arg_idx += 1; let s = sp_str(&argv); match prec { Some(p) => s.chars().take(p).collect(), None => s } }
-            _ => { out.extend(ch[start..i].iter()); continue; } // unknown spec: literal
+            ('f', SpVal::Num(Some(n))) => format!("{}{:.*}", sign(n.is_sign_negative() && n != 0.0), prec.unwrap_or(6), n.abs()),
+            ('e' | 'E', SpVal::Num(Some(n))) => format!("{}{}", sign(n.is_sign_negative() && n != 0.0), c_exp(n.abs(), prec.unwrap_or(6), conv == 'E')),
+            ('g' | 'G', SpVal::Num(Some(n))) => format!("{}{}", sign(n.is_sign_negative() && n != 0.0), c_g(n.abs(), prec, alt, conv == 'G')),
+            ('x', SpVal::Num(Some(n))) => format!("{:x}", n as i64),
+            ('X', SpVal::Num(Some(n))) => format!("{:X}", n as i64),
+            _ => String::new(),
         };
-        // width padding
         let blen = body.chars().count();
         if has_w && blen < width {
             let pad = width - blen;
             if left {
                 body.push_str(&" ".repeat(pad));
-            } else if zero && matches!(conv, 'd' | 'i' | 'f' | 'e' | 'E' | 'g' | 'G' | 'x' | 'X') {
-                let (sign, rest) = if body.starts_with(['-', '+', ' ']) { body.split_at(1) } else { ("", body.as_str()) };
-                body = format!("{}{}{}", sign, "0".repeat(pad), rest);
+            } else if zero && !numeric_special && conv != 's' {
+                let (sg, rest) = if body.starts_with(['-', '+', ' ']) { body.split_at(1) } else { ("", body.as_str()) };
+                body = format!("{}{}{}", sg, "0".repeat(pad), rest);
             } else {
                 body = format!("{}{}", " ".repeat(pad), body);
             }
         }
         out.push_str(&body);
     }
-    Ok(rstr(&out))
+    Ok(out)
+}
+
+/// `sprintf(fmt, ...)`, vectorised as R's is: the format and every
+/// argument are recycled to the longest length, one string each; a zero-
+/// length argument gives `character(0)`; an NA format gives NA. The
+/// conversions follow C (`%e` writes `1.500000e+03`, `%g` honours its
+/// precision), NA and non-finite values print as `NA`, `Inf`, `-Inf`,
+/// `NaN`, and `%d` of a non-whole number is R's error, not a rounding.
+pub fn bi_sprintf(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let fmts: Vec<Option<String>> = match &gv(a, 0) {
+        RVal::Character(v, _) => v.iter().map(|x| x.as_ref().map(|s| s.to_string())).collect(),
+        _ => return Err(runtime_err("'fmt' is not a character vector")),
+    };
+    let args: Vec<RVal> = a.iter().skip(1).map(|x| x.value.clone()).collect();
+    let lens: Vec<usize> = std::iter::once(fmts.len()).chain(args.iter().map(sp_len)).collect();
+    if lens.contains(&0) { return Ok(RVal::Character(Vec::new(), Attrs::default())); }
+    let n = *lens.iter().max().unwrap_or(&1);
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        out.push(match &fmts[k % fmts.len()] {
+            Some(f) => Some(Arc::from(sprintf_one(f, &args, k)?.as_str())),
+            None => None,
+        });
+    }
+    Ok(RVal::Character(out, Attrs::default()))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -602,6 +701,36 @@ mod tests {
     fn evarg(v: RVal) -> EvalArg { EvalArg { name: None, value: v } }
     fn evarg_named(name: &str, v: RVal) -> EvalArg {
         EvalArg { name: Some(Arc::from(name)), value: v }
+    }
+
+    fn num(v: &[f64]) -> RVal { RVal::Numeric(v.iter().map(|x| Some(*x)).collect::<Vec<_>>().into(), Attrs::default()) }
+    fn sp(args: Vec<RVal>) -> Vec<String> {
+        match bi_sprintf(&args.into_iter().map(evarg).collect::<Vec<_>>()).unwrap() {
+            RVal::Character(v, _) => v.iter().map(|s| s.as_deref().unwrap_or("<NA>").to_string()).collect(),
+            _ => panic!("sprintf must return character"),
+        }
+    }
+
+    /// R 4.5.3's own output for each case (sprintf_cases.R, 2026-09-23).
+    #[test]
+    fn sprintf_matches_r() {
+        assert_eq!(sp(vec![ch("%.10g"), num(&[1.123456789012, 2.5])]), ["1.123456789", "2.5"]);
+        assert_eq!(sp(vec![chs(&["%.2f", "%.4f"]), num(&[std::f64::consts::PI])]), ["3.14", "3.1416"]);
+        assert_eq!(sp(vec![ch("%s=%g"), chs(&["a", "b"]), num(&[1.0, 2.0, 3.0, 4.0])]), ["a=1", "b=2", "a=3", "b=4"]);
+        assert_eq!(sp(vec![ch("%g"), num(&[100000.0, 1e6, 1e-5, 0.0001, 123.456, 0.0, 1e-300])]),
+                   ["100000", "1e+06", "1e-05", "0.0001", "123.456", "0", "1e-300"]);
+        assert_eq!(sp(vec![ch("%.3g"), num(&[1234.5678, 0.00012345, 9.9999])]), ["1.23e+03", "0.000123", "10"]);
+        assert_eq!(sp(vec![ch("%#.3g"), num(&[1.0])]), ["1.00"]);
+        assert_eq!(sp(vec![ch("%e"), num(&[1500.0, 0.000123, 0.0, 1e100, -2.5])]),
+                   ["1.500000e+03", "1.230000e-04", "0.000000e+00", "1.000000e+100", "-2.500000e+00"]);
+        assert_eq!(sp(vec![ch("%f"), num(&[f64::INFINITY, f64::NEG_INFINITY, f64::NAN])]), ["Inf", "-Inf", "NaN"]);
+        assert_eq!(sp(vec![ch("%5.1f|%-8.2f|%08.3f"), num(&[3.14159]), num(&[2.5]), num(&[-1.5])]), ["  3.1|2.50    |-001.500"]);
+        assert_eq!(sp(vec![ch("%s"), num(&[1.0 / 3.0, 100000.0, 123456.0, 1e-20, 0.1 + 0.2, 2f64.powi(53)])]),
+                   ["0.333333333333333", "1e+05", "123456", "1e-20", "0.3", "9007199254740992"]);
+        assert_eq!(sp(vec![ch("%8.3f"), RVal::Numeric(vec![None].into(), Attrs::default())]), ["      NA"]);
+        assert!(sp(vec![ch("%d"), num(&[])]).is_empty(), "a zero-length argument gives character(0)");
+        assert!(bi_sprintf(&[evarg(ch("%d")), evarg(num(&[3.5]))]).is_err(), "%d of 3.5 is R's error");
+        assert!(bi_sprintf(&[evarg(ch("%f")), evarg(ch("a"))]).is_err(), "%f of a string is R's error");
     }
 
     #[test]
