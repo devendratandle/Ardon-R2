@@ -304,7 +304,9 @@ impl GpuTrainer {
         let flag = |x: &Tensor, n: usize| -> bool { !mixed || ew::nonfinite_flag(x, &a.loss_rows, t, n) };
         let ok = |b: bool, what: &'static str| -> Result<(), String> {
             if !b { return Err(format!("GPU kernel failed: {what}")); }
-            if census {
+            // an overflow check outside mixed precision launches nothing,
+            // so it is not a row of the census either
+            if census && (mixed || what != "overflow check") {
                 r2_gpu::device::sync();
                 let dt = mark.get().elapsed().as_secs_f64() * 1e3;
                 let mut tb = table.borrow_mut();

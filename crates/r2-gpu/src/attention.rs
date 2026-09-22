@@ -90,6 +90,19 @@ struct Kernels {
     dv: wgpu::ComputePipeline,
     dk: wgpu::ComputePipeline,
     dq: wgpu::ComputePipeline,
+    /// `attn_tiled`'s fused dK+dV, where this head dimension is served.
+    dkv_tiled: Option<wgpu::ComputePipeline>,
+}
+
+/// Whether the tiled dK/dV kernel is used where it applies. Both are
+/// compiled, so `R2_GPU_ATTN_TILED_BWD=0|1` switches between them inside
+/// ONE process — which is how they are compared, interleaved, in
+/// `--example attn_bench`.
+fn tiled_backward() -> bool {
+    // read per call, not cached: a benchmark has to be able to alternate
+    // between the two inside one window, and this is microseconds against
+    // a backward measured in milliseconds
+    std::env::var("R2_GPU_ATTN_TILED_BWD").map(|v| v != "0").unwrap_or(TILED_BACKWARD)
 }
 
 /// Whether `attn_tiled`'s register-tiled forward is used where it
@@ -101,6 +114,10 @@ struct Kernels {
 /// the FlashAttention-2 shape to build the backward on for a device with
 /// more to fill.
 const TILED_FORWARD: bool = false;
+
+/// Whether the tiled dK/dV kernel is the default where it applies — set
+/// by measurement on this machine (`--example attn_bench`).
+const TILED_BACKWARD: bool = true;
 
 /// Kernels per (head dimension, storage type of Q/K/V/O and their
 /// gradients). The row statistics `L` and `D` are always f32.
@@ -128,6 +145,8 @@ fn kernels(hd: usize, act: Dtype) -> Option<&'static Kernels> {
         dv: make("r2gpu-attn-dv", dkv_wgsl(hd, act, false)),
         dk: make("r2gpu-attn-dk", dkv_wgsl(hd, act, true)),
         dq: make("r2gpu-attn-dq", dq_wgsl(hd, act)),
+        dkv_tiled: crate::attn_tiled::supports_bwd(hd)
+            .then(|| make("r2gpu-attn-dkv-tiled", crate::attn_tiled::dkv_wgsl(hd, act))),
     }));
     table.insert((hd, act), k);
     Some(k)
@@ -501,10 +520,20 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
     let kblocks = (sh.seq as u32).div_ceil(BKV);
     launch(&ks.delta, &[&o.buf, &g.buf, &delta.buf], &dims, (rows.div_ceil(64), 1, 1))?;
     let inputs = [&q.buf, &k.buf, &v.buf, &g.buf, &lse.buf, &delta.buf];
-    let mut b = inputs.to_vec(); b.push(&dv.buf);
-    launch(&ks.dv, &b, &dims, (kblocks, sh.nkv as u32, sh.nseq as u32))?;
-    let mut b = inputs.to_vec(); b.push(&dk.buf);
-    launch(&ks.dk, &b, &dims, (kblocks, sh.nkv as u32, sh.nseq as u32))?;
+    match ks.dkv_tiled.as_ref().filter(|_| tiled_backward()) {
+        // one workgroup per key block computes both, walking the queries once
+        Some(p) => {
+            let mut b = inputs.to_vec(); b.push(&dk.buf); b.push(&dv.buf);
+            let blocks = (sh.seq as u32).div_ceil(crate::attn_tiled::BT);
+            launch(p, &b, &dims, (blocks, sh.nkv as u32, sh.nseq as u32))?;
+        }
+        None => {
+            let mut b = inputs.to_vec(); b.push(&dv.buf);
+            launch(&ks.dv, &b, &dims, (kblocks, sh.nkv as u32, sh.nseq as u32))?;
+            let mut b = inputs.to_vec(); b.push(&dk.buf);
+            launch(&ks.dk, &b, &dims, (kblocks, sh.nkv as u32, sh.nseq as u32))?;
+        }
+    }
     let mut b = inputs.to_vec(); b.push(&dq.buf);
     launch(&ks.dq, &b, &dims, (qblocks, sh.nh as u32, sh.nseq as u32))?;
     Some(())
