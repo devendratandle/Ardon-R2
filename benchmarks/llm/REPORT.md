@@ -747,6 +747,33 @@ the next to replace with R2's own; run the probe on every device the
 guarantee should cover — it is the first cross-vendor data point the
 office card will give.
 
+### Same bits on CPU and GPU (B1, 2026-09-23)
+
+What is now bit-identical GPU ≡ CPU, each pinned by a test:
+
+| | how |
+|---|---|
+| `exp` | `exp_r2`: the CPU's AVX2 `exp8` polynomial as a scalar and as WGSL, instruction for instruction, constants passed as bit patterns. Also made the CPU self-consistent: the 8-wide loops' tails used `libm`, so a row's bits depended on its length mod 8, and aarch64 disagreed with x86. |
+| silu | follows from `exp_r2` and `div_cr` |
+| Adam | `div_cr` / `sqrt_cr` (B0) |
+| RoPE | the GPU reads the CPU's host-built `(cos, sin)` table: no transcendental on the device at all |
+
+Two things the tests found that unit tests alone would not have:
+- **B0 turned weights into NaN in real training** while every unit test
+  passed: `sqrt_cr(0)` computed `0 * inf`. Adam's `v` is 0 for any weight
+  that has only ever had zero gradient. Fixed, and a real training run is
+  now part of the gate for numerics changes.
+- **The compiler reassociates.** It never contracts `a*b + c`, but it
+  regroups `m + fma(-0.5, z, y)`; located by returning each stage of `log`
+  in turn (all match until the last addition). WGSL cannot forbid it, so
+  `log_r2` stays within 2 ULP of the CPU and is not used by the kernels.
+  This is the concrete case for emitting SPIR-V (Track C), where an
+  operation can be marked against reassociation.
+
+Also measured: this adapter flushes subnormal RESULTS to zero (`1 / f32::MAX`
+gives 0), and divides via a reciprocal that flushes above 2^126 (`div_cr`
+pre-scales). Training is unchanged: held-out 6.2690, 344 ms/step.
+
 ### Mixed precision (2026-09-22)
 
 `Precision::Mixed` (`R2_GPU_PREC=mixed`) is the standard recipe: f32
