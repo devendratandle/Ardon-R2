@@ -59,7 +59,8 @@ pub mod plssem;
 // like lm/glm still print inline using these).
 pub use dist::{erf, erfc, phi, phi_upper, qnorm_approx};
 pub use htest::{
-    chi_sq_cdf, fmt_pval, gamma_approx, incomplete_beta, ln_gamma,
+    chi_sq_cdf, chi_sq_quantile, chi_sq_sf, dgamma, fmt_pval, gamma_approx, incomplete_beta, ln_gamma,
+    pgamma_log_tails,
     signif_stars, t_cdf,
 };
 

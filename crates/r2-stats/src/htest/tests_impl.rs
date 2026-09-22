@@ -519,7 +519,7 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 }
             }
             let df = ((nr - 1) * (nc - 1)) as f64;
-            let p_value = 1.0 - chi_sq_cdf(chi_sq, df);
+            let p_value = chi_sq_sf(chi_sq, df);   // the upper tail directly: small p-values keep their digits
             let method = if correct { "Pearson's Chi-squared test with Yates' continuity correction" }
                          else { "Pearson's Chi-squared test" };
             soutln!("\n  {}\n", method);
@@ -547,7 +547,7 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
             let chi_sq: f64 = obs.iter().zip(expected.iter())
                 .map(|(o, e)| if *e > 0.0 { (o - e).powi(2) / e } else { 0.0 }).sum();
             let df = (k - 1) as f64;
-            let p_value = 1.0 - chi_sq_cdf(chi_sq, df);
+            let p_value = chi_sq_sf(chi_sq, df);   // the upper tail directly: small p-values keep their digits
             soutln!("\n  Chi-squared test for given probabilities\n");
             soutln!("X-squared = {}, df = {}, p-value = {}", fmt_n(chi_sq), df as i32, fmt_pval(p_value));
 
