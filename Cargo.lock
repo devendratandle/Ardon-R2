@@ -3208,6 +3208,7 @@ dependencies = [
  "pollster",
  "r2-autograd",
  "r2-linalg",
+ "r2-tensor",
  "r2-train",
  "wgpu 30.0.1",
 ]
