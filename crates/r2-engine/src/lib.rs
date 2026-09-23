@@ -78,6 +78,10 @@ mod indexing;
 mod assign;
 mod fusion;
 mod formula_eval;
+mod formula_call;  // lm(y ~ x, data = df) and friends: the formula interface
+mod special_forms; // NSE calls intercepted before argument evaluation
+mod call;          // call_fn: builtins, closures, type constructors
+mod jit_call;      // the compiled fast path of a closure call
 use packages::*;
 pub use registry::{FunctionRegistry, PackageLayer, PackageTier};
 

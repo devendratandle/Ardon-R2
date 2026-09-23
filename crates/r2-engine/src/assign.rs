@@ -7,6 +7,87 @@ use crate::{Engine, val_to_str};
 use crate::err;
 
 impl Engine {
+    /// `target <- value` (and `<<-` when `superassign`): a variable, an
+    /// element (`x[i]`, `m[i, j]`, `x[[i]]`, `x$f`) or a replacement call
+    /// (`names(x) <- v`). An assignment evaluates to the assigned value.
+    pub(crate) fn eval_assign(&mut self, target: &Expr, value: &Expr, superassign: bool,
+                              env: &EnvRef) -> Result<RVal, R2Err> {
+        let val = self.eval_in(value, env)?;
+        match target {
+            Expr::Symbol(name) => {
+                if matches!(name.as_ref(), "TRUE"|"FALSE") { return err!(Runtime, "cannot assign to the reserved constant '{}'", name); }
+                if superassign { self.super_assign(name.clone(), val.clone()); }
+                else { self.scope_insert(name.clone(), val.clone()); }
+                Ok(val)
+            }
+            // Literals are not valid targets (e.g. `1 <- x`).
+            Expr::NumLit(_) | Expr::IntLit(_) | Expr::StrLit(_) | Expr::BoolLit(_)
+            | Expr::NullLit | Expr::NaLit =>
+                err!(Runtime, "cannot assign to a literal value"),
+            Expr::Index { object, indices } => {
+                if let Expr::Symbol(name) = object.as_ref() {
+                    let mut obj = self.eval_in(object, env)?;
+                    if indices.len() == 1 {
+                        if let Some(idx_expr) = &indices[0] {
+                            let idx = self.eval_in(idx_expr, env)?;
+                            self.assign_index(&mut obj, &idx, &val)?;
+                        }
+                    } else if indices.len() == 2 {
+                        // Matrix `m[i, j] <- v` / `m[i, ] <- v` / `m[, j] <- v`.
+                        // An empty subscript (None) selects the whole axis.
+                        let ri = match &indices[0] { Some(e) => Some(self.eval_in(e, env)?), None => None };
+                        let ci = match &indices[1] { Some(e) => Some(self.eval_in(e, env)?), None => None };
+                        self.assign_matrix_index(&mut obj, ri.as_ref(), ci.as_ref(), &val)?;
+                    }
+                    self.scope_insert(name.clone(), obj.clone());
+                    Ok(val)
+                } else { err!(Runtime, "invalid subscript assignment target") }
+            }
+            Expr::DblIndex { object, index } => {
+                if let Expr::Symbol(name) = object.as_ref() {
+                    let mut obj = self.eval_in(object, env)?;
+                    let idx = self.eval_in(index, env)?;
+                    self.assign_dbl_index(&mut obj, &idx, &val)?;
+                    self.scope_insert(name.clone(), obj.clone());
+                    Ok(val)
+                } else { err!(Runtime, "invalid [[ ]] assignment target") }
+            }
+            Expr::Dollar { object, field } => {
+                if let Expr::Symbol(name) = object.as_ref() {
+                    let mut obj = self.eval_in(object, env)?;
+                    self.assign_dollar(&mut obj, field, &val)?;
+                    self.scope_insert(name.clone(), obj.clone());
+                    Ok(val)
+                } else { err!(Runtime, "invalid $ assignment target") }
+            }
+            // Replacement function: `fname(obj, ...) <- value`
+            // desugars to `obj <- \`fname<-\`(obj, ..., value=value)`.
+            // Enables names(x)<-, colnames(df)<-, rownames(df)<-, etc.
+            Expr::Call { func, args } => {
+                if let (Expr::Symbol(fname), Some(first)) = (func.as_ref(), args.first()) {
+                    let setter = format!("{}<-", fname);
+                    if let Some((f, _)) = self.registry.resolve(&setter) {
+                        let obj_val = self.eval_in(&first.value, env)?;
+                        let mut ea = vec![EvalArg { name: None, value: obj_val }];
+                        for extra in &args[1..] {
+                            ea.push(EvalArg { name: extra.name.clone(), value: self.eval_in(&extra.value, env)? });
+                        }
+                        ea.push(EvalArg { name: Some(Arc::from("value")), value: val.clone() });
+                        let new_obj = f(self, &ea, env)?;
+                        if let Expr::Symbol(objname) = &first.value {
+                            self.scope_insert(objname.clone(), new_obj);
+                            return Ok(val);
+                        }
+                        return err!(Runtime, "replacement target must be a variable");
+                    }
+                    return err!(Runtime, "could not find function \"{}\"", setter);
+                }
+                err!(Runtime, "invalid assignment target")
+            }
+            _ => err!(Runtime, "invalid assignment target"),
+        }
+    }
+
     pub(crate) fn assign_index(&mut self, obj: &mut RVal, idx: &RVal, val: &RVal) -> Result<(), R2Err> {
         let positions = self.as_reals(idx)?;
         match obj {
