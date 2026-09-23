@@ -8,6 +8,26 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## Unreleased
 
+### What prints, and when, is R's — 2026-09-23
+
+- **Visibility works like R's.** A value now carries whether it should
+  auto-print, instead of the console guessing from the text of the line.
+  `f <- function(v) print(v); f(1)` prints once (it printed twice);
+  `h <- function() { x <- 3 }; h()` prints nothing; `(x <- 5)` prints 5;
+  `invisible()`, `tryCatch`, `switch` and `local` behave as in R.
+- **Hypothesis tests return their result and print nothing while
+  computing.** `res <- chisq.test(m)` is silent, `res` or `print(res)`
+  shows the report, and `chisq.test(m)$p.value` shows just the number (it
+  printed the whole report first). Same for `t.test`, `cor.test`,
+  `wilcox.test`, `fisher.test` and the other tests.
+- **`sprintf` matches R**: vectorised, C's `%g`/`%e` rules, `Inf`/`NA`;
+  **`print(x, digits = n)`** and **`format(x, digits = n)`** are honoured,
+  `format(pi)` is `3.141593`, and scientific notation prints as R's
+  (`3.333333e-09`).
+- The differential harness compares numbers within its documented
+  tolerance (it had been comparing any value with more than 6 digits as an
+  exact string), and gains whole-output cases for what a script prints.
+
 ### Chi-squared matches R; `lower.tail` / `log.p` work — 2026-09-23
 
 - **`pchisq`, `qchisq`, `dchisq` now agree with R 4.5.3 to 1.5e-13** on a

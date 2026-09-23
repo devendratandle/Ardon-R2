@@ -1044,7 +1044,24 @@ impl Engine {
                 }
                 // Normal resolution through search order
                 if let Some((f, _pkg)) = self.registry.resolve(name.as_ref()) {
-                    let r = f(self, args, env);
+                    let r = if is_htest_builtin(bare) {
+                        // R's design: the test RETURNS its result and prints
+                        // nothing; the report appears when the result is
+                        // printed. R2's tests write their report as they run,
+                        // so it is captured here and kept on the result.
+                        let (r, report) = r2_types::out::capture(|| f(self, args, env));
+                        match r {
+                            Ok(RVal::TypeInstance(mut inst)) if !report.is_empty() => {
+                                inst.fields.insert(Arc::from(".report"),
+                                    RVal::Character(vec![Some(Arc::from(report.as_str()))], Attrs::default()));
+                                Ok(RVal::TypeInstance(inst))
+                            }
+                            // anything else: the text goes out as it always did
+                            other => { r2_types::out::rout(&report); other }
+                        }
+                    } else {
+                        f(self, args, env)
+                    };
                     self.after_builtin(bare);
                     r
                 }
@@ -1430,12 +1447,24 @@ impl Engine {
     }
 }
 
+/// The hypothesis tests: their report is kept on the result they return
+/// (see `call_fn`) and shown when that result is printed — not when the
+/// test runs. So `res <- chisq.test(m)` prints nothing, `res` prints the
+/// report, and `chisq.test(m)$p.value` prints just the number.
+pub(crate) fn is_htest_builtin(name: &str) -> bool {
+    matches!(name,
+        "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
+        "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
+        "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
+        "poisson.test" | "hotelling.test")
+}
+
 /// Functions whose value R returns invisibly — their result is not
 /// auto-printed at the top level, and a user function ending in one of
 /// them returns invisibly too (`f <- function(v) print(v); f(1)` prints
-/// once). The hypothesis tests, `summary` and `str` are here because R2's
-/// versions print their report as they run; they leave this list when
-/// they return an object that prints itself instead.
+/// once). `anova`, `aov`, `manova`, `summary` and `str` are here because
+/// R2's versions still print their report as they run; they leave this
+/// list when they keep it on their result, as the hypothesis tests do.
 pub(crate) fn is_invisible_builtin(name: &str) -> bool {
     matches!(name,
         "invisible" | "print" | "cat" | "message" | "warning" | "writeLines" |
@@ -1448,10 +1477,7 @@ pub(crate) fn is_invisible_builtin(name: &str) -> bool {
         "plot" | "hist" | "boxplot" | "barplot" | "lines" | "points" | "abline" | "legend" | "text" |
         "save.plot" | "dev.view" | "dev.off" |
         "system.time" |
-        "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
-        "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
-        "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
-        "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test" |
+        "anova" | "aov" | "manova" |
         "summary" | "str")
 }
 

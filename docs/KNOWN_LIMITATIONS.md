@@ -42,11 +42,18 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Language / evaluation
 
-- **Hypothesis tests print when called**, not when their result is
-  printed: `chisq.test(...)$p.value` shows the whole report before the
-  value (R returns an `htest` object that prints only on display). The
-  reports are ~50 direct writes across ~15 tests; each needs to be kept
-  on the result and printed by its print method.
+- **A hypothesis test's report is laid out differently from R's
+  `print.htest`**: R2 prints the method, then the statistic line; R adds
+  the `data:` line, tab-indents the title, and prints the alternative,
+  interval and estimates in a fixed order. The values are the same.
+  (When the report appears is now R's: on printing the result, never while
+  the test runs.)
+- **`anova`, `aov`, `manova`, `summary` and `str` still print when
+  called**, so `summary(fit)$coefficients` shows the whole summary first.
+  The hypothesis tests were fixed by keeping their report on the result;
+  these need the same treatment.
+- **`sapply` over an integer vector returns a list** where R simplifies
+  (`sapply(1:3, function(i) i)`); over doubles it simplifies correctly.
 - **`format()` of a vector formats each element on its own**: R pads a
   vector to common decimals (`format(c(1, 2.5))` is `"1.0" "2.5"`, R2
   gives `"1" "2.5"`), and `nsmall` is treated as an exact decimal count

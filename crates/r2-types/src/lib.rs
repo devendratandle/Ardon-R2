@@ -625,6 +625,15 @@ impl fmt::Display for RVal {
                 Ok(())
             }
             RVal::TypeInstance(inst) => {
+                // A result that carries its report (a hypothesis test: the
+                // engine keeps the text the test produced on the result
+                // instead of printing it when the test RUNS) displays as
+                // that report — so it appears when the result is printed or
+                // auto-printed, and `res$p.value` alone shows only the number.
+                if let Some(RVal::Character(lines, _)) = inst.fields.get(".report") {
+                    let text: String = lines.iter().flatten().map(|s| s.as_ref()).collect();
+                    return write!(f, "{}", text.strip_suffix('\n').unwrap_or(&text));
+                }
                 match inst.type_name.as_ref() {
                     "lm" | "glm" => {
                         writeln!(f, "\nCall: {}(formula)\n", inst.type_name)?;
@@ -1124,7 +1133,35 @@ pub mod out {
         });
     }
 
+    thread_local! {
+        /// Open captures, innermost last: while one is open, standard
+        /// output goes into it instead of to the console.
+        static CAPTURE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Run `f` with its standard output collected instead of printed, and
+    /// return that text with `f`'s result. Nested captures each get their
+    /// own text; error output is never captured.
+    pub fn capture<R>(f: impl FnOnce() -> R) -> (R, String) {
+        CAPTURE.with(|c| c.borrow_mut().push(String::new()));
+        // pop even if `f` panics, so one failure cannot swallow later output
+        struct Pop;
+        impl Drop for Pop { fn drop(&mut self) { CAPTURE.with(|c| { c.borrow_mut().pop(); }); } }
+        let guard = Pop;
+        let r = f();
+        let text = CAPTURE.with(|c| c.borrow_mut().last_mut().map(std::mem::take).unwrap_or_default());
+        drop(guard);
+        (r, text)
+    }
+
     fn write_routed(s: &str, is_err: bool) {
+        if !is_err {
+            let captured = CAPTURE.with(|c| {
+                let mut c = c.borrow_mut();
+                match c.last_mut() { Some(buf) => { buf.push_str(s); true } None => false }
+            });
+            if captured { return; }
+        }
         LINEBUF.with(|lb| {
             let mut buf = lb.borrow_mut();
             buf.push_str(s);
