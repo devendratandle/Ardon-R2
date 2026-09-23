@@ -42,8 +42,14 @@ for case_file in cases/*.R; do
             k=$1; v=substr($0, length($1)+2)
             if (!(k in a)) { print "  R-only key: " k; bad=1; next }
             x=a[k]; seen[k]=1
-            # numeric compare when both parse as numbers, else exact string
-            if (x+0 == x && v+0 == v) {
+            # numeric compare when both LOOK like numbers, else exact string.
+            # (This was `x+0 == x`, which compares against the string by
+            # converting the number back with the 6 digits of CONVFMT, so any
+            # value printed with more than 6 significant digits silently fell
+            # through to an exact STRING compare, and the 1e-9 tolerance
+            # documented above never applied to it.)
+            num = "^[-+]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][-+]?[0-9]+)?$"
+            if (x ~ num && v ~ num) {
                 dx=x+0; dv=v+0; d=dx-dv; if (d<0) d=-d
                 m=(dx<0?-dx:dx); u=(dv<0?-dv:dv); if (u>m) m=u
                 tol=m*1e-9; if (tol<1e-12) tol=1e-12

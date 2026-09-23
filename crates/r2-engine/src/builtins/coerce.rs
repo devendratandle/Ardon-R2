@@ -389,9 +389,14 @@ pub(crate) fn bi_format(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
         }
     }
     let nsmall = gn(a,"nsmall").and_then(|x| e.scalar_f64(&x).ok().flatten()).unwrap_or(0.0) as usize;
+    // R's `digits` (7 by default): the same significant-digit formatting
+    // `print` uses — `format(pi)` is "3.141593", not every digit of the double
+    let digits = gn(a,"digits").and_then(|x| e.scalar_f64(&x).ok().flatten())
+        .filter(|d| *d >= 1.0).map(|d| d as usize).unwrap_or(7);
     let out: Vec<Option<Arc<str>>> = match &v {
         RVal::Numeric(nv, _) => nv.iter().copied().map(|o| o.map(|x| {
-            let s = if nsmall > 0 { format!("{:.*}", nsmall, x) } else { fmt_f64(x) };
+            let s = if nsmall > 0 { format!("{:.*}", nsmall, x) }
+                    else { r2_types::with_print_digits(digits, || r2_types::fmt_num(x)) };
             Arc::from(s.as_str())
         })).collect(),
         other => str_vec(other),

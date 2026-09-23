@@ -14,10 +14,11 @@
 //! Limits (lookaround, backreferences, Unicode categories) documented
 //! in `docs/KNOWN_LIMITATIONS.md`.
 //!
-//! **`sprintf` honest scoping (v0.1.x):** recognises `%d`, `%f`, `%s`,
-//! `%e`, and `%%` only — no width/precision specifiers, no flags. Format
-//! strings beyond that subset pass through unchanged. Tracked in
-//! KNOWN_LIMITATIONS.
+//! **`sprintf`:** `%d %i %f %e %E %g %G %x %X %s %%` with flags (`-+ 0#`),
+//! width and precision, vectorised over the format and every argument as
+//! R is; compared with R in `tests/differential/cases/formatting.R`. Not
+//! yet: `*` widths, `%o`, `%a`, and `%5$s`-style argument positions —
+//! such specifiers pass through literally.
 
 use r2_types::{Attrs, Character, ErrKind, EvalArg, Integer, Logical, R2Err, RVal};
 use std::sync::Arc;
@@ -711,26 +712,21 @@ mod tests {
         }
     }
 
-    /// R 4.5.3's own output for each case (sprintf_cases.R, 2026-09-23).
+    /// sprintf's contract, independent of any other program's output (the
+    /// comparison with R is tests/differential/cases/formatting.R): one
+    /// result per element of the longest argument, recycling, zero length,
+    /// NA formats, and the argument errors.
     #[test]
-    fn sprintf_matches_r() {
-        assert_eq!(sp(vec![ch("%.10g"), num(&[1.123456789012, 2.5])]), ["1.123456789", "2.5"]);
-        assert_eq!(sp(vec![chs(&["%.2f", "%.4f"]), num(&[std::f64::consts::PI])]), ["3.14", "3.1416"]);
-        assert_eq!(sp(vec![ch("%s=%g"), chs(&["a", "b"]), num(&[1.0, 2.0, 3.0, 4.0])]), ["a=1", "b=2", "a=3", "b=4"]);
-        assert_eq!(sp(vec![ch("%g"), num(&[100000.0, 1e6, 1e-5, 0.0001, 123.456, 0.0, 1e-300])]),
-                   ["100000", "1e+06", "1e-05", "0.0001", "123.456", "0", "1e-300"]);
-        assert_eq!(sp(vec![ch("%.3g"), num(&[1234.5678, 0.00012345, 9.9999])]), ["1.23e+03", "0.000123", "10"]);
-        assert_eq!(sp(vec![ch("%#.3g"), num(&[1.0])]), ["1.00"]);
-        assert_eq!(sp(vec![ch("%e"), num(&[1500.0, 0.000123, 0.0, 1e100, -2.5])]),
-                   ["1.500000e+03", "1.230000e-04", "0.000000e+00", "1.000000e+100", "-2.500000e+00"]);
-        assert_eq!(sp(vec![ch("%f"), num(&[f64::INFINITY, f64::NEG_INFINITY, f64::NAN])]), ["Inf", "-Inf", "NaN"]);
-        assert_eq!(sp(vec![ch("%5.1f|%-8.2f|%08.3f"), num(&[3.14159]), num(&[2.5]), num(&[-1.5])]), ["  3.1|2.50    |-001.500"]);
-        assert_eq!(sp(vec![ch("%s"), num(&[1.0 / 3.0, 100000.0, 123456.0, 1e-20, 0.1 + 0.2, 2f64.powi(53)])]),
-                   ["0.333333333333333", "1e+05", "123456", "1e-20", "0.3", "9007199254740992"]);
-        assert_eq!(sp(vec![ch("%8.3f"), RVal::Numeric(vec![None].into(), Attrs::default())]), ["      NA"]);
-        assert!(sp(vec![ch("%d"), num(&[])]).is_empty(), "a zero-length argument gives character(0)");
-        assert!(bi_sprintf(&[evarg(ch("%d")), evarg(num(&[3.5]))]).is_err(), "%d of 3.5 is R's error");
-        assert!(bi_sprintf(&[evarg(ch("%f")), evarg(ch("a"))]).is_err(), "%f of a string is R's error");
+    fn sprintf_vectorises_recycles_and_rejects() {
+        assert_eq!(sp(vec![ch("%g"), num(&[1.0, 2.0, 3.0])]).len(), 3, "one result per element");
+        assert_eq!(sp(vec![chs(&["%g", "<%g>"]), num(&[1.0])]).len(), 2, "the format vector counts too");
+        assert_eq!(sp(vec![ch("%s%g"), chs(&["a", "b"]), num(&[1.0, 2.0, 3.0, 4.0])]).len(), 4, "recycled to the longest");
+        assert!(sp(vec![ch("%g"), num(&[])]).is_empty(), "a zero-length argument gives character(0)");
+        let na_fmt = RVal::Character(vec![None], Attrs::default());
+        assert_eq!(sp(vec![na_fmt, num(&[1.0])]), ["<NA>"], "an NA format gives NA");
+        assert!(bi_sprintf(&[evarg(ch("%d")), evarg(num(&[3.5]))]).is_err(), "%d of a fractional number");
+        assert!(bi_sprintf(&[evarg(ch("%f")), evarg(ch("a"))]).is_err(), "%f of a string");
+        assert!(bi_sprintf(&[evarg(ch("%d %d")), evarg(num(&[1.0]))]).is_err(), "too few arguments");
     }
 
     #[test]

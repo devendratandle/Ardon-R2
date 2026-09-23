@@ -364,10 +364,19 @@ pub fn chi_sq_quantile(lp: f64, df: f64, lower: bool) -> f64 {
     // bracket [lo, hi] in x: the lower tail rises with x, the upper falls
     let (mut lo, mut hi) = (0.0f64, df.max(1.0));
     while (ltail(hi) < lt) == use_lower { lo = hi; hi *= 2.0; if hi > 1e300 { break; } }
-    // start from Wilson–Hilferty, clamped into the bracket
+    // A small lower-tail target: P(x) ~ (x/2)^a / Gamma(a+1) as x -> 0, so
+    // x ~ 2 exp((ln p + ln Gamma(a+1)) / a). When that underflows the true
+    // quantile is below the smallest double and 0 is the right answer —
+    // bisection from the bracket could never get there (200 halvings of 1
+    // reach 1e-60; qchisq(1e-300, 0.5) is ~1e-1200) and would stop on a
+    // wrong nonzero value. Otherwise it is the starting point.
+    let small = if use_lower { 2.0 * ((lt + ln_gamma(a + 1.0)) / a).exp() } else { f64::INFINITY };
+    if small == 0.0 { return 0.0; }
+    // else start from Wilson–Hilferty, clamped into the bracket
     let z = crate::dist::qnorm_approx(if use_lower { lt.exp() } else { -lt.exp_m1() });
     let wh = df * (1.0 - 2.0 / (9.0 * df) + z * (2.0 / (9.0 * df)).sqrt()).powi(3);
-    let mut x = if wh > lo && wh < hi { wh } else { 0.5 * (lo + hi) };
+    let mut x = if small < 0.1 * df.min(1.0) && small > lo && small < hi { small }
+        else if wh > lo && wh < hi { wh } else { 0.5 * (lo + hi) };
     for _ in 0..200 {
         let f = ltail(x) - lt;
         if f == 0.0 { break; }
@@ -376,7 +385,10 @@ pub fn chi_sq_quantile(lp: f64, df: f64, lower: bool) -> f64 {
         let ld = dgamma(x, a, 2.0, true) - ltail(x);
         let step = if use_lower { f / ld.exp() } else { -f / ld.exp() };
         let mut xn = x - step;
-        if !(xn > lo && xn < hi) || !xn.is_finite() { xn = 0.5 * (lo + hi); }
+        if !(xn > lo && xn < hi) || !xn.is_finite() {
+            // bisect — geometrically when the bracket spans decades
+            xn = if lo > 0.0 && hi > 4.0 * lo { (lo * hi).sqrt() } else { 0.5 * (lo + hi) };
+        }
         if (xn - x).abs() <= 4.0 * f64::EPSILON * x.abs() { x = xn; break; }
         x = xn;
     }
@@ -384,102 +396,100 @@ pub fn chi_sq_quantile(lp: f64, df: f64, lower: bool) -> f64 {
 }
 
 #[cfg(test)]
-mod chisq_vs_r {
+mod chisq_properties {
+    //! The chi-squared family checked against MATHEMATICS — identities that
+    //! hold whatever any other program prints. The comparison with R lives
+    //! outside the code, in tests/differential/cases/distributions.R, which
+    //! runs R itself.
+    use super::*;
+    use crate::dist::{erf, erfc};
 
-        //! The χ² family against R 4.5.3, value for value (R's own `sprintf("%%.17e")` output):
-        //! every row a case the old implementation got wrong or a branch of the new one.
-        //! Tolerance 1e-12 relative — R sums its series in another order.
-        use super::*;
+    const DFS: [f64; 10] = [0.5, 1.0, 1.5, 2.0, 2.005, 3.0, 10.0, 100.0, 1000.0, 10000.0];
 
-    // (x, df, pchisq, pchisq upper, dchisq)
-    const P: &[(f64, f64, f64, f64, f64)] = &[
-        (0.001, 0.5, 1.64959750768412822e-01, 8.35040249231587262e-01, 4.12234446493734765e+01),
-        (0.5, 1.0, 5.20499877813046519e-01, 4.79500122186953481e-01, 4.39391289467722435e-01),
-        (1.0, 2.005, 3.92246955341085501e-01, 6.07753044658914443e-01, 3.03175891008803322e-01),
-        (2.0, 1.0, 8.42700792949715560e-01, 1.57299207050284467e-01, 1.03776874355148666e-01),
-        (5.0, 3.0, 8.28202855703266794e-01, 1.71797144296733206e-01, 7.32249128096324475e-02),
-        (10.0, 10.0, 5.59506714934787541e-01, 4.40493285065212459e-01, 8.77336848839253697e-02),
-        (50.0, 5.0, 9.99999998614202634e-01, 1.38579733670095934e-09, 6.52952772125722279e-10),
-        (100.0, 50.0, 9.99965450686170154e-01, 3.45493138298486413e-05, 9.26446496012619852e-06),
-        (300.0, 100.0, 1.00000000000000000e+00, 7.41210085732287457e-22, 2.50705894152777400e-22),
-        (1050.0, 1000.0, 8.67525943178522940e-01, 1.32474056821477087e-01, 4.63896262901107755e-03),
-        (1101.0, 1000.0, 9.86145026081295728e-01, 1.38549739187042806e-02, 7.41862666809810960e-04),
-        (1200.0, 1000.0, 9.99987744057669325e-01, 1.22559423306229079e-05, 1.07724943014962010e-06),
-        (10100.0, 10000.0, 7.60984674759824897e-01, 2.39015325240175158e-01, 2.17876943448854551e-03),
-        (9900.0, 10000.0, 2.40479914316020643e-01, 7.59520085683979329e-01, 2.21538758734431736e-03),
-        (0.1, 0.5, 5.16555320830465625e-01, 4.83444679169534375e-01, 1.24064263562715382e+00),
-        (1e-8, 1.0, 7.97884559473057786e-05, 9.99920211544052751e-01, 3.98942278406721289e+03),
-        (30.0, 1.0, 9.99999956795369460e-01, 4.32046305782749682e-08, 2.22808733452496618e-08),
-        (70.0, 3.0, 9.99999999999995781e-01, 4.26833633549231165e-15, 2.10451593849574330e-15),
-    ];
-
-    // (p, df, qchisq)
-    const Q: &[(f64, f64, f64)] = &[
-        (1e-10, 0.5, 1.34993957862235127e-40), (0.01, 0.5, 1.34993958591169451e-08),
-        (0.5, 0.5, 8.73476047057468730e-02), (0.95, 0.5, 2.42023227488951775e+00),
-        (0.999999, 0.5, 2.13756351528219604e+01),
-        (1e-10, 1.0, 1.57079632679489347e-20), (0.01, 1.0, 1.57087857909702055e-04),
-        (0.5, 1.0, 4.54936423119572830e-01), (0.95, 1.0, 3.84145882069412403e+00),
-        (0.999999, 1.0, 2.39281269768794722e+01),
-        (1e-10, 2.0, 2.00000000009999768e-10), (0.01, 2.0, 2.01006717070028838e-02),
-        (0.5, 2.0, 1.38629436111989035e+00), (0.95, 2.0, 5.99146454710797993e+00),
-        (0.999999, 2.0, 2.76310211158710359e+01),
-        (1e-10, 2.005, 2.12044206806942537e-10), (0.01, 2.005, 2.03554978987766366e-02),
-        (0.5, 2.005, 1.39113503169397634e+00), (0.95, 2.005, 6.00114488080492592e+00),
-        (0.999999, 2.005, 2.76473675418424882e+01),
-        (1e-10, 5.0, 3.23355714624969331e-04), (0.01, 5.0, 5.54298076728277134e-01),
-        (0.5, 5.0, 4.35146019109552640e+00), (0.95, 5.0, 1.10704976935163533e+01),
-        (0.999999, 5.0, 3.58881868796104229e+01),
-        (1e-10, 100.0, 3.43998239091248195e+01), (0.01, 100.0, 7.00648949253997984e+01),
-        (0.5, 100.0, 9.93341292359884847e+01), (0.95, 100.0, 1.24342113404004053e+02),
-        (0.999999, 100.0, 1.82126777119426151e+02),
-        (1e-10, 1000.0, 7.41268071719353088e+02), (0.01, 1000.0, 8.98912446929613225e+02),
-        (0.5, 1000.0, 9.99333412403380976e+02), (0.95, 1000.0, 1.07467944880344089e+03),
-        (0.999999, 1000.0, 1.22715242118727770e+03),
-        (1e-10, 10000.0, 9.12651180242325609e+03), (0.01, 10000.0, 9.67394883957763523e+03),
-        (0.5, 10000.0, 9.99933334123514396e+03), (0.95, 10000.0, 1.02337488976779368e+04),
-        (0.999999, 10000.0, 1.06866898298660381e+04),
-    ];
-
-    // (upper-tail p, df, qchisq(p, df, lower.tail = FALSE)) — tails far below
-    // what `1 - p` can express, which is what `lower.tail = FALSE` is FOR
-    const QU: &[(f64, f64, f64)] = &[
-        (1e-20, 0.5, 8.38881937663919217e+01), (1e-100, 0.5, 4.49810824490212497e+02), (0.01, 0.5, 4.86777084439405616e+00),
-        (1e-20, 1.0, 8.71617334269098052e+01), (1e-100, 1.0, 4.53943082238798979e+02), (0.01, 1.0, 6.63489660102121270e+00),
-        (1e-20, 5.0, 1.03428977237757962e+02), (1e-100, 5.0, 4.76379437064162744e+02), (0.01, 5.0, 1.50862724693889927e+01),
-        (1e-20, 100.0, 2.92259133871445613e+02), (1e-100, 100.0, 7.52877564727371805e+02), (0.01, 100.0, 1.35806723171026789e+02),
-        (1e-20, 1000.0, 1.47245690210755743e+03), (1e-100, 1000.0, 2.27313605385415758e+03), (0.01, 1000.0, 1.10696899435221735e+03),
-    ];
-
-    fn close(got: f64, want: f64, what: &str) {
-        let rel = if want == 0.0 { got.abs() } else { ((got - want) / want).abs() };
-        assert!(rel <= 1e-12, "{what}: R2 {got:e} vs R {want:e} (rel {rel:.1e})");
+    /// Points over the body of chi-squared(df): mean df, sd sqrt(2 df).
+    fn bulk(df: f64) -> Vec<f64> {
+        let sd = (2.0 * df).sqrt();
+        (-6..=12).map(|k| df + k as f64 * sd / 2.0).filter(|&x| x > 0.02).collect()
     }
 
+    fn rel(a: f64, b: f64) -> f64 { if a == b { 0.0 } else { ((a - b) / b).abs() } }
+
+    /// P(X <= x) + P(X > x) = 1.
     #[test]
-    fn pchisq_both_tails_and_dchisq_match_r() {
-        for &(x, df, p, q, d) in P {
-            close(chi_sq_cdf(x, df), p, &format!("pchisq({x}, {df})"));
-            close(chi_sq_sf(x, df), q, &format!("pchisq({x}, {df}, lower.tail = FALSE)"));
-            close(dgamma(x, df / 2.0, 2.0, false), d, &format!("dchisq({x}, {df})"));
+    fn the_two_tails_sum_to_one() {
+        for df in DFS { for x in bulk(df) {
+            let s = chi_sq_cdf(x, df) + chi_sq_sf(x, df);
+            assert!((s - 1.0).abs() < 1e-14, "df {df}, x {x}: tails sum to {s}");
+        } }
+    }
+
+    /// qchisq inverts pchisq, in each tail, down to p = 1e-300.
+    #[test]
+    fn the_quantile_inverts_the_cdf_in_both_tails() {
+        for df in DFS { for p in [1e-300f64, 1e-100, 1e-10, 1e-3, 0.1, 0.5, 0.9] {
+            let x = chi_sq_quantile(p.ln(), df, true);
+            // where the true quantile is below the smallest double
+            // (P(x) ~ (x/2)^a / Gamma(a+1) near 0), the answer is exactly 0
+            let a = df / 2.0;
+            if 2.0 * ((p.ln() + ln_gamma(a + 1.0)) / a).exp() < 1e-300 {
+                assert_eq!(x, 0.0, "df {df}, p {p}: the quantile underflows, so it is 0");
+                continue;
+            }
+            assert!(rel(chi_sq_cdf(x, df), p) < 1e-11, "lower: df {df}, p {p}: P(q) = {}", chi_sq_cdf(x, df));
+            let x = chi_sq_quantile(p.ln(), df, false);
+            assert!(rel(chi_sq_sf(x, df), p) < 1e-11, "upper: df {df}, p {p}: Q(q) = {}", chi_sq_sf(x, df));
+        } }
+    }
+
+    /// The density is the slope of the CDF (central difference) — taken on
+    /// whichever tail is the smaller, since differencing two values of a
+    /// probability near 1 loses the digits the check needs.
+    #[test]
+    fn the_density_is_the_derivative_of_the_cdf() {
+        for df in DFS { for x in bulk(df) {
+            // the step scales with the distribution's width (sd) and, near 0,
+            // with x: the difference's truncation error goes as (h / scale)^2
+            let h = 1e-4 * (2.0 * df).sqrt().min(x);
+            let slope = if chi_sq_cdf(x, df) < 0.5 {
+                (chi_sq_cdf(x + h, df) - chi_sq_cdf(x - h, df)) / (2.0 * h)
+            } else {
+                (chi_sq_sf(x - h, df) - chi_sq_sf(x + h, df)) / (2.0 * h)
+            };
+            let d = dgamma(x, df / 2.0, 2.0, false);
+            assert!(rel(slope, d) < 1e-6, "df {df}, x {x}: slope {slope} vs density {d}");
+        } }
+    }
+
+    /// The closed forms: chi-squared(2) is the exponential with mean 2, and
+    /// chi-squared(1) is the square of a standard normal — computed here by
+    /// independent routes (expm1, and Cody's erf / erfc).
+    #[test]
+    fn df_one_and_two_equal_their_closed_forms() {
+        for i in 0..200 {
+            let x = 10f64.powf(-10.0 + i as f64 * 0.06);        // 1e-10 .. 1e2
+            assert!(rel(chi_sq_cdf(x, 2.0), -(-x / 2.0).exp_m1()) < 1e-14, "df 2 lower at {x}");
+            assert!(rel(chi_sq_sf(x, 2.0), (-x / 2.0).exp()) < 1e-14, "df 2 upper at {x}");
+            let z = (x / 2.0).sqrt();
+            assert!(rel(chi_sq_cdf(x, 1.0), erf(z)) < 1e-13, "df 1 lower at {x}");
+            assert!(rel(chi_sq_sf(x, 1.0), erfc(z)) < 1e-13, "df 1 upper at {x}");
         }
     }
 
+    /// The CDF never decreases.
     #[test]
-    fn qchisq_matches_r_in_both_tails() {
-        for &(p, df, want) in Q {
-            close(chi_sq_quantile(p.ln(), df, true), want, &format!("qchisq({p}, {df})"));
-        }
-        for &(q, df, want) in QU {
-            close(chi_sq_quantile(q.ln(), df, false), want, &format!("qchisq({q}, {df}, lower.tail = FALSE)"));
+    fn the_cdf_is_monotone() {
+        for df in DFS {
+            let xs = bulk(df);
+            for w in xs.windows(2) { assert!(chi_sq_cdf(w[1], df) >= chi_sq_cdf(w[0], df), "df {df} at {}", w[1]); }
         }
     }
 
+    /// The values the definitions fix at the edges.
     #[test]
-    fn edges_are_rs() {
-        assert_eq!(dgamma(0.0, 0.5, 2.0, false), f64::INFINITY);   // dchisq(0, 1)
-        assert_eq!(dgamma(0.0, 1.0, 2.0, false), 0.5);             // dchisq(0, 2)
-        assert_eq!(dgamma(0.0, 1.5, 2.0, false), 0.0);             // dchisq(0, 3)
+    fn edges_follow_the_definitions() {
+        assert_eq!(dgamma(0.0, 0.5, 2.0, false), f64::INFINITY);   // density of chi-squared(1) at 0
+        assert_eq!(dgamma(0.0, 1.0, 2.0, false), 0.5);             // chi-squared(2) = Exp(mean 2)
+        assert_eq!(dgamma(0.0, 1.5, 2.0, false), 0.0);             // chi-squared(3) at 0
         assert_eq!(chi_sq_cdf(0.0, 3.0), 0.0);
         assert_eq!(chi_sq_sf(0.0, 3.0), 1.0);
         assert_eq!(chi_sq_cdf(f64::INFINITY, 3.0), 1.0);

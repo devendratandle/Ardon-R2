@@ -42,14 +42,21 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Language / evaluation
 
-- **Display functions diverge from R** (found 2026-09-23, while checking
-  the chi-squared against R): `sprintf` does not vectorise over its
-  arguments and ignores a `%.Ng` precision, printing the full value, and
-  prints infinity as `inf` rather than `Inf`; `print(x, digits = n)`
-  ignores `digits`; `print(v)` inside a function also auto-prints the
-  function's value, so it appears twice; `chisq.test(...)$p.value` prints
-  the whole test report before the value. The NUMBERS are right — these
-  are formatting and visibility semantics.
+- **No visibility flag.** R tracks whether a value is invisible as code
+  runs; R2 decides auto-printing by the SHAPE of the top-level statement.
+  So `f <- function(v) print(v); f(1)` prints twice (R: once), and a
+  function ending in `invisible(x)` still auto-prints. Needs a visibility
+  flag in the evaluator, read by both consoles.
+- **Hypothesis tests print when called**, not when their result is
+  printed: `chisq.test(...)$p.value` shows the whole report before the
+  value (R returns an `htest` object that prints only on display). The
+  reports are ~50 direct writes across ~15 tests; each needs to be kept
+  on the result and printed by its print method.
+- **`format()` of a vector formats each element on its own**: R pads a
+  vector to common decimals (`format(c(1, 2.5))` is `"1.0" "2.5"`, R2
+  gives `"1" "2.5"`), and `nsmall` is treated as an exact decimal count
+  rather than R's minimum. `print` of a numeric vector shares the first.
+- `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
 - **No lazy promises.** Arguments are evaluated eagerly, so `substitute()`
   works but the captured expression must still be evaluable, and R's
   skip-unused-argument semantics don't apply.

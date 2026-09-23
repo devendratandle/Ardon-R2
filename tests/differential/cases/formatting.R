@@ -1,0 +1,38 @@
+# sprintf and format against R. Every value is wrapped in [...] so the
+# harness compares it as an exact STRING — "1.500000e+03" and "1.5e3"
+# are the same number and must not pass as equal here.
+kv <- function(k, v) cat(k, "=[", paste(v, collapse = "|"), "]\n", sep = "")
+
+kv("vec_g",     sprintf("%.10g", c(1.123456789012, 2.5)))
+kv("vec_d",     sprintf("%d items", 1:3))
+kv("recycle",   sprintf("%s=%d", c("a", "b"), 1:4))
+kv("vec_fmt",   sprintf(c("%.2f", "%.4f"), pi))
+kv("g_default", sprintf("%g", c(100000, 1e6, 1e-5, 0.0001, 123.456, 0, 1e-300)))
+kv("g_prec",    sprintf("%.3g", c(1234.5678, 0.00012345, 9.9999)))
+kv("g_alt",     sprintf("%#.3g", 1))
+kv("e",         sprintf("%e", c(1500, 0.000123, 0, 1e100, -2.5)))
+kv("E_prec",    sprintf("%.2E", 12345.678))
+kv("nonfinite", sprintf("%f", c(Inf, -Inf, NaN, NA)))
+kv("widths",    sprintf("%5.1f|%-8.2f|%08.3f", 3.14159, 2.5, -1.5))
+kv("flags",     sprintf("%+d % d %05d", 42L, 7L, -3L))
+kv("s_num",     sprintf("%s", c(1/3, 100000, 123456, 1e-20, 0.1 + 0.2, 2^53)))
+kv("s_lgl",     sprintf("%s and %s", TRUE, NA))
+kv("d_lgl",     sprintf("%d", TRUE))
+kv("s_width",   sprintf("%5s|%-5s|%.2s", "ab", "cd", "xyz"))
+kv("hex",       sprintf("%x %X", 255L, 255L))
+kv("percent",   sprintf("100%%"))
+kv("d_whole",   sprintf("%d", 3))
+kv("empty_len", length(sprintf("%d", integer(0))))
+kv("na_width",  sprintf("%8.3f", NA))
+kv("g_nonfin",  sprintf("%g", c(Inf, NA)))
+kv("d_frac_err", tryCatch(sprintf("%d", 3.5), error = function(e) "error"))
+kv("f_str_err",  tryCatch(sprintf("%f", "a"), error = function(e) "error"))
+
+# format(): R's 7 significant digits by default, and `digits`
+kv("format_pi",       format(pi))
+kv("format_digits10", format(pi, digits = 10))
+kv("format_sci",      format(1e-8 / 3, digits = 4))
+kv("format_sci_def",  format(1e-8 / 3))
+kv("format_big",      format(123456789012345678))
+kv("format_int",      format(42))
+kv("format_neg",      format(-2.5e-7))
