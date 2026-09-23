@@ -8,6 +8,32 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Factor levels are sorted, as in R — 2026-09-23
+
+- **`as.factor()` sorts its levels.** `levels(as.factor(c("b", "a", "b")))`
+  is `"a" "b"` (it was `"b" "a"`, first-appearance order). **`factor()`
+  sorts numbers numerically**: `factor(c(10, 2))` has levels `"2" "10"`
+  (it sorted them as strings). Integer and logical vectors work in both.
+  Number labels are `as.character`'s (`1e+05`, `0.333333333333333`).
+- `levels = c(...)` keeps its order; values outside it, and NA, get NA
+  codes; a duplicated level is an error. `factor(f)` drops unused levels
+  and keeps their order; `as.factor(f)` returns `f` unchanged.
+  `is.na()` works on a factor.
+- **Grouping follows the level order and never makes an NA group:**
+  `split()` (including empty levels of a factor), `tapply()` (an empty
+  level is NA), `aggregate()`, `table()` (numbers sorted numerically, NA
+  not counted), `boxplot(y ~ g)`. A factor's explicit level order is now
+  honoured by all of them (`split` and `boxplot` re-sorted by string).
+- **`lm()` with a character predictor uses the alphabetically first level
+  as the reference**, like R (it used the first observed value, so the
+  coefficients differed from R's). `t.test(y ~ g)` orders its two groups
+  the same way, so the estimate order and the sign of `t` match R.
+- Strings sort by byte (the C locale), the same order `order()` uses. R
+  in a UTF-8 or Windows locale collates `"a" "A" "b" "B"`, so mixed-case
+  levels can still differ from R.
+- Differential case `factor_levels` covers character and numeric input,
+  NA, explicit `levels=` order and the grouping functions.
+
 ### What prints, and when, is R's — 2026-09-23
 
 - **Visibility works like R's.** A value now carries whether it should

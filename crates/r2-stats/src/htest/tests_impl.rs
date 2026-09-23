@@ -2,7 +2,7 @@
 //! fisher) and their formula/grouping/pairing helpers.
 
 use super::*;
-use r2_types::{EvalArg, R2Err, RVal, TypeInstance};
+use r2_types::{EvalArg, Factor, R2Err, RVal, TypeInstance};
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::dist::{phi_upper, qnorm_approx};
@@ -104,43 +104,25 @@ fn unwrap_stratum_column(v: &RVal) -> RVal {
 /// Split `values` by the 2-level grouping vector `group`. Returns
 /// (group1_label, group1_values, group2_label, group2_values).
 fn split_by_group(values: &[f64], group: &RVal) -> Result<(String, Vec<f64>, String, Vec<f64>), R2Err> {
-    let group_strs: Vec<String> = match group {
-        RVal::Character(v, _) => v.iter()
-            .map(|x| x.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "NA".into())).collect(),
-        RVal::Factor(f) => f.codes.iter()
-            .map(|c| c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string()))
-                .unwrap_or_else(|| "NA".into())).collect(),
-        RVal::Numeric(v, _) => v.iter()
-            .map(|x| x.map(|n| format!("{}", n)).unwrap_or_else(|| "NA".into())).collect(),
-        RVal::Integer(v, _) => v.iter()
-            .map(|x| x.map(|n| format!("{}", n)).unwrap_or_else(|| "NA".into())).collect(),
-        RVal::Logical(v, _) => v.iter()
-            .map(|x| x.map(|b| if b { "TRUE".into() } else { "FALSE".into() })
-                .unwrap_or_else(|| "NA".into())).collect(),
-        _ => return Err(runtime_err(
-            "t.test formula RHS must be a 2-level grouping vector".into())),
+    // R's t.test.formula takes factor(g): sorted levels for a vector, a
+    // factor's own order with unused levels dropped; NA rows are left out.
+    let Some(g) = Factor::from_values(group).map(|f| f.drop_unused()) else {
+        return Err(runtime_err("t.test formula RHS must be a 2-level grouping vector".into()));
     };
-    if group_strs.len() != values.len() {
+    if g.codes.len() != values.len() {
         return Err(runtime_err(format!(
-            "t.test: LHS length ({}) != RHS length ({})", values.len(), group_strs.len())));
+            "t.test: LHS length ({}) != RHS length ({})", values.len(), g.codes.len())));
     }
-    // Discover levels in order of first appearance — matches R's behaviour
-    // for character vectors without explicit factor ordering.
-    let mut levels: Vec<String> = Vec::new();
-    for s in &group_strs {
-        if !levels.contains(s) { levels.push(s.clone()); }
-    }
-    if levels.len() != 2 {
+    if g.levels.len() != 2 {
         return Err(runtime_err(format!(
-            "t.test formula needs exactly 2 groups, got {}: {:?}", levels.len(), levels)));
+            "t.test formula needs exactly 2 groups, got {}: {:?}", g.levels.len(), g.levels)));
     }
     let mut g1 = Vec::new();
     let mut g2 = Vec::new();
-    for (val, gs) in values.iter().zip(group_strs.iter()) {
-        if gs == &levels[0] { g1.push(*val); }
-        else if gs == &levels[1] { g2.push(*val); }
+    for (val, c) in values.iter().zip(g.codes.iter()) {
+        match c { Some(0) => g1.push(*val), Some(_) => g2.push(*val), None => {} }
     }
-    Ok((levels[0].clone(), g1, levels[1].clone(), g2))
+    Ok((g.levels[0].to_string(), g1, g.levels[1].to_string(), g2))
 }
 
 /// Pearson correlation between two equal-length slices — delegates to

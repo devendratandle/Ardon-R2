@@ -3,7 +3,6 @@
 //! `bi_do_call`, thread them through unchanged); the factor, `data()` and
 //! predicate builtins at the end are implemented here.
 
-use std::sync::Arc;
 use r2_types::*;
 use crate::{gv, err};
 
@@ -70,27 +69,12 @@ pub(crate) fn bi_rank(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
 // ── factors, data sets, predicates ───────────────────────────────────
 
 pub(crate) fn bi_as_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // Levels are sorted (numbers numerically), NA is never a level, and a
+    // factor passes through untouched — see r2_types::factor.
     let val = gv(a, 0);
-    match &val {
-        RVal::Character(v, _) => {
-            let mut levels: Vec<Arc<str>> = Vec::new();
-            let codes: Vec<Option<u32>> = v.iter().map(|x| x.as_ref().map(|s| {
-                let idx = levels.iter().position(|l| l == s).unwrap_or_else(|| { levels.push(s.clone()); levels.len() - 1 });
-                idx as u32
-            })).collect();
-            Ok(RVal::Factor(Factor { codes, levels, ordered: false }))
-        }
-        RVal::Factor(..) => Ok(val), // already a factor
-        RVal::Numeric(v, _) => {
-            let mut levels: Vec<Arc<str>> = Vec::new();
-            let codes: Vec<Option<u32>> = v.iter().map(|x| x.map(|n| {
-                let s = Arc::from(fmt_num(n).as_str());
-                let idx = levels.iter().position(|l| *l == s).unwrap_or_else(|| { levels.push(s); levels.len() - 1 });
-                idx as u32
-            })).collect();
-            Ok(RVal::Factor(Factor { codes, levels, ordered: false }))
-        }
-        _ => err!(Type, "cannot coerce {} to factor", val.type_name()),
+    match Factor::from_values(&val) {
+        Some(f) => Ok(RVal::Factor(f)),
+        None => err!(Type, "cannot coerce {} to factor", val.type_name()),
     }
 }
 

@@ -59,6 +59,11 @@ to be worse than documented and was fixed here rather than scheduled.
   gives `"1" "2.5"`), and `nsmall` is treated as an exact decimal count
   rather than R's minimum. `print` of a numeric vector shares the first.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
+- **Strings sort by byte (the C locale)** in `order()`, factor levels,
+  `split`, `table` and the other grouping functions. R in a UTF-8 or
+  Windows locale collates case-insensitively first (`"a" "A" "b" "B"`;
+  R2 gives `"A" "B" "a" "b"`), so mixed-case factor levels can come out in
+  a different order than R's.
 - **No lazy promises.** Arguments are evaluated eagerly, so `substitute()`
   works but the captured expression must still be evaluable, and R's
   skip-unused-argument semantics don't apply.

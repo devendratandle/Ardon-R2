@@ -140,11 +140,13 @@ mod test_suite {
                 let df = inst.fields.get("parameter")
                     .and_then(|v| v.scalar_f64().ok().flatten()).unwrap();
                 assert!((df - 3.0).abs() < 1e-12, "expected df=3, got {}", df);
-                // Mean of (pre - post) differences. With pairs
-                // (10,12) (8,11) (11,14) (9,13), diffs = -2, -3, -3, -4 → mean = -3.
+                // Groups in sorted level order, "post" before "pre", so the
+                // differences are post - pre: pairs (12,10) (11,8) (14,11)
+                // (13,9) give 2, 3, 3, 4 → mean = 3, as
+                // t.test(post, pre, paired = TRUE) in R.
                 let est = inst.fields.get("estimate")
                     .and_then(|v| v.scalar_f64().ok().flatten()).unwrap();
-                assert!((est - (-3.0)).abs() < 1e-12, "expected mean diff=-3, got {}", est);
+                assert!((est - 3.0).abs() < 1e-12, "expected mean diff=3, got {}", est);
             }
             _ => panic!(),
         }

@@ -663,44 +663,31 @@ pub(crate) fn bi_transform(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     Ok(RVal::DataFrame(df))
 }
 pub(crate) fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    // R's `factor()` coerces numeric/integer/logical to character first.
-    // We do the same — converting to string keys and building the levels
-    // in order of first appearance.
-    let strs: Vec<Option<Arc<str>>> = match &gv(a, 0) {
-        RVal::Character(v, _) => v.clone(),
-        RVal::Numeric(v, _) => v.iter()
-            .map(|x| x.map(|n| Arc::from(fmt_num(n).as_str()))).collect(),
-        RVal::Integer(v, _) => v.iter()
-            .map(|x| x.map(|n| Arc::from(format!("{}", n).as_str()))).collect(),
-        RVal::Logical(v, _) => v.iter()
-            .map(|x| x.map(|b| Arc::from(if b { "TRUE" } else { "FALSE" }))).collect(),
-        other => return err!(Type, "factor() not supported for {}", other.type_name()),
+    let x = gv(a, 0);
+    let ordered = matches!(&x, RVal::Factor(f) if f.ordered);
+    let Some((labels, default_levels)) = factor_labels(&x) else {
+        return err!(Type, "factor() not supported for {}", x.type_name());
     };
-    // An explicit `levels = c(...)` argument wins and fixes both the set
-    // and the order (so the integer codes follow it). Without it, R's
-    // default is the sorted (alphabetical) unique values.
-    let levels: Vec<Arc<str>> = match a.iter().find(|x| x.name.as_deref() == Some("levels")) {
-        Some(lv) => match &lv.value {
-            RVal::Character(v, _) => v.iter().flatten().cloned().collect(),
-            RVal::Numeric(v, _) => v.iter().flatten().map(|n| Arc::from(fmt_num(*n).as_str())).collect(),
-            RVal::Integer(v, _) => v.iter().flatten().map(|n| Arc::from(format!("{}", n).as_str())).collect(),
-            RVal::Logical(v, _) => v.iter().flatten().map(|b| Arc::from(if *b { "TRUE" } else { "FALSE" })).collect(),
-            _ => Vec::new(),
-        },
-        None => {
-            let mut levels: Vec<Arc<str>> = Vec::new();
-            for x in strs.iter().flatten() {
-                if !levels.iter().any(|l| l == x) { levels.push(x.clone()); }
+    // An explicit `levels = c(...)` fixes both the set and the order (so the
+    // integer codes follow it); values outside it become NA. Without it the
+    // levels are R's default: sorted unique values, or for a factor its
+    // levels in use, in their order.
+    let levels: Vec<Arc<str>> = match (gn(a, "levels"), &x) {
+        (Some(lv), _) => {
+            let Some((given, _)) = factor_labels(&lv) else {
+                return err!(Type, "factor(): invalid 'levels' of type {}", lv.type_name());
+            };
+            let given: Vec<Arc<str>> = given.into_iter().flatten().collect(); // exclude = NA
+            let mut seen = std::collections::HashSet::new();
+            if let Some(i) = given.iter().position(|l| !seen.insert(l.clone())) {
+                return err!(Runtime, "factor level [{}] is duplicated", i + 1);
             }
-            levels.sort();
-            levels
+            given
         }
+        (None, RVal::Factor(f)) => return Ok(RVal::Factor(f.drop_unused())),
+        (None, _) => default_levels,
     };
-    // Values not present in `levels` (or NA) get code `None`, matching R.
-    let codes: Vec<Option<u32>> = strs.iter().map(|x| {
-        x.as_ref().and_then(|s| levels.iter().position(|l| l == s).map(|p| p as u32))
-    }).collect();
-    Ok(RVal::Factor(Factor { codes, levels, ordered: false }))
+    Ok(RVal::Factor(Factor::with_levels(&labels, levels, ordered)))
 }
 pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     match &gv(a,0) {

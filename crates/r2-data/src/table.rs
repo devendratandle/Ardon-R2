@@ -1,12 +1,9 @@
 //! `table()` — frequency counts. Phase R.7.
 //!
-//! Counts occurrences of each unique value. Side-effect: prints the
-//! count table to stdout. Returns a named `Integer` vector for
-//! Character / Factor inputs, or a scalar count of distinct values for
-//! Numeric (matches the engine's pre-migration behaviour).
+//! Counts occurrences of each level of `as.factor(x)`. Side-effect:
+//! prints the count table to stdout. Returns a named `Integer` vector.
 
-use r2_types::{Attrs, Character, ErrKind, EvalArg, Integer, R2Err, RVal};
-use std::sync::Arc;
+use r2_types::{Attrs, ErrKind, EvalArg, Factor, Integer, R2Err, RVal};
 
 #[inline]
 fn first_arg(a: &[EvalArg]) -> RVal {
@@ -14,79 +11,32 @@ fn first_arg(a: &[EvalArg]) -> RVal {
 }
 
 pub fn bi_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    match &first_arg(a) {
-        RVal::Character(v, _) => {
-            let mut counts: Vec<(String, usize)> = Vec::new();
-            for x in v {
-                if let Some(s) = x {
-                    if let Some(entry) = counts.iter_mut().find(|(k, _)| k == s.as_ref()) {
-                        entry.1 += 1;
-                    } else {
-                        counts.push((s.to_string(), 1));
-                    }
-                }
-            }
-            counts.sort_by(|a, b| a.0.cmp(&b.0));
-            for (k, _) in &counts { sout!("{:>12}", k); }
-            soutln!();
-            for (_, v) in &counts { sout!("{:>12}", v); }
-            soutln!();
-            let names: Vec<Character> = counts.iter().map(|(k, _)| Some(Arc::from(k.as_str()))).collect();
-            let vals: Vec<Integer> = counts.iter().map(|(_, v)| Some(*v as i32)).collect();
-            let mut attrs = Attrs::default();
-            attrs.names = Some(names.into_iter().filter_map(|x| x).collect());
-            Ok(RVal::Integer(vals.into(), attrs))
-        }
-        RVal::Numeric(v, _) => {
-            let mut counts: Vec<(String, usize)> = Vec::new();
-            for x in v {
-                let key = match x { Some(n) => format!("{}", n), None => "NA".into() };
-                if let Some(entry) = counts.iter_mut().find(|(k, _)| *k == key) {
-                    entry.1 += 1;
-                } else {
-                    counts.push((key, 1));
-                }
-            }
-            counts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            for (k, _) in &counts { sout!("{:>8}", k); }
-            soutln!();
-            for (_, v) in &counts { sout!("{:>8}", v); }
-            soutln!();
-            // Return the named counts vector (like the character path), so
-            // as.numeric(table(x)) / length(table(x)) work — not a scalar.
-            let names: Vec<Arc<str>> = counts.iter().map(|(k, _)| Arc::from(k.as_str())).collect();
-            let vals: Vec<Integer> = counts.iter().map(|(_, v)| Some(*v as i32)).collect();
-            let mut attrs = Attrs::default();
-            attrs.names = Some(names);
-            Ok(RVal::Integer(vals.into(), attrs))
-        }
-        RVal::Factor(f) => {
-            let mut counts: Vec<(String, usize)> = f.levels.iter().map(|l| (l.to_string(), 0)).collect();
-            for code in &f.codes {
-                if let Some(idx) = code {
-                    if let Some(entry) = counts.get_mut(*idx as usize) { entry.1 += 1; }
-                }
-            }
-            for (k, _) in &counts { sout!("{:>12}", k); }
-            soutln!();
-            for (_, v) in &counts { sout!("{:>12}", v); }
-            soutln!();
-            let names: Vec<Character> = counts.iter().map(|(k, _)| Some(Arc::from(k.as_str()))).collect();
-            let vals: Vec<Integer> = counts.iter().map(|(_, v)| Some(*v as i32)).collect();
-            let mut attrs = Attrs::default();
-            attrs.names = Some(names.into_iter().filter_map(|x| x).collect());
-            Ok(RVal::Integer(vals.into(), attrs))
-        }
-        _ => Err(R2Err {
-            msg: "table() works with character, numeric, or factor vectors. Try as.factor() first".into(),
+    let x = first_arg(a);
+    // One count per level of as.factor(x): sorted like R (numbers
+    // numerically), NA not counted, a factor's unused levels counted as 0.
+    let Some(f) = Factor::from_values(&x) else {
+        return Err(R2Err {
+            msg: "table() works with character, numeric, logical, or factor vectors. Try as.factor() first".into(),
             kind: ErrKind::Runtime,
-        }),
-    }
+        });
+    };
+    let mut counts = vec![0usize; f.levels.len()];
+    for c in f.codes.iter().flatten() { counts[*c as usize] += 1; }
+    let width = if matches!(x, RVal::Numeric(..) | RVal::Integer(..)) { 8 } else { 12 };
+    for k in &f.levels { sout!("{:>w$}", k, w = width); }
+    soutln!();
+    for v in &counts { sout!("{:>w$}", v, w = width); }
+    soutln!();
+    let vals: Vec<Integer> = counts.iter().map(|v| Some(*v as i32)).collect();
+    let mut attrs = Attrs::default();
+    attrs.names = Some(f.levels);
+    Ok(RVal::Integer(vals.into(), attrs))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn evarg(v: RVal) -> EvalArg { EvalArg { name: None, value: v } }
 

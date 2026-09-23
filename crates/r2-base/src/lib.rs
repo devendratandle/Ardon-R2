@@ -33,15 +33,8 @@ fn factorize_column(v: RVal, col: &str) -> RVal {
     if let RVal::DataFrame(mut df) = v {
         for (name, val) in df.columns.iter_mut() {
             if name.as_ref() == col {
-                if let RVal::Character(cv, _) = val {
-                    let mut levels: Vec<Arc<str>> = Vec::new();
-                    for s in cv.iter().flatten() {
-                        if !levels.iter().any(|l| l.as_ref() == s.as_ref()) { levels.push(s.clone()); }
-                    }
-                    levels.sort();
-                    let codes: Vec<Option<u32>> = cv.iter().map(|o| o.as_ref().and_then(|s|
-                        levels.iter().position(|l| l.as_ref() == s.as_ref()).map(|i| i as u32))).collect();
-                    *val = RVal::Factor(Factor { codes, levels, ordered: false });
+                if let RVal::Character(..) = val {
+                    if let Some(f) = Factor::from_values(val) { *val = RVal::Factor(f); }
                 }
             }
         }

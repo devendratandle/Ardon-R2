@@ -127,23 +127,19 @@ impl Engine {
         let (responses, groups) = self.formula_frame(lhs, rhs, df, env)?;
         if responses.len() != 1 || groups.len() != 1 { return Ok(None); }
         let y = self.as_reals(&responses[0].1)?;
-        let glabels: Vec<String> = match &groups[0].1 {
-            RVal::Factor(f) => f.codes.iter().map(|c|
-                c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string())).unwrap_or_default()).collect(),
-            RVal::Character(v, _) => v.iter().map(|x|
-                x.as_ref().map(|s| s.to_string()).unwrap_or_default()).collect(),
-            other => self.as_reals(other)?.iter().map(|x|
-                x.map(fmt_num).unwrap_or_default()).collect(),
+        // Boxes in level order of as.factor(g) — R's split(y, g): numbers
+        // sort numerically, a factor keeps its order and its empty levels
+        // (an empty slot), NA rows are dropped.
+        let Some(g) = Factor::from_values(&groups[0].1) else {
+            return err!(Type, "boxplot: cannot group by {}", groups[0].1.type_name());
         };
-        let mut levels: Vec<String> = Vec::new();
-        for l in &glabels { if !levels.contains(l) { levels.push(l.clone()); } }
-        levels.sort();
-        let mut ea: Vec<EvalArg> = Vec::new();
-        for lvl in &levels {
-            let vals: Vec<Real> = y.iter().zip(glabels.iter())
-                .filter(|(_, gl)| *gl == lvl).map(|(yi, _)| *yi).collect();
-            ea.push(EvalArg { name: Some(Arc::from(lvl.as_str())), value: RVal::Numeric(vals.into(), Attrs::default()) });
+        let mut by_level: Vec<Vec<Real>> = vec![Vec::new(); g.levels.len()];
+        for (yi, c) in y.iter().zip(g.codes.iter()) {
+            if let Some(c) = c { by_level[*c as usize].push(*yi); }
         }
+        let mut ea: Vec<EvalArg> = g.levels.into_iter().zip(by_level)
+            .map(|(lvl, vals)| EvalArg { name: Some(lvl), value: RVal::Numeric(vals.into(), Attrs::default()) })
+            .collect();
         // Carry styling args (main/col/…), skip formula + data.
         for arg in args.iter().skip(1) {
             if arg.name.as_deref() == Some("data") { continue; }

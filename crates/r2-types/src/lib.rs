@@ -33,17 +33,20 @@ pub mod infer;
 //   matrix   — Matrix (2D + linear algebra)
 //   tensor   — Tensor (N-dimensional, ML)
 //   expr     — Expr AST + call/arg/operator enums
+//   factor   — R's default factor levels (sorted) + level labels
 mod error;
 mod columnar;
 mod matrix;
 mod tensor;
 mod expr;
+mod factor;
 
 pub use error::*;
 pub use columnar::*;
 pub use matrix::*;
 pub use tensor::*;
 pub use expr::*;
+pub use factor::*;
 
 #[derive(Debug, Clone, Default)]
 pub struct Attrs {

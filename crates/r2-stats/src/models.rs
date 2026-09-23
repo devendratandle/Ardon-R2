@@ -14,7 +14,7 @@
 
 use crate::{fmt_pval, phi_upper, signif_stars};
 use r2_types::{
-    fmt_num, Attrs, ErrKind, EvalArg, Matrix, R2Err, RVal, TypeInstance,
+    factor_labels, fmt_num, Attrs, ErrKind, EvalArg, Factor, Matrix, R2Err, RVal, TypeInstance,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,8 +61,8 @@ fn val_to_str(v: &RVal) -> String {
 ///
 /// Numeric/Integer/Logical/Single columns pass through as a single f64
 /// column. Character and Factor columns expand into k-1 dummy columns
-/// using treatment contrasts: the first observed level becomes the
-/// reference (absorbed into the intercept) and the remaining levels each
+/// using treatment contrasts: the first level (sorted, for a character
+/// column) becomes the reference (absorbed into the intercept) and the remaining levels each
 /// get a 0/1 indicator column named `{base}{level}` — matching R's
 /// `model.matrix()` output when `contrasts = "contr.treatment"`.
 ///
@@ -71,38 +71,11 @@ pub fn model_matrix_expand(base_name: &str, col: &RVal)
     -> Result<(Vec<Vec<f64>>, Vec<String>), R2Err>
 {
     match col {
-        RVal::Character(v, _) => {
-            // Collect levels in first-appearance order (R's default).
-            let mut levels: Vec<String> = Vec::new();
-            let labels: Vec<Option<String>> = v.iter().map(|x| {
-                x.as_ref().map(|s| {
-                    let s = s.to_string();
-                    if !levels.contains(&s) { levels.push(s.clone()); }
-                    s
-                })
-            }).collect();
-            if levels.len() < 2 {
-                return Err(R2Err {
-                    msg: format!("contrasts can be applied only to factors with 2 or more levels (got '{}')", base_name),
-                    kind: ErrKind::Runtime,
-                });
-            }
-            let reference = &levels[0];
-            let mut cols = Vec::with_capacity(levels.len() - 1);
-            let mut names = Vec::with_capacity(levels.len() - 1);
-            for lvl in &levels[1..] {
-                let dummy: Vec<f64> = labels.iter().map(|l| match l {
-                    Some(s) if s == lvl => 1.0,
-                    Some(_)             => 0.0,
-                    None                => f64::NAN,
-                }).collect();
-                cols.push(dummy);
-                names.push(format!("{}{}", base_name, lvl));
-            }
-            // Suppress unused-binding lint while making clear that the
-            // reference level is intentionally dropped.
-            let _ = reference;
-            Ok((cols, names))
+        // A character predictor is as.factor()'d first, as in R's model
+        // frame: sorted levels, so the alphabetically first is the reference.
+        RVal::Character(..) => {
+            let (labels, levels) = factor_labels(col).unwrap_or_default();
+            model_matrix_expand(base_name, &RVal::Factor(Factor::with_levels(&labels, levels, false)))
         }
         RVal::Factor(f) => {
             if f.levels.len() < 2 {

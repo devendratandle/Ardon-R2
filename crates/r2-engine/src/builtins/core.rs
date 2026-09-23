@@ -144,6 +144,7 @@ pub(crate) fn bi_is_na(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
         RVal::Integer(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
         RVal::Logical(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
         RVal::Character(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
+        RVal::Factor(f) => Ok(RVal::Logical(f.codes.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
         _ => Ok(rbool(false)),
     }
 }
@@ -548,17 +549,17 @@ pub(crate) fn bi_map(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal
     Ok(RVal::List(out))
 }
 pub(crate) fn bi_split(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // One group per level of as.factor(f), in level order and including
+    // levels nobody falls in (R's drop = FALSE); NA keys belong to no group.
     let xr = e.as_reals(&gv(a,0))?;
-    let keys = str_vec(&gv(a,1));
-    if keys.is_empty() { return err!(Runtime, "split(): empty grouping factor"); }
-    let mut groups: Vec<(Arc<str>, Vec<Option<f64>>)> = Vec::new();
+    let g = gv(a,1);
+    let Some(f) = Factor::from_values(&g) else { return err!(Type, "split(): cannot group by {}", g.type_name()); };
+    if f.codes.is_empty() { return err!(Runtime, "split(): empty grouping factor"); }
+    let mut groups: Vec<Vec<Option<f64>>> = vec![Vec::new(); f.levels.len()];
     for (i, xv) in xr.iter().enumerate() {
-        let k = keys[i % keys.len()].clone().unwrap_or_else(|| Arc::from("NA"));
-        if let Some(g) = groups.iter_mut().find(|(gk, _)| *gk == k) { g.1.push(*xv); }
-        else { groups.push((k, vec![*xv])); }
+        if let Some(c) = f.codes[i % f.codes.len()] { groups[c as usize].push(*xv); }
     }
-    groups.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(RVal::List(groups.into_iter()
+    Ok(RVal::List(f.levels.into_iter().zip(groups)
         .map(|(k, v)| (Some(k), RVal::Numeric(v.into(), Attrs::default()))).collect()))
 }
 pub(crate) fn bi_stopifnot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

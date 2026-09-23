@@ -332,42 +332,39 @@ pub fn bi_apply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef)
 
 // ── tapply (split-by-index then apply) ──────────────────────────────
 
-fn to_string_vec(v: &RVal) -> Vec<String> {
-    match v {
-        RVal::Character(vs, _) => vs.iter().map(|x| x.as_ref().map(|s| s.to_string()).unwrap_or_default()).collect(),
-        RVal::Numeric(vs, _) => vs.iter().map(|x| x.map(|n| format!("{}", n)).unwrap_or_default()).collect(),
-        RVal::Integer(vs, _) => vs.iter().map(|x| x.map(|n| format!("{}", n)).unwrap_or_default()).collect(),
-        // Factor index is the COMMON tapply/aggregate case (group by a factor
-        // column); map codes → level labels. Without this, the `_` below
-        // returned empty and `tapply(x, factor, FUN)` produced nothing.
-        RVal::Factor(f) => f.codes.iter()
-            .map(|c| c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string())).unwrap_or_default()).collect(),
-        RVal::Logical(vs, _) => vs.iter()
-            .map(|x| x.map(|b| if b { "TRUE" } else { "FALSE" }.to_string()).unwrap_or_default()).collect(),
-        _ => vec![],
+/// `as.factor(index)` for the grouping functions: groups come in level
+/// order (sorted, like R) and NA keys belong to no group.
+fn group_factor(index: &RVal, what: &str) -> Result<Factor, R2Err> {
+    Factor::from_values(index).ok_or_else(|| R2Err {
+        msg: format!("{}: cannot group by {}", what, index.type_name()), kind: ErrKind::Type })
+}
+
+/// The elements of `x` in each level of `f`, one vector per level.
+fn group_values(x: &[Real], f: &Factor) -> Vec<Vec<Real>> {
+    let mut groups: Vec<Vec<Real>> = vec![Vec::new(); f.levels.len()];
+    for (i, c) in f.codes.iter().enumerate() {
+        if let Some(c) = c { groups[*c as usize].push(x.get(i).copied().unwrap_or(None)); }
     }
+    groups
 }
 
 pub fn bi_tapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let x = nth_arg(a, 0).as_reals()?;
-    let index = to_string_vec(&nth_arg(a, 1));
+    let index = group_factor(&nth_arg(a, 1), "tapply")?;
     let func = nth_arg(a, 2);
 
-    let mut groups: Vec<(String, Vec<Real>)> = Vec::new();
-    for (i, key) in index.iter().enumerate() {
-        if let Some(grp) = groups.iter_mut().find(|(k, _)| k == key) {
-            grp.1.push(x.get(i).copied().unwrap_or(None));
+    // FUN runs on the non-empty groups only; an empty level is NA, as in R.
+    let groups = group_values(&x, &index);
+    let group_inputs: Vec<RVal> = groups.iter().filter(|g| !g.is_empty())
+        .map(|vals| RVal::Numeric(vals.clone().into(), Attrs::default())).collect();
+    let mut computed = map_items(ctx, &func, &group_inputs, env)?.into_iter();
+
+    let results: Vec<(Option<Arc<str>>, RVal)> = index.levels.into_iter().zip(groups.iter())
+        .map(|(key, vals)| (Some(key), if vals.is_empty() {
+            RVal::Logical(vec![None].into(), Attrs::default())
         } else {
-            groups.push((key.clone(), vec![x.get(i).copied().unwrap_or(None)]));
-        }
-    }
-
-    let group_inputs: Vec<RVal> = groups.iter()
-        .map(|(_, vals)| RVal::Numeric(vals.clone().into(), Attrs::default())).collect();
-    let computed = map_items(ctx, &func, &group_inputs, env)?;
-
-    let results: Vec<(Option<Arc<str>>, RVal)> = groups.iter().zip(computed.into_iter())
-        .map(|((key, _), result)| (Some(Arc::from(key.as_str())), result))
+            computed.next().unwrap_or(RVal::Null)
+        }))
         .collect();
     Ok(RVal::List(results))
 }
@@ -382,17 +379,12 @@ fn arg_named(a: &[EvalArg], name: &str) -> Option<RVal> {
 
 pub fn bi_aggregate<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let x = nth_arg(a, 0).as_reals()?;
-    let by = to_string_vec(&arg_named(a, "by").unwrap_or_else(|| nth_arg(a, 1)));
+    let by = group_factor(&arg_named(a, "by").unwrap_or_else(|| nth_arg(a, 1)), "aggregate")?;
     let func = arg_named(a, "FUN").unwrap_or_else(|| nth_arg(a, 2));
 
-    let mut groups: Vec<(String, Vec<Real>)> = Vec::new();
-    for (i, key) in by.iter().enumerate() {
-        if let Some(grp) = groups.iter_mut().find(|(k, _)| k == key) {
-            grp.1.push(x.get(i).copied().unwrap_or(None));
-        } else {
-            groups.push((key.clone(), vec![x.get(i).copied().unwrap_or(None)]));
-        }
-    }
+    // Groups in level order; unlike tapply, empty levels are left out.
+    let groups: Vec<(Arc<str>, Vec<Real>)> = by.levels.iter().cloned()
+        .zip(group_values(&x, &by)).filter(|(_, g)| !g.is_empty()).collect();
 
     let group_inputs: Vec<RVal> = groups.iter()
         .map(|(_, vals)| RVal::Numeric(vals.clone().into(), Attrs::default())).collect();
@@ -401,7 +393,7 @@ pub fn bi_aggregate<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &Env
     let mut group_names: Vec<Character> = Vec::with_capacity(groups.len());
     let mut agg_values: Vec<Real> = Vec::with_capacity(groups.len());
     for ((key, _), result) in groups.iter().zip(computed.into_iter()) {
-        group_names.push(Some(Arc::from(key.as_str())));
+        group_names.push(Some(key.clone()));
         if let Ok(v) = result.scalar_f64() { agg_values.push(v); } else { agg_values.push(None); }
     }
     let _ = HashMap::<u8, u8>::new(); // suppress unused-import if HashMap not used
