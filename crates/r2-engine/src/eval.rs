@@ -14,7 +14,32 @@ use crate::na_bitmap::{combine_binary_output, combine_ternary_output, combine_un
 use crate::err;
 
 impl Engine {
+    /// Evaluate `expr` and record R's visibility of the result in
+    /// `self.visible`: assignments and loops are invisible; a call is
+    /// whatever `call_fn` decided (a builtin by name, a user function by
+    /// its body's last expression); blocks, `if`, `return` and friends
+    /// carry the visibility of what they evaluated; any other value is
+    /// visible.
     pub fn eval_in(&mut self, expr: &Expr, env: &EnvRef) -> Result<RVal, R2Err> {
+        let r = self.eval_node(expr, env)?;
+        match expr {
+            Expr::Assign { .. } | Expr::For { .. } | Expr::While { .. } | Expr::Repeat { .. }
+                | Expr::TypeDef { .. } | Expr::MethodDef(_) => self.visible = false,
+            Expr::Call { func, .. } => {
+                // calls that never reach call_fn (the NSE forms handled in
+                // eval_node) are still invisible if R's function is
+                if let Expr::Symbol(s) = func.as_ref() {
+                    if is_invisible_builtin(s) { self.visible = false; }
+                }
+            }
+            Expr::Block(_) | Expr::If { .. } | Expr::Match { .. } | Expr::Return(_)
+                | Expr::TryCatch { .. } | Expr::Pipe { .. } | Expr::Break | Expr::Next => {}
+            _ => self.visible = true,
+        }
+        Ok(r)
+    }
+
+    fn eval_node(&mut self, expr: &Expr, env: &EnvRef) -> Result<RVal, R2Err> {
         // Phase R.M.2 — check the global interrupt flag at the top of every
         // expression evaluation. This is the cheapest universal interruption
         // point in the engine: an atomic-load per Expr is below 1ns on any
@@ -784,7 +809,7 @@ impl Engine {
                     err!(Runtime, "'{}' not found in package '{}' (is it loaded?)", name, pkg)
                 }
             }
-            Expr::If { cond, then, else_ } => { let c = self.eval_in(cond, env)?; if self.truthy(&c)? { self.eval_in(then, env) } else if let Some(e) = else_ { self.eval_in(e, env) } else { Ok(RVal::Null) } }
+            Expr::If { cond, then, else_ } => { let c = self.eval_in(cond, env)?; if self.truthy(&c)? { self.eval_in(then, env) } else if let Some(e) = else_ { self.eval_in(e, env) } else { self.visible = false; Ok(RVal::Null) } }
             Expr::For { var, iter, body } => {
                 // Environments are interior-mutable: assignments write into
                 // the live env, so the body always sees prior writes through
@@ -1010,13 +1035,19 @@ impl Engine {
                     let pkg = &name[..sep];
                     let fname = &name[sep+2..];
                     if let Some(f) = self.registry.resolve_in_package(pkg, fname) {
-                        return f(self, args, env);
+                        let r = f(self, args, env);
+                        self.after_builtin(fname);
+                        return r;
                     } else {
                         return err!(Runtime, "'{}' not found in package '{}'", fname, pkg);
                     }
                 }
                 // Normal resolution through search order
-                if let Some((f, _pkg)) = self.registry.resolve(name.as_ref()) { f(self, args, env) }
+                if let Some((f, _pkg)) = self.registry.resolve(name.as_ref()) {
+                    let r = f(self, args, env);
+                    self.after_builtin(bare);
+                    r
+                }
                 else { err!(Runtime, "unknown function '{}'", name) }
             }
             RVal::Closure(cl) => {
@@ -1048,6 +1079,9 @@ impl Engine {
                         }
                     };
                     if let Some(h) = handle {
+                        // a compiled body obeys the same rule as an interpreted one:
+                        // visible unless its last expression is invisible
+                        self.visible = tail_is_visible(&cl.body);
                         // ── JIT NA-aware zero-copy bridge (Phase F.3 unlock) ──
                         //
                         // Pre-F.3, every JIT call did:
@@ -1380,4 +1414,64 @@ impl Engine {
         env.lookup("...").or_else(|| self.frames.last().and_then(|f| f.lookup("...")))
     }
 
+}
+
+// ── visibility ───────────────────────────────────────────────────────
+
+impl Engine {
+    /// A builtin just returned: its value is visible unless R's function
+    /// returns invisibly — except the functions that evaluate user code and
+    /// return what it returned (`eval`, `tryCatch`, `switch`, …), which
+    /// keep the visibility that code left, as they do in R.
+    fn after_builtin(&mut self, name: &str) {
+        if !is_passthrough_builtin(name) {
+            self.visible = !is_invisible_builtin(name);
+        }
+    }
+}
+
+/// Functions whose value R returns invisibly — their result is not
+/// auto-printed at the top level, and a user function ending in one of
+/// them returns invisibly too (`f <- function(v) print(v); f(1)` prints
+/// once). The hypothesis tests, `summary` and `str` are here because R2's
+/// versions print their report as they run; they leave this list when
+/// they return an object that prints itself instead.
+pub(crate) fn is_invisible_builtin(name: &str) -> bool {
+    matches!(name,
+        "invisible" | "print" | "cat" | "message" | "warning" | "writeLines" |
+        "library" | "require" | "detach" | "data" | "help" |
+        "set.seed" | "Sys.sleep" | "Sys.setenv" | "setwd" |
+        "assign" | "rm" | "remove" | "stopifnot" |
+        "write.csv" | "write.table" | "saveRDS" | "save" | "sink" |
+        "install.packages" | "uninstall" | "q" | "quit" |
+        "clear" | "cls" | "clr" |
+        "plot" | "hist" | "boxplot" | "barplot" | "lines" | "points" | "abline" | "legend" | "text" |
+        "save.plot" | "dev.view" | "dev.off" |
+        "system.time" |
+        "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
+        "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
+        "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
+        "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test" |
+        "summary" | "str")
+}
+
+/// Builtins that evaluate user code and return its value: they keep the
+/// visibility that code left (`tryCatch(invisible(1))` is invisible).
+fn is_passthrough_builtin(name: &str) -> bool {
+    matches!(name,
+        "eval" | "evalq" | "local" | "with" | "switch" | "do.call" | "Recall" |
+        "tryCatch" | "try" | "withCallingHandlers" | "suppressWarnings" | "suppressMessages")
+}
+
+/// Whether a function body's value is visible, read from its last
+/// expression without running it — for the JIT, which returns the value
+/// but not the visibility the interpreter would have left.
+fn tail_is_visible(body: &Expr) -> bool {
+    match body {
+        Expr::Block(stmts) => stmts.last().map(tail_is_visible).unwrap_or(false),
+        Expr::Assign { .. } | Expr::For { .. } | Expr::While { .. } | Expr::Repeat { .. } => false,
+        Expr::Return(v) => tail_is_visible(v),
+        Expr::Call { func, .. } => !matches!(func.as_ref(), Expr::Symbol(s) if is_invisible_builtin(s)),
+        _ => true,
+    }
 }

@@ -259,7 +259,16 @@ impl Parser {
             Token::NaN => { self.advance(); Ok(Expr::NumLit(f64::NAN)) }
             Token::Ident(s) => { self.advance(); Ok(Expr::Symbol(Arc::from(s.as_str()))) }
             Token::DotDotDot => { self.advance(); Ok(Expr::Dots) }
-            Token::LParen => { self.advance(); self.skip_nl(); let e = self.parse_expr()?; self.skip_nl(); self.expect(&Token::RParen)?; Ok(e) }
+            Token::LParen => {
+                self.advance(); self.skip_nl(); let e = self.parse_expr()?; self.skip_nl(); self.expect(&Token::RParen)?;
+                // `(x <- 5)`: in R, `(` is a function, and a call is visible, so
+                // the parenthesised assignment prints. Kept as a call to `(`
+                // for assignments only — grouping parentheses in arithmetic
+                // carry no meaning and stay out of the tree (and the JIT).
+                if matches!(e, Expr::Assign { .. }) {
+                    Ok(Expr::Call { func: Box::new(Expr::Symbol(Arc::from("("))), args: vec![CallArg { name: None, value: e }] })
+                } else { Ok(e) }
+            }
             Token::LBrace => self.parse_block(),
             Token::If => self.parse_if(),
             Token::For => self.parse_for(),

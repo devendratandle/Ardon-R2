@@ -425,6 +425,9 @@ pub fn deparse(e: &Expr) -> String {
             };
             format!("{} {} {}", deparse(lhs), opstr, deparse(rhs))
         }
+        Expr::Call { func, args } if matches!(func.as_ref(), Expr::Symbol(s) if s.as_ref() == "(") && args.len() == 1 => {
+            format!("({})", deparse(&args[0].value))
+        }
         Expr::Call { func, args } => {
             let fname = deparse(func);
             let parts: Vec<String> = args.iter().map(|a| match &a.name {

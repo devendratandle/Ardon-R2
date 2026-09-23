@@ -114,6 +114,12 @@ pub struct Engine {
     /// Capability policy — checked at builtin dispatch (see policy.rs).
     pub policy: Policy,
     pub mode: ErrorMode,
+    /// R's visibility: whether the value the last evaluation produced should
+    /// auto-print at the top level. Assignments, loops, `invisible()`,
+    /// `print()` and friends clear it; a function call leaves whatever its
+    /// body's last expression left. The consoles read it after each
+    /// top-level statement (`r2_console::should_autoprint`).
+    pub visible: bool,
     pub registry: FunctionRegistry,
     pub lib_paths: Vec<String>,                              // where to find packages on disk
     pub installed: HashMap<String, InstalledPkgInfo>,         // discovered packages
@@ -238,6 +244,7 @@ impl Engine {
             global_env: self.global_env.clone(),
             policy: self.policy,
             mode: self.mode,
+            visible: true,
             registry: self.registry.clone(),
             lib_paths: self.lib_paths.clone(),
             installed: self.installed.clone(),
@@ -297,7 +304,7 @@ impl Engine {
     pub fn new() -> Self {
         let global = Env::new_global();
         let mut e = Engine {
-            global_env: global, policy: Policy::allow_all(), mode: ErrorMode::Strict,
+            global_env: global, policy: Policy::allow_all(), mode: ErrorMode::Strict, visible: true,
             registry: FunctionRegistry::new(),
             lib_paths: {
                 let mut paths = vec![];

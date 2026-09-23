@@ -42,11 +42,6 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Language / evaluation
 
-- **No visibility flag.** R tracks whether a value is invisible as code
-  runs; R2 decides auto-printing by the SHAPE of the top-level statement.
-  So `f <- function(v) print(v); f(1)` prints twice (R: once), and a
-  function ending in `invisible(x)` still auto-prints. Needs a visibility
-  flag in the evaluator, read by both consoles.
 - **Hypothesis tests print when called**, not when their result is
   printed: `chisq.test(...)$p.value` shows the whole report before the
   value (R returns an `htest` object that prints only on display). The

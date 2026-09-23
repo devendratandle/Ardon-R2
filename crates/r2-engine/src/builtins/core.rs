@@ -326,7 +326,12 @@ pub(crate) fn bi_seq_along(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     Ok(rints(&(1..=n).collect::<Vec<_>>()))
 }
 pub(crate) fn bi_invisible(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    // Value passthrough. (Top-level auto-print suppression is a REPL concern.)
+    // The value, unchanged; `call_fn` marks it invisible (is_invisible_builtin).
+    Ok(gv(a,0))
+}
+/// `(x)` — R's parenthesis function: the value, made visible, so
+/// `(x <- 5)` prints what it assigned.
+pub(crate) fn bi_paren(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(gv(a,0))
 }
 pub(crate) fn signif_one(x: f64, d: i32) -> f64 {

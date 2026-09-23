@@ -202,7 +202,7 @@ pub(crate) fn run_source(
             Ok(val) => {
                 // Unified auto-print rule (shared with the CLI) — silent
                 // set + NULL-invisibility, so both consoles behave identically.
-                if r2_console::should_autoprint(&stmt, &val) {
+                if r2_console::should_autoprint(engine.visible, &val) {
                     buffer.lock().unwrap().push_output(&format!("{}", val));
                 }
             }

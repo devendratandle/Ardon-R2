@@ -149,7 +149,7 @@ fn run_script(path: &str) -> i32 {
     for stmt in &exprs {
         match engine.eval(stmt) {
             Ok(val) => {
-                if r2_console::should_autoprint(stmt, &val) {
+                if r2_console::should_autoprint(engine.visible, &val) {
                     println!("{}", val);
                 }
             }
@@ -421,7 +421,7 @@ fn repl_main() {
                     poller.stop();
                     match result {
                         Ok(Ok(val)) => {
-                            if r2_console::should_autoprint(stmt, &val) {
+                            if r2_console::should_autoprint(engine.visible, &val) {
                                 println!("{}", val);
                             }
                         }

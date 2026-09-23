@@ -70,6 +70,23 @@ for case_file in cases/*.R; do
     fi
 done
 
+# Whole-output cases: what a script PRINTS — auto-printing, print(),
+# cat() — must match R's output line for line. For behaviour that is about
+# what appears rather than about values (visibility, formatting).
+for case_file in output/*.R; do
+    [ -e "$case_file" ] || continue
+    name="output/$(basename "$case_file" .R)"
+    [ -n "$FILTER" ] && case "$name" in *"$FILTER"*) ;; *) continue;; esac
+    diff_report=$(diff <("$R2_BIN" "$case_file" 2>&1 | tr -d '\r') <("$RSCRIPT" "$case_file" 2>&1 | tr -d '\r'))
+    if [ -z "$diff_report" ]; then
+        pass=$((pass+1)); echo "PASS  $name"
+    else
+        fail=$((fail+1)); failed_cases="$failed_cases $name"
+        echo "FAIL  $name  (< r2, > R)"
+        printf '%s\n' "$diff_report" | head -20
+    fi
+done
+
 echo
 echo "differential: $pass passed, $fail failed"
 [ -n "$failed_cases" ] && echo "failed:$failed_cases"

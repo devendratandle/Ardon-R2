@@ -353,68 +353,32 @@ pub fn is_incomplete(s: &str) -> bool {
     p > 0 || b > 0 || k > 0
 }
 
-/// R's auto-print rule: a top-level expression's return value is
-/// auto-printed UNLESS the expression is an assignment, control
-/// flow, type definition, or a function whose side effect IS the
-/// print.
-pub fn is_silent(e: &Expr) -> bool {
-    if matches!(
-        e,
-        Expr::Assign { .. } | Expr::TypeDef { .. } | Expr::MethodDef(_)
-            | Expr::For { .. } | Expr::While { .. }
-    ) {
-        return true;
-    }
-    if let Expr::Call { func, .. } = e {
-        if let Expr::Symbol(s) = func.as_ref() {
-            return matches!(s.as_ref(),
-                "print" | "cat" | "message" | "warning" | "writeLines" | "invisible" |
-                "clear" | "cls" | "clr" |
-                "plot"  | "hist" | "boxplot" | "barplot" |
-                "lines" | "points" | "abline" | "legend" |
-                "library" | "detach" | "require" | "save.plot" | "dev.view" | "dev.off" |
-                "install.packages" | "uninstall" | "set.seed" | "Sys.sleep" |
-                // system.time prints its own timing table and returns NULL —
-                // suppress the redundant trailing NULL (matches R, whose
-                // proc_time prints as the value).
-                "system.time" |
-                // Hypothesis tests / ANOVA: these format and emit their
-                // own output as a side effect, then return an htest/model
-                // object whose Display is just "<… model>". Suppress the
-                // redundant auto-print of that return value.
-                "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
-                "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
-                "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
-                "poisson.test" | "anova" | "aov" | "manova" | "hotelling.test" |
-                // Inspectors that print their report and return NULL.
-                "summary" | "str");
-        }
-    }
-    false
-}
-
-/// The single auto-print rule shared by **every** frontend (CLI + GUI),
-/// so the r2dterminal behaves identically everywhere. A top-level result
-/// is printed unless the call is in the silent set OR the value is NULL
-/// (R's invisible return). Frontends must call this — never re-implement
-/// it — so the two consoles can't drift (the cause of the stray-`NULL`
-/// divergence). The only legitimate frontend differences are font/colour
-/// and the graphics device.
-pub fn should_autoprint(stmt: &Expr, val: &RVal) -> bool {
-    !is_silent(stmt) && !matches!(val, RVal::Null)
+/// R's auto-print rule, shared by **every** frontend (CLI + GUI) so the
+/// consoles cannot drift: a top-level result prints when the engine left
+/// it VISIBLE (`Engine::visible` — R's visibility: assignments, loops,
+/// `invisible()`, `print()` and the like are invisible, and a user
+/// function inherits its last expression's), and it is not NULL.
+///
+/// This used to decide from the SHAPE of the top-level statement — a
+/// top-level `print(x)` was silent, but `f <- function(v) print(v); f(1)`
+/// printed twice, because the call `f(1)` is not shaped like a print.
+/// Visibility follows the value through the call instead.
+///
+/// The NULL rule is R2's, not R's (R prints a visible NULL): some R2
+/// builtins still return NULL where R's return invisibly, and this keeps
+/// those from printing a stray `NULL`.
+pub fn should_autoprint(visible: bool, val: &RVal) -> bool {
+    visible && !matches!(val, RVal::Null)
 }
 
 #[cfg(test)]
 mod autoprint_tests {
     use super::*;
     #[test]
-    fn null_result_is_never_autoprinted() {
-        let sym = Expr::Symbol(std::sync::Arc::from("x"));
-        // A visible (non-NULL) top-level value prints…
-        assert!(should_autoprint(&sym, &r2_types::rnum(1.0)));
-        // …but a NULL return is suppressed (R's invisible) — this is the
-        // rule the GUI was missing, which leaked the stray `NULL`.
-        assert!(!should_autoprint(&sym, &RVal::Null));
+    fn visible_values_print_invisible_ones_and_null_do_not() {
+        assert!(should_autoprint(true, &r2_types::rnum(1.0)));
+        assert!(!should_autoprint(false, &r2_types::rnum(1.0)));
+        assert!(!should_autoprint(true, &RVal::Null));
     }
 }
 
