@@ -6,7 +6,7 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
-## Unreleased
+## v0.4.1 (September 2026)
 
 ### What prints, and when, is R's — 2026-09-23
 

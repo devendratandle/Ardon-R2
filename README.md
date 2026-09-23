@@ -5,7 +5,7 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.4.0.</em></p>
+<em>An AI-Assisted Project. v0.4.1.</em></p>
 
 ---
 

@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "r2-gui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "image",
  "r2-console",
@@ -3311,7 +3311,7 @@ version = "0.1.1"
 
 [[package]]
 name = "r2-panel"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "r2-engine",
  "r2-parser",
@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "r2-repl"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ctrlc",
  "ico",
