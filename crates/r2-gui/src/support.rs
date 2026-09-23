@@ -3,8 +3,6 @@
 //! home-directory selection. Pure moves out of main.rs (no behaviour
 //! change) so main.rs is just window setup + the event/paint loop.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use r2_console::{ConsoleBuffer, LineKind, OutputSink};
 use r2_engine::Engine;
@@ -181,7 +179,7 @@ pub(crate) fn run_source(
     src: &str,
     engine: &mut Engine,
     buffer: &Arc<Mutex<ConsoleBuffer>>,
-    quit_requested: &Rc<RefCell<bool>>,
+    quit_requested: &mut bool,
 ) {
     let stmts = match Parser::parse(src) {
         Ok(v)  => v,
@@ -195,7 +193,7 @@ pub(crate) fn run_source(
     let poller = EscPoller::start();
     for stmt in stmts {
         if r2_console::is_quit_call(&stmt) {
-            *quit_requested.borrow_mut() = true;
+            *quit_requested = true;
             break;
         }
         match engine.eval(&stmt) {
