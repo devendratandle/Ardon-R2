@@ -470,8 +470,9 @@ pub(crate) fn bi_lenient(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<R
 /// one more column than the author wrote, which then propagated into every
 /// `merge`, `ncol`, `names` and column loop downstream.
 ///
-/// R2 stores character columns as character already, so honouring the flag
-/// is a no-op; what matters is that it not become data. `row.names` is
+/// Character columns stay character (R >= 4.0's default);
+/// `stringsAsFactors = TRUE` makes them factors. Either way the flag never
+/// becomes a column. `row.names` is
 /// consumed properly, and the remaining control arguments are accepted and
 /// ignored so that valid R keeps working.
 pub(crate) fn bi_df(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
@@ -520,6 +521,17 @@ pub(crate) fn bi_df(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R
         let len = r2_types::rval_length(c);
         if len > 0 && len < nrow && nrow % len == 0 {
             *c = recycle_col(c, nrow);
+        }
+    }
+    // stringsAsFactors = TRUE: character columns become factors (sorted
+    // levels, as factor() gives them).
+    let as_factors = gn(a, "stringsAsFactors").and_then(|v| v.as_logicals().ok())
+        .and_then(|v| v.first().copied().flatten()) == Some(true);
+    if as_factors {
+        for (_, col) in cols.iter_mut() {
+            if let RVal::Character(..) = col {
+                if let Some(f) = Factor::from_values(col) { *col = RVal::Factor(f); }
+            }
         }
     }
     Ok(RVal::DataFrame(DataFrame { columns: cols, row_names }))
@@ -684,10 +696,30 @@ pub(crate) fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
             }
             given
         }
-        (None, RVal::Factor(f)) => return Ok(RVal::Factor(f.drop_unused())),
+        (None, RVal::Factor(f)) => f.drop_unused().levels,
         (None, _) => default_levels,
     };
-    Ok(RVal::Factor(Factor::with_levels(&labels, levels, ordered)))
+    let mut f = Factor::with_levels(&labels, levels, ordered);
+    if let Some(o) = gn(a, "ordered").and_then(|v| v.as_logicals().ok()).and_then(|v| v.first().copied().flatten()) {
+        f.ordered = o;
+    }
+    // `labels =` renames the levels: one label per level, or a single
+    // prefix numbered 1..k. Levels given the same label merge (R >= 3.4).
+    if let Some(lab) = gn(a, "labels") {
+        let given: Vec<Arc<str>> = factor_labels(&lab).map(|(l, _)| l.into_iter().flatten().collect()).unwrap_or_default();
+        let k = f.levels.len();
+        let names: Vec<Arc<str>> = if given.len() == k { given }
+            else if given.len() == 1 && k > 1 { (1..=k).map(|i| Arc::from(format!("{}{}", given[0], i).as_str())).collect() }
+            else { return err!(Runtime, "invalid 'labels'; length {} should be 1 or {}", given.len(), k) };
+        let mut merged: Vec<Arc<str>> = Vec::new();
+        let remap: Vec<u32> = names.iter().map(|n| match merged.iter().position(|m| m == n) {
+            Some(p) => p as u32,
+            None => { merged.push(n.clone()); merged.len() as u32 - 1 }
+        }).collect();
+        f.codes = f.codes.iter().map(|c| c.map(|c| remap[c as usize])).collect();
+        f.levels = merged;
+    }
+    Ok(RVal::Factor(f))
 }
 pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     match &gv(a,0) {

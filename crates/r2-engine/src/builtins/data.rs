@@ -122,6 +122,9 @@ pub(crate) fn bi_data(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 pub(crate) fn bi_is_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(rbool(matches!(gv(a, 0), RVal::Factor(_))))
 }
+pub(crate) fn bi_is_ordered(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(rbool(matches!(gv(a, 0), RVal::Factor(f) if f.ordered)))
+}
 
 pub(crate) fn bi_is_matrix(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(rbool(matches!(gv(a, 0), RVal::Matrix(_))))

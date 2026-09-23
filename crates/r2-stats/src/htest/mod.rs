@@ -47,6 +47,11 @@ fn rnum(n: f64) -> RVal { RVal::Numeric(vec![Some(n)].into(), Attrs::default()) 
 
 #[inline]
 fn rnums(v: &[f64]) -> RVal { RVal::Numeric(v.iter().map(|x| Some(*x)).collect(), Attrs::default()) }
+/// Numbers with names, as R labels an htest `estimate` ("mean of x").
+fn named(v: &[f64], names: &[&str]) -> RVal {
+    RVal::Numeric(v.iter().map(|x| Some(*x)).collect(),
+        Attrs { names: Some(names.iter().map(|n| std::sync::Arc::from(*n)).collect()), ..Default::default() })
+}
 
 #[inline]
 fn rstr(s: &str) -> RVal { RVal::Character(vec![Some(Arc::from(s))], Attrs::default()) }

@@ -180,17 +180,30 @@ pub fn bi_sapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
     let func = nth_arg(a, 1);
     let items = x.to_items()?;
     let results = map_items(ctx, &func, &items, env)?;
-    // Simplify to numeric vector if all results are scalar Numeric.
-    let mut nums = Vec::new();
-    let mut all_num = true;
-    for r in &results {
-        match r {
-            RVal::Numeric(v, _) if v.len() == 1 => nums.push(v[0]),
-            _ => { all_num = false; break; }
+    // R's simplification: length-1 atomic results combine as c() would
+    // (logical < integer < double < character), named by a character X.
+    let use_names = !matches!(arg_named(a, "USE.NAMES"), Some(RVal::Logical(v, _)) if v.first() == Some(&Some(false)));
+    match simplify_scalars(&results)? {
+        Some(mut v) => {
+            if let (true, RVal::Character(xs, _)) = (use_names, &x) {
+                let ns: Vec<Arc<str>> = xs.iter().map(|s| s.clone().unwrap_or_else(|| Arc::from("NA"))).collect();
+                if let RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) = &mut v {
+                    if at.names.is_none() { at.names = Some(ns); }
+                }
+            }
+            Ok(v)
         }
+        None => Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())),
     }
-    if all_num { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-    else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) }
+}
+
+/// `c(results...)` when every result is a length-1 atomic vector, else None.
+fn simplify_scalars(results: &[RVal]) -> Result<Option<RVal>, R2Err> {
+    let scalar = |r: &RVal| matches!(r, RVal::Numeric(..) | RVal::Integer(..) | RVal::Logical(..) | RVal::Character(..))
+        && rval_length(r) == 1;
+    if results.is_empty() || !results.iter().all(scalar) { return Ok(None); }
+    let args: Vec<EvalArg> = results.iter().map(|r| EvalArg { name: None, value: r.clone() }).collect();
+    crate::concat::bi_c(&args).map(Some)
 }
 
 // ── vapply (type-strict sapply) ─────────────────────────────────────
@@ -201,17 +214,9 @@ pub fn bi_vapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
     // a[2] is FUN.VALUE — accepted but not enforced in current impl.
     let items = x.to_items()?;
     let results = map_items(ctx, &func, &items, env)?;
-    let mut nums = Vec::with_capacity(results.len());
-    for r in &results {
-        match r {
-            RVal::Numeric(v, _) if v.len() == 1 => nums.push(v[0]),
-            other => return Err(R2Err {
-                msg: format!("vapply: FUN returned non-scalar of type '{}'", other.type_name()),
-                kind: ErrKind::Type,
-            }),
-        }
-    }
-    Ok(RVal::Numeric(nums.into(), Attrs::default()))
+    if results.is_empty() { return Ok(RVal::Numeric(Vec::<Real>::new().into(), Attrs::default())); }
+    simplify_scalars(&results)?.ok_or_else(|| R2Err {
+        msg: "vapply: values must be length 1".into(), kind: ErrKind::Type })
 }
 
 // ── mapply (multivariate apply) ─────────────────────────────────────
@@ -366,6 +371,16 @@ pub fn bi_tapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
             computed.next().unwrap_or(RVal::Null)
         }))
         .collect();
+    // Scalar results simplify to a vector named by the levels, as R's
+    // tapply returns a 1-d array; anything else stays a list.
+    let values: Vec<RVal> = results.iter().map(|(_, v)| v.clone()).collect();
+    if let Some(mut v) = simplify_scalars(&values)? {
+        let names: Vec<Arc<str>> = results.iter().map(|(k, _)| k.clone().unwrap_or_else(|| Arc::from(""))).collect();
+        if let RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) = &mut v {
+            at.names = Some(names);
+        }
+        return Ok(v);
+    }
     Ok(RVal::List(results))
 }
 

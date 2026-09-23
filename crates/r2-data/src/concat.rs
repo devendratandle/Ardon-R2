@@ -1,9 +1,11 @@
 //! `c()` — concatenation. Phase R.2 step 2.
 //!
 //! Mode selection (matches r2-engine semantics bit-for-bit):
-//!   - If any argument is `Character`, all args coerce to character;
-//!     numeric values format via Display.
-//!   - Otherwise, all args coerce to numeric via `RVal::as_reals()`.
+//!   - If any argument is `Character`, all args coerce to character as
+//!     `as.character` writes them (NA stays NA; a factor gives its codes).
+//!   - Otherwise the narrowest of logical < integer < double that holds
+//!     every argument (`NA` is logical, so `c(TRUE, NA)` stays logical).
+//!   - Names come from the arguments' names and their elements' names.
 //!
 //! Pure — no Engine reference; uses RVal methods (Phase R.1 step 2).
 
@@ -11,20 +13,29 @@ use r2_types::*;
 use std::sync::Arc;
 
 pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
+    // `recursive =` / `use.names =` are c()'s own options, not elements.
+    let owned: Vec<EvalArg>;
+    let args = if args.iter().any(|a| matches!(a.name.as_deref(), Some("recursive" | "use.names"))) {
+        owned = args.iter().filter(|a| !matches!(a.name.as_deref(), Some("recursive" | "use.names"))).cloned().collect();
+        &owned[..]
+    } else { args };
     let has_str = args.iter().any(|a| matches!(&a.value, RVal::Character(..)));
     if has_str {
         // Character coercion path
         let mut s: Vec<Character> = Vec::new();
         for a in args {
             match &a.value {
-                RVal::Character(v, _) => s.extend(v.clone()),
-                RVal::Numeric(v, _) => s.extend(
-                    v.iter().map(|x| x.map(|n| Arc::from(format!("{}", n).as_str())))
-                ),
-                _ => {} // silently drop non-coercible (matches engine behavior)
+                // A factor contributes its integer codes, as R's c() does.
+                RVal::Factor(f) => s.extend(f.codes.iter().map(|c| c.map(|c| Arc::from((c + 1).to_string().as_str())))),
+                RVal::Null => {}
+                // Everything atomic as as.character writes it; NA stays NA.
+                other => match factor_labels(other) {
+                    Some((labels, _)) => s.extend(labels),
+                    None => return Err(R2Err { msg: format!("c(): cannot combine {} with character", other.type_name()), kind: ErrKind::Type }),
+                },
             }
         }
-        return Ok(RVal::Character(s, Attrs::default()));
+        return Ok(RVal::Character(s, names_of(args)));
     }
     // R's c() type hierarchy: logical < integer < double. Preserve the
     // narrowest type so `c(TRUE,FALSE)` stays logical (which()/all() need
@@ -35,7 +46,7 @@ pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
     if only_lgl {
         let mut lg: Vec<Logical> = Vec::new();
         for a in args { if let RVal::Logical(v, _) = &a.value { lg.extend(v.iter().cloned()); } }
-        return Ok(RVal::Logical(lg.into(), Attrs::default()));
+        return Ok(RVal::Logical(lg.into(), names_of(args)));
     }
     let only_int = args.iter().all(|a| matches!(&a.value, RVal::Integer(..) | RVal::Logical(..) | RVal::Null))
         && args.iter().any(|a| matches!(&a.value, RVal::Integer(..)));
@@ -48,7 +59,7 @@ pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
                 _ => {}
             }
         }
-        return Ok(RVal::Integer(ints.into(), Attrs::default()));
+        return Ok(RVal::Integer(ints.into(), names_of(args)));
     }
 
     // Numeric path — RVal::as_reals handles Numeric/Integer/Logical/Matrix
@@ -71,7 +82,35 @@ pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
             _ => None,
         }
     };
-    Ok(RVal::Numeric(nums.into(), Attrs { class: shared_class, ..Default::default() }))
+    Ok(RVal::Numeric(nums.into(), Attrs { class: shared_class, ..names_of(args) }))
+}
+
+/// The names of `c(...)`'s result: an argument's name for a length-1
+/// element (`c(a = 1)`), `name1`, `name2`, ... for a longer one, and the
+/// element's own names otherwise ("" where there are none). No names at
+/// all when nothing is named.
+fn names_of(args: &[EvalArg]) -> Attrs {
+    let own = |v: &RVal| match v {
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) => at.names.clone(),
+        _ => None,
+    };
+    if args.iter().all(|a| a.name.is_none() && own(&a.value).is_none()) { return Attrs::default(); }
+    let mut names: Vec<Arc<str>> = Vec::new();
+    for a in args {
+        let n = rval_length(&a.value);
+        let inner = own(&a.value);
+        for i in 0..n {
+            let e = inner.as_ref().and_then(|ns| ns.get(i).cloned()).filter(|s| !s.is_empty());
+            names.push(match (&a.name, e) {
+                (Some(p), Some(e)) => Arc::from(format!("{}.{}", p, e).as_str()),
+                (Some(p), None) if n == 1 => p.clone(),
+                (Some(p), None) => Arc::from(format!("{}{}", p, i + 1).as_str()),
+                (None, Some(e)) => e,
+                (None, None) => Arc::from(""),
+            });
+        }
+    }
+    Attrs { names: Some(names), ..Default::default() }
 }
 
 #[cfg(test)]

@@ -352,6 +352,10 @@ impl Engine {
         e.global_env.set(Arc::from("pi"),  scalar(std::f64::consts::PI));
         e.global_env.set(Arc::from("Inf"), scalar(f64::INFINITY));
         e.global_env.set(Arc::from("NaN"), scalar(f64::NAN));
+        // Typed missing values (`NA` itself is a logical literal).
+        e.global_env.set(Arc::from("NA_real_"), RVal::Numeric(vec![None].into(), Attrs::default()));
+        e.global_env.set(Arc::from("NA_integer_"), RVal::Integer(vec![None].into(), Attrs::default()));
+        e.global_env.set(Arc::from("NA_character_"), RVal::Character(vec![None], Attrs::default()));
         e
     }
 

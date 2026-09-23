@@ -52,6 +52,7 @@ is.logical(x)       Test if logical
 is.null(x)          Test if NULL
 is.data.frame(x)    Test if data.frame
 is.factor(x)        Test if factor
+is.ordered(x)       Test if ordered factor
 is.matrix(x)        Test if matrix
 TRUE/FALSE/T/F      Logical constants
 NA                  Missing value

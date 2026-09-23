@@ -56,7 +56,8 @@ impl Engine {
         match expr {
             Expr::NumLit(n) => Ok(rnum(*n)), Expr::IntLit(n) => Ok(rint(*n)),
             Expr::StrLit(s) => Ok(rstr(s)), Expr::BoolLit(b) => Ok(rbool(*b)),
-            Expr::NaLit => Ok(rna()), Expr::NullLit => Ok(RVal::Null),
+            // `NA` is a logical NA in R; c()/arithmetic widen it as needed.
+            Expr::NaLit => Ok(RVal::Logical(vec![None].into(), Attrs::default())), Expr::NullLit => Ok(RVal::Null),
             Expr::FStringLit(parts) => { let mut r = String::new(); for p in parts { match p { FStringPart::Literal(s) => r.push_str(s), FStringPart::Expr(e) => { let v = self.eval_in(e, env)?; r.push_str(&val_to_str(&v)); } } } Ok(rstr(&r)) }
             Expr::Symbol(name) => {
                 // 1. Current call frame — locals + args live in the frame env,

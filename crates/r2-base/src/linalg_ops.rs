@@ -68,7 +68,7 @@ fn rnums(v: &[f64]) -> RVal {
 
 /// `matrix(data, nrow=, ncol=)` — fill a Matrix with the given data.
 pub fn bi_matrix(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let data: Vec<f64> = gv(a, 0).as_reals()?.into_iter().filter_map(|x| x).collect();
+    let data: Vec<f64> = gv(a, 0).as_reals()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect(); // NA is NaN in a matrix; dropping it shifted every later cell
     // R's matrix(data, nrow, ncol, byrow=FALSE) — nrow/ncol accept BOTH
     // positional and named forms. Previously we only honoured named args,
     // so `matrix(rnorm(1e6), 1000, 1000)` silently became 1e6×1.
@@ -91,23 +91,23 @@ pub fn bi_matrix(a: &[EvalArg]) -> Result<RVal, R2Err> {
         (None, None) => (data.len(), 1),
     };
     check_alloc(nr * nc, 8)?;
-    let mut d = if byrow {
+    let d = if byrow {
         // R's byrow=TRUE: fill row-major, store column-major (R's convention).
         let mut out = vec![0.0; nr * nc];
         for i in 0..nr {
             for j in 0..nc {
                 let src = i * nc + j;
-                if src < data.len() { out[j * nr + i] = data[src]; }
+                if !data.is_empty() { out[j * nr + i] = data[src % data.len()]; }
             }
         }
         out
     } else {
-        // Column-major fill (R default): values map directly.
-        let mut v = data;
-        v.resize(nr * nc, 0.0);
-        v
+        // Column-major fill (R default); data recycles, so matrix(1, 2, 2)
+        // is all ones (padding with 0 made it 1 0 0 0).
+        if data.is_empty() { vec![f64::NAN; nr * nc] }
+        else { (0..nr * nc).map(|k| data[k % data.len()]).collect() }
     };
-    let _ = &mut d; // silence unused-mut warning when byrow branch yields vec without mutation
+
     Ok(RVal::Matrix(Matrix::new(d, nr, nc)))
 }
 

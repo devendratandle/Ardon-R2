@@ -52,18 +52,19 @@ to be worse than documented and was fixed here rather than scheduled.
   called**, so `summary(fit)$coefficients` shows the whole summary first.
   The hypothesis tests were fixed by keeping their report on the result;
   these need the same treatment.
-- **`sapply` over an integer vector returns a list** where R simplifies
-  (`sapply(1:3, function(i) i)`); over doubles it simplifies correctly.
 - **`format()` of a vector formats each element on its own**: R pads a
   vector to common decimals (`format(c(1, 2.5))` is `"1.0" "2.5"`, R2
   gives `"1" "2.5"`), and `nsmall` is treated as an exact decimal count
-  rather than R's minimum. `print` of a numeric vector shares the first.
+  rather than R's minimum. `print` pads to a common width like R but
+  shares the missing common decimals (`[1] 1.0 2.5` prints `[1]   1 2.5`).
+- `sapply` simplifies length-1 results to a vector; equal-length longer
+  results stay a list where R builds a matrix.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
-- **Strings sort by byte (the C locale)** in `order()`, factor levels,
-  `split`, `table` and the other grouping functions. R in a UTF-8 or
-  Windows locale collates case-insensitively first (`"a" "A" "b" "B"`;
-  R2 gives `"A" "B" "a" "b"`), so mixed-case factor levels can come out in
-  a different order than R's.
+- **String collation follows R on Windows / English locales** (letters
+  case- and accent-blind first, then accents, then lowercase first;
+  punctuation before digits before letters), for Latin letters. Scripts
+  outside Latin-1 sort by code point, and R in the C locale (byte order)
+  will differ.
 - **No lazy promises.** Arguments are evaluated eagerly, so `substitute()`
   works but the captured expression must still be evaluable, and R's
   skip-unused-argument semantics don't apply.

@@ -108,17 +108,32 @@ pub(crate) fn quoted_vec(strs: &[String]) -> String {
     }
     s
 }
-pub(crate) fn bi_cat(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+/// One string per element as `cat` writes it: a matrix column by column
+/// (NA for its NaN cells), a factor as its codes, a list element by
+/// element, NULL as nothing.
+fn cat_elems(v: &RVal) -> Vec<String> {
+    match v {
+        RVal::Null => Vec::new(),
+        RVal::Matrix(m) => m.data.iter().map(|x| if x.is_nan() { "NA".into() } else { fmt_num(*x) }).collect(),
+        RVal::Factor(f) => f.codes.iter().map(|c| c.map_or("NA".into(), |c| (c + 1).to_string())).collect(),
+        RVal::List(items) => items.iter().flat_map(|(_, x)| cat_elems(x)).collect(),
+        RVal::Numeric(..) | RVal::Single(..) | RVal::Integer(..) | RVal::Character(..) | RVal::Logical(..) =>
+            (0..rval_length(v)).map(|i| val_to_str(&take(v, &[i]))).collect(),
+        other => vec![val_to_str(other)],
+    }
+}
+
+pub(crate) fn bi_cat(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let sep = gn(a,"sep").map(|v| val_to_str(&v)).unwrap_or(" ".into());
+    // `sep` goes between every ELEMENT, not only between arguments:
+    // cat(c(1, 2), sep = ",") is "1,2".
     let parts: Vec<String> = a.iter()
         .filter(|x| x.name.as_ref().map(|n| n.as_ref()) != Some("sep"))
-        .map(|x| val_to_str(&x.value))
+        .flat_map(|x| cat_elems(&x.value))
         .collect();
-    // cat() does NOT auto-newline (R behavior). The sink's contract
-    // is one logical "output chunk" per call — if the assembled text
-    // has no trailing newline, the sink may or may not add one
-    // depending on impl. StdoutSink adds one for line-buffered I/O.
-    e.emit_output(&parts.join(&sep));
+    // cat() writes exactly its text: no newline is added (R behaviour), so
+    // cat("a"); cat("b\n") prints "ab". emit_output would append one.
+    r2_types::out::rout(&parts.join(&sep));
     Ok(RVal::Null)
 }
 /// `clear()` / `cls()` — clear the console. Routes through the
@@ -145,6 +160,9 @@ pub(crate) fn bi_is_na(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
         RVal::Logical(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
         RVal::Character(v,_) => Ok(RVal::Logical(v.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
         RVal::Factor(f) => Ok(RVal::Logical(f.codes.iter().map(|x| Some(x.is_none())).collect(), Attrs::default())),
+        // A numeric matrix stores NA as NaN; the result keeps the shape.
+        RVal::Matrix(m) => Ok(RVal::Logical(m.data.iter().map(|x| Some(x.is_nan())).collect::<Vec<Logical>>().into(),
+            Attrs { dim: Some(vec![m.nrow, m.ncol]), ..Default::default() })),
         _ => Ok(rbool(false)),
     }
 }
@@ -277,7 +295,7 @@ pub(crate) fn bi_sqrt(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 }
 // R rounds half to EVEN (IEC 60559 banker's rounding): round(2.5)=2, round(3.5)=4.
 pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = if a.len() > 1 { e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) } else { 0.0 } as i32; let f = 10f64.powi(d); let out: Vec<Option<f64>> = v.into_iter().map(|x| x.map(|n| (n*f).round_ties_even()/f)).collect(); Ok(math1_wrap(&gv(a,0), out)) }
-pub(crate) fn bi_sort(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let mut n: Vec<f64> = v.into_iter().filter_map(|x| x).collect(); n.sort_by(|a,b| a.partial_cmp(b).unwrap()); Ok(rnums(&n)) }
+pub(crate) fn bi_sort(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::order::bi_sort(a) }
 pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) {
     RVal::Numeric(v,_)   => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())),
     RVal::Integer(v,_)   => Ok(RVal::Integer(v.iter().rev().cloned().collect(), Attrs::default())),
@@ -367,17 +385,26 @@ pub(crate) fn bi_set_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 }
 pub(crate) fn p_extreme(e: &mut Engine, a: &[EvalArg], want_max: bool) -> Result<RVal, R2Err> {
     let mut vecs = Vec::new();
+    let mut na_rm = false;
     for arg in a {
-        if arg.name.as_deref() == Some("na.rm") { continue; }
+        if arg.name.as_deref() == Some("na.rm") {
+            na_rm = e.as_logicals(&arg.value)?.first().copied().flatten() == Some(true);
+            continue;
+        }
         vecs.push(e.as_reals(&arg.value)?);
     }
     let n = vecs.iter().map(|v| v.len()).max().unwrap_or(0);
+    // Without na.rm, an NA (or NaN) anywhere in a position makes it NA (NaN).
     let out: Vec<Option<f64>> = (0..n).map(|i| {
         let mut acc: Option<f64> = None;
         for v in &vecs {
             if v.is_empty() { continue; }
-            if let Some(x) = v[i % v.len()] {
-                acc = Some(match acc { Some(a2) => if want_max { a2.max(x) } else { a2.min(x) }, None => x });
+            match v[i % v.len()] {
+                None if !na_rm => return None,
+                Some(x) if x.is_nan() && !na_rm => return Some(f64::NAN),
+                Some(x) if !x.is_nan() =>
+                    acc = Some(match acc { Some(a2) => if want_max { a2.max(x) } else { a2.min(x) }, None => x }),
+                _ => {}
             }
         }
         acc

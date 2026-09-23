@@ -50,6 +50,16 @@ impl Engine {
             "lm" | "glm" | "t.test" | "rpart" | "rf" | "gbm" | "cv" | "aov" | "manova"
                 | "lmer" | "aggregate" | "boxplot" => return self.formula_call(fname, func, args, env),
             "system.time" if !args.is_empty() => self.nse_system_time(&args[0].value, env)?,
+            // table(x) prints `x` as its header line (R's deparse.level = 1):
+            // a bare variable passes its name on as `dnn`.
+            "table" if args.len() == 1 && args[0].name.is_none() && matches!(args[0].value, Expr::Symbol(_)) => {
+                let Expr::Symbol(name) = &args[0].value else { return Ok(None) };
+                let ea = vec![
+                    EvalArg { name: None, value: self.eval_in(&args[0].value, env)? },
+                    EvalArg { name: Some(Arc::from("dnn")), value: RVal::Character(vec![Some(name.clone())], Attrs::default()) },
+                ];
+                self.call_fn(&RVal::BuiltinFn(Arc::from("table")), &ea, env)?
+            }
             _ => return Ok(None),
         };
         Ok(Some(v))

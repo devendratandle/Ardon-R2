@@ -407,6 +407,8 @@ fn paste_elems(v: &RVal) -> Vec<String> {
         RVal::Logical(l, _)   => l.as_vec().iter().map(|x| x.map(|b| if b { "TRUE" } else { "FALSE" }.to_string()).unwrap_or_else(|| "NA".into())).collect(),
         RVal::Factor(f)       => f.codes.iter().map(|c| c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string())).unwrap_or_else(|| "NA".into())).collect(),
         RVal::Null            => Vec::new(),
+        // A matrix pastes its cells column by column; NaN cells are NA.
+        RVal::Matrix(m)       => m.data.iter().map(|x| if x.is_nan() { "NA".into() } else { r2_types::fmt_num(*x) }).collect(),
         other                 => vec![val_to_str(other)],
     }
 }
@@ -605,6 +607,8 @@ fn sprintf_one(fmt: &str, args: &[RVal], k: usize) -> Result<String, R2Err> {
             ('s', SpVal::Num(n)) => match n { Some(n) => { let s = num_as_character(n); match prec { Some(p) => s.chars().take(p).collect(), None => s } } None => "NA".into() },
             (_, SpVal::Str(_)) => return Err(runtime_err(&format!("invalid format '%{conv}'; use format %s for character objects"))),
             (c, SpVal::Lgl(b)) if matches!(c, 'd' | 'i') => match b { Some(b) => format!("{}{}", sign(false), b as i32), None => { numeric_special = true; "NA".into() } },
+            // A logical NA (the `NA` literal) fits any numeric format.
+            (_, SpVal::Lgl(None)) => { numeric_special = true; "NA".into() }
             (_, SpVal::Lgl(_)) => return Err(runtime_err(&format!("invalid format '%{conv}'; use format %d or %i for logical objects"))),
             (_, SpVal::Num(None)) => { numeric_special = true; "NA".into() }
             (_, SpVal::Num(Some(n))) if !n.is_finite() => {

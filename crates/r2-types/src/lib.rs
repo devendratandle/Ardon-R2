@@ -34,12 +34,16 @@ pub mod infer;
 //   tensor   — Tensor (N-dimensional, ML)
 //   expr     — Expr AST + call/arg/operator enums
 //   factor   — R's default factor levels (sorted) + level labels
+//   sort     — R's orderings: collation, sort/order keys, unique keys
+//   replace  — `x[i] <- v`: subscripts, growth, type widening
 mod error;
 mod columnar;
 mod matrix;
 mod tensor;
 mod expr;
 mod factor;
+mod sort;
+mod replace;
 
 pub use error::*;
 pub use columnar::*;
@@ -47,6 +51,8 @@ pub use matrix::*;
 pub use tensor::*;
 pub use expr::*;
 pub use factor::*;
+pub use sort::*;
+pub use replace::*;
 
 #[derive(Debug, Clone, Default)]
 pub struct Attrs {
@@ -513,42 +519,41 @@ impl fmt::Display for RVal {
         match self {
             RVal::Null => write!(f, "NULL"),
             RVal::Numeric(v, attrs) => {
-                // If vector has names, display R-style: names on top, values below
-                if let Some(names) = &attrs.names {
-                    if names.len() == v.len() && !names.is_empty() {
-                        let strs: Vec<String> = v.iter().map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect();
-                        let widths: Vec<usize> = names.iter().zip(strs.iter()).map(|(n, s)| n.len().max(s.len()) + 1).collect();
-                        // Names row
-                        for (i, name) in names.iter().enumerate() { write!(f, "{:>w$}", name, w = widths[i])?; }
-                        writeln!(f)?;
-                        // Values row
-                        for (i, s) in strs.iter().enumerate() { write!(f, "{:>w$}", s, w = widths[i])?; }
-                        return Ok(());
-                    }
+                if attrs.names.is_some() {
+                    let strs: Vec<String> = v.iter().map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect();
+                    if let Some(r) = write_named(f, attrs, &strs) { return r; }
                 }
-                write_vec(f, v, |x| match x { Some(n) => fmt_num(*n), None => "NA".into() })
+                write_vec(f, v, |x| match x { Some(n) => fmt_num(*n), None => "NA".into() }, false, "numeric(0)")
             }
             RVal::Single(v, _) => {
                 // Print like Numeric but with `(single)` annotation
                 // after the value list. f32-as-displayed loses precision
                 // beyond ~7 digits; the `fmt_num` helper handles that.
-                write_vec(f, v, |x| match x { Some(n) => fmt_num(*n as f64), None => "NA".into() })
+                write_vec(f, v, |x| match x { Some(n) => fmt_num(*n as f64), None => "NA".into() }, false, "single(0)")
             }
             RVal::Integer(v, attrs) => {
-                if let Some(names) = &attrs.names {
-                    if names.len() == v.len() && !names.is_empty() {
-                        let strs: Vec<String> = v.iter().map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).collect();
-                        let widths: Vec<usize> = names.iter().zip(strs.iter()).map(|(n, s)| n.len().max(s.len()) + 1).collect();
-                        for (i, name) in names.iter().enumerate() { write!(f, "{:>w$}", name, w = widths[i])?; }
-                        writeln!(f)?;
-                        for (i, s) in strs.iter().enumerate() { write!(f, "{:>w$}", s, w = widths[i])?; }
-                        return Ok(());
-                    }
+                if attrs.names.is_some() {
+                    let strs: Vec<String> = v.iter().map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).collect();
+                    if let Some(r) = write_named(f, attrs, &strs) { return r; }
                 }
-                write_vec(f, v, |x| match x { Some(n) => format!("{}", n), None => "NA".into() })
+                write_vec(f, v, |x| match x { Some(n) => format!("{}", n), None => "NA".into() }, false, "integer(0)")
             }
-            RVal::Character(v, _) => write_vec(f, v, |x| match x { Some(s) => format!("\"{}\"", s), None => "NA".into() }),
-            RVal::Logical(v, _) => write_vec(f, v, |x| match x { Some(true) => "TRUE".into(), Some(false) => "FALSE".into(), None => "NA".into() }),
+            RVal::Character(v, attrs) => {
+                let cell = |x: &Character| match x { Some(s) => format!("\"{}\"", s), None => "NA".into() };
+                if attrs.names.is_some() {
+                    let strs: Vec<String> = v.iter().map(cell).collect();
+                    if let Some(r) = write_named(f, attrs, &strs) { return r; }
+                }
+                write_vec(f, v, cell, true, "character(0)")
+            }
+            RVal::Logical(v, attrs) => {
+                let cell = |x: &Logical| match x { Some(true) => "TRUE".into(), Some(false) => "FALSE".into(), None => "NA".into() };
+                if attrs.names.is_some() {
+                    let strs: Vec<String> = v.iter().map(cell).collect();
+                    if let Some(r) = write_named(f, attrs, &strs) { return r; }
+                }
+                write_vec(f, v, cell, false, "logical(0)")
+            }
             RVal::Tensor(t) => {
                 write!(f, "Tensor {:?}", t.shape)?;
                 if t.numel() <= 20 {
@@ -667,10 +672,10 @@ impl fmt::Display for RVal {
             RVal::Factor(fct) => {
                 let display_vals: Vec<String> = fct.codes.iter().map(|c| match c {
                     Some(idx) => fct.levels.get(*idx as usize).map(|s| s.to_string()).unwrap_or("NA".into()),
-                    None => "NA".into(),
+                    None => "<NA>".into(),
                 }).collect();
-                write_vec(f, &display_vals, |s| s.clone())?;
-                write!(f, "\nLevels: {}", fct.levels.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" "))
+                write_vec(f, &display_vals, |s| s.clone(), true, "factor(0)")?;
+                write!(f, "\nLevels: {}", fct.levels.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(if fct.ordered { " < " } else { " " }))
             }
             RVal::BuiltinFn(name) => {
                 let sig = builtin_signature(name);
@@ -691,21 +696,47 @@ impl fmt::Display for RVal {
     }
 }
 
-fn write_vec<T>(f: &mut fmt::Formatter, v: &[T], fmt_fn: impl Fn(&T) -> String) -> fmt::Result {
-    if v.is_empty() { return write!(f, "character(0)"); }
-    let strs: Vec<String> = v.iter().map(&fmt_fn).collect();
-    let mut pos = 0;
-    while pos < strs.len() {
-        write!(f, "[{}]", pos + 1)?;
-        let mut used = format!("[{}]", pos + 1).len();
-        while pos < strs.len() {
-            let next = format!(" {}", strs[pos]);
-            if used + next.len() > 80 && used > 4 { break; }
-            write!(f, "{}", next)?;
-            used += next.len();
-            pos += 1;
+/// A named vector as R prints it: every field right-aligned to ONE common
+/// width (the widest name or value) and followed by a space, names over
+/// values, wrapped to 80 columns. A `table` first prints its dimnames
+/// header line (the variable name, or empty).
+fn write_named(f: &mut fmt::Formatter, attrs: &Attrs, strs: &[String]) -> Option<fmt::Result> {
+    let names = attrs.names.as_ref().filter(|n| n.len() == strs.len() && !n.is_empty())?;
+    Some((|| {
+        if attrs.class.as_deref() == Some("table") {
+            let dnn = match attrs.custom.get("dnn") { Some(RVal::Character(d, _)) => d.first().cloned().flatten(), _ => None };
+            writeln!(f, "{}", dnn.as_deref().unwrap_or(""))?;
         }
-        if pos < strs.len() { writeln!(f)?; }
+        let w = names.iter().map(|n| n.chars().count()).chain(strs.iter().map(|s| s.chars().count())).max().unwrap_or(0);
+        let per_line = (80 / (w + 1)).max(1);
+        for (k, start) in (0..strs.len()).step_by(per_line).enumerate() {
+            if k > 0 { writeln!(f)?; }
+            let end = (start + per_line).min(strs.len());
+            for n in &names[start..end] { write!(f, "{:>w$} ", n, w = w)?; }
+            writeln!(f)?;
+            for s in &strs[start..end] { write!(f, "{:>w$} ", s, w = w)?; }
+        }
+        Ok(())
+    })())
+}
+
+/// An unnamed vector as R's print.default writes it: every element padded
+/// to one common width (text left-aligned, numbers right-aligned), the
+/// `[k]` labels right-aligned to the widest label, as many elements per
+/// line as fit in 80 columns. `empty` is what a length-0 vector prints
+/// (`numeric(0)`, `character(0)`, ...).
+fn write_vec<T>(f: &mut fmt::Formatter, v: &[T], fmt_fn: impl Fn(&T) -> String, left: bool, empty: &str) -> fmt::Result {
+    if v.is_empty() { return write!(f, "{}", empty); }
+    let strs: Vec<String> = v.iter().map(&fmt_fn).collect();
+    let w = strs.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+    let label_w = format!("[{}]", strs.len()).len();
+    let per_line = ((80 - label_w.min(79)) / (w + 1)).max(1);
+    for (k, start) in (0..strs.len()).step_by(per_line).enumerate() {
+        if k > 0 { writeln!(f)?; }
+        write!(f, "{:>lw$}", format!("[{}]", start + 1), lw = label_w)?;
+        for s in &strs[start..(start + per_line).min(strs.len())] {
+            if left { write!(f, " {:<w$}", s, w = w)?; } else { write!(f, " {:>w$}", s, w = w)?; }
+        }
     }
     Ok(())
 }

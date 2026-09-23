@@ -1,9 +1,10 @@
 //! `table()` — frequency counts. Phase R.7.
 //!
-//! Counts occurrences of each level of `as.factor(x)`. Side-effect:
-//! prints the count table to stdout. Returns a named `Integer` vector.
+//! Counts occurrences of each level of `as.factor(x)`, as a named
+//! `Integer` vector of class "table" (printed with its header line).
 
 use r2_types::{Attrs, ErrKind, EvalArg, Factor, Integer, R2Err, RVal};
+use std::sync::Arc;
 
 #[inline]
 fn first_arg(a: &[EvalArg]) -> RVal {
@@ -22,21 +23,21 @@ pub fn bi_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
     };
     let mut counts = vec![0usize; f.levels.len()];
     for c in f.codes.iter().flatten() { counts[*c as usize] += 1; }
-    let width = if matches!(x, RVal::Numeric(..) | RVal::Integer(..)) { 8 } else { 12 };
-    for k in &f.levels { sout!("{:>w$}", k, w = width); }
-    soutln!();
-    for v in &counts { sout!("{:>w$}", v, w = width); }
-    soutln!();
     let vals: Vec<Integer> = counts.iter().map(|v| Some(*v as i32)).collect();
     let mut attrs = Attrs::default();
     attrs.names = Some(f.levels);
+    // A value of class "table": printed (with its header line) only when
+    // auto-printed or print()ed, never while computing.
+    attrs.class = Some(Arc::from("table"));
+    let dnn = a.iter().find(|x| x.name.as_deref() == Some("dnn")).map(|x| x.value.clone());
+    if let Some(d) = dnn { attrs.custom.insert(Arc::from("dnn"), d); }
     Ok(RVal::Integer(vals.into(), attrs))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+
 
     fn evarg(v: RVal) -> EvalArg { EvalArg { name: None, value: v } }
 

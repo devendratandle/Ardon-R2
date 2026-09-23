@@ -23,10 +23,16 @@ use crate::*;
 pub(crate) fn body_is_jit_lowerable(e: &r2_types::Expr) -> bool {
     use r2_types::Expr::*;
     match e {
-        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
+        // `NA` is not lowerable: the IR constant has no NA and became 0.0.
+        NumLit(_) | IntLit(_) | BoolLit(_) | NullLit | Symbol(_) => true,
         Unary { expr, .. } => body_is_jit_lowerable(expr),
         Binary { lhs, rhs, .. } => body_is_jit_lowerable(lhs) && body_is_jit_lowerable(rhs),
-        Assign { value, .. } => body_is_jit_lowerable(value),
+        // Only a plain local `name <- value`: `<<-` writes an enclosing
+        // environment and `x[i] <- v` replaces in place, which the compiled
+        // body would do as a local rebinding.
+        Assign { target, value, superassign: false } =>
+            matches!(target.as_ref(), Symbol(_)) && body_is_jit_lowerable(value),
+        Assign { .. } => false,
         Call { func, args } => {
             body_is_jit_lowerable(func)
                 && args.iter().all(|a| body_is_jit_lowerable(&a.value))
@@ -238,7 +244,7 @@ pub(crate) fn body_is_indexed_lowerable(e: &r2_types::Expr, vecs: &[std::sync::A
     use r2_types::Expr::*;
     let is_vec = |o: &r2_types::Expr| matches!(o, Symbol(s) if vecs.iter().any(|v| v.as_ref() == s.as_ref()));
     match e {
-        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
+        NumLit(_) | IntLit(_) | BoolLit(_) | NullLit | Symbol(_) => true,
         Unary { expr, .. } => body_is_indexed_lowerable(expr, vecs, ivar),
         Binary { lhs, rhs, .. } => body_is_indexed_lowerable(lhs, vecs, ivar) && body_is_indexed_lowerable(rhs, vecs, ivar),
         // Assign only to a scalar symbol (accumulator/temp); no indexed stores.
@@ -407,7 +413,7 @@ pub(crate) fn store_body_ok(e: &r2_types::Expr, in_vecs: &[std::sync::Arc<str>],
             && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref() == ivar)
     };
     match e {
-        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
+        NumLit(_) | IntLit(_) | BoolLit(_) | NullLit | Symbol(_) => true,
         Unary { expr, .. } => store_body_ok(expr, in_vecs, out, ivar),
         Binary { lhs, rhs, .. } => store_body_ok(lhs, in_vecs, out, ivar) && store_body_ok(rhs, in_vecs, out, ivar),
         Assign { target, value, .. } => {

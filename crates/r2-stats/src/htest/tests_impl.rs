@@ -173,7 +173,8 @@ fn welch_two_sample(
     fields.insert(Arc::from("statistic"), rnum(t_stat));
     fields.insert(Arc::from("p.value"), rnum(p_value));
     fields.insert(Arc::from("parameter"), rnum(df));
-    fields.insert(Arc::from("estimate"), rnums(&[mx, my]));
+    let (nx, ny) = if data_line == "x and y" { ("mean of x".to_string(), "mean of y".to_string()) } else { (format!("mean in group {}", lab_x), format!("mean in group {}", lab_y)) };
+    fields.insert(Arc::from("estimate"), named(&[mx, my], &[&nx, &ny]));
     fields.insert(Arc::from("conf.int"), rnums(&[ci_lo, ci_hi]));
     fields.insert(Arc::from("conf.level"), rnum(conf_level));
     fields.insert(Arc::from("method"), rstr("Welch Two Sample t-test"));
@@ -301,7 +302,7 @@ fn paired_t_test(
     fields.insert(Arc::from("statistic"), rnum(t_stat));
     fields.insert(Arc::from("p.value"), rnum(p_value));
     fields.insert(Arc::from("parameter"), rnum(df));
-    fields.insert(Arc::from("estimate"), rnum(mean_d));
+    fields.insert(Arc::from("estimate"), named(&[mean_d], &["mean difference"]));
     fields.insert(Arc::from("conf.int"), rnums(&[ci_lo, ci_hi]));
     fields.insert(Arc::from("conf.level"), rnum(conf_level));
     fields.insert(Arc::from("cor"), rnum(cor));
@@ -343,7 +344,7 @@ fn one_sample_t_test(
     fields.insert(Arc::from("statistic"), rnum(t_stat));
     fields.insert(Arc::from("p.value"), rnum(p_value));
     fields.insert(Arc::from("parameter"), rnum(df));
-    fields.insert(Arc::from("estimate"), rnum(mean));
+    fields.insert(Arc::from("estimate"), named(&[mean], &["mean of x"]));
     fields.insert(Arc::from("conf.int"), rnums(&[ci_lo, ci_hi]));
     fields.insert(Arc::from("conf.level"), rnum(conf_level));
     fields.insert(Arc::from("method"), rstr("One Sample t-test"));
@@ -572,7 +573,7 @@ pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     soutln!("{:>9}", fmt_n(r));
 
     let mut fields = HashMap::new();
-    fields.insert(Arc::from("estimate"), rnum(r));
+    fields.insert(Arc::from("estimate"), named(&[r], &["cor"]));
     fields.insert(Arc::from("statistic"), rnum(t_stat));
     fields.insert(Arc::from("p.value"), rnum(p_value));
     fields.insert(Arc::from("df"), rnum(df));
@@ -754,7 +755,7 @@ pub fn bi_fisher_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("p.value"), rnum(p_value));
-    fields.insert(Arc::from("estimate"), rnum(or));
+    fields.insert(Arc::from("estimate"), named(&[or], &["odds ratio"]));
     fields.insert(Arc::from("method"), rstr("Fisher's Exact Test for Count Data"));
     Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("fisher.test"), fields }))
 }

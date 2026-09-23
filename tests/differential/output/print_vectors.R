@@ -1,0 +1,16 @@
+x <- c("b", "a", "b", NA, "c")
+table(x)
+t1 <- table(c(10, 2, NA, 2))
+t1
+tapply(1:5, x, sum)
+c(a = 1, bb = 22)
+c(first = TRUE, second = NA)
+c(a = "x", b = "long")
+c("Low", "High")
+c(1, 10, 100)
+numeric(0)
+character(0)
+factor(c("lo", "hi", NA))
+factor(c("s", "m", "l"), levels = c("s", "m", "l"), ordered = TRUE)
+1:30
+cat("a"); cat("b\n")

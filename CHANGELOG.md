@@ -8,6 +8,63 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### `NA`, assignment, sorting and printing match R — 2026-09-23
+
+- **`sort()` no longer crashes** on NaN (`sort(c(3, NaN, 1))` panicked:
+  the GUI's error popup). It keeps the type (integer, character, logical,
+  factor), honours `decreasing =` (ignored before) and `na.last =`.
+  `order()` takes several keys and puts NA last; `unique()` and
+  `duplicated()` compare exactly and keep NA once (NA and NaN distinct);
+  `rank()` averages ties and has `ties.method = "min"/"max"/"first"`.
+- **Strings sort as R does on Windows and in English locales**:
+  case-insensitive first, lowercase first on a tie (`"a" "A" "b" "B"`),
+  accents after the base letter (`"naive" "Naive" "naïve"`), punctuation
+  before digits before letters in R's order. `sort`, `order`, factor
+  levels and every grouping function share it.
+- **`NA` is logical**, as in R: `c(TRUE, FALSE, NA)` stays logical,
+  `c(1L, NA)` integer, `class(NA)` is `"logical"`. `NA_real_`,
+  `NA_integer_` and `NA_character_` exist. `c()` keeps element names
+  (`c(a = 1, b = 2)`), and combining with strings no longer drops
+  logical/integer values (`c("a", TRUE)` lost the TRUE) or writes doubles
+  to 17 digits.
+- **Element assignment works like R's.** `x[x > 2] <- 0`, `x[-1] <- 9`,
+  `x[is.na(x)] <- 0`, `x["name"] <- v` all failed with an error. Also now:
+  assigning past the end grows the vector with NA; the vector widens to
+  hold the value (`x[2] <- 2.5` on integers, `x[2] <- "z"` on numbers);
+  `NA` into a character vector is NA, not the string "NA"; assigning
+  into logical vectors and factors; nested targets (`df$a[2] <- v`,
+  `l$v[2] <- v`, `names(x)[2] <- "b"`); `df[i, "col"] <- v`;
+  `df$col <- 0` recycles to every row; `l[["name"]] <- v` and
+  `l$x <- NULL` / `df$x <- NULL` remove.
+- **`x <<- v` inside a function whose body is only that assignment
+  changed nothing**: the JIT compiled it as a local assignment. It and
+  `x[i] <<- v` now update the enclosing variable. The JIT also compiled
+  the `NA` literal as 0; such bodies now run in the interpreter.
+- **`matrix()` recycles its data and keeps NA**: `matrix(1, 2, 2)` was
+  `1 0 0 0` and `matrix(c(1, NA, 3, 4), 2)` dropped the NA, shifting every
+  later cell. `is.na()` works on a matrix; `cat()` and `paste()` print its
+  cells.
+- `cat()` puts `sep` between elements (`cat(c(1, 2), sep = ",")` is
+  `1,2`) and no longer adds a newline of its own. `pmin`/`pmax` return NA
+  for NA input unless `na.rm = TRUE` (they always dropped it).
+- `sapply()` / `vapply()` simplify integer, logical and character results
+  (they returned a list unless every result was a double) and name them
+  by a character input. `tapply()` returns a named vector.
+- `factor(labels =)` renames levels (one label per level, a single
+  prefix numbered `L1 L2 ...`, or duplicates that merge levels);
+  `factor(ordered = TRUE)` and new `is.ordered()`; an ordered factor
+  prints `Levels: s < m < l`. `data.frame(stringsAsFactors = TRUE)` makes
+  factors. `t.test`, `cor.test` and `fisher.test` name their estimate
+  (`mean of x`, `mean in group a`, `cor`, `odds ratio`).
+- **Printing matches R's layout**: vectors pad to a common width (text
+  left-aligned, numbers right), `[k]` labels align, empty vectors print
+  `numeric(0)` / `integer(0)` / `logical(0)` (all said `character(0)`);
+  named vectors (now also logical and character ones) use one common
+  width with R's spacing; a factor prints NA as `<NA>`. `table()` returns
+  a table that prints like R's, with the variable name as its header,
+  instead of printing 12-wide columns while being computed.
+- Differential cases `vector_semantics` and `output/print_vectors`.
+
 ### Factor levels are sorted, as in R — 2026-09-23
 
 - **`as.factor()` sorts its levels.** `levels(as.factor(c("b", "a", "b")))`
@@ -28,9 +85,7 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
   as the reference**, like R (it used the first observed value, so the
   coefficients differed from R's). `t.test(y ~ g)` orders its two groups
   the same way, so the estimate order and the sign of `t` match R.
-- Strings sort by byte (the C locale), the same order `order()` uses. R
-  in a UTF-8 or Windows locale collates `"a" "A" "b" "B"`, so mixed-case
-  levels can still differ from R.
+- Strings sort in R's collation order (see the entry above).
 - Differential case `factor_levels` covers character and numeric input,
   NA, explicit `levels=` order and the grouping functions.
 

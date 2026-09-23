@@ -7,9 +7,8 @@
 //! `tapply`, `table`, model dummies) goes through here so the group order
 //! is the same everywhere.
 //!
-//! Strings sort by byte (the C locale), the same order `order()` uses. R
-//! in a UTF-8 or Windows locale collates instead ("a" "A" "b" "B"), so
-//! mixed-case levels still differ from such an R.
+//! Strings sort by `str_collate`, the same order `order()` and `sort()`
+//! use ("a" "A" "b" "B", as R in an en-US locale).
 
 use crate::{Factor, RVal};
 use std::collections::HashMap;
@@ -41,7 +40,7 @@ pub fn factor_labels(x: &RVal) -> Option<(Vec<Option<Arc<str>>>, Vec<Arc<str>>)>
     Some(match x {
         RVal::Character(v, _) => {
             let mut levels: Vec<Arc<str>> = v.iter().flatten().cloned().collect();
-            levels.sort_unstable();
+            levels.sort_by_cached_key(|l| crate::collation_key(l));
             levels.dedup();
             (v.clone(), levels)
         }

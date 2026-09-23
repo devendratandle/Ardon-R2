@@ -29,7 +29,7 @@ pub(crate) fn core_table() -> Vec<(&'static str, BuiltinFn)> {
         ("as.numeric",bi_as_num),("as.single",bi_as_single),("is.single",bi_is_single),
         ("as.character",bi_as_chr),("as.integer",bi_as_int),
         ("as.factor",bi_as_factor),("as.logical",bi_as_logical),("as.data.frame",bi_as_data_frame),
-        ("is.data.frame",bi_is_data_frame),("is.factor",bi_is_factor),("is.matrix",bi_is_matrix),
+        ("is.data.frame",bi_is_data_frame),("is.factor",bi_is_factor),("is.ordered",bi_is_ordered),("is.matrix",bi_is_matrix),
         ("list",bi_list),("list.meta",bi_list_meta),
         ("data.frame",bi_df),("matrix",bi_matrix),("tensor",bi_tensor),
         ("strict",bi_strict),("lenient",bi_lenient),

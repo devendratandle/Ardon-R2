@@ -307,6 +307,7 @@ pub(crate) fn bi_help(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
         "load" => "load(file)\n  Load saved session, data, or model.\n  Returns loaded object for .r2d and .r2m files.\n  Examples:\n    load(\"session.r2s\")        # restore all variables\n    d <- load(\"data.r2d\")      # load data\n    m <- load(\"model.r2m\")     # load model",
         // Core
         "c" => "c(...)\n  Combine values into a vector.\n  Example: c(1, 2, 3)",
+        "is.ordered" => "is.ordered(x)\n  TRUE for an ordered factor (factor(..., ordered = TRUE)).\n  Example: is.ordered(factor(c(\"s\", \"m\"), ordered = TRUE))",
         "library" => "library(package)\n  Load a package.\n  Example: library(mymath)",
         "data.frame" => "data.frame(...)\n  Create data frame.\n  Example: data.frame(x = 1:5, y = c(\"a\",\"b\",\"c\",\"d\",\"e\"))",
         "matrix" => "matrix(data, nrow, ncol)\n  Create matrix.\n  Example: matrix(1:12, nrow = 3, ncol = 4)",
