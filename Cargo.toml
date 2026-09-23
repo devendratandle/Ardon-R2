@@ -32,6 +32,15 @@ members = [
     "crates/r2-panel",
 ]
 
+# ── The product version — the ONLY place it is written ────────────────
+# r2-repl, r2-gui and r2-panel inherit it (`version.workspace = true`);
+# the exes carry it as their FileVersion, installer/R2.iss reads it back
+# from r2.exe, and the README badge reads the latest GitHub release.
+# A release is: bump this line, add the CHANGELOG heading (a test in
+# r2-repl fails without it), commit, tag v<version>.
+[workspace.package]
+version = "0.4.1"
+
 [workspace.dependencies]
 thiserror = "1"
 

@@ -18,8 +18,23 @@
 ;  Tested with Inno Setup 6.2.x.
 ; ═══════════════════════════════════════════════════════════════════════
 
+; The version is read from the built r2.exe (its FileVersion is the
+; workspace version in the root Cargo.toml) — never type it here. A
+; stale R2Gui.exe (built at another version) stops the compile instead
+; of shipping silently.
+#define R2Exe            AddBackslash(SourcePath) + "..\target\release\r2.exe"
+#define GuiExe           AddBackslash(SourcePath) + "..\target\release\R2Gui.exe"
+#if !FileExists(R2Exe)
+  #error r2.exe is not built: cargo build --release -p r2-repl -p r2-gui
+#endif
+#define MyAppVersion     GetStringFileInfo(R2Exe, "FileVersion")
+#if FileExists(GuiExe)
+  #if GetStringFileInfo(GuiExe, "FileVersion") != MyAppVersion
+    #error R2Gui.exe and r2.exe carry different versions: rebuild both
+  #endif
+#endif
+
 #define MyAppName        "Ardon-R2"
-#define MyAppVersion     "0.4.1"
 #define MyAppPublisher   "Devendra Tandale"
 #define MyAppURL         "https://github.com/devendratandle/Ardon-R2"
 #define MyAppExeName     "r2.exe"

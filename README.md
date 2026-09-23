@@ -5,7 +5,8 @@
 <h1 align="center">Ardon-R2</h1>
 
 <p align="center"><strong>Inspired by R. Built on Rust.</strong><br>
-<em>An AI-Assisted Project. v0.4.1.</em></p>
+<em>An AI-Assisted Project.</em><br>
+<a href="https://github.com/devendratandle/Ardon-R2/releases/latest"><img src="https://img.shields.io/github/v/release/devendratandle/Ardon-R2?label=version" alt="latest release"></a></p>
 
 ---
 
