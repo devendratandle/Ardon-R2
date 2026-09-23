@@ -1,28 +1,17 @@
-//! Closure -> JIT entry point (Phase C.2) + scalar helpers.
+//! Closure -> JIT entry point (Phase C.2): prepare the body, then try the
+//! code generators in precedence order until one compiles it. The body
+//! preparation passes live in `inline.rs` and `rewrite.rs`, the loop
+//! recognizers in `recognize.rs`.
 
-use r2_types::infer::IrElem;
+use std::sync::Arc;
+use r2_types::infer::{IrElem, IrType};
+use r2_types::{Closure, Expr};
 use crate::*;
 
-// ── Closure → JIT (Phase C.2 entry-point for the engine) ─────────────
-
-/// Attempt to JIT-compile a Closure into a scalar `(f64, ...) -> f64`
-/// specialization. Returns `None` if the closure has zero or more than
-/// two parameters with default expressions, or its body contains
-/// constructs the JIT does not yet support.
-///
-/// On success, the engine should cache the returned handle keyed by
-/// `Arc::as_ptr(&closure.body)` so re-calls reuse the compiled code.
-/// Extract a single f64 scalar from an `RVal` if it's a numeric scalar
-/// (Real / Int / Bool of length 1, non-NA). Used by the closure-capture
-/// inference path to detect "bakeable" free-variable references.
-fn scalar_f64_of(v: &r2_types::RVal) -> Option<f64> {
-    match v {
-        r2_types::RVal::Numeric(r, _) if r.len() == 1 => r[0],
-        r2_types::RVal::Integer(r, _) if r.len() == 1 => r[0].map(|n| n as f64),
-        r2_types::RVal::Logical(r, _) if r.len() == 1 => r[0].map(|b| if b { 1.0 } else { 0.0 }),
-        _ => None,
-    }
-}
+type Handle = Arc<dyn r2_types::JitHandle>;
+/// One way of compiling a (prepared) closure body; `None` when the body is
+/// not its shape or its compile fails.
+type Strategy = fn(&Closure, &Expr) -> Option<Handle>;
 
 /// Compile-time constant: is the Cranelift JIT functional on this target?
 ///
@@ -35,525 +24,323 @@ fn scalar_f64_of(v: &r2_types::RVal) -> Option<f64> {
 /// involves upgrading Cranelift to a version with aarch64 PLT support.
 pub const JIT_SUPPORTED: bool = cfg!(target_arch = "x86_64");
 
-/// Allowlist: is every node in `e` a construct that `r2_ir`'s lowering
-/// represents *faithfully*? The lowering's catch-all arm silently turns
-/// unhandled expressions (notably `for`, `repeat`, `match`, `tryCatch`,
-/// `break`/`next`) into a no-op `Null` const — which would make the JIT
-/// emit code that quietly skips them and returns a wrong scalar (e.g. a
-/// `for`-loop accumulator returning its init value). Rather than denylist
-/// the silently-dropped constructs (fragile as the AST grows), we only
-/// admit bodies built entirely from the faithfully-lowered set; anything
-/// else returns `false` and `try_compile_closure` falls back to the
-/// interpreter, which handles every construct correctly.
+/// Tried BEFORE the lowerability gate, which would reject their `x[i]`
+/// indexing: the indexed-loop shapes.
+const INDEXED: &[Strategy] = &[
+    index_fold_or_map,
+    indexed_scalar_loop,
+    indexed_store_map,
+];
+
+/// Tried after the gate, in precedence order: specialised shapes first,
+/// then generic maps, then the multi-reduction kernels, then the scalar
+/// specialization that takes anything lowerable.
+const GENERAL: &[Strategy] = &[
+    whole_vector_reduction,
+    binary_map_reduce,
+    vector_binary_op,
+    binary_map_generic,
+    map_with_literal,
+    simd_map,
+    map_generic,
+    ternary_map,
+    matvec_kernel,
+    multi_reduction_kernel,
+    scalar_fallback,
+];
+
+/// Attempt to JIT-compile a Closure. Returns `None` if the closure has more
+/// than three parameters, any parameter with a default or `...`, or a body
+/// with constructs the JIT does not yet support — the interpreter runs it.
 ///
-/// Note: `Call`/`Index`/`StrLit` etc. that the scalar codegen can't emit
-/// still fail *loudly* (the compile returns `Err` and we fall back) — they
-/// don't need gating here. This gate exists only for the constructs that
-/// would otherwise compile to silently-wrong code.
-pub(crate) fn body_is_jit_lowerable(e: &r2_types::Expr) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
-        Unary { expr, .. } => body_is_jit_lowerable(expr),
-        Binary { lhs, rhs, .. } => body_is_jit_lowerable(lhs) && body_is_jit_lowerable(rhs),
-        Assign { value, .. } => body_is_jit_lowerable(value),
-        Call { func, args } => {
-            body_is_jit_lowerable(func)
-                && args.iter().all(|a| body_is_jit_lowerable(&a.value))
+/// On success, the engine should cache the returned handle keyed by
+/// `Arc::as_ptr(&closure.body)` so re-calls reuse the compiled code.
+pub fn try_compile_closure(cl: &Closure) -> Option<Handle> {
+    // Phase R.M — gate the JIT on supported architectures. On aarch64 the
+    // engine falls back to the interpreter; statistical outputs are
+    // bit-identical, only wall-clock performance differs.
+    if !JIT_SUPPORTED { return None; }
+    // Phase C.5 admits 3-param closures for the ternary vector-map path.
+    if cl.params.len() > 3 { return None; }
+    if cl.params.iter().any(|p| p.default.is_some() || p.dots) { return None; }
+
+    let body = prepare_body(cl);
+    if let Some(h) = INDEXED.iter().find_map(|s| s(cl, &body)) {
+        return Some(h);
+    }
+    // Eligibility gate: bail (→ interpreter) if the body contains any
+    // construct the IR lowering silently drops (for/repeat/match/...).
+    // Without this, e.g. `function(n){ s<-0; for(k in 1:n) s<-s+k; s }`
+    // would JIT-compile with the loop elided and return `s`'s init value.
+    if !body_is_jit_lowerable(&body) { return None; }
+    GENERAL.iter().find_map(|s| s(cl, &body))
+}
+
+/// The body every strategy sees:
+///
+/// 1. Phase J.4 / J.5b — inline calls to pure JIT-lowerable user helpers,
+///    so a function composed of small numeric helpers compiles as one
+///    unit. A body with no such calls comes back structurally unchanged.
+///    Depth-bounded → recursion falls back safely.
+/// 2. Phase J.5 — normalize indexed accumulation loops into vector
+///    reductions, so every later pass sees the one canonical spelling and
+///    reuses the same compiled waves.
+/// 3. Phase B.1 — closure capture inference by partial evaluation: free
+///    variables that are numeric scalars (Real/Int/Bool of length 1) in
+///    `cl.env` are baked in as constants, so the closure is self-contained
+///    from the JIT's perspective — no new ABI surface, no per-call capture
+///    passing. Vector-valued and other captures stay as references and the
+///    lowering rejects them (the closure stays interpreter-only).
+///    **Correctness window**: this assumes captured values are stable for
+///    the lifetime of the closure. R semantics agree — captures are
+///    by-value at creation time. If R2 ever adds reactive values, this
+///    substitution must be invalidated on capture mutation.
+fn prepare_body(cl: &Closure) -> Expr {
+    let mut ib_ctr = 0u32;
+    let inlined = vectorize_indexed_loops(
+        &inline_block_helpers(&inline_user_calls(cl.body.as_ref(), &cl.env, 8), &cl.env, &mut ib_ctr, 4));
+    if std::env::var("R2_JIT_DEBUG").is_ok() {
+        eprintln!("[J5] normalized body: {:?}", inlined);
+    }
+    let param_names: Vec<Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
+    let mut subs: std::collections::HashMap<Arc<str>, f64> = std::collections::HashMap::new();
+    for name in &r2_ir::collect_free_vars(&inlined, &param_names) {
+        if let Some(scalar) = cl.env.lookup(name).as_ref().and_then(scalar_f64_of) {
+            subs.insert(name.clone(), scalar);
         }
-        If { cond, then, else_ } => {
-            body_is_jit_lowerable(cond)
-                && body_is_jit_lowerable(then)
-                && else_.as_ref().map_or(true, |e| body_is_jit_lowerable(e))
-        }
-        While { cond, body } => body_is_jit_lowerable(cond) && body_is_jit_lowerable(body),
-        // Phase J.1: counted `for(v in a:b)` only — the IR lowers exactly
-        // this form (with loop-carried phis); other iterables fall back.
-        For { iter, body, .. } => matches!(iter.as_ref(), Binary { op: r2_types::BinOp::Colon, .. })
-            && body_is_jit_lowerable(iter) && body_is_jit_lowerable(body),
-        Block(stmts) => stmts.iter().all(body_is_jit_lowerable),
-        Return(v) => body_is_jit_lowerable(v),
-        Pipe { lhs, rhs } => body_is_jit_lowerable(lhs) && body_is_jit_lowerable(rhs),
-        // For / Repeat / Match / TryCatch / Break / Next / FuncDef / Lambda /
-        // Index / DblIndex / Dollar / Namespace / StrLit / FStringLit / Dots /
-        // TypeDef / MethodDef — not faithfully lowered (or not scalar-numeric):
-        // reject so the engine uses the interpreter.
-        _ => false,
+    }
+    if subs.is_empty() { inlined } else { r2_ir::substitute_constants(&inlined, &subs) }
+}
+
+/// A single f64 from an `RVal` that is a numeric scalar (Real / Int / Bool
+/// of length 1, non-NA) — the "bakeable" captures of `prepare_body`.
+fn scalar_f64_of(v: &r2_types::RVal) -> Option<f64> {
+    match v {
+        r2_types::RVal::Numeric(r, _) if r.len() == 1 => r[0],
+        r2_types::RVal::Integer(r, _) if r.len() == 1 => r[0].map(|n| n as f64),
+        r2_types::RVal::Logical(r, _) if r.len() == 1 => r[0].map(|b| if b { 1.0 } else { 0.0 }),
+        _ => None,
     }
 }
 
-/// Replace every `v[i]` (`Index{Symbol(v), Symbol(i)}`) with `Symbol(v)` so a
-/// per-iteration contribution becomes a map body over the element. Recurses
-/// through arithmetic / unary / calls (the map-body-eligible shapes).
-fn subst_vi(e: &r2_types::Expr, v: &str, i: &str) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    match e {
-        Index { object, indices } => {
-            if indices.len() == 1 {
-                if let (Symbol(o), Some(Symbol(ix))) = (object.as_ref(), &indices[0]) {
-                    if o.as_ref() == v && ix.as_ref() == i { return Symbol(o.clone()); }
-                }
-            }
-            Index { object: Box::new(subst_vi(object, v, i)), indices: indices.clone() }
-        }
-        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(subst_vi(lhs, v, i)), rhs: Box::new(subst_vi(rhs, v, i)) },
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(subst_vi(expr, v, i)) },
-        Call { func, args } => Call {
-            func: func.clone(),
-            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: subst_vi(&a.value, v, i) }).collect(),
-        },
-        other => other.clone(),
-    }
+fn handle(r: JitResult<CompiledFn>) -> Option<Handle> {
+    r.ok().map(|c| Arc::new(c) as Handle)
 }
 
-/// Does `e` mention the bare symbol `name` anywhere?
-fn mentions(e: &r2_types::Expr, name: &str) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        Symbol(s) => s.as_ref() == name,
-        Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
-        Unary { expr, .. } => mentions(expr, name),
-        Call { func, args } => mentions(func, name) || args.iter().any(|a| mentions(&a.value, name)),
-        Index { object, indices } => mentions(object, name) || indices.iter().flatten().any(|x| mentions(x, name)),
-        _ => false,
-    }
+fn param_names(cl: &Closure) -> Vec<Arc<str>> {
+    cl.params.iter().map(|p| p.name.clone()).collect()
 }
 
-/// Does `e` contain the exact indexed load `v[i]`?
-fn has_index_vi(e: &r2_types::Expr, v: &str, i: &str) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        Index { object, indices } => {
-            (indices.len() == 1 && matches!(object.as_ref(), Symbol(o) if o.as_ref()==v)
-                && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref()==i))
-                || has_index_vi(object, v, i)
-                || indices.iter().flatten().any(|x| has_index_vi(x, v, i))
-        }
-        Binary { lhs, rhs, .. } => has_index_vi(lhs, v, i) || has_index_vi(rhs, v, i),
-        Unary { expr, .. } => has_index_vi(expr, v, i),
-        Call { args, .. } => args.iter().any(|a| has_index_vi(&a.value, v, i)),
-        _ => false,
-    }
+/// Lower `body` as a function of the closure's parameters, each a scalar
+/// real, returning a scalar real — the per-element form the map and
+/// map-reduce generators take.
+fn lower_scalar(name: &str, cl: &Closure, body: &Expr) -> r2_ir::IrFunc {
+    let params = cl.params.iter().map(|p| (p.name.clone(), IrType::scalar(IrElem::Real))).collect();
+    let mut ir = r2_ir::lower_function(name, params, body);
+    ir.return_type = IrType::scalar(IrElem::Real);
+    ir
 }
 
-/// Phase J.2 — recognize an index-loop fold over a vector param:
-/// `function(v){ [n <- length(v);] s <- init; for(i in 1:<len>) s <- s <+/*> f(v[i]); s }`.
-/// Returns the per-element map body (with `v[i]` → `v`) and the reduce op, or
-/// `None` if the body isn't exactly this shape (→ fall back to interpreter).
-pub(crate) fn recognize_index_reduction(body: &r2_types::Expr, v: &str) -> Option<(r2_types::Expr, FusedReduceOp)> {
-    use r2_types::Expr::*;
-    let stmts = match body { Block(s) => s, _ => return None };
-    let mut len_var: Option<String> = None;
-    let mut acc: Option<String> = None;
-    let mut init: Option<f64> = None;
-    let mut for_stmt: Option<&r2_types::Expr> = None;
-    let mut trailing: Option<String> = None;
-    for st in stmts {
-        match st {
-            Assign { target, value, .. } => {
-                let nm = match target.as_ref() { Symbol(n) => n.to_string(), _ => return None };
-                match value.as_ref() {
-                    Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
-                        && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==v) => { len_var = Some(nm); }
-                    NumLit(x) => { acc = Some(nm); init = Some(*x); }
-                    IntLit(x) => { acc = Some(nm); init = Some(*x as f64); }
-                    _ => return None,
-                }
-            }
-            For { .. } => for_stmt = Some(st),
-            Symbol(nm) => trailing = Some(nm.to_string()),
-            _ => return None,
+/// Indexed-kernel parameters: the vectors, then `extra` (an output
+/// vector), then the loop-length scalar.
+fn indexed_params(vecs: &[Arc<str>], extra: Option<Arc<str>>) -> Vec<(Arc<str>, IrType)> {
+    let mut params: Vec<(Arc<str>, IrType)> = vecs.iter()
+        .map(|v| (v.clone(), IrType::vector(IrElem::Real, None)))
+        .collect();
+    if let Some(out) = extra { params.push((out, IrType::vector(IrElem::Real, None))); }
+    params.push((Arc::from(".__ixloop_n"), IrType::scalar(IrElem::Real)));
+    params
+}
+
+// ── Indexed loops (before the gate) ──────────────────────────────────
+
+/// Phase J.2 — index-loop fold over a vector param:
+///   function(v){ [n<-length(v);] s<-init; for(i in 1:len) s<-s <+/*> f(v[i]); s }
+/// recognized as a map-reduce over v (v[i] → element), reusing the fused
+/// map-reduce codegen. Brick 2: the index-loop map
+/// `for(i in 1:len) y[i] <- f(x[i]); y` → VectorMap.
+fn index_fold_or_map(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 1 { return None; }
+    let v = &cl.params[0].name;
+    if let Some((mapped, reduce_op)) = recognize_index_reduction(body, v) {
+        if body_is_jit_lowerable(&mapped) {
+            let ir = lower_scalar("__map_reduce_inner__", cl, &mapped);
+            if let Some(h) = handle(JitCompiler::compile_vector_map_reduce(&ir, reduce_op)) { return Some(h); }
         }
     }
-    let acc = acc?; let init = init?;
-    if trailing.as_deref() != Some(acc.as_str()) { return None; }
-    let (ivar, iter, fbody) = match for_stmt? { For { var, iter, body } => (var, iter, body), _ => return None };
-    let len_expr = match iter.as_ref() {
-        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
-            if matches!(lhs.as_ref(), NumLit(x) if *x==1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
+    let mapped = recognize_index_map(body, v)?;
+    if !body_is_jit_lowerable(&mapped) { return None; }
+    handle(JitCompiler::compile_vector_map_generic(&lower_scalar("__index_map_inner__", cl, &mapped)))
+}
+
+/// Phase J.3 — general scalar-returning loop with real indexed loads over
+/// 1-2 vector params (multi-statement folds, conditionals, scalar
+/// recurrences reading x[i]/w[i]). Compiles the *actual* loop via `Load`
+/// codegen; after the specialised fold/map recognisers so those keep
+/// precedence for the shapes they cover.
+fn indexed_scalar_loop(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if !(1..=2).contains(&cl.params.len()) { return None; }
+    let (rewritten, vecs) = recognize_indexed_scalar_loop(body, &param_names(cl))?;
+    let mut ir = r2_ir::lower_function("__indexed_scalar_loop__", indexed_params(&vecs, None), &rewritten);
+    ir.return_type = IrType::scalar(IrElem::Real);
+    handle(JitCompiler::compile_indexed_reduction(&ir))
+}
+
+/// Phase J.3 — general indexed-STORE map (1-2 input vectors → 1 output),
+/// e.g. two-input `for(i in 1:length(x)) y[i] <- x[i]+w[i]; y` or a
+/// multi-statement store body. After `recognize_index_map`, which handles
+/// the single-input `y[i] <- f(x[i])` shape via VectorMap.
+fn indexed_store_map(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if !(1..=2).contains(&cl.params.len()) { return None; }
+    let (rewritten, in_vecs, out) = recognize_indexed_store_map(body, &param_names(cl))?;
+    let mut ir = r2_ir::lower_function("__indexed_store_map__", indexed_params(&in_vecs, Some(out)), &rewritten);
+    ir.return_type = IrType::null();
+    handle(JitCompiler::compile_indexed_store_map(&ir))
+}
+
+// ── Whole-vector shapes (after the gate) ─────────────────────────────
+
+/// Phase C.3 — `function(v) sum(v)` (also mean/length/prod), and Phase C.9
+/// — the fused map-reduce `sum(f(v))` / `prod(f(v))`: load v[i], apply f,
+/// accumulate. No intermediate vector allocated.
+fn whole_vector_reduction(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 1 { return None; }
+    let Expr::Call { func, args } = body else { return None };
+    let Expr::Symbol(fname) = func.as_ref() else { return None };
+    if !matches!(fname.as_ref(), "sum" | "mean" | "length" | "prod") || args.len() != 1 { return None; }
+    if let Expr::Symbol(arg) = &args[0].value {
+        if arg == &cl.params[0].name {
+            if let Some(h) = handle(JitCompiler::compile_vector_reduction(fname.as_ref())) { return Some(h); }
+        }
+    }
+    let reduce_op = match fname.as_ref() {
+        "sum"  => FusedReduceOp::Sum,
+        "prod" => FusedReduceOp::Prod,
         _ => return None,
     };
-    let len_ok = match len_expr {
-        Symbol(nm) => len_var.as_deref() == Some(nm.as_ref()),
-        Call { func, args } => matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
-            && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==v),
-        _ => false,
-    };
-    if !len_ok { return None; }
-    let (t, val) = match fbody.as_ref() { Assign { target, value, .. } => (target, value), _ => return None };
-    if !matches!(t.as_ref(), Symbol(nm) if nm.as_ref()==acc) { return None; }
-    let (op, contrib) = match val.as_ref() {
-        Binary { op, lhs, rhs } => {
-            if matches!(lhs.as_ref(), Symbol(nm) if nm.as_ref()==acc) { (*op, rhs.as_ref()) }
-            else if matches!(rhs.as_ref(), Symbol(nm) if nm.as_ref()==acc) { (*op, lhs.as_ref()) }
-            else { return None; }
-        }
+    let ir = lower_scalar("__map_reduce_inner__", cl, &args[0].value);
+    handle(JitCompiler::compile_vector_map_reduce(&ir, reduce_op))
+}
+
+/// Phase J.2 — binary map-reduce `function(x, w) sum(f(x, w))` / prod, e.g.
+/// the dot product `sum(x*w)`: fused (a[i], b[i]) → accumulate loop.
+fn binary_map_reduce(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 2 { return None; }
+    let Expr::Call { func, args } = body else { return None };
+    let Expr::Symbol(fname) = func.as_ref() else { return None };
+    if !matches!(fname.as_ref(), "sum" | "prod") || args.len() != 1
+        || !body_is_jit_lowerable(&args[0].value) { return None; }
+    let reduce_op = if fname.as_ref() == "sum" { FusedReduceOp::Sum } else { FusedReduceOp::Prod };
+    let ir = lower_scalar("__binary_map_reduce_inner__", cl, &args[0].value);
+    handle(JitCompiler::compile_vector_binary_map_reduce(&ir, reduce_op))
+}
+
+/// Phase C.4-full — vector ⊗ vector element-wise: `function(a, b) a OP b`.
+fn vector_binary_op(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 2 { return None; }
+    let Expr::Binary { op, lhs, rhs } = body else { return None };
+    let (Expr::Symbol(ls), Expr::Symbol(rs)) = (lhs.as_ref(), rhs.as_ref()) else { return None };
+    if ls != &cl.params[0].name || rs != &cl.params[1].name { return None; }
+    handle(JitCompiler::compile_vector_binary_op(*op))
+}
+
+/// Phase C.7 — generic 2-param vector map for any body that lowers to
+/// arithmetic + math Calls + branches: `function(a, b) sqrt(a*a + b*b)`,
+/// `function(x, y) if (x > y) x else y`, etc.
+fn binary_map_generic(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 2 { return None; }
+    handle(JitCompiler::compile_vector_binary_map_generic(&lower_scalar("__vec_binary_body__", cl, body)))
+}
+
+/// Phase C.4 — element-wise vector map with a scalar literal:
+/// `function(v) v OP k`, or `k OP v` for the commutative ops.
+fn map_with_literal(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 1 { return None; }
+    let Expr::Binary { op, lhs, rhs } = body else { return None };
+    let pname = &cl.params[0].name;
+    let k = match (lhs.as_ref(), rhs.as_ref()) {
+        (Expr::Symbol(s), Expr::NumLit(k)) if s == pname => *k,
+        (Expr::NumLit(k), Expr::Symbol(s)) if s == pname
+            && matches!(op, r2_types::BinOp::Add | r2_types::BinOp::Mul) => *k,
         _ => return None,
     };
-    let reduce_op = match op {
-        r2_types::BinOp::Add if init == 0.0 => FusedReduceOp::Sum,
-        r2_types::BinOp::Mul if init == 1.0 => FusedReduceOp::Prod,
-        _ => return None,
-    };
-    if !has_index_vi(contrib, v, ivar.as_ref()) { return None; } // must actually fold v
-    let mapped = subst_vi(contrib, v, ivar.as_ref());
-    // Reject if the element body still references the loop index or accumulator.
-    if mentions(&mapped, ivar.as_ref()) || mentions(&mapped, &acc) { return None; }
-    Some((mapped, reduce_op))
+    handle(JitCompiler::compile_vector_map_scalar_op(*op, k))
 }
 
-/// Phase J.2 brick 2 — recognize an index-loop *map* over a vector param:
-/// `function(x){ [n<-length(x);] y <- <alloc>; for(i in 1:len) y[i] <- f(x[i]); y }`.
-/// Returns the per-element map body (`x[i]` → `x`), or `None` (→ fall back).
-pub(crate) fn recognize_index_map(body: &r2_types::Expr, x: &str) -> Option<r2_types::Expr> {
-    use r2_types::Expr::*;
-    let stmts = match body { Block(s) => s, _ => return None };
-    let mut len_var: Option<String> = None;
-    let mut out_var: Option<String> = None;
-    let mut for_stmt: Option<&r2_types::Expr> = None;
-    let mut trailing: Option<String> = None;
-    for st in stmts {
-        match st {
-            Assign { target, value, .. } => {
-                let nm = match target.as_ref() { Symbol(n) => n.to_string(), _ => return None };
-                match value.as_ref() {
-                    Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
-                        && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==x) => { len_var = Some(nm); }
-                    _ => { if out_var.is_some() { return None; } out_var = Some(nm); } // exactly one output alloc
-                }
-            }
-            For { .. } => for_stmt = Some(st),
-            Symbol(nm) => trailing = Some(nm.to_string()),
-            _ => return None,
+/// Phase C.8 — SIMD f64x2 1-param vector map: a SIMD-clean body becomes a
+/// tight 2-elements-per-iteration loop with native SSE2/NEON instructions;
+/// anything else falls through to the scalar generic map.
+fn simd_map(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) || cl.params.len() != 1 { return None; }
+    handle(JitCompiler::compile_vector_simd_map_f64x2(&lower_scalar("__vec_simd_body__", cl, body)))
+}
+
+/// Phase C.4-full part 2 — generic 1-param vector map for any pure
+/// arithmetic body (composed expressions, e.g. `(v+1)*2`, `v*v - 1`).
+fn map_generic(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 1 { return None; }
+    handle(JitCompiler::compile_vector_map_generic(&lower_scalar("__vec_body__", cl, body)))
+}
+
+/// Phase C.5 — generic 3-param branchy ternary vector map:
+/// `function(c, a, b) if (c > 0) a else b` and similar multi-block bodies.
+fn ternary_map(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 3 { return None; }
+    handle(JitCompiler::compile_vector_ternary_map_generic(&lower_scalar("__vec_ternary_body__", cl, body)))
+}
+
+/// Phase J.4 matrix state — `function(X, y)` iterative kernels using
+/// `X %*% v` / `t(X) %*% v` (multi-parameter GD / IRLS-core). The matrix
+/// param is the one used as a `%*%` left operand (bare or `t(...)`); the
+/// ABI fixes it as param 0. The engine takes this handle only when arg0 is
+/// actually a Matrix with matching dims, so a mis-typed call falls back to
+/// the interpreter.
+fn matvec_kernel(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if cl.params.len() != 2 { return None; }
+    let (p0, p1) = (&cl.params[0].name, &cl.params[1].name);
+    let mat = matmul_matrix_param(body, p0, p1)?;
+    if mat.as_ref() != p0.as_ref() { return None; }
+    let (kbody0, _kept) = normalize_reduction_kernel(body, &[p1.clone()]);
+    let mut mvctr = 0u32;
+    let kbody = hoist_matmuls(&kbody0, &mut mvctr);
+    match JitCompiler::compile_matvec_kernel(&kbody, &mat, p1) {
+        Ok(c) => Some(Arc::new(c) as Handle),
+        Err(e) => {
+            if std::env::var("R2_JIT_DEBUG").is_ok() { eprintln!("[matvec-kernel] {:?}", e); }
+            None
         }
     }
-    let out = out_var?;
-    if trailing.as_deref() != Some(out.as_str()) { return None; }
-    let (ivar, iter, fbody) = match for_stmt? { For { var, iter, body } => (var, iter, body), _ => return None };
-    let len_expr = match iter.as_ref() {
-        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
-            if matches!(lhs.as_ref(), NumLit(v) if *v==1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
-        _ => return None,
+}
+
+/// Phase J.4 brick 2 — multi-reduction kernel: combinations of whole-vector
+/// reductions the single-reduction paths can't express — `sum(x*y)/sum(x*x)`
+/// (regression coef), `{ m<-mean(x); sum((x-m)^2) }` (variance),
+/// covariance. Only when the body mentions a reduction, so pure maps skip
+/// it. Brick 3 fuses vector-valued intermediates and hoists reductions to
+/// scalar locals; a vector-valued final expression (`x - mean(x)`, or a
+/// KEPT loop-carried vector) takes the vector-output kernel.
+fn multi_reduction_kernel(cl: &Closure, body: &Expr) -> Option<Handle> {
+    if !(1..=2).contains(&cl.params.len()) || !mentions_reduction(body) { return None; }
+    let pnames = param_names(cl);
+    let (kbody, kept) = normalize_reduction_kernel(body, &pnames);
+    let all_vec_names: Vec<Arc<str>> = pnames.iter().chain(kept.iter()).cloned().collect();
+    let final_is_vec = match &kbody {
+        Expr::Block(s) => s.last().map_or(false, |e| refs_vector_bare(e, &all_vec_names)),
+        other => refs_vector_bare(other, &all_vec_names),
     };
-    let len_ok = match len_expr {
-        Symbol(nm) => len_var.as_deref() == Some(nm.as_ref()),
-        Call { func, args } => matches!(func.as_ref(), Symbol(f) if f.as_ref()=="length")
-            && args.len()==1 && matches!(&args[0].value, Symbol(a) if a.as_ref()==x),
-        _ => false,
-    };
-    if !len_ok { return None; }
-    // Loop body must be `y[i] <- f(x[i])`.
-    let (t, val) = match fbody.as_ref() { Assign { target, value, .. } => (target, value), _ => return None };
-    match t.as_ref() {
-        Index { object, indices } if indices.len()==1
-            && matches!(object.as_ref(), Symbol(o) if o.as_ref()==out)
-            && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref()==ivar.as_ref()) => {}
-        _ => return None,
-    }
-    if !has_index_vi(val, x, ivar.as_ref()) { return None; }
-    let mapped = subst_vi(val, x, ivar.as_ref());
-    if mentions(&mapped, ivar.as_ref()) || mentions(&mapped, &out) { return None; }
-    if let Some(lv) = &len_var { if mentions(&mapped, lv) { return None; } }
-    Some(mapped)
-}
-
-/// Phase J.3 — is `e` built entirely from constructs the indexed-load codegen
-/// lowers faithfully? Like `body_is_jit_lowerable`, but additionally admits
-/// `v[ivar]` where `v` is one of the vector params `vecs` and the index is
-/// *exactly* the loop induction variable `ivar` (guaranteeing an in-bounds
-/// load over `1:length(v)` — no bounds check needed). Indexed *stores* (an
-/// `Index` assignment target) are rejected: this brick is load-only, scalar
-/// return.
-fn body_is_indexed_lowerable(e: &r2_types::Expr, vecs: &[std::sync::Arc<str>], ivar: &str) -> bool {
-    use r2_types::Expr::*;
-    let is_vec = |o: &r2_types::Expr| matches!(o, Symbol(s) if vecs.iter().any(|v| v.as_ref() == s.as_ref()));
-    match e {
-        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
-        Unary { expr, .. } => body_is_indexed_lowerable(expr, vecs, ivar),
-        Binary { lhs, rhs, .. } => body_is_indexed_lowerable(lhs, vecs, ivar) && body_is_indexed_lowerable(rhs, vecs, ivar),
-        // Assign only to a scalar symbol (accumulator/temp); no indexed stores.
-        Assign { target, value, .. } => matches!(target.as_ref(), Symbol(_))
-            && body_is_indexed_lowerable(value, vecs, ivar),
-        Call { func, args } => body_is_indexed_lowerable(func, vecs, ivar)
-            && args.iter().all(|a| body_is_indexed_lowerable(&a.value, vecs, ivar)),
-        // Require an explicit `else`: an if-without-else that assigns the
-        // accumulator lowers its missing branch to Null(=0.0), which would
-        // silently zero the accumulator when the condition is false. The
-        // interpreter handles such bodies correctly, so decline (→ fallback).
-        If { cond, then, else_ } => else_.is_some()
-            && body_is_indexed_lowerable(cond, vecs, ivar)
-            && body_is_indexed_lowerable(then, vecs, ivar)
-            && else_.as_ref().map_or(true, |e| body_is_indexed_lowerable(e, vecs, ivar)),
-        While { cond, body } => body_is_indexed_lowerable(cond, vecs, ivar) && body_is_indexed_lowerable(body, vecs, ivar),
-        For { iter, body, .. } => matches!(iter.as_ref(), Binary { op: r2_types::BinOp::Colon, .. })
-            && body_is_indexed_lowerable(iter, vecs, ivar) && body_is_indexed_lowerable(body, vecs, ivar),
-        Block(stmts) => stmts.iter().all(|s| body_is_indexed_lowerable(s, vecs, ivar)),
-        Return(v) => body_is_indexed_lowerable(v, vecs, ivar),
-        Pipe { lhs, rhs } => body_is_indexed_lowerable(lhs, vecs, ivar) && body_is_indexed_lowerable(rhs, vecs, ivar),
-        // The one new admission: v[ivar] on a vector param.
-        Index { object, indices } => indices.len() == 1
-            && is_vec(object.as_ref())
-            && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref() == ivar),
-        _ => false,
+    if final_is_vec {
+        handle(JitCompiler::compile_reduction_map_kernel(&kbody, &pnames))
+    } else {
+        handle(JitCompiler::compile_reduction_kernel(&kbody, &pnames))
     }
 }
 
-/// Replace every `length(v)` (v ∈ `vecs`) with `Symbol(newsym)`. Used to turn
-/// the loop bound / any `length` use into a reference to the fused `len` param.
-fn rewrite_length(e: &r2_types::Expr, vecs: &[std::sync::Arc<str>], newsym: &std::sync::Arc<str>) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    match e {
-        Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "length")
-            && args.len() == 1
-            && matches!(&args[0].value, Symbol(a) if vecs.iter().any(|v| v.as_ref() == a.as_ref())) => {
-            Symbol(newsym.clone())
-        }
-        Binary { op, lhs, rhs } => Binary { op: *op,
-            lhs: Box::new(rewrite_length(lhs, vecs, newsym)), rhs: Box::new(rewrite_length(rhs, vecs, newsym)) },
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(rewrite_length(expr, vecs, newsym)) },
-        Assign { target, value, superassign } => Assign { target: target.clone(),
-            value: Box::new(rewrite_length(value, vecs, newsym)), superassign: *superassign },
-        Call { func, args } => Call { func: func.clone(),
-            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: rewrite_length(&a.value, vecs, newsym) }).collect() },
-        If { cond, then, else_ } => If { cond: Box::new(rewrite_length(cond, vecs, newsym)),
-            then: Box::new(rewrite_length(then, vecs, newsym)),
-            else_: else_.as_ref().map(|e| Box::new(rewrite_length(e, vecs, newsym))) },
-        While { cond, body } => While { cond: Box::new(rewrite_length(cond, vecs, newsym)), body: Box::new(rewrite_length(body, vecs, newsym)) },
-        For { var, iter, body } => For { var: var.clone(),
-            iter: Box::new(rewrite_length(iter, vecs, newsym)), body: Box::new(rewrite_length(body, vecs, newsym)) },
-        Block(stmts) => Block(stmts.iter().map(|s| rewrite_length(s, vecs, newsym)).collect()),
-        Return(v) => Return(Box::new(rewrite_length(v, vecs, newsym))),
-        Index { object, indices } => Index {
-            object: Box::new(rewrite_length(object, vecs, newsym)),
-            indices: indices.iter().map(|ix| ix.as_ref().map(|x| rewrite_length(x, vecs, newsym))).collect() },
-        other => other.clone(),
-    }
+/// Phase C.2 — the scalar specialization `(f64, ...) -> f64`.
+fn scalar_fallback(cl: &Closure, body: &Expr) -> Option<Handle> {
+    handle(JitCompiler::compile(&lower_scalar("__jit__", cl, body)))
 }
 
-/// Walk `e`, collecting a reference to every `For` node. Used to require the
-/// body contains exactly one counted loop (so the induction var is unambiguous).
-fn collect_fors<'a>(e: &'a r2_types::Expr, out: &mut Vec<&'a r2_types::Expr>) {
-    use r2_types::Expr::*;
-    match e {
-        For { body, iter, .. } => { out.push(e); collect_fors(iter, out); collect_fors(body, out); }
-        Binary { lhs, rhs, .. } => { collect_fors(lhs, out); collect_fors(rhs, out); }
-        Unary { expr, .. } => collect_fors(expr, out),
-        Assign { value, .. } => collect_fors(value, out),
-        Call { args, .. } => for a in args { collect_fors(&a.value, out); },
-        If { cond, then, else_ } => { collect_fors(cond, out); collect_fors(then, out); if let Some(x) = else_ { collect_fors(x, out); } }
-        While { cond, body } => { collect_fors(cond, out); collect_fors(body, out); }
-        Block(s) => for x in s { collect_fors(x, out); },
-        Return(v) => collect_fors(v, out),
-        Pipe { lhs, rhs } => { collect_fors(lhs, out); collect_fors(rhs, out); }
-        _ => {}
-    }
-}
-
-/// Does `e` contain any `v[..]` index on one of `vecs`?
-fn has_any_vec_index(e: &r2_types::Expr, vecs: &[std::sync::Arc<str>]) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        Index { object, indices } => matches!(object.as_ref(), Symbol(o) if vecs.iter().any(|v| v.as_ref()==o.as_ref()))
-            || has_any_vec_index(object, vecs) || indices.iter().flatten().any(|x| has_any_vec_index(x, vecs)),
-        Binary { lhs, rhs, .. } => has_any_vec_index(lhs, vecs) || has_any_vec_index(rhs, vecs),
-        Unary { expr, .. } => has_any_vec_index(expr, vecs),
-        Assign { value, .. } => has_any_vec_index(value, vecs),
-        Call { args, .. } => args.iter().any(|a| has_any_vec_index(&a.value, vecs)),
-        If { cond, then, else_ } => has_any_vec_index(cond, vecs) || has_any_vec_index(then, vecs) || else_.as_ref().map_or(false,|e| has_any_vec_index(e, vecs)),
-        While { cond, body } => has_any_vec_index(cond, vecs) || has_any_vec_index(body, vecs),
-        For { body, .. } => has_any_vec_index(body, vecs),
-        Block(s) => s.iter().any(|x| has_any_vec_index(x, vecs)),
-        Return(v) => has_any_vec_index(v, vecs),
-        Pipe { lhs, rhs } => has_any_vec_index(lhs, vecs) || has_any_vec_index(rhs, vecs),
-        _ => false,
-    }
-}
-
-/// Phase J.3 — recognize a general scalar-returning loop with real indexed
-/// loads over the (1 or 2) vector params:
-///   `function(x[, w]) { <scalar inits>; for(i in 1:length(x)) <body with x[i]/w[i]>; result }`
-/// Unlike the fold/map recognizers this admits arbitrary indexed-lowerable loop
-/// bodies (multi-statement, conditionals, scalar recurrences) as long as every
-/// `v[i]` uses the bare loop var (in-bounds) and the loop bound is `length` of a
-/// param. Returns the length-rewritten body + the vector param names in order.
-pub(crate) fn recognize_indexed_scalar_loop(
-    body: &r2_types::Expr,
-    params: &[std::sync::Arc<str>],
-) -> Option<(r2_types::Expr, Vec<std::sync::Arc<str>>)> {
-    use r2_types::Expr::*;
-    let stmts = match body { Block(s) => s, _ => return None };
-    // Must end in a bare symbol (the scalar result) so the compiled function
-    // returns a value, not the loop's NULL.
-    match stmts.last() { Some(Symbol(_)) => {}, _ => return None }
-
-    let vecs: Vec<std::sync::Arc<str>> = params.to_vec();
-    if !has_any_vec_index(body, &vecs) { return None; } // must actually index a vector
-
-    // Exactly one counted loop → unambiguous induction variable.
-    let mut fors = Vec::new();
-    collect_fors(body, &mut fors);
-    if fors.len() != 1 { return None; }
-    let (ivar, iter) = match fors[0] { For { var, iter, .. } => (var.clone(), iter), _ => return None };
-
-    // Loop must be `1:<len>` where <len> is `length(vecparam)` or a symbol
-    // assigned `length(vecparam)` among the leading statements.
-    let len_expr = match iter.as_ref() {
-        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
-            if matches!(lhs.as_ref(), NumLit(x) if *x == 1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
-        _ => return None,
-    };
-    let is_len_of_vec = |e: &r2_types::Expr| matches!(e, Call { func, args }
-        if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "length")
-            && args.len() == 1
-            && matches!(&args[0].value, Symbol(a) if vecs.iter().any(|v| v.as_ref() == a.as_ref())));
-    let len_ok = match len_expr {
-        e if is_len_of_vec(e) => true,
-        Symbol(nm) => stmts.iter().any(|s| matches!(s,
-            Assign { target, value, .. }
-                if matches!(target.as_ref(), Symbol(t) if t.as_ref() == nm.as_ref())
-                    && is_len_of_vec(value))),
-        _ => false,
-    };
-    if !len_ok { return None; }
-
-    // Rewrite length(vec) → a synthetic scalar `len` param, then validate the
-    // whole body is faithfully lowerable with in-bounds `v[ivar]` loads only.
-    let len_sym: std::sync::Arc<str> = std::sync::Arc::from(".__ixloop_n");
-    let rewritten = rewrite_length(body, &vecs, &len_sym);
-    if !body_is_indexed_lowerable(&rewritten, &vecs, ivar.as_ref()) { return None; }
-    Some((rewritten, vecs))
-}
-
-/// Phase J.3 — is `e` a faithfully-lowerable indexed-**store** loop body?
-/// Admits: reads `in_vec[ivar]`, stores `out[ivar] <- value` (both with the
-/// bare loop var → in-bounds), scalar-symbol temporaries, arithmetic, math
-/// calls, and `if`/`else` *as a value*. Rejects reads of `out` (no recurrence),
-/// nested loops, and `if` without `else`.
-fn store_body_ok(e: &r2_types::Expr, in_vecs: &[std::sync::Arc<str>], out: &str, ivar: &str) -> bool {
-    use r2_types::Expr::*;
-    let is_bare_index = |o: &r2_types::Expr, indices: &[Option<r2_types::Expr>], name: &str| {
-        indices.len() == 1
-            && matches!(o, Symbol(s) if s.as_ref() == name)
-            && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref() == ivar)
-    };
-    match e {
-        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
-        Unary { expr, .. } => store_body_ok(expr, in_vecs, out, ivar),
-        Binary { lhs, rhs, .. } => store_body_ok(lhs, in_vecs, out, ivar) && store_body_ok(rhs, in_vecs, out, ivar),
-        Assign { target, value, .. } => {
-            let target_ok = match target.as_ref() {
-                Symbol(_) => true, // scalar temp
-                Index { object, indices } => is_bare_index(object, indices, out), // out[i] store
-                _ => false,
-            };
-            target_ok && store_body_ok(value, in_vecs, out, ivar)
-        }
-        Call { func, args } => store_body_ok(func, in_vecs, out, ivar)
-            && args.iter().all(|a| store_body_ok(&a.value, in_vecs, out, ivar)),
-        If { cond, then, else_ } => else_.is_some()
-            && store_body_ok(cond, in_vecs, out, ivar)
-            && store_body_ok(then, in_vecs, out, ivar)
-            && else_.as_ref().map_or(true, |x| store_body_ok(x, in_vecs, out, ivar)),
-        Block(stmts) => stmts.iter().all(|s| store_body_ok(s, in_vecs, out, ivar)),
-        // A read: only an input vector at the bare loop var (never `out`).
-        Index { object, indices } => in_vecs.iter().any(|v| is_bare_index(object, indices, v)),
-        _ => false, // no For/While/Repeat/Match/etc. inside the loop body
-    }
-}
-
-/// Does `e` contain a store `out[ivar] <- …`?
-fn has_store_to(e: &r2_types::Expr, out: &str, ivar: &str) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        Assign { target, value, .. } => {
-            let hit = matches!(target.as_ref(), Index { object, indices }
-                if indices.len() == 1
-                    && matches!(object.as_ref(), Symbol(o) if o.as_ref() == out)
-                    && matches!(&indices[0], Some(Symbol(ix)) if ix.as_ref() == ivar));
-            hit || has_store_to(value, out, ivar)
-        }
-        Binary { lhs, rhs, .. } => has_store_to(lhs, out, ivar) || has_store_to(rhs, out, ivar),
-        Unary { expr, .. } => has_store_to(expr, out, ivar),
-        Call { args, .. } => args.iter().any(|a| has_store_to(&a.value, out, ivar)),
-        If { cond, then, else_ } => has_store_to(cond, out, ivar) || has_store_to(then, out, ivar)
-            || else_.as_ref().map_or(false, |x| has_store_to(x, out, ivar)),
-        Block(s) => s.iter().any(|x| has_store_to(x, out, ivar)),
-        _ => false,
-    }
-}
-
-/// Phase J.3 — recognize a general indexed-**store** map over 1-2 input vectors:
-///   `function(x[, w]) { [n <- length(x);] y <- <alloc>; for(i in 1:length(x)) <body storing y[i]>; y }`
-/// The loop body may be multi-statement with scalar temporaries and reads of
-/// `x[i]`/`w[i]` (bare loop var). Returns (rewritten IR body = the loop only, with
-/// `length(v)`→ the len param), the input vector names, and the output var name.
-pub(crate) fn recognize_indexed_store_map(
-    body: &r2_types::Expr,
-    params: &[std::sync::Arc<str>],
-) -> Option<(r2_types::Expr, Vec<std::sync::Arc<str>>, std::sync::Arc<str>)> {
-    use r2_types::Expr::*;
-    let stmts = match body { Block(s) => s, _ => return None };
-    let out = match stmts.last() { Some(Symbol(o)) => o.clone(), _ => return None };
-    let in_vecs: Vec<std::sync::Arc<str>> = params.to_vec();
-    if in_vecs.iter().any(|v| v.as_ref() == out.as_ref()) { return None; } // out must be a fresh local
-
-    let is_len_of_vec = |e: &r2_types::Expr| matches!(e, Call { func, args }
-        if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "length")
-            && args.len() == 1
-            && matches!(&args[0].value, Symbol(a) if in_vecs.iter().any(|v| v.as_ref() == a.as_ref())));
-
-    // Partition the top-level statements: length-aliases, the single output
-    // alloc, the (single) For, and the trailing `out`. Anything else → bail.
-    let mut len_aliases: Vec<std::sync::Arc<str>> = Vec::new();
-    let mut saw_alloc = false;
-    let mut for_stmt: Option<&r2_types::Expr> = None;
-    for (k, st) in stmts.iter().enumerate() {
-        if k == stmts.len() - 1 { break; } // trailing Symbol(out), already captured
-        match st {
-            Assign { target, value, .. } => {
-                let nm = match target.as_ref() { Symbol(n) => n.clone(), _ => return None };
-                if is_len_of_vec(value) { len_aliases.push(nm); }
-                else if nm.as_ref() == out.as_ref() { saw_alloc = true; }
-                else { return None; } // unexpected pre-loop statement
-            }
-            For { .. } => { if for_stmt.is_some() { return None; } for_stmt = Some(st); }
-            _ => return None,
-        }
-    }
-    if !saw_alloc { return None; }
-    let (ivar, iter, fbody) = match for_stmt? { For { var, iter, body } => (var.clone(), iter, body), _ => return None };
-
-    // Loop must be `1:<len>` with <len> = length(invec) or a length-alias.
-    let len_expr = match iter.as_ref() {
-        Binary { op: r2_types::BinOp::Colon, lhs, rhs }
-            if matches!(lhs.as_ref(), NumLit(x) if *x == 1.0) || matches!(lhs.as_ref(), IntLit(1)) => rhs.as_ref(),
-        _ => return None,
-    };
-    let len_ok = match len_expr {
-        e if is_len_of_vec(e) => true,
-        Symbol(nm) => len_aliases.iter().any(|a| a.as_ref() == nm.as_ref()),
-        _ => false,
-    };
-    if !len_ok { return None; }
-
-    // Validate the loop body and require it actually stores out[ivar].
-    if !store_body_ok(fbody, &in_vecs, out.as_ref(), ivar.as_ref()) { return None; }
-    if !has_store_to(fbody, out.as_ref(), ivar.as_ref()) { return None; }
-
-    // Rewritten IR body = the pre-loop length-aliases + the For (drop alloc &
-    // trailing return); length(vec) → the synthetic len param.
-    let len_sym: std::sync::Arc<str> = std::sync::Arc::from(".__ixloop_n");
-    let mut kept: Vec<r2_types::Expr> = Vec::new();
-    for (k, st) in stmts.iter().enumerate() {
-        if k == stmts.len() - 1 { break; }
-        match st {
-            Assign { target, value, .. }
-                if matches!(target.as_ref(), Symbol(n) if n.as_ref() == out.as_ref()) && !is_len_of_vec(value) => {}
-            other => kept.push(rewrite_length(other, &in_vecs, &len_sym)),
-        }
-    }
-    Some((Block(kept), in_vecs, out))
-}
+// ── Diagnostics ──────────────────────────────────────────────────────
 
 /// J.5 groundwork / `explain()` — the FIRST construct in `e` that keeps it out
 /// of the JIT, as a human-readable reason, or `None` if fully lowerable. Mirrors
@@ -615,1166 +402,3 @@ pub fn explain_closure(cl: &r2_types::Closure) -> String {
         None => "interpreter — body is lowerable but codegen is unsupported here (report this)".into(),
     }
 }
-
-/// Phase J.4 — is `e` a *pure single-expression* tree safe to inline by
-/// substitution (no local bindings to alpha-rename, no control-flow that binds
-/// its own variables)? Literals, symbols, arithmetic, calls, `if`/`else`, and
-/// indexing only.
-fn is_pure_inlinable(e: &r2_types::Expr) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        NumLit(_) | IntLit(_) | BoolLit(_) | NaLit | NullLit | Symbol(_) => true,
-        Unary { expr, .. } => is_pure_inlinable(expr),
-        Binary { lhs, rhs, .. } => is_pure_inlinable(lhs) && is_pure_inlinable(rhs),
-        Call { func, args } => is_pure_inlinable(func) && args.iter().all(|a| is_pure_inlinable(&a.value)),
-        If { cond, then, else_ } => is_pure_inlinable(cond) && is_pure_inlinable(then)
-            && else_.as_ref().map_or(true, |x| is_pure_inlinable(x)),
-        Index { object, indices } => is_pure_inlinable(object) && indices.iter().flatten().all(is_pure_inlinable),
-        Pipe { lhs, rhs } => is_pure_inlinable(lhs) && is_pure_inlinable(rhs),
-        _ => false,
-    }
-}
-
-/// Substitute bare symbols with argument expressions (used to inline a callee
-/// body once its params are bound to the caller's argument expressions). Only
-/// walks the pure-inlinable node set (guaranteed by `is_pure_inlinable`).
-fn substitute_symbols(e: &r2_types::Expr, subst: &std::collections::HashMap<std::sync::Arc<str>, r2_types::Expr>) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    match e {
-        Symbol(s) => subst.get(s).cloned().unwrap_or_else(|| e.clone()),
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(substitute_symbols(expr, subst)) },
-        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(substitute_symbols(lhs, subst)), rhs: Box::new(substitute_symbols(rhs, subst)) },
-        Call { func, args } => Call { func: Box::new(substitute_symbols(func, subst)),
-            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: substitute_symbols(&a.value, subst) }).collect() },
-        If { cond, then, else_ } => If { cond: Box::new(substitute_symbols(cond, subst)),
-            then: Box::new(substitute_symbols(then, subst)),
-            else_: else_.as_ref().map(|x| Box::new(substitute_symbols(x, subst))) },
-        Index { object, indices } => Index { object: Box::new(substitute_symbols(object, subst)),
-            indices: indices.iter().map(|ix| ix.as_ref().map(|x| substitute_symbols(x, subst))).collect() },
-        Pipe { lhs, rhs } => Pipe { lhs: Box::new(substitute_symbols(lhs, subst)), rhs: Box::new(substitute_symbols(rhs, subst)) },
-        other => other.clone(),
-    }
-}
-
-/// Phase J.4 — inline calls to pure JIT-lowerable user closures found in `env`.
-/// `function(a,b) sq(a) + sq(b)` with `sq <- function(x) x*x` becomes
-/// `a*a + b*b`, so the composed function JITs as one unit instead of bailing on
-/// the user-function `Call`. Depth-bounded so (mutual) recursion terminates with
-/// a residual `Call` that safely falls back to the interpreter.
-fn inline_user_calls(e: &r2_types::Expr, env: &r2_types::EnvRef, depth: u32) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    if depth == 0 { return e.clone(); }
-    match e {
-        Call { func, args } => {
-            let new_args: Vec<r2_types::CallArg> = args.iter()
-                .map(|a| r2_types::CallArg { name: a.name.clone(), value: inline_user_calls(&a.value, env, depth) })
-                .collect();
-            if let Symbol(f) = func.as_ref() {
-                if new_args.iter().all(|a| a.name.is_none()) {
-                    if let Some(r2_types::RVal::Closure(cl2)) = env.lookup(f) {
-                        if cl2.params.len() == new_args.len()
-                            && cl2.params.iter().all(|p| p.default.is_none() && !p.dots)
-                            && is_pure_inlinable(&cl2.body)
-                        {
-                            let mut subst = std::collections::HashMap::new();
-                            for (p, a) in cl2.params.iter().zip(new_args.iter()) {
-                                subst.insert(p.name.clone(), a.value.clone());
-                            }
-                            let body_sub = substitute_symbols(&cl2.body, &subst);
-                            return inline_user_calls(&body_sub, env, depth - 1);
-                        }
-                    }
-                }
-            }
-            Call { func: func.clone(), args: new_args }
-        }
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(inline_user_calls(expr, env, depth)) },
-        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(inline_user_calls(lhs, env, depth)), rhs: Box::new(inline_user_calls(rhs, env, depth)) },
-        If { cond, then, else_ } => If { cond: Box::new(inline_user_calls(cond, env, depth)),
-            then: Box::new(inline_user_calls(then, env, depth)),
-            else_: else_.as_ref().map(|x| Box::new(inline_user_calls(x, env, depth))) },
-        While { cond, body } => While { cond: Box::new(inline_user_calls(cond, env, depth)), body: Box::new(inline_user_calls(body, env, depth)) },
-        For { var, iter, body } => For { var: var.clone(), iter: Box::new(inline_user_calls(iter, env, depth)), body: Box::new(inline_user_calls(body, env, depth)) },
-        Block(s) => Block(s.iter().map(|x| inline_user_calls(x, env, depth)).collect()),
-        Assign { target, value, superassign } => Assign { target: target.clone(), value: Box::new(inline_user_calls(value, env, depth)), superassign: *superassign },
-        Return(v) => Return(Box::new(inline_user_calls(v, env, depth))),
-        Pipe { lhs, rhs } => Pipe { lhs: Box::new(inline_user_calls(lhs, env, depth)), rhs: Box::new(inline_user_calls(rhs, env, depth)) },
-        Index { object, indices } => Index { object: Box::new(inline_user_calls(object, env, depth)),
-            indices: indices.iter().map(|ix| ix.as_ref().map(|x| inline_user_calls(x, env, depth))).collect() },
-        other => other.clone(),
-    }
-}
-
-/// Phase J.5b — inline user helpers whose bodies are BLOCKS of local
-/// assignments ending in an expression: the standard addon-library style
-///   vsd <- function(x) { m <- mean(x); s <- sqrt(...); if (s < eps) 1 else s }
-/// `inline_user_calls` only handles single-expression helpers (no locals
-/// to rename); this pass alpha-renames the helper's locals with a unique
-/// prefix, hoists the renamed assignments BEFORE the statement containing
-/// the call, and replaces the call with the substituted final expression.
-/// Guards: unnamed pure-inlinable args, params without defaults/dots,
-/// every non-final statement a single-assignment `Symbol <- pure-expr`
-/// (each local assigned once), pure-inlinable final expr.
-fn inline_block_helpers(e: &r2_types::Expr, env: &r2_types::EnvRef, ctr: &mut u32, depth: u32) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    fn expand(e: &r2_types::Expr, env: &r2_types::EnvRef, pre: &mut Vec<r2_types::Expr>, ctr: &mut u32, depth: u32) -> r2_types::Expr {
-        if depth == 0 { return e.clone(); }
-        match e {
-            Call { func, args } => {
-                let new_args: Vec<r2_types::CallArg> = args.iter()
-                    .map(|a| r2_types::CallArg { name: a.name.clone(), value: expand(&a.value, env, pre, ctr, depth) })
-                    .collect();
-                if let Symbol(f) = func.as_ref() {
-                    if new_args.iter().all(|a| a.name.is_none() && is_pure_inlinable(&a.value)) {
-                        if let Some(r2_types::RVal::Closure(cl2)) = env.lookup(f) {
-                            if cl2.params.len() == new_args.len()
-                                && cl2.params.iter().all(|p| p.default.is_none() && !p.dots)
-                            {
-                                if let Block(inner) = cl2.body.as_ref() {
-                                    if let Some(expanded) = splice_block(inner, &cl2.params, &new_args, env, pre, ctr, depth) {
-                                        return expanded;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Call { func: func.clone(), args: new_args }
-            }
-            Unary { op, expr } => Unary { op: *op, expr: Box::new(expand(expr, env, pre, ctr, depth)) },
-            Binary { op, lhs, rhs } => Binary { op: *op,
-                lhs: Box::new(expand(lhs, env, pre, ctr, depth)), rhs: Box::new(expand(rhs, env, pre, ctr, depth)) },
-            If { cond, then, else_ } => If { cond: Box::new(expand(cond, env, pre, ctr, depth)),
-                then: Box::new(expand(then, env, pre, ctr, depth)),
-                else_: else_.as_ref().map(|x| Box::new(expand(x, env, pre, ctr, depth))) },
-            other => other.clone(),
-        }
-    }
-    /// Try to splice a helper body `{a <- ..; b <- ..; final}` at a call
-    /// site: renamed assigns are pushed to `pre`, the substituted final
-    /// expression is returned. None when the body doesn't fit the shape.
-    fn splice_block(inner: &[r2_types::Expr], params: &[r2_types::Param], args: &[r2_types::CallArg],
-                    env: &r2_types::EnvRef, pre: &mut Vec<r2_types::Expr>, ctr: &mut u32, depth: u32) -> Option<r2_types::Expr> {
-        if inner.len() < 2 { return None; }
-        let (last, assigns) = inner.split_last()?;
-        // shape check first (no side effects until certain)
-        let mut locals: std::collections::HashSet<std::sync::Arc<str>> = Default::default();
-        for st in assigns {
-            match st {
-                Assign { target, value, superassign: false } => match target.as_ref() {
-                    Symbol(n) if !locals.contains(n.as_ref()) && is_pure_inlinable(value) => { locals.insert(n.clone()); }
-                    _ => return None,
-                },
-                _ => return None,
-            }
-        }
-        if !is_pure_inlinable(last) { return None; }
-        let tag = *ctr; *ctr += 1;
-        let mut subst: std::collections::HashMap<std::sync::Arc<str>, r2_types::Expr> = Default::default();
-        for (p, a) in params.iter().zip(args.iter()) { subst.insert(p.name.clone(), a.value.clone()); }
-        for st in assigns {
-            if let Assign { target, value, .. } = st {
-                if let Symbol(n) = target.as_ref() {
-                    let renamed: std::sync::Arc<str> = std::sync::Arc::from(format!(".__ib{}_{}", tag, n));
-                    // Substitute params + earlier locals, then keep expanding
-                    // nested helpers inside the hoisted value too (both the
-                    // single-expression and block-helper kinds).
-                    let v = inline_user_calls(&substitute_symbols(value, &subst), env, 4);
-                    let v = expand(&v, env, pre, ctr, depth - 1);
-                    pre.push(Assign { target: Box::new(Symbol(renamed.clone())), value: Box::new(v), superassign: false });
-                    subst.insert(n.clone(), Symbol(renamed));
-                }
-            }
-        }
-        let fin = inline_user_calls(&substitute_symbols(last, &subst), env, 4);
-        Some(expand(&fin, env, pre, ctr, depth - 1))
-    }
-    match e {
-        Block(stmts) => {
-            let mut out: Vec<r2_types::Expr> = Vec::with_capacity(stmts.len());
-            for st in stmts {
-                let mut pre: Vec<r2_types::Expr> = Vec::new();
-                let new_st = match st {
-                    Assign { target, value, superassign } => {
-                        let v = expand(value, env, &mut pre, ctr, depth);
-                        Assign { target: target.clone(), value: Box::new(v), superassign: *superassign }
-                    }
-                    For { var, iter, body } => For { var: var.clone(), iter: iter.clone(),
-                        body: Box::new(inline_block_helpers(body, env, ctr, depth)) },
-                    While { cond, body } => While { cond: cond.clone(),
-                        body: Box::new(inline_block_helpers(body, env, ctr, depth)) },
-                    other => expand(other, env, &mut pre, ctr, depth),
-                };
-                out.extend(pre);
-                out.push(new_st);
-            }
-            Block(out)
-        }
-        // Single-expression body: hoisted assigns turn it into a Block.
-        other => {
-            let mut pre: Vec<r2_types::Expr> = Vec::new();
-            let fin = expand(other, env, &mut pre, ctr, depth);
-            if pre.is_empty() { fin } else { pre.push(fin); Block(pre) }
-        }
-    }
-}
-
-pub fn try_compile_closure(cl: &r2_types::Closure) -> Option<std::sync::Arc<dyn r2_types::JitHandle>> {
-    // Phase R.M — gate the JIT on supported architectures. On aarch64 the
-    // engine falls back to the interpreter; statistical outputs are
-    // bit-identical, only wall-clock performance differs.
-    if !JIT_SUPPORTED { return None; }
-
-    // Filter out anything we definitely can't handle.
-    // Phase C.5 admits 3-param closures for the ternary vector-map path.
-    if cl.params.len() > 3 { return None; }
-    if cl.params.iter().any(|p| p.default.is_some() || p.dots) { return None; }
-
-    // ── Phase B.1: closure capture inference via partial evaluation ─
-    //
-    // Free variables in the body are resolved against `cl.env` at JIT
-    // compile time. Numeric scalars get substituted as `Expr::NumLit`
-    // constants directly in the body AST before IR lowering. The closure
-    // becomes self-contained from the JIT's perspective — no new ABI
-    // surface, no per-call capture passing.
-    //
-    // Limitations: only numeric scalars (Real/Int/Bool of length 1) get
-    // baked in. Vector-valued captures and other types fall through —
-    // the body still references them and the lowering rejects (closure
-    // stays interpreter-only).
-    //
-    // **Correctness window**: this assumes captured values are stable
-    // for the lifetime of the closure. R semantics agree — captures
-    // are by-value at creation time. If R2 ever adds reactive/observable
-    // values, this substitution will need to be invalidated on capture
-    // mutation; we'll cross that bridge when it appears.
-    // Phase J.4 brick 1 — inline calls to pure JIT-lowerable user helpers first,
-    // so a function composed of small numeric helpers compiles as one unit. A
-    // body with no such calls is returned structurally unchanged (a clone), so
-    // existing paths are unaffected. Depth-bounded → recursion falls back safely.
-    // Phase J.5 — normalize indexed accumulation loops into vector
-    // reductions FIRST, so every later pass (fold/map recognizers,
-    // iterative kernels, reduction kernels) sees the one canonical
-    // spelling and reuses the same compiled waves.
-    let mut ib_ctr = 0u32;
-    let inlined_body = vectorize_indexed_loops(
-        &inline_block_helpers(&inline_user_calls(cl.body.as_ref(), &cl.env, 8), &cl.env, &mut ib_ctr, 4));
-    if std::env::var("R2_JIT_DEBUG").is_ok() {
-        eprintln!("[J5] normalized body: {:?}", inlined_body);
-    }
-
-    let param_names: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
-    let free_vars = r2_ir::collect_free_vars(&inlined_body, &param_names);
-    let body_expr: r2_types::Expr;
-    let body_ref: &r2_types::Expr;
-    if !free_vars.is_empty() {
-        let mut subs: std::collections::HashMap<std::sync::Arc<str>, f64> =
-            std::collections::HashMap::new();
-        for name in &free_vars {
-            if let Some(val) = cl.env.lookup(name) {
-                if let Some(scalar) = scalar_f64_of(&val) {
-                    subs.insert(name.clone(), scalar);
-                }
-            }
-        }
-        if !subs.is_empty() {
-            body_expr = r2_ir::substitute_constants(&inlined_body, &subs);
-            body_ref = &body_expr;
-        } else {
-            body_ref = &inlined_body;
-        }
-    } else {
-        body_ref = &inlined_body;
-    }
-
-    // Phase J.2 — index-loop fold over a vector param:
-    //   function(v){ [n<-length(v);] s<-init; for(i in 1:len) s<-s <+/*> f(v[i]); s }
-    // Recognized as a map-reduce over v (v[i] → element), reusing the tested
-    // fused map-reduce codegen — no new indexed-load codegen. Runs BEFORE the
-    // allowlist gate, which would otherwise reject the `Index` in the body.
-    if cl.params.len() == 1 {
-        if let Some((mapped, reduce_op)) = recognize_index_reduction(body_ref, &cl.params[0].name) {
-            if body_is_jit_lowerable(&mapped) {
-                let params = vec![(cl.params[0].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real))];
-                let mut inner_ir = r2_ir::lower_function("__map_reduce_inner__", params, &mapped);
-                inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-                if let Ok(c) = JitCompiler::compile_vector_map_reduce(&inner_ir, reduce_op) {
-                    return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-                }
-            }
-        }
-        // Brick 2: index-loop map `for(i in 1:len) y[i] <- f(x[i]); y` → VectorMap.
-        if let Some(mapped) = recognize_index_map(body_ref, &cl.params[0].name) {
-            if body_is_jit_lowerable(&mapped) {
-                let params = vec![(cl.params[0].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real))];
-                let mut inner_ir = r2_ir::lower_function("__index_map_inner__", params, &mapped);
-                inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-                if let Ok(c) = JitCompiler::compile_vector_map_generic(&inner_ir) {
-                    return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-                }
-            }
-        }
-    }
-
-    // Phase J.3 — general scalar-returning loop with real indexed loads over
-    // 1-2 vector params (multi-statement folds, conditionals, scalar
-    // recurrences reading x[i]/w[i]). Compiles the *actual* loop via `Load`
-    // codegen — not a recognised map/reduce shape. Runs before the allowlist
-    // gate (which rejects `Index`), and after the specialised fold/map
-    // recognisers so those keep precedence for the shapes they cover.
-    if cl.params.len() == 1 || cl.params.len() == 2 {
-        let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
-        if let Some((rewritten, vecs)) = recognize_indexed_scalar_loop(body_ref, &pnames) {
-            let mut params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = vecs.iter()
-                .map(|v| (v.clone(), r2_types::infer::IrType::vector(IrElem::Real, None)))
-                .collect();
-            params.push((std::sync::Arc::from(".__ixloop_n"), r2_types::infer::IrType::scalar(IrElem::Real)));
-            let mut ir = r2_ir::lower_function("__indexed_scalar_loop__", params, &rewritten);
-            ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-            if let Ok(c) = JitCompiler::compile_indexed_reduction(&ir) {
-                return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-            }
-        }
-    }
-
-    // Phase J.3 — general indexed-STORE map (1-2 input vectors → 1 output),
-    // e.g. two-input `for(i in 1:length(x)) y[i] <- x[i]+w[i]; y` or a
-    // multi-statement store body. Runs after the simpler `recognize_index_map`
-    // (which handles the single-input `y[i] <- f(x[i])` shape via VectorMap).
-    if cl.params.len() == 1 || cl.params.len() == 2 {
-        let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
-        if let Some((rewritten, in_vecs, out)) = recognize_indexed_store_map(body_ref, &pnames) {
-            // Params: input vectors, then the output vector, then the len scalar.
-            let mut params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = in_vecs.iter()
-                .map(|v| (v.clone(), r2_types::infer::IrType::vector(IrElem::Real, None)))
-                .collect();
-            params.push((out, r2_types::infer::IrType::vector(IrElem::Real, None)));
-            params.push((std::sync::Arc::from(".__ixloop_n"), r2_types::infer::IrType::scalar(IrElem::Real)));
-            let mut ir = r2_ir::lower_function("__indexed_store_map__", params, &rewritten);
-            ir.return_type = r2_types::infer::IrType::null();
-            if let Ok(c) = JitCompiler::compile_indexed_store_map(&ir) {
-                return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-            }
-        }
-    }
-
-    // Eligibility gate: bail (→ interpreter) if the body contains any
-    // construct the IR lowering silently drops (for/repeat/match/...).
-    // Without this, e.g. `function(n){ s<-0; for(k in 1:n) s<-s+k; s }`
-    // would JIT-compile with the loop elided and return `s`'s init value.
-    if !body_is_jit_lowerable(body_ref) { return None; }
-
-    // Phase C.3 — vector reduction pattern: `function(v) sum(v)` etc.
-    if cl.params.len() == 1 {
-        if let r2_types::Expr::Call { func, args } = body_ref {
-            if let r2_types::Expr::Symbol(fname) = func.as_ref() {
-                let supported = matches!(fname.as_ref(), "sum" | "mean" | "length" | "prod");
-                if supported && args.len() == 1 {
-                    if let r2_types::Expr::Symbol(arg_sym) = &args[0].value {
-                        if arg_sym == &cl.params[0].name {
-                            if let Ok(c) = JitCompiler::compile_vector_reduction(fname.as_ref()) {
-                                return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-                            }
-                        }
-                    }
-                    // ── Phase C.9 — fused map-reduce ──
-                    // Body is `sum(inner_expr)` / `prod(inner_expr)` where
-                    // `inner_expr` is a function of the closure param.
-                    // Compile a fused loop: load x[i], apply inner_expr,
-                    // accumulate. No intermediate vector allocated.
-                    if matches!(fname.as_ref(), "sum" | "prod") {
-                        let reduce_op = match fname.as_ref() {
-                            "sum"  => FusedReduceOp::Sum,
-                            "prod" => FusedReduceOp::Prod,
-                            _ => unreachable!(),
-                        };
-                        let params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> =
-                            cl.params.iter()
-                                .map(|p| (p.name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)))
-                                .collect();
-                        let mut inner_ir = r2_ir::lower_function(
-                            "__map_reduce_inner__",
-                            params,
-                            &args[0].value,
-                        );
-                        inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-                        if let Ok(c) = JitCompiler::compile_vector_map_reduce(&inner_ir, reduce_op) {
-                            return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Phase J.2 — binary map-reduce: function(x, w) sum(f(x,w)) / prod(...).
-    // e.g. dot product `function(x, w) sum(x*w)`. The inner `f` is a per-element
-    // function of both vectors → fused (a[i], b[i]) → accumulate loop.
-    if cl.params.len() == 2 {
-        if let r2_types::Expr::Call { func, args } = body_ref {
-            if let r2_types::Expr::Symbol(fname) = func.as_ref() {
-                if matches!(fname.as_ref(), "sum" | "prod") && args.len() == 1
-                    && body_is_jit_lowerable(&args[0].value) {
-                    let reduce_op = if fname.as_ref() == "sum" { FusedReduceOp::Sum } else { FusedReduceOp::Prod };
-                    let params = vec![
-                        (cl.params[0].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)),
-                        (cl.params[1].name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)),
-                    ];
-                    let mut inner_ir = r2_ir::lower_function("__binary_map_reduce_inner__", params, &args[0].value);
-                    inner_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-                    if let Ok(c) = JitCompiler::compile_vector_binary_map_reduce(&inner_ir, reduce_op) {
-                        return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-                    }
-                }
-            }
-        }
-    }
-
-    // Phase C.4-full — vector ⊗ vector element-wise: function(a, b) a OP b
-    if cl.params.len() == 2 {
-        if let r2_types::Expr::Binary { op, lhs, rhs } = body_ref {
-            if let (r2_types::Expr::Symbol(ls), r2_types::Expr::Symbol(rs)) = (lhs.as_ref(), rhs.as_ref()) {
-                if ls == &cl.params[0].name && rs == &cl.params[1].name {
-                    if let Ok(c) = JitCompiler::compile_vector_binary_op(*op) {
-                        return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-                    }
-                }
-            }
-        }
-    }
-
-    // Phase C.7 — generic 2-param vector map for any body that lowers to
-    // arithmetic + math Calls + branches. Catches `function(a, b) sqrt(a*a + b*b)`,
-    // `function(x, y) if (x > y) x else y`, etc. Tried before the
-    // simpler `function(a, b) a OP b` path falls through to the scalar fallback.
-    if cl.params.len() == 2 {
-        let params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = cl.params.iter()
-            .map(|p| (p.name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)))
-            .collect();
-        let mut body_ir = r2_ir::lower_function("__vec_binary_body__", params, body_ref);
-        body_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-        if let Ok(c) = JitCompiler::compile_vector_binary_map_generic(&body_ir) {
-            return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-        }
-    }
-
-    // Phase C.4 — element-wise vector map with scalar literal:
-    //   function(v) v OP literal     OR     function(v) literal OP v   (commutative ops)
-    if cl.params.len() == 1 {
-        if let r2_types::Expr::Binary { op, lhs, rhs } = body_ref {
-            let pname = &cl.params[0].name;
-            let pat = match (lhs.as_ref(), rhs.as_ref()) {
-                (r2_types::Expr::Symbol(s), r2_types::Expr::NumLit(k)) if s == pname => Some((*op, *k)),
-                (r2_types::Expr::NumLit(k), r2_types::Expr::Symbol(s)) if s == pname
-                    && matches!(op, r2_types::BinOp::Add | r2_types::BinOp::Mul)
-                    => Some((*op, *k)),
-                _ => None,
-            };
-            if let Some((op, k)) = pat {
-                if let Ok(c) = JitCompiler::compile_vector_map_scalar_op(op, k) {
-                    return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-                }
-            }
-        }
-    }
-
-    // Phase C.8 — SIMD f64x2 1-param vector map. Tried before the
-    // generic scalar path; if the body is SIMD-clean it produces a
-    // tight 2-elements-per-iter loop with native SSE2/NEON instructions.
-    // Falls through (Err) to the scalar generic path if not clean.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    if cl.params.len() == 1 {
-        let params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = cl.params.iter()
-            .map(|p| (p.name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)))
-            .collect();
-        let mut body_ir = r2_ir::lower_function("__vec_simd_body__", params, body_ref);
-        body_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-        if let Ok(c) = JitCompiler::compile_vector_simd_map_f64x2(&body_ir) {
-            return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-        }
-    }
-
-    // Phase C.4-full part 2 — generic 1-param vector map for any pure
-    // arithmetic body (composed expressions, e.g. `(v+1)*2`, `v*v - 1`).
-    if cl.params.len() == 1 {
-        let params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = cl.params.iter()
-            .map(|p| (p.name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)))
-            .collect();
-        let mut body_ir = r2_ir::lower_function("__vec_body__", params, body_ref);
-        body_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-        if let Ok(c) = JitCompiler::compile_vector_map_generic(&body_ir) {
-            return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-        }
-    }
-
-    // Phase C.5 — generic 3-param branchy ternary vector map.
-    // Targets `function(c, a, b) if (c > 0) a else b` and similar shapes
-    // where three same-length vectors map to one output via a multi-block body.
-    if cl.params.len() == 3 {
-        let params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = cl.params.iter()
-            .map(|p| (p.name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)))
-            .collect();
-        let mut body_ir = r2_ir::lower_function("__vec_ternary_body__", params, body_ref);
-        body_ir.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-        if let Ok(c) = JitCompiler::compile_vector_ternary_map_generic(&body_ir) {
-            return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-        }
-    }
-
-    // Phase J.4 matrix state — `function(X, y)` iterative kernels using
-    // `X %*% v` / `t(X) %*% v` (multi-parameter GD / IRLS-core). The matrix
-    // param is the one used as a `%*%` left operand (bare or `t(...)`); the
-    // engine dispatch only takes this handle when arg0 is actually a Matrix
-    // with matching dims, so a mis-typed call falls back to the interpreter.
-    if cl.params.len() == 2 {
-        if let Some(mat) = matmul_matrix_param(body_ref, &cl.params[0].name, &cl.params[1].name) {
-            let vec = if mat.as_ref() == cl.params[0].name.as_ref() { cl.params[1].name.clone() } else { cl.params[0].name.clone() };
-            if mat.as_ref() == cl.params[0].name.as_ref() { // ABI fixes X as param 0
-                let pnames: Vec<std::sync::Arc<str>> = vec![vec.clone()];
-                let (kbody0, _kept) = normalize_reduction_kernel(body_ref, &pnames);
-                let mut mvctr = 0u32;
-                let kbody = hoist_matmuls(&kbody0, &mut mvctr);
-                match JitCompiler::compile_matvec_kernel(&kbody, &mat, &vec) {
-                    Ok(c) => return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>),
-                    Err(e) => if std::env::var("R2_JIT_DEBUG").is_ok() { eprintln!("[matvec-kernel] {:?}", e); }
-                }
-            }
-        }
-    }
-
-    // Phase J.4 brick 2 — multi-reduction scalar kernel. Combinations of
-    // whole-vector reductions the single-reduction paths can't express:
-    // `sum(x*y)/sum(x*x)` (regression coef), `{ m<-mean(x); sum((x-m)^2) }`
-    // (variance), covariance, etc. Attempted only when the body actually
-    // mentions a reduction (so pure vector maps skip it), after all the
-    // single-reduction / vector-map paths, before the scalar fallback.
-    if (cl.params.len() == 1 || cl.params.len() == 2) && mentions_reduction(body_ref) {
-        let pnames: Vec<std::sync::Arc<str>> = cl.params.iter().map(|p| p.name.clone()).collect();
-        // Brick 3: fuse vector-valued intermediates + hoist reductions to scalar
-        // locals, giving the canonical Block form the kernel codegen consumes.
-        let (kbody, kept) = normalize_reduction_kernel(body_ref, &pnames);
-        // A vector-valued final expression (e.g. `x - mean(x)`, or a KEPT
-        // loop-carried vector) → vector-output reduction-map kernel; a scalar
-        // one (e.g. `sum(x*y)/sum(x*x)`) → the scalar reduction kernel.
-        let all_vec_names: Vec<std::sync::Arc<str>> =
-            pnames.iter().chain(kept.iter()).cloned().collect();
-        let final_is_vec = match &kbody {
-            r2_types::Expr::Block(s) => s.last().map_or(false, |e| refs_vector_bare(e, &all_vec_names)),
-            other => refs_vector_bare(other, &all_vec_names),
-        };
-        if final_is_vec {
-            if let Ok(c) = JitCompiler::compile_reduction_map_kernel(&kbody, &pnames) {
-                return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-            }
-        } else if let Ok(c) = JitCompiler::compile_reduction_kernel(&kbody, &pnames) {
-            return Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>);
-        }
-    }
-
-    // Phase C.2 — scalar specialization fallback.
-    let params: Vec<(std::sync::Arc<str>, r2_types::infer::IrType)> = cl.params.iter()
-        .map(|p| (p.name.clone(), r2_types::infer::IrType::scalar(IrElem::Real)))
-        .collect();
-    let mut func = r2_ir::lower_function("__jit__", params, body_ref);
-    func.return_type = r2_types::infer::IrType::scalar(IrElem::Real);
-
-    match JitCompiler::compile(&func) {
-        Ok(c) => Some(std::sync::Arc::new(c) as std::sync::Arc<dyn r2_types::JitHandle>),
-        Err(_) => None,
-    }
-}
-
-/// Phase J.4 brick 3 — inline vector-valued locals into a reduction-kernel body
-/// by substitution, so composed formulas like `{ e <- pred-obs; sqrt(mean(e*e)) }`
-/// or `{ d <- x-mean(x); sum(d*d) }` compile with the intermediate vector *fused*
-/// away (no buffer allocated). A leading `local <- rhs` is a **vector** local iff
-/// `rhs` has no top-level reduction and references a vector (param or earlier
-/// vector-local); such statements are dropped and their definition substituted
-/// into later statements. Scalar locals (those whose rhs reduces to a scalar) are
-/// kept. Non-Block bodies pass through unchanged.
-/// Canonical string key for an expression (the reduction-kernel node subset).
-/// Used for common-subexpression elimination: identical reduction sub-trees
-/// (e.g. `mean(x)`, `x-mean(x)` occurring many times) map to the same key and
-/// are computed once. Written verbatim, so `a+b` and `b+a` are distinct — fine,
-/// because the reuse philosophy writes each primitive (`d(x)`) identically.
-fn expr_key(e: &r2_types::Expr) -> String {
-    use r2_types::Expr::*;
-    match e {
-        NumLit(x) => format!("#{}", x),
-        IntLit(x) => format!("i{}", x),
-        BoolLit(b) => format!("b{}", b),
-        Symbol(s) => format!("${}", s),
-        Unary { op, expr } => format!("u{:?}({})", op, expr_key(expr)),
-        Binary { op, lhs, rhs } => format!("({}{:?}{})", expr_key(lhs), op, expr_key(rhs)),
-        Call { func, args } => format!("{}[{}]", expr_key(func),
-            args.iter().map(|a| expr_key(&a.value)).collect::<Vec<_>>().join(",")),
-        If { cond, then, else_ } => format!("if({},{},{})", expr_key(cond), expr_key(then),
-            else_.as_ref().map(|x| expr_key(x)).unwrap_or_else(|| "_".into())),
-        other => format!("?{:p}", other),
-    }
-}
-
-/// Phase J.4 brick 3 — hoist every reduction sub-expression (`sum`/`prod`/
-/// `mean`/`length`) to a fresh scalar local, so what remains inside each fused
-/// loop is a pure element expression over vector params + (now hoisted) scalar
-/// locals. `sum((x-mean(x))^2)` → `__hr0 <- mean(x); __hr1 <- sum((x-__hr0)^2); __hr1`.
-/// Nested reductions are hoisted innermost-first.
-///
-/// Phase J.4 brick 4 — **CSE**: a reduction whose (fully-hoisted) form was
-/// already emitted reuses that local instead of recomputing. So `mean(x)`
-/// appearing in variance, sd, covariance and correlation is computed *once* —
-/// the "compute the shared primitive `d(x)`/`mean(x)` once, reuse everywhere"
-/// design made real at the machine level.
-/// Phase J.5 — loop-to-vector normalization ("same math, one kernel").
-/// Rewrites elementwise accumulation loops into the vector reductions the
-/// existing kernels already compile:
-///
-///   for (i in 1:length(x)) s <- s + EXPR(x[i], w[i], scalars, mean(x)…)
-///     ⇒  s <- s + sum(EXPR(x, w, …))
-///
-/// Guards (all must hold, else the loop is left untouched):
-///  - iterator is `1:length(v)`, or `1:n` where `n` was bound to
-///    `length(v)` earlier in the same block;
-///  - the loop body is exactly one statement `s <- s + EXPR` (Add only —
-///    order-independent, so vectorising cannot change results beyond the
-///    FP reassociation already inherent to the SIMD waves);
-///  - the index var appears ONLY as a whole-symbol subscript `vec[i]`;
-///  - the accumulator `s` is not read inside EXPR (no recurrence).
-/// Same-length requirements between subscripted vectors are enforced at
-/// call time by the kernel handles (mismatch → interpreter fallback).
-fn vectorize_indexed_loops(e: &r2_types::Expr) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    fn is_one(e: &r2_types::Expr) -> bool {
-        matches!(e, NumLit(n) if *n == 1.0) || matches!(e, IntLit(1))
-    }
-    fn length_of(e: &r2_types::Expr) -> Option<std::sync::Arc<str>> {
-        if let Call { func, args } = e {
-            if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "length") && args.len() == 1 {
-                if let Symbol(v) = &args[0].value { return Some(v.clone()); }
-            }
-        }
-        None
-    }
-    // Replace `vec[i]` with `vec` (counting replacements); fail (None) if
-    // `i` or the accumulator appears any other way.
-    fn strip_index(e: &r2_types::Expr, i: &str, acc: &str, hits: &mut u32) -> Option<r2_types::Expr> {
-        match e {
-            Index { object, indices } => {
-                if let (Symbol(_), [Some(Symbol(idx))]) = (object.as_ref(), indices.as_slice()) {
-                    if idx.as_ref() == i { *hits += 1; return Some((**object).clone()); }
-                }
-                None // any other indexing shape: bail conservatively
-            }
-            Symbol(s) if s.as_ref() == i || s.as_ref() == acc => None,
-            Binary { op, lhs, rhs } => Some(Binary { op: *op,
-                lhs: Box::new(strip_index(lhs, i, acc, hits)?), rhs: Box::new(strip_index(rhs, i, acc, hits)?) }),
-            Unary { op, expr } => Some(Unary { op: *op, expr: Box::new(strip_index(expr, i, acc, hits)?) }),
-            Call { func, args } => {
-                let mut na = Vec::with_capacity(args.len());
-                for a in args { na.push(r2_types::CallArg { name: a.name.clone(), value: strip_index(&a.value, i, acc, hits)? }); }
-                Some(Call { func: func.clone(), args: na })
-            }
-            If { cond, then, else_ } => Some(If {
-                cond: Box::new(strip_index(cond, i, acc, hits)?),
-                then: Box::new(strip_index(then, i, acc, hits)?),
-                else_: match else_ { Some(x) => Some(Box::new(strip_index(x, i, acc, hits)?)), None => None } }),
-            other => Some(other.clone()),
-        }
-    }
-    fn rewrite_for(var: &std::sync::Arc<str>, iter: &r2_types::Expr, body: &r2_types::Expr,
-                   len_aliases: &std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>>,
-                   buf_aliases: &std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>>) -> Option<r2_types::Expr> {
-        // The vector the iterator spans: `1:length(v)` or `1:n`, n ≡ length(v).
-        let iter_vec: std::sync::Arc<str> = if let Binary { op: r2_types::BinOp::Colon, lhs, rhs } = iter {
-            if !is_one(lhs) { return None; }
-            match length_of(rhs) {
-                Some(v) => v,
-                None => match rhs.as_ref() {
-                    Symbol(n) => len_aliases.get(n.as_ref())?.clone(),
-                    _ => return None,
-                },
-            }
-        } else { return None; };
-        let stmt = match body { Block(v) if v.len() == 1 => &v[0], b @ Assign { .. } => b, _ => return None };
-        if let Assign { target, value, superassign: false } = stmt {
-            // Form 1 — accumulation: `s <- s + EXPR`  ⇒  `s <- s + sum(EXPR')`.
-            if let (Symbol(s), Binary { op: r2_types::BinOp::Add, lhs, rhs }) = (target.as_ref(), value.as_ref()) {
-                if matches!(lhs.as_ref(), Symbol(l) if l == s) {
-                    let mut hits = 0u32;
-                    let vecexpr = strip_index(rhs, var.as_ref(), s.as_ref(), &mut hits)?;
-                    // The index must actually be used (else it's not a map).
-                    if hits == 0 { return None; }
-                    let sum = Call {
-                        func: Box::new(Symbol(std::sync::Arc::from("sum"))),
-                        args: vec![r2_types::CallArg { name: None, value: vecexpr }] };
-                    return Some(Assign { target: target.clone(),
-                        value: Box::new(Binary { op: r2_types::BinOp::Add, lhs: lhs.clone(), rhs: Box::new(sum) }),
-                        superassign: false });
-                }
-            }
-            // Form 2 — store map: `y[i] <- EXPR`  ⇒  `y <- EXPR'`, only when
-            // `y` was allocated as `numeric(length(v))` over the SAME vector
-            // the iterator spans (so every element is written exactly once
-            // and whole-vector replacement is semantics-preserving).
-            if let Index { object, indices } = target.as_ref() {
-                if let (Symbol(y), [Some(Symbol(ix))]) = (object.as_ref(), indices.as_slice()) {
-                    if ix.as_ref() == var.as_ref()
-                        && buf_aliases.get(y.as_ref()).is_some_and(|v| v.as_ref() == iter_vec.as_ref()) {
-                        let mut hits = 0u32;
-                        let vecexpr = strip_index(value, var.as_ref(), y.as_ref(), &mut hits)?;
-                        if hits == 0 { return None; }
-                        return Some(Assign { target: Box::new(Symbol(y.clone())),
-                            value: Box::new(vecexpr), superassign: false });
-                    }
-                }
-            }
-        }
-        None
-    }
-    match e {
-        Block(stmts) => {
-            let mut aliases: std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>> = Default::default();
-            let mut bufs: std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<str>> = Default::default();
-            let out = stmts.iter().map(|st| {
-                if let Assign { target, value, superassign: false } = st {
-                    if let Symbol(n) = target.as_ref() {
-                        if let Some(v) = length_of(value) { aliases.insert(n.clone(), v); }
-                        // `y <- numeric(length(v))` (or numeric(n), n ≡ length(v))
-                        if let Call { func, args } = value.as_ref() {
-                            if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "numeric") && args.len() == 1 {
-                                let vs = match length_of(&args[0].value) {
-                                    Some(v) => Some(v),
-                                    None => match &args[0].value {
-                                        Symbol(a) => aliases.get(a.as_ref()).cloned(),
-                                        _ => None,
-                                    },
-                                };
-                                if let Some(v) = vs { bufs.insert(n.clone(), v); }
-                            }
-                        }
-                    }
-                }
-                if let For { var, iter, body } = st {
-                    if let Some(r) = rewrite_for(var, iter, body, &aliases, &bufs) { return r; }
-                }
-                vectorize_indexed_loops(st)
-            }).collect::<Vec<_>>();
-            // A vectorized store-map fully overwrites its buffer, so the
-            // `y <- numeric(length(v))` allocation is dead — drop it (the
-            // kernels reject vector-valued alloc calls they can't lower).
-            let rewritten: std::collections::HashSet<std::sync::Arc<str>> = out.iter().filter_map(|st| {
-                if let Assign { target, value, superassign: false } = st {
-                    if let Symbol(n) = target.as_ref() {
-                        if bufs.contains_key(n.as_ref())
-                            && !matches!(value.as_ref(), Call { func, .. } if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "numeric")) {
-                            return Some(n.clone());
-                        }
-                    }
-                }
-                None
-            }).collect();
-            let out = out.into_iter().filter(|st| {
-                if let Assign { target, value, superassign: false } = st {
-                    if let (Symbol(n), Call { func, .. }) = (target.as_ref(), value.as_ref()) {
-                        if matches!(func.as_ref(), Symbol(s) if s.as_ref() == "numeric") && rewritten.contains(n.as_ref()) {
-                            return false;
-                        }
-                    }
-                }
-                true
-            }).collect();
-            Block(out)
-        }
-        For { var, iter, body } => {
-            if let Some(r) = rewrite_for(var, iter, body, &Default::default(), &Default::default()) { return r; }
-            For { var: var.clone(), iter: iter.clone(), body: Box::new(vectorize_indexed_loops(body)) }
-        }
-        While { cond, body } => While { cond: cond.clone(), body: Box::new(vectorize_indexed_loops(body)) },
-        other => other.clone(),
-    }
-}
-
-fn hoist_reductions(e: &r2_types::Expr, stmts: &mut Vec<r2_types::Expr>, ctr: &mut u32, seen: &mut std::collections::HashMap<String, std::sync::Arc<str>>) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    match e {
-        Call { func, args } => {
-            let is_red = matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean" | "length"));
-            let new_args: Vec<r2_types::CallArg> = args.iter()
-                .map(|a| r2_types::CallArg { name: a.name.clone(), value: hoist_reductions(&a.value, stmts, ctr, seen) })
-                .collect();
-            let call = Call { func: func.clone(), args: new_args };
-            if is_red {
-                let key = expr_key(&call);
-                if let Some(existing) = seen.get(&key) { return Symbol(existing.clone()); } // CSE hit
-                let name: std::sync::Arc<str> = std::sync::Arc::from(format!(".__hr{}", *ctr));
-                *ctr += 1;
-                seen.insert(key, name.clone());
-                stmts.push(Assign { target: Box::new(Symbol(name.clone())), value: Box::new(call), superassign: false });
-                Symbol(name)
-            } else {
-                call
-            }
-        }
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(hoist_reductions(expr, stmts, ctr, seen)) },
-        Binary { op, lhs, rhs } => Binary { op: *op,
-            lhs: Box::new(hoist_reductions(lhs, stmts, ctr, seen)), rhs: Box::new(hoist_reductions(rhs, stmts, ctr, seen)) },
-        If { cond, then, else_ } => If { cond: Box::new(hoist_reductions(cond, stmts, ctr, seen)),
-            then: Box::new(hoist_reductions(then, stmts, ctr, seen)),
-            else_: else_.as_ref().map(|x| Box::new(hoist_reductions(x, stmts, ctr, seen))) },
-        other => other.clone(),
-    }
-}
-
-/// Normalize a reduction-kernel body: fuse vector locals, then hoist all
-/// reductions to scalar locals → a `Block` of `local <- <reduction|scalar>`
-/// followed by a final scalar expression (the shape `compile_reduction_kernel`
-/// consumes). Non-Block scalar bodies are handled too.
-/// Rewrite small integer powers `b^k` (k = 2..=4) into repeated multiplication,
-/// e.g. `(x-mean(x))^2` → `(x-mean(x))*(x-mean(x))`. Exact for real `b`, and —
-/// unlike the `pow` extern call — SIMD-vectorisable, so variance/correlation
-/// element expressions become F64X2-clean. Walks the whole tree.
-fn expand_int_powers(e: &r2_types::Expr) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    match e {
-        Binary { op: r2_types::BinOp::Pow, lhs, rhs } => {
-            let base = expand_int_powers(lhs);
-            let k = match rhs.as_ref() {
-                NumLit(x) if *x >= 2.0 && *x <= 4.0 && x.fract() == 0.0 => Some(*x as u32),
-                IntLit(x) if (2..=4).contains(x) => Some(*x as u32),
-                _ => None,
-            };
-            match k {
-                Some(k) => {
-                    let mut acc = base.clone();
-                    for _ in 1..k { acc = Binary { op: r2_types::BinOp::Mul, lhs: Box::new(acc), rhs: Box::new(base.clone()) }; }
-                    acc
-                }
-                None => Binary { op: r2_types::BinOp::Pow, lhs: Box::new(base), rhs: Box::new(expand_int_powers(rhs)) },
-            }
-        }
-        Binary { op, lhs, rhs } => Binary { op: *op, lhs: Box::new(expand_int_powers(lhs)), rhs: Box::new(expand_int_powers(rhs)) },
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(expand_int_powers(expr)) },
-        Call { func, args } => Call { func: func.clone(),
-            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: expand_int_powers(&a.value) }).collect() },
-        If { cond, then, else_ } => If { cond: Box::new(expand_int_powers(cond)),
-            then: Box::new(expand_int_powers(then)), else_: else_.as_ref().map(|x| Box::new(expand_int_powers(x))) },
-        Assign { target, value, superassign } => Assign { target: target.clone(), value: Box::new(expand_int_powers(value)), superassign: *superassign },
-        Block(s) => Block(s.iter().map(expand_int_powers).collect()),
-        Return(v) => Return(Box::new(expand_int_powers(v))),
-        Pipe { lhs, rhs } => Pipe { lhs: Box::new(expand_int_powers(lhs)), rhs: Box::new(expand_int_powers(rhs)) },
-        other => other.clone(),
-    }
-}
-
-fn normalize_reduction_kernel(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> (r2_types::Expr, Vec<std::sync::Arc<str>>) {
-    use r2_types::Expr::*;
-    let (inlined_raw, kept) = inline_vector_locals(body, vec_params);
-    let inlined = expand_int_powers(&inlined_raw);
-    let mut out: Vec<r2_types::Expr> = Vec::new();
-    let mut ctr = 0u32;
-    let mut seen: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
-    let final_expr = match &inlined {
-        Block(ss) => {
-            let (last, init) = match ss.split_last() { Some(x) => x, None => return (inlined.clone(), kept) };
-            for st in init {
-                match st {
-                    Assign { target, value, superassign } => {
-                        let v = hoist_reductions(value, &mut out, &mut ctr, &mut seen);
-                        out.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
-                    }
-                    // J.4 iterative kernels — normalize a counted loop's body:
-                    // hoist reductions PER STATEMENT with a fresh CSE scope
-                    // (loop-carried scalars change between statements and
-                    // iterations, so no cross-statement reuse), keeping the
-                    // hoisted temps inside the loop body. The bound is loop-
-                    // invariant → hoisted into the outer scope.
-                    For { var, iter, body } => {
-                        let iter_n = hoist_reductions(iter, &mut out, &mut ctr, &mut seen);
-                        let body_stmts: Vec<r2_types::Expr> = match body.as_ref() {
-                            Block(b) => b.clone(),
-                            single => vec![single.clone()],
-                        };
-                        let mut new_body: Vec<r2_types::Expr> = Vec::new();
-                        for bs in &body_stmts {
-                            if let Assign { target, value, superassign } = bs {
-                                let mut fresh: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
-                                let v = hoist_reductions(value, &mut new_body, &mut ctr, &mut fresh);
-                                new_body.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
-                            } else {
-                                new_body.push(bs.clone()); // codegen will reject → fallback
-                            }
-                        }
-                        out.push(For { var: var.clone(), iter: Box::new(iter_n), body: Box::new(Block(new_body)) });
-                    }
-                    // J.4 while-convergence loops: hoist body reductions per
-                    // statement (fresh CSE scope); the condition stays intact —
-                    // `emit_scalar` evaluates embedded reductions per iteration.
-                    While { cond, body } => {
-                        let body_stmts: Vec<r2_types::Expr> = match body.as_ref() {
-                            Block(b) => b.clone(),
-                            single => vec![single.clone()],
-                        };
-                        let mut new_body: Vec<r2_types::Expr> = Vec::new();
-                        for bs in &body_stmts {
-                            if let Assign { target, value, superassign } = bs {
-                                let mut fresh: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
-                                let v = hoist_reductions(value, &mut new_body, &mut ctr, &mut fresh);
-                                new_body.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
-                            } else {
-                                new_body.push(bs.clone());
-                            }
-                        }
-                        out.push(While { cond: cond.clone(), body: Box::new(Block(new_body)) });
-                    }
-                    _ => out.push(st.clone()),
-                }
-            }
-            hoist_reductions(last, &mut out, &mut ctr, &mut seen)
-        }
-        other => hoist_reductions(other, &mut out, &mut ctr, &mut seen),
-    };
-    out.push(final_expr);
-    (Block(out), kept)
-}
-
-/// Does `e` reference a vector name in a *vector position* — i.e. bare, or under
-/// element-wise ops, but NOT enclosed in a reduction (`sum`/`prod`/`mean`/
-/// `length`, which collapse a vector to a scalar)? Determines whether a local's
-/// rhs evaluates to a vector (fuse it) or a scalar (keep it).
-fn refs_vector_bare(e: &r2_types::Expr, vec_names: &[std::sync::Arc<str>]) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        Symbol(s) => vec_names.iter().any(|v| v.as_ref() == s.as_ref()),
-        Unary { expr, .. } => refs_vector_bare(expr, vec_names),
-        Binary { lhs, rhs, .. } => refs_vector_bare(lhs, vec_names) || refs_vector_bare(rhs, vec_names),
-        If { cond, then, else_ } => refs_vector_bare(cond, vec_names) || refs_vector_bare(then, vec_names)
-            || else_.as_ref().map_or(false, |x| refs_vector_bare(x, vec_names)),
-        Call { func, args } => {
-            // A reduction collapses its argument to a scalar → not a vector position.
-            if matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean" | "length")) {
-                return false;
-            }
-            args.iter().any(|a| refs_vector_bare(&a.value, vec_names))
-        }
-        _ => false,
-    }
-}
-
-/// Names assigned anywhere inside `For`/`While` bodies of `e` — such vector
-/// locals are LOOP-CARRIED STATE and must stay as real (buffered) statements,
-/// never fused away by substitution.
-fn loop_assigned_names(e: &r2_types::Expr, out: &mut std::collections::HashSet<std::sync::Arc<str>>) {
-    use r2_types::Expr::*;
-    fn collect_assigns(e: &r2_types::Expr, out: &mut std::collections::HashSet<std::sync::Arc<str>>) {
-        match e {
-            Assign { target, value, .. } => {
-                if let Symbol(n) = target.as_ref() { out.insert(n.clone()); }
-                collect_assigns(value, out);
-            }
-            Block(s) => for x in s { collect_assigns(x, out); },
-            If { cond, then, else_ } => { collect_assigns(cond, out); collect_assigns(then, out);
-                if let Some(x) = else_ { collect_assigns(x, out); } }
-            For { body, .. } | While { body, .. } => collect_assigns(body, out),
-            _ => {}
-        }
-    }
-    match e {
-        For { body, .. } | While { body, .. } => collect_assigns(body, out),
-        Block(s) => for x in s { loop_assigned_names(x, out); },
-        Assign { value, .. } => loop_assigned_names(value, out),
-        If { cond, then, else_ } => { loop_assigned_names(cond, out); loop_assigned_names(then, out);
-            if let Some(x) = else_ { loop_assigned_names(x, out); } }
-        _ => {}
-    }
-}
-
-/// Returns the transformed body plus the vector locals that were KEPT as real
-/// statements because a loop reassigns them (loop-carried vector state — the
-/// codegen buffers those; everything else fuses by substitution as before).
-fn inline_vector_locals(body: &r2_types::Expr, vec_params: &[std::sync::Arc<str>]) -> (r2_types::Expr, Vec<std::sync::Arc<str>>) {
-    use r2_types::Expr::*;
-    let stmts = match body { Block(s) => s, _ => return (body.clone(), Vec::new()) };
-    if stmts.len() < 2 { return (body.clone(), Vec::new()); }
-    let (last, init) = stmts.split_last().unwrap();
-
-    let mut in_loops: std::collections::HashSet<std::sync::Arc<str>> = std::collections::HashSet::new();
-    loop_assigned_names(body, &mut in_loops);
-
-    let mut vecdefs: std::collections::HashMap<std::sync::Arc<str>, r2_types::Expr> = std::collections::HashMap::new();
-    let mut vec_names: Vec<std::sync::Arc<str>> = vec_params.to_vec();
-    let mut kept: Vec<std::sync::Arc<str>> = Vec::new();
-    let mut out: Vec<r2_types::Expr> = Vec::new();
-
-    for st in init {
-        if let Assign { target, value, superassign } = st {
-            if let Symbol(nm) = target.as_ref() {
-                // Inline already-known vector-locals into this rhs first.
-                let rhs = substitute_symbols(value, &vecdefs);
-                let kept_names: Vec<std::sync::Arc<str>> =
-                    vec_names.iter().chain(kept.iter()).cloned().collect();
-                if refs_vector_bare(&rhs, &kept_names) {
-                    if in_loops.contains(nm) {
-                        // Loop-carried vector: keep as a real statement.
-                        if !kept.iter().any(|k| k.as_ref() == nm.as_ref()) { kept.push(nm.clone()); }
-                        out.push(Assign { target: target.clone(), value: Box::new(rhs), superassign: *superassign });
-                    } else {
-                        // Pure vector temp: fuse away by substitution.
-                        vecdefs.insert(nm.clone(), rhs);
-                        vec_names.push(nm.clone());
-                    }
-                    continue;
-                }
-                // Scalar local: keep, with vector-locals substituted in.
-                out.push(Assign { target: target.clone(), value: Box::new(rhs), superassign: *superassign });
-                continue;
-            }
-        }
-        out.push(st.clone());
-    }
-    out.push(substitute_symbols(last, &vecdefs));
-    (Block(out), kept)
-}
-
-/// J.4 matrix state — hoist every `%*%` sub-expression to its own statement
-/// (`.__mvN <- X %*% v`), and any non-symbol `%*%` right operand to an
-/// element-wise temp, so the matrix kernel sees matvecs only as whole
-/// statements with named operands. Mirrors `hoist_reductions`.
-fn hoist_matmuls_expr(e: &r2_types::Expr, pre: &mut Vec<r2_types::Expr>, ctr: &mut u32) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    match e {
-        Binary { op: r2_types::BinOp::MatMul, lhs, rhs } => {
-            // Named right operand, else hoist it first.
-            let rname = match rhs.as_ref() {
-                Symbol(_) => rhs.as_ref().clone(),
-                other => {
-                    let inner = hoist_matmuls_expr(other, pre, ctr);
-                    let t: std::sync::Arc<str> = std::sync::Arc::from(format!(".__mvarg{}", *ctr));
-                    *ctr += 1;
-                    pre.push(Assign { target: Box::new(Symbol(t.clone())), value: Box::new(inner), superassign: false });
-                    Symbol(t)
-                }
-            };
-            let call = Binary { op: r2_types::BinOp::MatMul, lhs: lhs.clone(), rhs: Box::new(rname) };
-            let t: std::sync::Arc<str> = std::sync::Arc::from(format!(".__mv{}", *ctr));
-            *ctr += 1;
-            pre.push(Assign { target: Box::new(Symbol(t.clone())), value: Box::new(call), superassign: false });
-            Symbol(t)
-        }
-        Binary { op, lhs, rhs } => Binary { op: *op,
-            lhs: Box::new(hoist_matmuls_expr(lhs, pre, ctr)), rhs: Box::new(hoist_matmuls_expr(rhs, pre, ctr)) },
-        Unary { op, expr } => Unary { op: *op, expr: Box::new(hoist_matmuls_expr(expr, pre, ctr)) },
-        If { cond, then, else_ } => If { cond: Box::new(hoist_matmuls_expr(cond, pre, ctr)),
-            then: Box::new(hoist_matmuls_expr(then, pre, ctr)),
-            else_: else_.as_ref().map(|x| Box::new(hoist_matmuls_expr(x, pre, ctr))) },
-        Call { func, args } => Call { func: func.clone(),
-            args: args.iter().map(|a| r2_types::CallArg { name: a.name.clone(), value: hoist_matmuls_expr(&a.value, pre, ctr) }).collect() },
-        other => other.clone(),
-    }
-}
-
-/// Statement-level matmul hoisting (recurses into loop bodies).
-fn hoist_matmuls(body: &r2_types::Expr, ctr: &mut u32) -> r2_types::Expr {
-    use r2_types::Expr::*;
-    let stmts = match body { Block(s) => s.clone(), other => vec![other.clone()] };
-    let mut out: Vec<r2_types::Expr> = Vec::new();
-    let n = stmts.len();
-    for (i, st) in stmts.iter().enumerate() {
-        let is_last = i + 1 == n;
-        match st {
-            Assign { target, value, superassign } => {
-                // Whole-rhs matvec stays a statement; only its rhs-arg may hoist.
-                if let Binary { op: r2_types::BinOp::MatMul, lhs, rhs } = value.as_ref() {
-                    let rname = match rhs.as_ref() {
-                        Symbol(_) => rhs.as_ref().clone(),
-                        other => {
-                            let mut pre = Vec::new();
-                            let inner = hoist_matmuls_expr(other, &mut pre, ctr);
-                            out.extend(pre);
-                            let t: std::sync::Arc<str> = std::sync::Arc::from(format!(".__mvarg{}", *ctr));
-                            *ctr += 1;
-                            out.push(Assign { target: Box::new(Symbol(t.clone())), value: Box::new(inner), superassign: false });
-                            Symbol(t)
-                        }
-                    };
-                    out.push(Assign { target: target.clone(),
-                        value: Box::new(Binary { op: r2_types::BinOp::MatMul, lhs: lhs.clone(), rhs: Box::new(rname) }),
-                        superassign: *superassign });
-                } else {
-                    let mut pre = Vec::new();
-                    let v = hoist_matmuls_expr(value, &mut pre, ctr);
-                    out.extend(pre);
-                    out.push(Assign { target: target.clone(), value: Box::new(v), superassign: *superassign });
-                }
-            }
-            For { var, iter, body } => {
-                let mut pre = Vec::new();
-                let it = hoist_matmuls_expr(iter, &mut pre, ctr);
-                out.extend(pre);
-                let nb = hoist_matmuls(body, ctr);
-                out.push(For { var: var.clone(), iter: Box::new(it), body: Box::new(nb) });
-            }
-            other if is_last => {
-                let mut pre = Vec::new();
-                let v = hoist_matmuls_expr(other, &mut pre, ctr);
-                out.extend(pre);
-                out.push(v);
-            }
-            other => out.push(other.clone()),
-        }
-    }
-    Block(out)
-}
-
-/// Which of the two params is used as a `%*%` LEFT operand (bare or wrapped in
-/// `t(...)`)? That param is the matrix of a matrix-state kernel.
-fn matmul_matrix_param(e: &r2_types::Expr, p0: &std::sync::Arc<str>, p1: &std::sync::Arc<str>) -> Option<std::sync::Arc<str>> {
-    use r2_types::Expr::*;
-    let as_param = |s: &str| -> Option<std::sync::Arc<str>> {
-        if s == p0.as_ref() { Some(p0.clone()) } else if s == p1.as_ref() { Some(p1.clone()) } else { None }
-    };
-    match e {
-        Binary { op: r2_types::BinOp::MatMul, lhs, rhs } => {
-            let hit = match lhs.as_ref() {
-                Symbol(s) => as_param(s.as_ref()),
-                Call { func, args } if matches!(func.as_ref(), Symbol(f) if f.as_ref() == "t") && args.len() == 1 =>
-                    match &args[0].value { Symbol(s) => as_param(s.as_ref()), _ => None },
-                _ => None,
-            };
-            hit.or_else(|| matmul_matrix_param(rhs, p0, p1))
-        }
-        Binary { lhs, rhs, .. } => matmul_matrix_param(lhs, p0, p1).or_else(|| matmul_matrix_param(rhs, p0, p1)),
-        Unary { expr, .. } => matmul_matrix_param(expr, p0, p1),
-        Assign { value, .. } => matmul_matrix_param(value, p0, p1),
-        Call { args, .. } => args.iter().find_map(|a| matmul_matrix_param(&a.value, p0, p1)),
-        If { cond, then, else_ } => matmul_matrix_param(cond, p0, p1)
-            .or_else(|| matmul_matrix_param(then, p0, p1))
-            .or_else(|| else_.as_ref().and_then(|x| matmul_matrix_param(x, p0, p1))),
-        For { iter, body, .. } => matmul_matrix_param(iter, p0, p1).or_else(|| matmul_matrix_param(body, p0, p1)),
-        While { cond, body } => matmul_matrix_param(cond, p0, p1).or_else(|| matmul_matrix_param(body, p0, p1)),
-        Block(s) => s.iter().find_map(|x| matmul_matrix_param(x, p0, p1)),
-        Return(v) => matmul_matrix_param(v, p0, p1),
-        _ => None,
-    }
-}
-
-/// Does `e` contain a `sum`/`prod`/`mean` reduction call? Cheap gate so the
-/// multi-reduction kernel is only attempted on plausibly-scalar bodies.
-fn mentions_reduction(e: &r2_types::Expr) -> bool {
-    use r2_types::Expr::*;
-    match e {
-        Call { func, args } => matches!(func.as_ref(), Symbol(s) if matches!(s.as_ref(), "sum" | "prod" | "mean"))
-            || args.iter().any(|a| mentions_reduction(&a.value)),
-        Binary { lhs, rhs, .. } => mentions_reduction(lhs) || mentions_reduction(rhs),
-        Unary { expr, .. } => mentions_reduction(expr),
-        Assign { value, .. } => mentions_reduction(value),
-        If { cond, then, else_ } => mentions_reduction(cond) || mentions_reduction(then)
-            || else_.as_ref().map_or(false, |x| mentions_reduction(x)),
-        Block(s) => s.iter().any(mentions_reduction),
-        Return(v) => mentions_reduction(v),
-        // J.4 iterative kernels: reductions inside a counted loop body count.
-        For { iter, body, .. } => mentions_reduction(iter) || mentions_reduction(body),
-        While { cond, body } => mentions_reduction(cond) || mentions_reduction(body),
-        _ => false,
-    }
-}
-

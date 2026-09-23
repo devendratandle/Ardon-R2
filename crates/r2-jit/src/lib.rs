@@ -28,7 +28,9 @@
 //! `JitCompiler` entry points; `codegen` the vectorized SIMD/map/reduce
 //! builders; `lower` the IR→Cranelift body lowering; `externs` the
 //! `extern "C"` math wrappers + registry; `closure` the engine-facing
-//! `try_compile_closure`. Everything is re-exported flat so the only
+//! `try_compile_closure` (its strategies in precedence order), fed by
+//! `inline` (user helpers), `rewrite` (canonical forms) and `recognize`
+//! (indexed-loop shapes). Everything is re-exported flat so the only
 //! externally-used path, `r2_jit::try_compile_closure`, is unchanged.
 
 mod error;
@@ -40,12 +42,18 @@ mod reduce_kernel;
 mod kernel_matrix;
 mod externs;
 mod closure;
+mod recognize;
+mod inline;
+mod rewrite;
 mod lower;
 
 pub use error::*;
 pub use handle::*;
 pub use compiler::*;
 pub use closure::*;
+pub(crate) use recognize::*;
+pub(crate) use inline::*;
+pub(crate) use rewrite::*;
 pub(crate) use codegen::*;
 pub(crate) use mapreduce::*;
 pub(crate) use reduce_kernel::*;
