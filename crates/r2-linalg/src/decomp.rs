@@ -19,33 +19,83 @@ const CHOL_CW: usize = 128;
 /// 128 KB — L2-resident).
 const CHOL_RB: usize = 128;
 
-/// `A[r0..n, c0..c1] -= L·U` on a column-major n x n `a` — the O(n³) trailing
-/// update of a blocked factorisation, on the packed GEMM kernel.
+/// `A[r0..r1, c0..c1] -= L·U` on a column-major n x n `a` — the O(n³)
+/// updates of the recursive LU and its triangular solves, on the packed
+/// GEMM kernel.
 ///
-/// `l` is the m2 x kb panel (m2 = n − r0) and `u` the kb x n2 row block
+/// `l` is the m2 x kb block (m2 = r1 − r0) and `u` the kb x n2 block
 /// (n2 = c1 − c0), both column-major and contiguous: the caller copies
 /// them out of `a`, which costs O(n·kb) against the product's O(n²·kb).
-/// The product lands in a scratch m2 x n2 buffer and is subtracted back
-/// one column per task. `lower_only` touches only rows >= column (the
-/// Cholesky trailing update, whose upper triangle is never read).
-fn sub_product(n: usize, a: &mut [f64], r0: usize, c0: usize, c1: usize,
-               l: &[f64], u: &[f64], kb: usize, lower_only: bool) {
+/// The product lands in a scratch buffer kept per thread (a fresh one is a
+/// fresh mapping from the OS — ~2,000 page faults at 8 MB) and is
+/// subtracted back one column per task.
+fn sub_product(n: usize, a: &mut [f64], r0: usize, r1: usize, c0: usize, c1: usize,
+               l: &[f64], u: &[f64], kb: usize) {
     use crate::gemm::{f64 as g, Trans};
     use rayon::prelude::*;
-    let (m2, n2) = (n - r0, c1 - c0);
+    thread_local! {
+        static SBUF: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let (m2, n2) = (r1 - r0, c1 - c0);
     if m2 == 0 || n2 == 0 || kb == 0 { return; }
     let parallel = r2_oracle::should_parallelize(r2_oracle::Op::MatMul, r2_oracle::Shape::nmk(m2, n2, kb));
     // Column-major T = L·U is row-major Tᵀ = Uᵀ·Lᵀ, and u / l read
     // row-major ARE Uᵀ (n2 x kb) and Lᵀ (kb x m2) — see level3::dgemm.
-    let t = g::gemm(u, Trans::No, l, Trans::No, n2, kb, m2, parallel);
+    // Taken out of the cell, not borrowed across the (forking) GEMM.
+    let mut t = SBUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    if t.len() < m2 * n2 { t.resize(m2 * n2, 0.0); }
+    g::gemm_assign_into(u, Trans::No, l, Trans::No, n2, kb, m2, &mut t[..m2 * n2], parallel);
+    let tr = &t;
     let body = |(jj, col): (usize, &mut [f64])| {
-        let tc = &t[jj * m2..(jj + 1) * m2];
-        let from = if lower_only { (c0 + jj).saturating_sub(r0) } else { 0 };
-        for i in from..m2 { col[r0 + i] -= tc[i]; }
+        for (x, d) in col[r0..r1].iter_mut().zip(&tr[jj * m2..(jj + 1) * m2]) { *x -= d; }
     };
     if parallel { a[c0 * n..c1 * n].par_chunks_mut(n).enumerate().for_each(body); }
     else { a[c0 * n..c1 * n].chunks_mut(n).enumerate().for_each(body); }
+    SBUF.with(|b| { let mut s = b.borrow_mut(); if s.capacity() < t.capacity() { *s = t; } });
 }
+
+/// In-place unit-lower triangular solve `A[r0..r0+h, c1..c2] ←
+/// L⁻¹·A[r0..r0+h, c1..c2]`, L = the unit-lower part of A[r0..r0+h,
+/// r0..r0+h] (LU's L₁₁, so U₁₂ = L₁₁⁻¹·A₁₂). Recursive, as LAPACK's
+/// `dtrsm` is blocked: solve the top half, one GEMM brings the bottom
+/// half up to date, solve the bottom half — so almost all of its
+/// O(h²·(c2−c1)) work is GEMM. Narrow blocks are solved directly, one
+/// column per task (columns are independent).
+fn trsm_unit_lower(n: usize, a: &mut [f64], r0: usize, h: usize, c1: usize, c2: usize) {
+    if h <= TRSM_BASE {
+        use rayon::prelude::*;
+        let (left, right) = a.split_at_mut(c1 * n);
+        let lcols = &left[r0 * n..];
+        let r1 = r0 + h;
+        let solve = |col: &mut [f64]| {
+            for p in 0..h {
+                let u = col[r0 + p];
+                if u != 0.0 {
+                    let lc = &lcols[p * n..p * n + n];
+                    for i in (r0 + p + 1)..r1 { col[i] -= lc[i] * u; }
+                }
+            }
+        };
+        let right = &mut right[..(c2 - c1) * n];
+        if (c2 - c1) * h * h >= 1 << 16 { right.par_chunks_mut(n).for_each(solve); }
+        else { right.chunks_mut(n).for_each(solve); }
+        return;
+    }
+    let h1 = h / 2;
+    let h2 = h - h1;
+    trsm_unit_lower(n, a, r0, h1, c1, c2);
+    // A[r0+h1..r0+h, c1..c2] −= L[r0+h1..r0+h, r0..r0+h1] · X[r0..r0+h1, c1..c2]
+    let nc = c2 - c1;
+    let mut l = vec![0.0; h2 * h1];
+    for p in 0..h1 { l[p * h2..(p + 1) * h2].copy_from_slice(&a[(r0 + p) * n + r0 + h1..(r0 + p) * n + r0 + h]); }
+    let mut u = vec![0.0; h1 * nc];
+    for jj in 0..nc { u[jj * h1..(jj + 1) * h1].copy_from_slice(&a[(c1 + jj) * n + r0..(c1 + jj) * n + r0 + h1]); }
+    sub_product(n, a, r0 + h1, r0 + h, c1, c2, &l, &u, h1);
+    trsm_unit_lower(n, a, r0 + h1, h2, c1, c2);
+}
+
+/// Rows below which [`trsm_unit_lower`] stops recursing.
+const TRSM_BASE: usize = 64;
 
 /// LU factorization with partial pivoting — recursive, GEMM-based.
 /// Modifies A in place: A = P·L·U where L has unit diagonal.
@@ -100,30 +150,14 @@ fn lu_rec(n: usize, a: &mut [f64], ipiv: &mut [usize], c: usize, w: usize) -> Re
     // (unit-lower forward substitution, columns independent), then
     // A₂₂ −= L₂₁·U₁₂ on rows c+h..n.
     let (r1, c1, c2) = (c + h, c + h, c + w);
-    {
-        use rayon::prelude::*;
-        let (left, right) = a.split_at_mut(c1 * n);
-        let lcols = &left[c * n..];
-        let trsm = |col: &mut [f64]| {
-            for p in 0..h {
-                let u = col[c + p];
-                if u != 0.0 {
-                    let lc = &lcols[p * n..p * n + n];
-                    for i in (c + p + 1)..r1 { col[i] -= lc[i] * u; }
-                }
-            }
-        };
-        let right = &mut right[..(c2 - c1) * n];
-        if (c2 - c1) * h * h >= 1 << 16 { right.par_chunks_mut(n).for_each(trsm); }
-        else { right.chunks_mut(n).for_each(trsm); }
-    }
+    trsm_unit_lower(n, a, c, h, c1, c2);
     if r1 < n {
         let (m2, n2) = (n - r1, c2 - c1);
         let mut l = vec![0.0; m2 * h];
         for p in 0..h { l[p * m2..(p + 1) * m2].copy_from_slice(&a[(c + p) * n + r1..(c + p + 1) * n]); }
         let mut u = vec![0.0; h * n2];
         for jj in 0..n2 { u[jj * h..(jj + 1) * h].copy_from_slice(&a[(c1 + jj) * n + c..(c1 + jj) * n + r1]); }
-        sub_product(n, a, r1, c1, c2, &l, &u, h, false);
+        sub_product(n, a, r1, n, c1, c2, &l, &u, h);
     }
     lu_rec(n, a, ipiv, c1, c2 - c1)
 }
