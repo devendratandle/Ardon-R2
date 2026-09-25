@@ -8,6 +8,14 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Cholesky fixed above 32x32 — 2026-09-25
+
+- **`chol()` returned a wrong factor for matrices larger than 32x32**, and
+  so did everything built on it: mixed models (`lmer` with more than 32
+  fixed-effect columns) and MANOVA with more than 32 response variables.
+  The blocked algorithm subtracted earlier columns twice. Fixed; `L %*%
+  t(L)` now reproduces the input at 33, 50, 64 and 100 dimensions.
+
 ### AVX-512 matrix kernel for LLM training — 2026-09-25
 
 - **On CPUs with AVX-512** (Intel Xeon Skylake-SP and later, AMD Zen 4/5)

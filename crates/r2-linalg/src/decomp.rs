@@ -98,15 +98,14 @@ pub fn dpotrf(n: usize, a: &mut [f64]) -> Result<(), LinalgError> {
         // First update it with contributions from previous columns
         for jj in j..(j + jb) {
             let mut diag = a[jj * n + jj];
-            for k in 0..j { diag -= a[k * n + jj] * a[k * n + jj]; }
+            for k in j..jj { diag -= a[k * n + jj] * a[k * n + jj]; }
             if diag <= 1e-15 { return Err(LinalgError::NotPositiveDefinite); }
             let ljj = diag.sqrt();
             a[jj * n + jj] = ljj;
 
             for i in (jj + 1)..(j + jb) {
                 let mut sum = a[jj * n + i];
-                for k in 0..j { sum -= a[k * n + i] * a[k * n + jj]; }
-                // Subtract contributions from columns j..jj within this block
+                // Columns 0..j were already subtracted by earlier trailing updates.
                 for k in j..jj { sum -= a[k * n + i] * a[k * n + jj]; }
                 a[jj * n + i] = sum / ljj;
             }
@@ -120,7 +119,7 @@ pub fn dpotrf(n: usize, a: &mut [f64]) -> Result<(), LinalgError> {
                 let ljj = a[jj * n + jj];
                 for i in (j + jb)..n {
                     let mut sum = a[jj * n + i];
-                    for k in 0..jj { sum -= a[k * n + i] * a[k * n + jj]; }
+                    for k in j..jj { sum -= a[k * n + i] * a[k * n + jj]; }
                     a[jj * n + i] = sum / ljj;
                 }
             }
@@ -961,6 +960,45 @@ mod tests {
         assert!((a[0] - 2.0).abs() < 1e-10);
         assert!((a[1] - 6.0).abs() < 1e-10);
         assert!((a[3] - 1.0).abs() < 1e-10);
+    }
+
+    /// The BLOCKED path (n > NB = 32), which `test_dpotrf` never reached.
+    /// It once subtracted the earlier blocks' columns twice — the trailing
+    /// update had already removed them — and left the in-block columns out
+    /// of the diagonal. At every size past one block, L·Lᵀ must give A
+    /// back and L must equal the unblocked factor.
+    #[test]
+    fn dpotrf_blocked_reconstructs_a() {
+        for &n in &[33usize, 50, 64, 100] {
+            // SPD: A = BᵀB + n·I, column-major
+            let b: Vec<f64> = (0..n * n).map(|i| ((i * 7 + 3) % 17) as f64 * 0.1 - 0.8).collect();
+            let mut a0 = vec![0.0; n * n];
+            for j in 0..n {
+                for i in 0..n {
+                    let mut s = 0.0;
+                    for p in 0..n { s += b[i * n + p] * b[j * n + p]; }
+                    a0[j * n + i] = s + if i == j { n as f64 } else { 0.0 };
+                }
+            }
+            let mut l = a0.clone();
+            dpotrf(n, &mut l).unwrap();
+            let mut lu = a0.clone();
+            dpotrf_unblocked(n, &mut lu).unwrap();
+            let scale = a0.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            for j in 0..n {
+                for i in 0..n {
+                    // upper triangle of L is zeroed
+                    if i < j { assert_eq!(l[j * n + i], 0.0, "n={n}: upper ({i},{j}) not zero"); }
+                    // (L·Lᵀ)[i][j] = Σ_k L[i][k]·L[j][k]
+                    let mut s = 0.0;
+                    for k in 0..=i.min(j) { s += l[k * n + i] * l[k * n + j]; }
+                    assert!((s - a0[j * n + i]).abs() <= 1e-10 * scale,
+                        "n={n}: (L·Lᵀ)[{i}][{j}] = {s}, A = {}", a0[j * n + i]);
+                    assert!((l[j * n + i] - lu[j * n + i]).abs() <= 1e-10 * scale,
+                        "n={n}: blocked L[{i}][{j}] differs from unblocked");
+                }
+            }
+        }
     }
 
     #[test]
