@@ -49,18 +49,23 @@ pub fn dgetrf(n: usize, a: &mut [f64]) -> Result<Vec<usize>, LinalgError> {
             }
         }
 
-        // Update trailing matrix: A[k+kb:n, k+kb:n] -= L[k+kb:n, k:k+kb] * U[k:k+kb, k+kb:n]
+        // For every column j right of the panel: first U[k:k+kb, j] =
+        // L[k:k+kb, k:k+kb]⁻¹ · A[k:k+kb, j] (unit-lower forward
+        // substitution), then A[k+kb:n, j] -= L[k+kb:n, k:k+kb] · U[k:k+kb, j].
+        // Both are the same column sweep: walking kk in order and updating
+        // rows kk+1.. — the panel rows below kk ARE the substitution, the
+        // rows past the panel ARE the trailing update — so `u_kj` is final
+        // by the time it is read. (Starting at the trailing rows only once
+        // skipped the substitution: U₁₂ stayed A₁₂ and every n > NB was
+        // wrong.)
         let trail_start = k + kb;
         if trail_start < n {
-            let trail_m = n - trail_start;
-            let _trail_n = n - trail_start;
             for j in trail_start..n {
                 for kk in k..(k + kb) {
                     let u_kj = a[j * n + kk]; // U[kk, j]
                     if u_kj != 0.0 {
                         // 4-way unrolled for SIMD
-                        let _main = trail_start + ((trail_m) / 4) * 4;
-                        let mut i = trail_start;
+                        let mut i = kk + 1;
                         while i + 3 < n {
                             a[j * n + i]     -= a[kk * n + i]     * u_kj;
                             a[j * n + i + 1] -= a[kk * n + i + 1] * u_kj;
@@ -215,152 +220,18 @@ pub fn dgeqrf(m: usize, n: usize, a: &mut [f64]) -> Result<Vec<f64>, LinalgError
 
 /// Singular Value Decomposition — singular values only.
 ///
-/// Two-phase algorithm:
-///   1. Bidiagonalization via Householder reflections (Phase 1)
-///   2. Golub-Kahan QR iterations on the bidiagonal (Phase 2)
-///
 /// A is m×n (m >= n), column-major. Returns the n singular values in
-/// descending order.
+/// descending order — exactly [`dgesvd_full`]'s σ.
 ///
-/// This routine returns singular values only. For the full thin SVD
-/// with orthogonal factors U and Vᵀ, use [`dgesvd_full`] (shipped v0.1.0).
-/// Kept as a separate entry point for callers that don't need the
-/// orthogonal factors — slightly faster since it skips the Bᵀ·B
-/// eigendecomposition pass.
+/// This had its own Golub-Kahan phase 2, and it was wrong at every size:
+/// each "Givens" step rotated one side of the bidiagonal and dropped the
+/// fill-in, which is not an orthogonal transform, so it converged to
+/// numbers that were not the singular values (11x4: 2.217 against the
+/// true 2.408; Σσ² ≠ ‖A‖²_F). Until a proper implicit-shift bidiagonal QR
+/// (LAPACK `dbdsqr`) is written, the values come from the full routine,
+/// which `crates/r2-linalg/tests/decomp_large.rs` checks against A itself.
 pub fn dgesvd(m: usize, n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
-    if a.len() != m * n { return Err(LinalgError::InvalidShape("SVD: A shape".into())); }
-    if m < n { return Err(LinalgError::InvalidShape("SVD: need m >= n".into())); }
-
-    let mut work = a.to_vec();
-    let min_mn = m.min(n);
-
-    // Phase 1: Bidiagonalize A → U1 · B · V1ᵀ
-    // B has entries on diagonal (d) and superdiagonal (e)
-    let mut d = vec![0.0; min_mn];
-    let mut e = vec![0.0; min_mn.saturating_sub(1)];
-
-    // Householder vectors stored implicitly
-    let mut tauq = vec![0.0; min_mn];
-    let mut taup = vec![0.0; min_mn];
-
-    // Bidiagonalization
-    for k in 0..min_mn {
-        // Left Householder: zero out A[k+1:m, k]
-        let mut norm_sq = 0.0;
-        for i in k..m { norm_sq += work[k * m + i] * work[k * m + i]; }
-        let norm = norm_sq.sqrt();
-        if norm > 1e-15 {
-            let akk = work[k * m + k];
-            let sign = if akk >= 0.0 { 1.0 } else { -1.0 };
-            let alpha = -sign * norm;
-            let v0 = akk - alpha;
-            work[k * m + k] = alpha;
-            d[k] = alpha;
-
-            // Store Householder vector below diagonal
-            for i in (k + 1)..m { work[k * m + i] /= v0; }
-            let mut vv = 1.0;
-            for i in (k + 1)..m { vv += work[k * m + i] * work[k * m + i]; }
-            tauq[k] = 2.0 / vv;
-
-            // Apply to trailing columns
-            for j in (k + 1)..n {
-                let mut dot = work[j * m + k];
-                for i in (k + 1)..m { dot += work[k * m + i] * work[j * m + i]; }
-                dot *= tauq[k];
-                work[j * m + k] -= dot;
-                for i in (k + 1)..m { work[j * m + i] -= dot * work[k * m + i]; }
-            }
-        } else {
-            d[k] = work[k * m + k];
-        }
-
-        // Right Householder: zero out A[k, k+2:n]
-        if k + 1 < n {
-            let mut norm_sq = 0.0;
-            for j in (k + 1)..n { norm_sq += work[j * m + k] * work[j * m + k]; }
-            let norm = norm_sq.sqrt();
-            if norm > 1e-15 && k + 1 < n {
-                let akk1 = work[(k + 1) * m + k];
-                let sign = if akk1 >= 0.0 { 1.0 } else { -1.0 };
-                let alpha = -sign * norm;
-                let v0 = akk1 - alpha;
-                work[(k + 1) * m + k] = alpha;
-                if k < e.len() { e[k] = alpha; }
-
-                for j in (k + 2)..n { work[j * m + k] /= v0; }
-                let mut vv = 1.0;
-                for j in (k + 2)..n { vv += work[j * m + k] * work[j * m + k]; }
-                taup[k] = 2.0 / vv;
-
-                // Apply to trailing rows
-                for i in (k + 1)..m {
-                    let mut dot = work[(k + 1) * m + i];
-                    for j in (k + 2)..n { dot += work[j * m + k] * work[j * m + i]; }
-                    dot *= taup[k];
-                    work[(k + 1) * m + i] -= dot;
-                    for j in (k + 2)..n { work[j * m + i] -= dot * work[j * m + k]; }
-                }
-            } else if k < e.len() {
-                e[k] = work[(k + 1) * m + k];
-            }
-        }
-    }
-
-    // Phase 2: QR iteration on bidiagonal matrix to get singular values
-    // Use implicit zero-shift QR (Golub-Kahan)
-    let mut sigma = d.clone();
-    let mut super_diag = e.clone();
-    let nn = sigma.len();
-
-    // Simple iterative SVD for bidiagonal matrix
-    // Convergence to singular values
-    for _iter in 0..nn * 100 {
-        // Check convergence
-        let mut all_converged = true;
-        for i in 0..super_diag.len() {
-            if super_diag[i].abs() > 1e-14 * (sigma[i].abs() + sigma[i + 1].abs()) {
-                all_converged = false;
-                break;
-            }
-        }
-        if all_converged { break; }
-
-        // Implicit QR step on bidiagonal
-        for i in 0..super_diag.len() {
-            if super_diag[i].abs() <= 1e-14 * (sigma[i].abs() + sigma[i + 1].abs()) {
-                super_diag[i] = 0.0;
-                continue;
-            }
-            // Givens rotation to chase bulge
-            let (cs, sn) = givens(sigma[i], super_diag[i]);
-            let old_d = sigma[i];
-            sigma[i] = cs * old_d + sn * super_diag[i];
-            super_diag[i] = -sn * old_d + cs * super_diag[i];
-            if i + 1 < nn {
-                let old_d1 = sigma[i + 1];
-                sigma[i + 1] = cs * old_d1;
-            }
-        }
-    }
-
-    // Make singular values positive and sort descending
-    for s in sigma.iter_mut() { *s = s.abs(); }
-    // Simple insertion sort (n is typically small)
-    for i in 1..sigma.len() {
-        let mut j = i;
-        while j > 0 && sigma[j] > sigma[j - 1] {
-            sigma.swap(j, j - 1);
-            j -= 1;
-        }
-    }
-
-    // U and Vᵀ accumulation is intentionally NOT done here — see the
-    // docstring above and docs/KNOWN_LIMITATIONS.md. Producing identity
-    // placeholders would silently corrupt any caller that reconstructs
-    // A = U·diag(σ)·Vᵀ.
-    let _ = (m, nn); // keep parameters live in case the body reverts.
-    Ok(sigma)
+    dgesvd_full(m, n, a).map(|(sigma, _, _)| sigma)
 }
 
 /// Thin SVD with orthogonal factors: A = U · diag(σ) · Vᵀ.
@@ -835,13 +706,16 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
             }
         }
 
-        // Accumulate Q ← Q · H. Q is column-major; H acts on the right.
-        // For each column c of Q: q_c ← q_c − β·(q_cᵀ v)·v
-        for c in 0..n {
-            let mut qcv = 0.0;
-            for j in (k + 1)..n { qcv += q[c * n + j] * v[j]; }
-            let scale = beta * qcv;
-            for j in (k + 1)..n { q[c * n + j] -= scale * v[j]; }
+        // Accumulate Q ← Q · H. Q is column-major; H acts on the right,
+        // i.e. on each ROW r of Q: Q[r, :] ← Q[r, :] − β·(Q[r, :]·v)·vᵀ.
+        // (This once updated each COLUMN instead — Q ← H·Q — which builds
+        // Hₙ···H₁, the transpose of Q₁ = H₁···Hₙ. Equal for n ≤ 3, where
+        // there is one reflection; every eigenvector was wrong from 4x4.)
+        for r in 0..n {
+            let mut qrv = 0.0;
+            for j in (k + 1)..n { qrv += q[j * n + r] * v[j]; }
+            let scale = beta * qrv;
+            for j in (k + 1)..n { q[j * n + r] -= scale * v[j]; }
         }
     }
 
@@ -962,14 +836,15 @@ mod tests {
         assert!((a[3] - 1.0).abs() < 1e-10);
     }
 
-    /// The BLOCKED path (n > NB = 32), which `test_dpotrf` never reached.
-    /// It once subtracted the earlier blocks' columns twice — the trailing
-    /// update had already removed them — and left the in-block columns out
-    /// of the diagonal. At every size past one block, L·Lᵀ must give A
-    /// back and L must equal the unblocked factor.
+    /// The blocked path (every n > 4), which `test_dpotrf` (2x2) never
+    /// reached. It once left the in-block columns out of the diagonal —
+    /// wrong from 5x5, one block — and, past one NB = 32 block, subtracted
+    /// the earlier blocks' columns twice (the trailing update had already
+    /// removed them). At one block, at its edge and at several: L·Lᵀ must
+    /// give A back and L must equal the unblocked factor.
     #[test]
     fn dpotrf_blocked_reconstructs_a() {
-        for &n in &[33usize, 50, 64, 100] {
+        for &n in &[5usize, 6, 16, 32, 33, 50, 64, 100, 200] {
             // SPD: A = BᵀB + n·I, column-major
             let b: Vec<f64> = (0..n * n).map(|i| ((i * 7 + 3) % 17) as f64 * 0.1 - 0.8).collect();
             let mut a0 = vec![0.0; n * n];

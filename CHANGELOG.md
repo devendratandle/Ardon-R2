@@ -8,13 +8,32 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
-### Cholesky fixed above 32x32 — 2026-09-25
+### `solve()`, `det()` and symmetric `eigen()` vectors fixed — 2026-09-25
 
-- **`chol()` returned a wrong factor for matrices larger than 32x32**, and
-  so did everything built on it: mixed models (`lmer` with more than 32
-  fixed-effect columns) and MANOVA with more than 32 response variables.
-  The blocked algorithm subtracted earlier columns twice. Fixed; `L %*%
-  t(L)` now reproduces the input at 33, 50, 64 and 100 dimensions.
+- **`solve()`, `det()` and matrix inversion were wrong for matrices
+  larger than 32x32** (a residual of ~0.01 where it should be ~1e-15):
+  the blocked LU factorisation skipped a triangular solve for every block
+  after the first. Also affected: `lm()`'s standard-error fallback and
+  the multivariate quadratic forms built on the inverse. Fixed; residuals
+  are ~1e-15 from 4x4 to 200x200.
+- **`eigen()$vectors` for symmetric matrices were wrong from 4x4 up.**
+  The eigenvalues were always right; the vectors were not eigenvectors
+  (`A %*% v` was not `lambda * v`). Fixed; `A %*% v - lambda * v` is now
+  ~1e-14 at every size tested.
+- A new test suite checks every decomposition — LU, inverse, Cholesky,
+  QR least squares, determinant, symmetric eigen, SVD — by what it
+  promises (residuals, `A` rebuilt from its factors) at 4x4 to 200x200.
+
+### Cholesky fixed above 4x4 — 2026-09-25
+
+- **The Cholesky factorisation was wrong for every matrix larger than
+  4x4** (at 200x200, `L %*% t(L)` missed the input by up to 12.9), and so
+  was everything built on it: MANOVA with more than 4 response variables,
+  mixed models with more than 4 fixed effects, the normal-equations
+  least-squares solver (the ML `lm` dispatch with more than 3
+  predictors, and `lm()`'s fallback when QR does not apply), and the
+  internal Cholesky routine. `lm()` itself uses QR and was not affected.
+  Fixed; `L %*% t(L)` now reproduces the input from 5x5 to 200x200.
 
 ### AVX-512 matrix kernel for LLM training — 2026-09-25
 
