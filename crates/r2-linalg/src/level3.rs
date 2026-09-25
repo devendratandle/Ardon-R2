@@ -169,7 +169,7 @@ fn dot4_impl<const F: bool>(x: &[f64], y: &[f64], m: usize) -> f64 {
 /// Runtime-multiversioned dot product (AVX-512 → AVX2 → SSE2), same tiers
 /// as the GEMM kernel. Powers `crossprod` / XᵀX.
 #[inline]
-fn dot4(x: &[f64], y: &[f64], m: usize) -> f64 {
+pub(crate) fn dot4(x: &[f64], y: &[f64], m: usize) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: each wrapper entered only when its feature is detected.

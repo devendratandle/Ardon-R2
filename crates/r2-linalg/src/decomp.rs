@@ -9,10 +9,15 @@ use crate::LinalgError;
 /// 113, 32 → 4.4 / 20.2 / 105, 64 → 4.2 / 17.6 / 96.
 const LU_BASE: usize = 64;
 
-/// Panel width of the blocked Cholesky. Same machine and harness, potrf ms
-/// at n = 500 / 1000 / 2000: 32 → 5.9 / 46 / 411, 64 → 4.1 / 26 / 224,
-/// 128 → 3.8 / 19.9 / 152.
+/// Panel width of the blocked Cholesky, and columns per task of its
+/// trailing update. Same machine and harness, potrf ms at n = 1000 / 2000
+/// (NB, CW): (128, 32) 19.3 / 108, (128, 64) 15.9 / 108, (128, 128) 15.7 /
+/// 84, (192, 64) 18.1 / 96, (256, 128) 19.9 / 96, (96, 64) 16.5 / 92.
 const CHOL_NB: usize = 128;
+const CHOL_CW: usize = 128;
+/// Rows per task of the Cholesky panel solve (a chunk is RB x NB doubles,
+/// 128 KB — L2-resident).
+const CHOL_RB: usize = 128;
 
 /// `A[r0..n, c0..c1] -= L·U` on a column-major n x n `a` — the O(n³) trailing
 /// update of a blocked factorisation, on the packed GEMM kernel.
@@ -127,8 +132,10 @@ fn lu_rec(n: usize, a: &mut [f64], ipiv: &mut [usize], c: usize, w: usize) -> Re
 /// Modifies A in place, storing L in lower triangle
 ///
 /// Blocked algorithm, `CHOL_NB` columns at a time: factor the diagonal
-/// block, solve the panel below it column by column (contiguous axpys),
-/// then the trailing update A₂₂ −= L₂₁·L₂₁ᵀ on the packed GEMM kernel.
+/// block on a contiguous copy, solve the panel below it in parallel
+/// `CHOL_RB`-row chunks, then the trailing update A₂₂ −= L₂₁·L₂₁ᵀ (lower
+/// triangle only) in parallel `CHOL_CW`-column chunks on the packed GEMM
+/// kernel. Every step reads memory contiguously; scratch is reused.
 pub fn dpotrf(n: usize, a: &mut [f64]) -> Result<(), LinalgError> {
     if a.len() != n * n { return Err(LinalgError::NotSquare); }
 
@@ -137,56 +144,128 @@ pub fn dpotrf(n: usize, a: &mut [f64]) -> Result<(), LinalgError> {
 
     let nb = CHOL_NB;
     let mut j = 0;
+    // Scratch reused across panels: fresh multi-MB buffers per panel are
+    // fresh pages from the OS, a page fault each.
+    let (mut dblk, mut pb, mut lt) = (Vec::<f64>::new(), Vec::<f64>::new(), Vec::<f64>::new());
     while j < n {
         let jb = (n - j).min(nb);
 
-        // Factor diagonal block: A[j:j+jb, j:j+jb]
-        // First update it with contributions from previous columns
-        for jj in j..(j + jb) {
-            let mut diag = a[jj * n + jj];
-            for k in j..jj { diag -= a[k * n + jj] * a[k * n + jj]; }
+        // Factor the diagonal block A[j:j+jb, j:j+jb] on a contiguous copy
+        // (jb x jb column-major, cache-resident), left-looking: column c
+        // subtracts L[c][k]·column k for each earlier k as a contiguous
+        // axpy. (Columns 0..j were already removed by the trailing
+        // updates.) In place in A, every step strode n elements.
+        dblk.clear();
+        dblk.resize(jb * jb, 0.0);
+        for q in 0..jb { dblk[q * jb..(q + 1) * jb].copy_from_slice(&a[(j + q) * n + j..(j + q) * n + j + jb]); }
+        for c in 0..jb {
+            let (lo, hi) = dblk.split_at_mut(c * jb);
+            let col = &mut hi[..jb];
+            for k in 0..c {
+                let f = lo[k * jb + c];
+                if f != 0.0 {
+                    for (d, s) in col[c..].iter_mut().zip(&lo[k * jb + c..k * jb + jb]) { *d -= s * f; }
+                }
+            }
+            let diag = col[c];
             if diag <= 1e-15 { return Err(LinalgError::NotPositiveDefinite); }
             let ljj = diag.sqrt();
-            a[jj * n + jj] = ljj;
-
-            for i in (jj + 1)..(j + jb) {
-                let mut sum = a[jj * n + i];
-                // Columns 0..j were already subtracted by earlier trailing updates.
-                for k in j..jj { sum -= a[k * n + i] * a[k * n + jj]; }
-                a[jj * n + i] = sum / ljj;
-            }
-            // Zero upper
-            for i in 0..jj { a[jj * n + i] = 0.0; }
+            col[c] = ljj;
+            for d in col[c + 1..].iter_mut() { *d /= ljj; }
+        }
+        for q in 0..jb {
+            let col = &mut a[(j + q) * n..(j + q + 1) * n];
+            for x in col[..j + q].iter_mut() { *x = 0.0; }   // upper triangle
+            col[j + q..j + jb].copy_from_slice(&dblk[q * jb + q..(q + 1) * jb]);
         }
 
-        // Update below-diagonal panel: A[j+jb:n, j:j+jb]
+        // Panel below the diagonal block: L₂₁ = A₂₁·L₁₁⁻ᵀ. Rows are
+        // independent, so the panel is cut into CHOL_RB-row chunks, each
+        // stored column-major and contiguous; a chunk is solved column-
+        // oriented — column q −= L[q][p]·column p for p < q, then ÷ L[q][q],
+        // every step a contiguous axpy — and chunks run in parallel. The
+        // same pass writes the chunk's rows row-major into `lt`, the
+        // L₂₁ᵀ operand of the trailing GEMM, while it is in cache.
+        // (Row-by-row substitution spent its time in 128 short dot calls
+        // per row, and element-wise transposes strode 1 KB per element.)
         if j + jb < n {
-            for jj in j..(j + jb) {
-                let ljj = a[jj * n + jj];
-                // Column-oriented: subtract each earlier panel column as a
-                // contiguous axpy, rather than a dot product that strides
-                // across a row (n elements apart per step, a cache miss each).
-                let (lo, hi) = a.split_at_mut(jj * n);
-                let col = &mut hi[j + jb..n];
-                for k in j..jj {
-                    let f = lo[k * n + jj];
-                    if f != 0.0 {
-                        let src = &lo[k * n + j + jb..k * n + n];
-                        for (d, v) in col.iter_mut().zip(src) { *d -= v * f; }
-                    }
-                }
-                for d in col.iter_mut() { *d /= ljj; }
-            }
-
-            // Trailing update A₂₂ −= L₂₁·L₂₁ᵀ (lower triangle) on the GEMM
-            // kernel: L₂₁ copied out contiguous, and its transpose.
+            use rayon::prelude::*;
             let trail = j + jb;
             let m2 = n - trail;
-            let mut l = vec![0.0; m2 * jb];
-            for p in 0..jb { l[p * m2..(p + 1) * m2].copy_from_slice(&a[(j + p) * n + trail..(j + p + 1) * n]); }
-            let mut lt = vec![0.0; jb * m2];
-            for p in 0..jb { for r in 0..m2 { lt[r * jb + p] = l[p * m2 + r]; } }
-            sub_product(n, a, trail, trail, n, &l, &lt, jb, true);
+            let nch = m2.div_ceil(CHOL_RB);
+            pb.clear();
+            pb.resize(nch * CHOL_RB * jb, 0.0);
+            for q in 0..jb {
+                let col = &a[(j + q) * n + trail..(j + q + 1) * n];
+                for (k, seg) in col.chunks(CHOL_RB).enumerate() {
+                    let o = k * CHOL_RB * jb + q * CHOL_RB;
+                    pb[o..o + seg.len()].copy_from_slice(seg);
+                }
+            }
+            lt.clear();
+            lt.resize(m2 * jb, 0.0);
+            let d = &dblk;
+            pb.par_chunks_mut(CHOL_RB * jb).zip(lt.par_chunks_mut(CHOL_RB * jb)).enumerate()
+                .for_each(|(k, (ch, rows))| {
+                    let len = CHOL_RB.min(m2 - k * CHOL_RB);
+                    for q in 0..jb {
+                        let (lo, hi) = ch.split_at_mut(q * CHOL_RB);
+                        let seg = &mut hi[..len];
+                        for p in 0..q {
+                            let f = d[p * jb + q];   // L[q][p]
+                            if f != 0.0 {
+                                for (x, s) in seg.iter_mut().zip(&lo[p * CHOL_RB..p * CHOL_RB + len]) { *x -= s * f; }
+                            }
+                        }
+                        let ljj = d[q * jb + q];
+                        for x in seg.iter_mut() { *x /= ljj; }
+                    }
+                    for r in 0..len { for q in 0..jb { rows[r * jb + q] = ch[q * CHOL_RB + r]; } }
+                });
+            for q in 0..jb {
+                let col = &mut a[(j + q) * n + trail..(j + q + 1) * n];
+                for (k, seg) in col.chunks_mut(CHOL_RB).enumerate() {
+                    let o = k * CHOL_RB * jb + q * CHOL_RB;
+                    seg.copy_from_slice(&pb[o..o + seg.len()]);
+                }
+            }
+
+            // Trailing update A₂₂ −= L₂₁·L₂₁ᵀ, lower triangle only, in
+            // column chunks of CHOL_CW: a chunk's columns c..c+cw need rows
+            // c..n alone, one small serial GEMM computes exactly those, and
+            // the result is subtracted straight into A while it is in
+            // cache. Chunks in parallel. (A whole-matrix product halved
+            // nothing — it computed the full square — and moved the
+            // trailing matrix through RAM several times per panel: 103 ms
+            // of 141 at n = 2000 on this single-channel machine.)
+            //
+            // Row-major view: rows c..c+cw of `lt` are L₂₁[c..c+cw, :]
+            // (cw x jb); rows c.. of `lt` read transposed are L₂₁[c.., :]ᵀ.
+            // Their product is Tᵀ (cw x rows), T = L₂₁[c.., :]·L₂₁[c..c+cw, :]ᵀ.
+            use crate::gemm::{f64 as g, Trans};
+            // Per-thread product scratch, reused across chunks and panels
+            // (a fresh ~2 MB Vec per chunk is ~500 page faults). TAKEN out
+            // of the cell for the call, not borrowed across it: the GEMM's
+            // packing can fork, a waiting thread may steal another chunk,
+            // and that chunk then finds the cell empty and allocates.
+            thread_local! {
+                static TBUF: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let ltr = &lt;
+            a[trail * n..].par_chunks_mut(CHOL_CW * n).enumerate().for_each(|(ci, block)| {
+                let c = ci * CHOL_CW;
+                let cw = block.len() / n;
+                let rows = m2 - c;
+                let mut t = TBUF.with(|tb| std::mem::take(&mut *tb.borrow_mut()));
+                if t.len() < cw * rows { t.resize(cw * rows, 0.0); }
+                g::gemm_assign_into(&ltr[c * jb..(c + cw) * jb], Trans::No, &ltr[c * jb..], Trans::Yes,
+                                    cw, jb, rows, &mut t[..cw * rows], false);
+                for jj in 0..cw {
+                    let col = &mut block[jj * n + trail + c + jj..(jj + 1) * n];
+                    for (x, d) in col.iter_mut().zip(&t[jj * rows + jj..(jj + 1) * rows]) { *x -= d; }
+                }
+                TBUF.with(|tb| { let mut b = tb.borrow_mut(); if b.capacity() < t.capacity() { *b = t; } });
+            });
         }
         j += jb;
     }
