@@ -8,6 +8,15 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### `qr()` and `lm()`'s QR 5x faster — 2026-09-25
+
+- **The QR decomposition behind `qr()`, `lm()` and least squares is ~5x
+  faster**: 1000x1000 225 ms -> 43-51 ms on an Intel i5-12500, about 6x
+  faster than R 4.6.1 (285 ms) and 0.13-0.23x of Intel MKL (was 0.04x).
+  It now works in blocks of 64 columns applied as matrix multiplies (as
+  LAPACK does). Same factor, same results. Reproduce:
+  `python benchmarks/lapack_cases.py`.
+
 ### `svd()` 17-34x faster — 2026-09-25
 
 - **`svd()` is 17-34x faster.** On an Intel i5-12500 at 1000x1000:

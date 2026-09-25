@@ -212,22 +212,50 @@ fn dpotrf_unblocked(n: usize, a: &mut [f64]) -> Result<(), LinalgError> {
     Ok(())
 }
 
-/// QR decomposition via Householder reflections
-/// A is m×n, m >= n
-/// On exit: upper triangle of A contains R, below-diagonal contains Householder vectors
-/// tau[i] contains the reflection coefficient
+/// QR decomposition via Householder reflections — blocked (LAPACK `dgeqrf`).
+/// A is m×n, m >= n, column-major.
+/// On exit: upper triangle of A contains R, below-diagonal contains the
+/// Householder vectors (v[k] = 1 implicit), `tau[k]` their coefficients —
+/// H_k = I − τ_k·v_k·v_kᵀ and Q = H_0·H_1···H_{n−1}.
+///
+/// Panels of `QR_NB` columns are factored one reflector at a time
+/// ([`qr_panel`]); the panel's reflectors are then combined into one block
+/// reflector H = I − V·T·Vᵀ (`dlarft`) and applied to everything right of
+/// the panel as three GEMMs (`dlarfb`): W = Vᵀ·C, W = Tᵀ·W, C −= V·W.
+/// Unblocked, each reflector swept the whole trailing matrix on one core
+/// (225 ms at n = 1000 against MKL's 9 ms); blocked, the O(m·n²) work is
+/// GEMM. Same factor, same storage — `dlsq_qr` and `lm` read it unchanged.
 pub fn dgeqrf(m: usize, n: usize, a: &mut [f64]) -> Result<Vec<f64>, LinalgError> {
     if a.len() != m * n { return Err(LinalgError::InvalidShape("QR: A shape".into())); }
     if m < n { return Err(LinalgError::InvalidShape("QR: need m >= n".into())); }
 
     let mut tau = vec![0.0; n];
+    let mut k = 0;
+    while k < n {
+        let kb = QR_NB.min(n - k);
+        qr_panel(m, a, &mut tau, k, k + kb);
+        if k + kb < n { apply_block_reflector(m, a, &tau, k, kb); }
+        k += kb;
+    }
+    Ok(tau)
+}
 
-    for k in 0..n {
+/// Panel width of the blocked QR. Measured on an Intel i5-12500 (single-
+/// channel DDR4), geqrf ms at n = 500 / 1000 / 2000 with 32-column apply
+/// chunks: 64 → 10.2 / 42.7 / 246, 96 → 12.7 / 52 / 301, 128 → 15.4 / 65 /
+/// 322. Chunks of 16 / 64 columns at width 64: 10.7 / 45.7 / 240 and
+/// 10.2 / 38.4 / 320.
+const QR_NB: usize = 64;
+
+/// Unblocked Householder QR of columns `k0..k1` (rows k..m for column k),
+/// updating only columns inside the panel.
+fn qr_panel(m: usize, a: &mut [f64], tau: &mut [f64], k0: usize, k1: usize) {
+    for k in k0..k1 {
         // Compute Householder reflection for column k, rows k..m
         let mut norm_sq = 0.0;
         for i in k..m { let v = a[k * m + i]; norm_sq += v * v; }
         let norm = norm_sq.sqrt();
-        if norm < 1e-15 { continue; }
+        if norm < 1e-15 { tau[k] = 0.0; continue; }
 
         let akk = a[k * m + k];
         let sign = if akk >= 0.0 { 1.0 } else { -1.0 };
@@ -245,16 +273,78 @@ pub fn dgeqrf(m: usize, n: usize, a: &mut [f64]) -> Result<Vec<f64>, LinalgError
         for i in (k + 1)..m { vv += a[k * m + i] * a[k * m + i]; }
         tau[k] = 2.0 / vv;
 
-        // Apply to remaining columns: A[:,j] -= tau · v · (v'·A[:,j])
-        for j in (k + 1)..n {
-            let mut vaj = a[j * m + k]; // contribution from v[k] = 1
-            for i in (k + 1)..m { vaj += a[k * m + i] * a[j * m + i]; }
+        // Apply to the remaining PANEL columns: A[:,j] -= tau · v · (v'·A[:,j])
+        let (lo, hi) = a.split_at_mut((k + 1) * m);
+        let v = &lo[k * m + k + 1..k * m + m];
+        for j in (k + 1)..k1 {
+            let col = &mut hi[(j - k - 1) * m..(j - k) * m];
+            let mut vaj = col[k]; // contribution from v[k] = 1
+            for (x, vi) in col[k + 1..m].iter().zip(v) { vaj += vi * x; }
             vaj *= tau[k];
-            a[j * m + k] -= vaj;
-            for i in (k + 1)..m { a[j * m + i] -= vaj * a[k * m + i]; }
+            col[k] -= vaj;
+            for (x, vi) in col[k + 1..m].iter_mut().zip(v) { *x -= vaj * vi; }
         }
     }
-    Ok(tau)
+}
+
+/// Apply Hᵀ = (H_k0···H_{k0+kb−1})ᵀ, the panel's reflectors, to columns
+/// k0+kb..n of `a` (rows k0..m) as one block reflector: with
+/// H = I − V·T·Vᵀ (V the unit-lower mk x kb reflectors, T upper
+/// triangular, `dlarft` forward/columnwise), Hᵀ·C = C − V·(Tᵀ·(Vᵀ·C)).
+fn apply_block_reflector(m: usize, a: &mut [f64], tau: &[f64], k0: usize, kb: usize) {
+    use rayon::prelude::*;
+    let mk = m - k0;
+    let c0 = k0 + kb;
+    // V (mk x kb, column-major): unit diagonal, zeros above.
+    let mut v = vec![0.0; mk * kb];
+    for p in 0..kb {
+        let col = &mut v[p * mk..(p + 1) * mk];
+        col[p] = 1.0;
+        col[p + 1..].copy_from_slice(&a[(k0 + p) * m + k0 + p + 1..(k0 + p + 1) * m]);
+    }
+    // T (kb x kb upper, column-major): T[p][p] = τ_p,
+    // T[0..p, p] = −τ_p · T[0..p, 0..p] · (V[:, 0..p]ᵀ · v_p).
+    let mut t = vec![0.0; kb * kb];
+    for p in 0..kb {
+        let tp = tau[k0 + p];
+        t[p * kb + p] = tp;
+        if p == 0 || tp == 0.0 { continue; }
+        let vp = &v[p * mk..(p + 1) * mk];
+        let z: Vec<f64> = (0..p).map(|q| {
+            let vq = &v[q * mk..(q + 1) * mk];
+            vq[p..].iter().zip(&vp[p..]).map(|(x, y)| x * y).sum::<f64>()
+        }).collect();
+        for r in 0..p {
+            let mut s = 0.0;
+            for q in r..p { s += t[q * kb + r] * z[q]; }
+            t[p * kb + r] = -tp * s;
+        }
+    }
+    // Applied in column chunks that stay in cache: copy CW columns out,
+    // W = Vᵀ·C, W ← Tᵀ·W, C −= V·W on small serial GEMMs, copy back —
+    // chunks in parallel. One pass over the trailing matrix per panel
+    // instead of the ~10 a whole-matrix Vᵀ·C / V·W with full-size
+    // temporaries costs; on a memory-bound machine that is the difference
+    // (n = 2000: 521 ms of block-reflector work with whole-matrix GEMMs).
+    //
+    // Row-major view (see level3::dgemm): a column-major chunk C (mk x cw)
+    // is row-major Cᵀ; V's buffer is row-major Vᵀ (kb x mk); T's is Tᵀ.
+    //   Wᵀ  (cw x kb) = Cᵀ·V      = gemm(C, No,  V, Yes)
+    //   W2ᵀ (cw x kb) = Wᵀ·T      = gemm(Wᵀ, No, T, Yes)
+    //   Cᵀ −= W2ᵀ·Vᵀ              = gemm_into(−W2ᵀ, No, V, No)
+    use crate::gemm::{f64 as g, Trans};
+    const CW: usize = 32;
+    let (vr, tr) = (&v, &t);
+    a[c0 * m..].par_chunks_mut(CW * m).for_each(|block| {
+        let cw = block.len() / m;
+        let mut c = vec![0.0; mk * cw];
+        for j in 0..cw { c[j * mk..(j + 1) * mk].copy_from_slice(&block[j * m + k0..(j + 1) * m]); }
+        let w = g::gemm(&c, Trans::No, vr, Trans::Yes, cw, mk, kb, false);
+        let mut w2 = g::gemm(&w, Trans::No, tr, Trans::Yes, cw, kb, kb, false);
+        for x in w2.iter_mut() { *x = -*x; }
+        g::gemm_into(&w2, Trans::No, vr, Trans::No, cw, kb, mk, &mut c, false);
+        for j in 0..cw { block[j * m + k0..(j + 1) * m].copy_from_slice(&c[j * mk..(j + 1) * mk]); }
+    });
 }
 
 /// Singular Value Decomposition — singular values only.
