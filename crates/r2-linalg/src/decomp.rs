@@ -597,9 +597,8 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
                 let hvk = &hv[k..m];
                 let app = |col: &mut [f64]| {
                     let c = &mut col[k..m];
-                    let dot: f64 = c.iter().zip(hvk).map(|(x, h)| x * h).sum();
-                    let scale = tau * dot;
-                    for (x, h) in c.iter_mut().zip(hvk) { *x -= scale * h; }
+                    let scale = tau * crate::simd::dot(c, hvk);
+                    crate::simd::axpy(c, -scale, hvk);
                 };
                 let cols = &mut work[(k + 1) * m..];
                 if (n - k - 1) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
@@ -668,7 +667,7 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
                                 let vj = vrr[j];
                                 if vj == 0.0 { continue; }
                                 let src = &w[j * m + i0..j * m + i0 + ch.len()];
-                                for (d, x) in ch.iter_mut().zip(src) { *d += vj * x; }
+                                crate::simd::axpy(ch, vj, src);
                             }
                         };
                         if (m - r0) * (n - k - 1) >= PAR { dots.par_chunks_mut(256).enumerate().for_each(fill); }
@@ -678,7 +677,7 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
                     let upd = |(jj, col): (usize, &mut [f64])| {
                         let s = tau * vrr[k + 1 + jj];
                         if s == 0.0 { return; }
-                        for (x, d) in col[r0..m].iter_mut().zip(&dots) { *x -= s * d; }
+                        crate::simd::axpy(&mut col[r0..m], -s, &dots);
                     };
                     let cols = &mut work[(k + 1) * m..n * m];
                     if (m - r0) * (n - k - 1) >= PAR { cols.par_chunks_mut(m).enumerate().for_each(upd); }
@@ -726,9 +725,9 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
             let vk = &left_vs[k][k..m];
             let app = |col: &mut [f64]| {
                 let c = &mut col[k..m];
-                let dot: f64 = c.iter().zip(vk).map(|(x, h)| x * h).sum();
+                let dot = crate::simd::dot(c, vk);
                 let scale = tau * dot;
-                for (x, h) in c.iter_mut().zip(vk) { *x -= scale * h; }
+                crate::simd::axpy(c, -scale, vk);
             };
             let cols = &mut u1[k * m..];
             if (n - k) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
@@ -751,9 +750,9 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
             let vk = &right_vs[k][k + 1..n];
             let app = |col: &mut [f64]| {
                 let c = &mut col[k + 1..n];
-                let dot: f64 = c.iter().zip(vk).map(|(x, h)| x * h).sum();
+                let dot = crate::simd::dot(c, vk);
                 let scale = tau * dot;
-                for (x, h) in c.iter_mut().zip(vk) { *x -= scale * h; }
+                crate::simd::axpy(c, -scale, vk);
             };
             let cols = &mut v1[(k + 1) * n..];
             if (n - k - 1) * (n - k - 1) >= PAR { cols.par_chunks_mut(n).for_each(app); }

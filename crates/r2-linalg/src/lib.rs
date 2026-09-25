@@ -26,6 +26,7 @@ pub mod level3;
 pub mod decomp;
 pub mod eigen;
 pub mod symeig;
+mod simd;
 pub mod solve;
 
 pub use level1::*;

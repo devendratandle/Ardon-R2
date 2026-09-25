@@ -46,6 +46,26 @@ const ROT_BATCH: usize = 1 << 15;
 /// Apply rotations, in order, to one RB-row block of Q (column-major
 /// within the block): columns k and k+1 of every row.
 fn rotate_block(block: &mut [f64], rots: &[(usize, f64, f64)]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::avx2() {
+        // SAFETY: avx2() confirmed AVX2 on this CPU.
+        return unsafe { rotate_block_avx2(block, rots) };
+    }
+    rotate_block_impl(block, rots)
+}
+
+/// The same loop compiled 4 doubles wide. The workspace builds for
+/// baseline x86-64 (SSE2), so without this the rotations ran 2 wide. No
+/// FMA: a·x + b·y keeps its two roundings, so results are bit-identical
+/// to the baseline build.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn rotate_block_avx2(block: &mut [f64], rots: &[(usize, f64, f64)]) {
+    rotate_block_impl(block, rots)
+}
+
+#[inline(always)]
+fn rotate_block_impl(block: &mut [f64], rots: &[(usize, f64, f64)]) {
     for &(k, cs, sn) in rots {
         let (lo, hi) = block.split_at_mut((k + 1) * RB);
         let a = &mut lo[k * RB..];
@@ -73,18 +93,7 @@ fn givens(a: f64, b: f64) -> (f64, f64) {
     (a / r, b / r)
 }
 
-fn dot(x: &[f64], y: &[f64]) -> f64 {
-    // Four accumulators so the add chain vectorises.
-    let mut s = [0.0f64; 4];
-    let (xc, yc) = (x.chunks_exact(4), y.chunks_exact(4));
-    let (xr, yr) = (xc.remainder(), yc.remainder());
-    for (a, b) in xc.zip(yc) {
-        s[0] += a[0] * b[0]; s[1] += a[1] * b[1]; s[2] += a[2] * b[2]; s[3] += a[3] * b[3];
-    }
-    let mut t = (s[0] + s[1]) + (s[2] + s[3]);
-    for (a, b) in xr.iter().zip(yr) { t += a * b; }
-    t
-}
+use crate::simd::{axpy, dot, rank2};
 
 /// Symmetric eigendecomposition of the column-major n x n `a`.
 /// Returns (eigenvalues descending, eigenvectors column-major n x n with
@@ -126,7 +135,7 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
         let upd = |(j, c): (usize, &mut [f64])| {
             let c = &mut c[k + 1..n];
             let (wj, vj) = (w[j], v[j]);
-            for ((ci, vi), wi) in c.iter_mut().zip(&v).zip(&w) { *ci -= vi * wj + wi * vj; }
+            rank2(c, &v, &w, wj, vj);
         };
         let trail = &mut t[(k + 1) * n..];
         if m * m >= PAR_MIN { trail.par_chunks_mut(n).enumerate().for_each(upd); }
@@ -153,7 +162,7 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
         let app = |c: &mut [f64]| {
             let seg = &mut c[k + 1..n];
             let s = beta * dot(seg, v);
-            for (x, vi) in seg.iter_mut().zip(v) { *x -= s * vi; }
+            axpy(seg, -s, v);
         };
         let cols = &mut q[(k + 1) * n..];
         if m * m >= PAR_MIN { cols.par_chunks_mut(n).for_each(app); }
