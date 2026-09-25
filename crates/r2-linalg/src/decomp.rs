@@ -386,16 +386,26 @@ fn qr_panel(m: usize, a: &mut [f64], tau: &mut [f64], k0: usize, k1: usize) {
         for i in (k + 1)..m { vv += a[k * m + i] * a[k * m + i]; }
         tau[k] = 2.0 / vv;
 
-        // Apply to the remaining PANEL columns: A[:,j] -= tau · v · (v'·A[:,j])
+        // Apply to the remaining PANEL columns: A[:,j] -= tau · v · (v'·A[:,j]).
+        // Columns are independent: in parallel once the panel is tall
+        // enough to pay for the fork (single-threaded, the panels were a
+        // quarter of the factorisation: 15 of ~64 ms at n = 1000).
         let (lo, hi) = a.split_at_mut((k + 1) * m);
         let v = &lo[k * m + k + 1..k * m + m];
-        for j in (k + 1)..k1 {
-            let col = &mut hi[(j - k - 1) * m..(j - k) * m];
+        let tk = tau[k];
+        let app = |col: &mut [f64]| {
             let mut vaj = col[k]; // contribution from v[k] = 1
             for (x, vi) in col[k + 1..m].iter().zip(v) { vaj += vi * x; }
-            vaj *= tau[k];
+            vaj *= tk;
             col[k] -= vaj;
             for (x, vi) in col[k + 1..m].iter_mut().zip(v) { *x -= vaj * vi; }
+        };
+        let cols = &mut hi[..(k1 - k - 1) * m];
+        if (m - k) * (k1 - k - 1) >= 1 << 14 {
+            use rayon::prelude::*;
+            cols.par_chunks_mut(m).for_each(app);
+        } else {
+            cols.chunks_mut(m).for_each(app);
         }
     }
 }
@@ -433,7 +443,7 @@ fn apply_block_reflector(m: usize, a: &mut [f64], tau: &[f64], k0: usize, kb: us
             t[p * kb + r] = -tp * s;
         }
     }
-    // Applied in column chunks that stay in cache: copy CW columns out,
+    // Applied in column chunks that stay in cache: copy a chunk out,
     // W = Vᵀ·C, W ← Tᵀ·W, C −= V·W on small serial GEMMs, copy back —
     // chunks in parallel. One pass over the trailing matrix per panel
     // instead of the ~10 a whole-matrix Vᵀ·C / V·W with full-size
@@ -446,9 +456,13 @@ fn apply_block_reflector(m: usize, a: &mut [f64], tau: &[f64], k0: usize, kb: us
     //   W2ᵀ (cw x kb) = Wᵀ·T      = gemm(Wᵀ, No, T, Yes)
     //   Cᵀ −= W2ᵀ·Vᵀ              = gemm_into(−W2ᵀ, No, V, No)
     use crate::gemm::{f64 as g, Trans};
-    const CW: usize = 32;
+    // Chunk width: 64 columns while a chunk (mk x 64 doubles) stays within
+    // 512 KB of L2, else 32. Measured (i5-12500, geqrf ms at n = 500 /
+    // 1000 / 2000): 32 → 10.5 / 37-40 / 206-211, 64 → 10.0 / 33 / 256-259,
+    // 128 → 10.7 / 40-43 / 286-290.
+    let cw_cols = if mk * 64 * 8 <= 1 << 19 { 64 } else { 32 };
     let (vr, tr) = (&v, &t);
-    a[c0 * m..].par_chunks_mut(CW * m).for_each(|block| {
+    a[c0 * m..].par_chunks_mut(cw_cols * m).for_each(|block| {
         let cw = block.len() / m;
         let mut c = vec![0.0; mk * cw];
         for j in 0..cw { c[j * mk..(j + 1) * mk].copy_from_slice(&block[j * m + k0..(j + 1) * m]); }
