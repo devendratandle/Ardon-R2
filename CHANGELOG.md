@@ -8,6 +8,15 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### AVX-512 matrix kernel for LLM training — 2026-09-25
+
+- **On CPUs with AVX-512** (Intel Xeon Skylake-SP and later, AMD Zen 4/5)
+  LLM training's matrix multiplies use a new 512-bit kernel; other CPUs
+  are unchanged. It gives bit-identical results to the AVX2 kernel
+  (verified under Intel's emulator, including a training run). Its speed
+  has **not been measured yet** — no AVX-512 machine was available.
+  `R2_SIMD=avx2` switches it off.
+
 ### Matrix multiply (`%*%`) at MKL speed — 2026-09-25
 
 - **`%*%` on doubles is 3-16x faster** and now matches Intel MKL's

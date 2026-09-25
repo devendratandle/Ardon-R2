@@ -884,6 +884,24 @@ monotonically worse).
 
 Ranked by the census above, not by how interesting they are.
 
+- **AVX-512 `sgemm` — written, correct, NOT YET TIMED (2026-09-25).**
+  `gemm::f32_512`: the same packed kernel at a 12x32 tile (24 ZMM
+  accumulators, 27 of 32 registers; the inner loop's assembly has 24
+  FMAs and no stack traffic). `sgemm*` take it when the CPU has
+  AVX-512F; `R2_SIMD=avx2` forces the AVX2 kernel. Checked under Intel
+  SDE (Sapphire Rapids and Skylake-X): bit-identical to the AVX2 kernel
+  on every transpose case, ragged shape and partition
+  (`avx512_is_bit_identical_to_avx2`); the linalg, autograd and tensor
+  suites pass on it; a 10-step TinyStories run gives the same losses to
+  the last printed digit as the AVX2 run. **No speed claim exists**:
+  neither dev machine has AVX-512, and SDE timing is meaningless. On an
+  AVX-512 machine, run `gemm_cases.py` and `tinystories_train` with and
+  without `R2_SIMD=avx2`, then tune `KC`/`MC`/`NC` (still the AVX2
+  kernel's; the 32 KB B strip at KC 256 is L1-sized for Sapphire
+  Rapids' 48 KB, tight for Zen 4's 32 KB). Expect most on full-width
+  parts (Xeon SPR+, Zen 5) and least on Zen 4, which splits each 512-bit
+  op into two 256-bit halves.
+
 0. **Re-run `--example step_census` — the shares below predate the three
    removals in section 1.** Fixing the top item promotes whatever was
    hiding under it, and a stale census is how the split-K attempt below

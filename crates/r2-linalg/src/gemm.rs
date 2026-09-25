@@ -127,18 +127,20 @@ pub fn take_gemm_stats() -> Vec<(u64, f32, bool)> {
 }
 
 
-/// Rows per register tile. See the module docs.
-const MR: usize = 6;
-
 /// Generate a complete blocked GEMM for one element type.
 ///
 /// A macro rather than a trait: the micro-kernel has to be monomorphic for
 /// the accumulator array to stay in registers, and `#[target_feature]`
 /// cannot be applied through a generic. Rust has no numeric trait in std,
 /// and pulling in `num-traits` would add a dependency to a crate that
-/// deliberately has almost none. Instantiated for f32 and f64 below.
+/// deliberately has almost none. Instantiated for f32 and f64 (AVX2) and
+/// f32 again at the AVX-512 tile below. `$feat` is the `target_feature` the
+/// fallback micro-kernel is compiled for and `$wide` the runtime check
+/// that gates every wide path of this instantiation.
 macro_rules! blocked_gemm_for {
-    ($ty:ty, $nr:expr, $kc:expr, $mc:expr, $nc:expr, $feat:literal) => {
+    ($ty:ty, $mr:expr, $nr:expr, $kc:expr, $mc:expr, $nc:expr, $feat:literal, $wide:expr) => {
+        /// Rows per register tile. See the module docs.
+        const MR: usize = $mr;
         /// Columns per register tile: two vector registers' worth.
         const NR: usize = $nr;
         /// Depth of one packed panel.
@@ -199,10 +201,7 @@ macro_rules! blocked_gemm_for {
             {
                 use std::sync::OnceLock;
                 static OK: OnceLock<bool> = OnceLock::new();
-                *OK.get_or_init(|| {
-                    std::arch::is_x86_feature_detected!("avx2")
-                        && std::arch::is_x86_feature_detected!("fma")
-                })
+                *OK.get_or_init(|| $wide)
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
@@ -231,6 +230,16 @@ macro_rules! blocked_gemm_for {
                         let b: &[f32] = core::slice::from_raw_parts(
                             bpack.as_ptr() as *const f32, bpack.len());
                         let r = super::micro_f32_avx2(kc, a, b);
+                        core::ptr::read(&r as *const _ as *const [[$ty; NR]; MR])
+                    };
+                }
+                if std::mem::size_of::<$ty>() == 4 && MR == 12 && NR == 32 {
+                    return unsafe {
+                        let a: &[f32] = core::slice::from_raw_parts(
+                            apack.as_ptr() as *const f32, apack.len());
+                        let b: &[f32] = core::slice::from_raw_parts(
+                            bpack.as_ptr() as *const f32, bpack.len());
+                        let r = super::micro_f32_avx512(kc, a, b);
                         core::ptr::read(&r as *const _ as *const [[$ty; NR]; MR])
                     };
                 }
@@ -771,8 +780,8 @@ macro_rules! blocked_gemm_for {
 /// The f32 kernel. A block 96x256x4B = 96 KB (L2), B panel
 /// 256x1024x4B = 1 MB (L3).
 pub mod f32 {
-    use super::{nthreads, stats_on, Trans, MR, PACK_PAR_MIN, STATS};
-    blocked_gemm_for!(f32, 16, 256, 96, 1024, "fma");
+    use super::{nthreads, stats_on, Trans, PACK_PAR_MIN, STATS};
+    blocked_gemm_for!(f32, 6, 16, 256, 96, 1024, "fma", super::avx2_fma());
 }
 
 /// The f64 kernel: the same structure at half the lanes. NR = 8 doubles is
@@ -782,9 +791,47 @@ pub mod f32 {
 /// 256x512x8B = 1 MB (L3). `level3::dgemm` — `%*%` and the blocked LAPACK
 /// routines — runs on this.
 pub mod f64 {
-    use super::{nthreads, stats_on, Trans, MR, PACK_PAR_MIN, STATS};
-    blocked_gemm_for!(f64, 8, 256, 96, 512, "fma");
+    use super::{nthreads, stats_on, Trans, PACK_PAR_MIN, STATS};
+    blocked_gemm_for!(f64, 6, 8, 256, 96, 512, "fma", super::avx2_fma());
 }
+
+/// The f32 kernel at the AVX-512 tile: 12 rows x 32 floats, 24 of the 32
+/// ZMM registers as accumulators ([`micro_f32_avx512`]). Everything else —
+/// packing, blocking, the partitions — is the same macro as [`f32`], so
+/// each element of C sums its products in the same order with the same
+/// fused multiply-adds, and the result is bit-identical to the AVX2
+/// kernel's (`avx512_is_bit_identical_to_avx2`). A block of 96 rows is 8
+/// panels here instead of 16.
+///
+/// `sgemm*` route here when [`f32_512::have_wide`] — AVX-512F on this CPU,
+/// and `R2_SIMD` not set to `avx2` (the same cap `level3`'s `dot4` honours,
+/// for a machine where AVX-512 downclocks the rest of the workload).
+///
+/// NOT yet tuned or timed: the machines R2 is developed on have no
+/// AVX-512. It is checked for correctness under Intel SDE; `KC`/`MC`/`NC`
+/// are the AVX2 kernel's until an AVX-512 machine measures them.
+pub mod f32_512 {
+    use super::{nthreads, stats_on, Trans, PACK_PAR_MIN, STATS};
+    blocked_gemm_for!(f32, 12, 32, 256, 96, 1024, "avx512f", super::avx512f_allowed());
+}
+
+/// AVX2 + FMA on this CPU (the f32/f64 kernels' wide path).
+#[cfg(target_arch = "x86_64")]
+fn avx2_fma() -> bool {
+    std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn avx2_fma() -> bool { false }
+
+/// AVX-512F on this CPU, and not capped by `R2_SIMD=avx2` / `sse2`.
+#[cfg(target_arch = "x86_64")]
+fn avx512f_allowed() -> bool {
+    let cap = std::env::var("R2_SIMD").ok();
+    !matches!(cap.as_deref(), Some("avx2") | Some("sse2"))
+        && std::arch::is_x86_feature_detected!("avx512f")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn avx512f_allowed() -> bool { false }
 
 /// The f32 micro-kernel, written with AVX2 intrinsics instead of left to
 /// the optimiser.
@@ -937,18 +984,74 @@ unsafe fn micro_f64_avx2(kc: usize, apack: &[f64], bpack: &[f64]) -> [[f64; 8]; 
     out
 }
 
+/// The f32 micro-kernel for AVX-512: 12 rows x 32 floats.
+///
+/// The AVX2 kernel's tile is bounded by its 16 YMM registers (12
+/// accumulators). AVX-512 doubles the vector width AND the register file
+/// to 32 ZMM, so the tile grows in both directions: 32 floats across (two
+/// ZMM per row, as the AVX2 kernel has two YMM) and 12 rows down — **24
+/// accumulators + 2 for the B strip + 1 broadcast = 27 of 32**, leaving
+/// headroom rather than spilling. That is the shape of BLIS's `skx` sgemm
+/// kernel (its 32x12, transposed to R2's row-broadcast orientation). Per
+/// depth step it issues 24 FMAs against 2 vector loads and 12 broadcasts:
+/// twice the FMAs per load of the AVX2 tile, which is what lets two
+/// 512-bit FMA ports stay fed.
+///
+/// The accumulators are an array indexed by constants in fully unrolled
+/// loops, which LLVM promotes to registers; the emitted inner loop was
+/// checked to contain no stack traffic (`cargo rustc --release -p
+/// r2-linalg -- --emit asm`, search `micro_f32_avx512`).
+///
+/// # Safety
+///
+/// Packed buffers from [`f32_512::pack_a`] / [`f32_512::pack_b`], at least
+/// `kc * 12` and `kc * 32` elements; AVX-512F confirmed by the caller's
+/// `f32_512::have_wide()`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn micro_f32_avx512(kc: usize, apack: &[f32], bpack: &[f32]) -> [[f32; 32]; 12] {
+    use std::arch::x86_64::*;
+    debug_assert!(apack.len() >= kc * 12);
+    debug_assert!(bpack.len() >= kc * 32);
+
+    let mut c = [[_mm512_setzero_ps(); 2]; 12];
+    let mut a = apack.as_ptr();
+    let mut b = bpack.as_ptr();
+    for _ in 0..kc {
+        let b0 = _mm512_loadu_ps(b);
+        let b1 = _mm512_loadu_ps(b.add(16));
+        for i in 0..12 {
+            let ai = _mm512_set1_ps(*a.add(i));
+            c[i][0] = _mm512_fmadd_ps(ai, b0, c[i][0]);
+            c[i][1] = _mm512_fmadd_ps(ai, b1, c[i][1]);
+        }
+        a = a.add(12);
+        b = b.add(32);
+    }
+
+    let mut out = [[0.0f32; 32]; 12];
+    for i in 0..12 {
+        let p = out[i].as_mut_ptr();
+        _mm512_storeu_ps(p, c[i][0]);
+        _mm512_storeu_ps(p.add(16), c[i][1]);
+    }
+    out
+}
+
 /// BLAS `sgemm`, row-major: `C = A·B` in single precision.
 ///
 /// The one routine an LLM needs. The forward pass is NN, `grad_A = g·Bᵀ`
 /// is NT, and `grad_B = Aᵀ·g` is TN.
 pub fn sgemm(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
              m: usize, k: usize, n: usize, parallel: bool) -> Vec<f32> {
+    if f32_512::have_wide() { return self::f32_512::gemm(a, ta, b, tb, m, k, n, parallel); }
     self::f32::gemm(a, ta, b, tb, m, k, n, parallel)
 }
 
 /// BLAS `sgemm` accumulating into an existing `C`.
 pub fn sgemm_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
                   m: usize, k: usize, n: usize, c: &mut [f32], parallel: bool) {
+    if f32_512::have_wide() { return self::f32_512::gemm_into(a, ta, b, tb, m, k, n, c, parallel); }
     self::f32::gemm_into(a, ta, b, tb, m, k, n, c, parallel)
 }
 
@@ -956,6 +1059,7 @@ pub fn sgemm_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
 /// contents are ignored (no zeroing required).
 pub fn sgemm_assign_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
                          m: usize, k: usize, n: usize, c: &mut [f32], parallel: bool) {
+    if f32_512::have_wide() { return self::f32_512::gemm_assign_into(a, ta, b, tb, m, k, n, c, parallel); }
     self::f32::gemm_assign_into(a, ta, b, tb, m, k, n, c, parallel)
 }
 
@@ -995,6 +1099,47 @@ mod tests {
 
     fn mk(n: usize, ph: f32) -> Vec<f32> {
         (0..n).map(|i| ((i as f32) * 0.031 + ph).sin()).collect()
+    }
+
+    /// The AVX-512 kernel (12x32 tile) against the AVX2 kernel (6x16), BIT
+    /// for bit: same packing order, same per-element FMA sequence, so any
+    /// difference is a bug in the tile, its edges, or the partitions at a
+    /// different MR. Every transpose case, ragged sizes around both tiles,
+    /// both partitions (short and long m, shallow and deep k), serial and
+    /// threaded, assigning and accumulating. Returns early on a CPU without
+    /// AVX-512 — run it under Intel SDE (`sde -spr -- <test exe>`) there.
+    #[test]
+    fn avx512_is_bit_identical_to_avx2() {
+        if !(f32_512::have_wide() && f32::have_wide()) {
+            eprintln!("avx512_is_bit_identical_to_avx2: no AVX-512 here, skipped");
+            return;
+        }
+        eprintln!("avx512_is_bit_identical_to_avx2: AVX-512 path active");
+        let shapes = [
+            (1usize, 1usize, 1usize), (12, 7, 32), (13, 33, 31), (11, 300, 65),
+            (97, 256, 95), (200, 513, 40), (256, 2048, 768), (2048, 256, 768),
+            (40, 900, 1100), (1030, 70, 20),
+        ];
+        let ts = [(Trans::No, Trans::No), (Trans::No, Trans::Yes), (Trans::Yes, Trans::No), (Trans::Yes, Trans::Yes)];
+        for &(m, k, n) in &shapes {
+            let a = mk(m * k, 0.3);
+            let b = mk(k * n, 1.7);
+            for &(ta, tb) in &ts {
+                for &par in &[false, true] {
+                    let want = f32::gemm(&a, ta, &b, tb, m, k, n, par);
+                    let got = f32_512::gemm(&a, ta, &b, tb, m, k, n, par);
+                    let same = want.iter().zip(&got).all(|(x, y)| x.to_bits() == y.to_bits());
+                    assert!(same, "{m}x{k}x{n} {ta:?}{tb:?} par={par}: AVX-512 differs from AVX2");
+                    // accumulate into a non-zero C
+                    let c0 = mk(m * n, 2.9);
+                    let (mut c1, mut c2) = (c0.clone(), c0.clone());
+                    f32::gemm_into(&a, ta, &b, tb, m, k, n, &mut c1, par);
+                    f32_512::gemm_into(&a, ta, &b, tb, m, k, n, &mut c2, par);
+                    assert!(c1.iter().zip(&c2).all(|(x, y)| x.to_bits() == y.to_bits()),
+                        "{m}x{k}x{n} {ta:?}{tb:?} par={par}: accumulate differs");
+                }
+            }
+        }
     }
 
     /// Every transpose combination, at sizes that exercise the edge
