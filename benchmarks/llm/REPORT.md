@@ -102,6 +102,31 @@ AVX2 here; on an AVX-512 Intel part MKL would use AVX-512 while R2's
 AVX-512 GEMM tier is still unmeasured, so this machine does not predict
 that case either way.
 
+**Where the Intel lead comes from** (`R2_TAPE_STATS=1 R2_GEMM_STATS=1
+--example phase_split` against `op_profile.py`, two pairs, ms/step):
+
+| | R2 | PyTorch 2.14 + MKL | |
+|---|---:|---:|---|
+| GEMMs, forward | 63-66 | 68-70 | R2 ~1.07x — **parity** |
+| GEMMs, backward | 116-121 | 123-127 | R2 ~1.05x — **parity** |
+| everything else, forward | 34 | 53-57 | **R2 1.6x** |
+| everything else, backward | 50 | 100-110 | **R2 2.0x** |
+| optimizer (Adam) | 14.5-14.8 | 32-34 | **R2 2.2x** |
+| `softmax_ce` forward | 13.1-13.3 | 10.7-11.1 (`_log_softmax`) | PyTorch 1.2x |
+| attention backward | 8.1-8.6 | 6.5-7.4 (SDPA) | PyTorch 1.2x |
+
+On this CPU the GEMMs are at parity with MKL in situ; the whole lead is
+the bandwidth work around them and the optimizer. That makes the
+bandwidth tail (section 5) the next lever on BOTH machines. The two rows
+PyTorch wins are ~2 and ~1.5 ms of a ~280 ms step — under 1% each.
+
+Kernel to kernel (`gemm_cases.py`, same day) R2 is ahead of MKL from dim
+768 up — NN/NT/TN medians 1.26/1.17/1.29, up to 2.07x — and at parity or
+within noise on the dim-256 shapes. The one steady deficit is the dim-256
+output head forward, 2048x256x8000 NN: ~29 ms vs MKL ~25 ms. It is not
+comparable to that shape's TN (15 ms): NN writes a 64 MB C against TN's
+8 MB. Two Intel-specific probes measured nothing (section 6).
+
 ### Forward, backward, optimizer — and the fourth piece of waste
 
 `--example phase_split` and `benchmarks/llm/phase_split.py` cut one step
@@ -994,6 +1019,8 @@ Ranked by the census above, not by how interesting they are.
 | **Rewriting the silu backward in ATen's expression order** (`dy*s*(1+x*(1-s))`, plain store) on the theory that PyTorch's is "more vectorised" | `--example silu_forms`, 2048x768, 1 thread, 21 rounds: R2's two-FMA form 1.430 ms, ATen order 1.435 ms — identical; the two agree to 1.1e-7 (< f32 eps). The REAL `aten::silu_backward` on the same array: 2.096 ms on 1 thread (R2 **1.47x faster per core**), 1.262 ms on 6. Both are the same 8-wide AVX2 loop; PyTorch's Sleef `exp` is wider-range and slower than R2's clamped Cephes, which is all silu needs |
 | Timing PyTorch's tokenizer BEFORE its training loop, in one process | It holds a ~19 MB string and a 4.6M-element id list alive through training, and PyTorch's measured training time moved **20.7%** between two runs fifteen minutes apart (302.85 -> 365.46 s) while R2's moved 5.6%. That asymmetry — one side moving four times as much as the other — is the signature of a perturbation, not of drift. Moved after training; the ratio returned to 1.04x. **A measurement that shares a process with its neighbour must run after it** |
 | Reading the pipeline ratio as a property of the two implementations | It is a property of the RUN LENGTH. 1.71x at 30 steps, 1.02x at 500, same code both times — tokenizing is 0.5% of a real training pipeline. Quote the training ratio |
+| **Retuning `NC` for Intel's larger caches** (i5-12500: 1.25 MB L2/core, 18 MB L3 vs Zen's 512 KB / 8 MB), 2026-09-25 | `R2_GEMM_NC` = 512 / 1024 / 2048 / 4096, two rounds over five dim-256/768 shapes. Run-to-run scatter (w1/w3 NN 2175 then 1327 us at the SAME setting) exceeds every between-setting difference. No setting is better; the default stays |
+| **Column groups for shallow K on Intel** (waiving `colgroups_ok`'s `k >= 3*KC` gate, so the dim-256 NN/NT calls take the column-group form), 2026-09-25 | Three interleaved rounds, five shapes: the output head NN 28.7/29.8/29.3 ms off vs 29.6/29.7/29.4 on; the rest within scatter. The gate's AMD measurement holds on Intel too. Reverted. Lesson: the first `gemm_cases.py` sweep here read 0.73x on dim256 w1/w3 NN from ONE 3.0 ms sample that re-measures at 1.3-1.8 ms — **re-measure an op-level outlier before acting on it** |
 
 Three rules out of these. **A dependency chain costs nothing when something
 else is already the bottleneck.** **"Serial float reduction" is not one
