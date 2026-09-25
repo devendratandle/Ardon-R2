@@ -4,10 +4,9 @@
 //! `ops::matmul` and the autograd tape's two gradient cases all call it,
 //! so the LLM path has exactly one matrix-multiply implementation.
 //!
-//! `level3::dgemm` is NOT touched. It is the column-major BLAS entry point
-//! the statistics path calls, with its own fast path and its own tests.
-//! The kernel below is written as a per-type macro so that instantiating
-//! it for f64 later is a one-line change.
+//! The kernel below is a per-type macro, instantiated for f32 (the LLM
+//! path) and f64 (`level3::dgemm`, the column-major BLAS entry point the
+//! statistics path calls — `%*%` and the blocked LAPACK routines).
 //!
 //! # Why it exists
 //!
@@ -137,8 +136,7 @@ const MR: usize = 6;
 /// the accumulator array to stay in registers, and `#[target_feature]`
 /// cannot be applied through a generic. Rust has no numeric trait in std,
 /// and pulling in `num-traits` would add a dependency to a crate that
-/// deliberately has almost none. Only f32 is instantiated today; the macro
-/// is what makes adding f64 a one-line change.
+/// deliberately has almost none. Instantiated for f32 and f64 below.
 macro_rules! blocked_gemm_for {
     ($ty:ty, $nr:expr, $kc:expr, $mc:expr, $nc:expr, $feat:literal) => {
         /// Columns per register tile: two vector registers' worth.
@@ -233,6 +231,16 @@ macro_rules! blocked_gemm_for {
                         let b: &[f32] = core::slice::from_raw_parts(
                             bpack.as_ptr() as *const f32, bpack.len());
                         let r = super::micro_f32_avx2(kc, a, b);
+                        core::ptr::read(&r as *const _ as *const [[$ty; NR]; MR])
+                    };
+                }
+                if std::mem::size_of::<$ty>() == 8 && MR == 6 && NR == 8 {
+                    return unsafe {
+                        let a: &[f64] = core::slice::from_raw_parts(
+                            apack.as_ptr() as *const f64, apack.len());
+                        let b: &[f64] = core::slice::from_raw_parts(
+                            bpack.as_ptr() as *const f64, bpack.len());
+                        let r = super::micro_f64_avx2(kc, a, b);
                         core::ptr::read(&r as *const _ as *const [[$ty; NR]; MR])
                     };
                 }
@@ -767,6 +775,17 @@ pub mod f32 {
     blocked_gemm_for!(f32, 16, 256, 96, 1024, "fma");
 }
 
+/// The f64 kernel: the same structure at half the lanes. NR = 8 doubles is
+/// two YMM registers, so the 6x8 tile is again 12 accumulators. The byte
+/// sizes match the f32 kernel's: a 16 KB B strip and a 12 KB A panel per
+/// tile (L1), an A block of 96x256x8B = 192 KB (L2), a B panel of
+/// 256x512x8B = 1 MB (L3). `level3::dgemm` — `%*%` and the blocked LAPACK
+/// routines — runs on this.
+pub mod f64 {
+    use super::{nthreads, stats_on, Trans, MR, PACK_PAR_MIN, STATS};
+    blocked_gemm_for!(f64, 8, 256, 96, 512, "fma");
+}
+
 /// The f32 micro-kernel, written with AVX2 intrinsics instead of left to
 /// the optimiser.
 ///
@@ -858,6 +877,66 @@ unsafe fn micro_f32_avx2(kc: usize, apack: &[f32], bpack: &[f32]) -> [[f32; 16];
     out
 }
 
+/// The f64 micro-kernel: [`micro_f32_avx2`] at half the lanes, 6 rows x
+/// 8 doubles = 12 YMM accumulators + 2 for the B strip + 1 broadcast.
+///
+/// # Safety
+///
+/// As for [`micro_f32_avx2`]: packed buffers from [`f64::pack_a`] /
+/// [`f64::pack_b`], at least `kc * 6` and `kc * 8` elements, and AVX2+FMA
+/// confirmed by the caller's `have_wide()`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn micro_f64_avx2(kc: usize, apack: &[f64], bpack: &[f64]) -> [[f64; 8]; 6] {
+    use std::arch::x86_64::*;
+    debug_assert!(apack.len() >= kc * 6);
+    debug_assert!(bpack.len() >= kc * 8);
+
+    let (mut c00, mut c01) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+    let (mut c10, mut c11) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+    let (mut c20, mut c21) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+    let (mut c30, mut c31) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+    let (mut c40, mut c41) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+    let (mut c50, mut c51) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+
+    let mut a = apack.as_ptr();
+    let mut b = bpack.as_ptr();
+    for _ in 0..kc {
+        let b0 = _mm256_loadu_pd(b);
+        let b1 = _mm256_loadu_pd(b.add(4));
+        let a0 = _mm256_set1_pd(*a);
+        c00 = _mm256_fmadd_pd(a0, b0, c00);
+        c01 = _mm256_fmadd_pd(a0, b1, c01);
+        let a1 = _mm256_set1_pd(*a.add(1));
+        c10 = _mm256_fmadd_pd(a1, b0, c10);
+        c11 = _mm256_fmadd_pd(a1, b1, c11);
+        let a2 = _mm256_set1_pd(*a.add(2));
+        c20 = _mm256_fmadd_pd(a2, b0, c20);
+        c21 = _mm256_fmadd_pd(a2, b1, c21);
+        let a3 = _mm256_set1_pd(*a.add(3));
+        c30 = _mm256_fmadd_pd(a3, b0, c30);
+        c31 = _mm256_fmadd_pd(a3, b1, c31);
+        let a4 = _mm256_set1_pd(*a.add(4));
+        c40 = _mm256_fmadd_pd(a4, b0, c40);
+        c41 = _mm256_fmadd_pd(a4, b1, c41);
+        let a5 = _mm256_set1_pd(*a.add(5));
+        c50 = _mm256_fmadd_pd(a5, b0, c50);
+        c51 = _mm256_fmadd_pd(a5, b1, c51);
+        a = a.add(6);
+        b = b.add(8);
+    }
+
+    let mut out = [[0.0f64; 8]; 6];
+    let p = out.as_mut_ptr() as *mut f64;
+    _mm256_storeu_pd(p, c00);            _mm256_storeu_pd(p.add(4), c01);
+    _mm256_storeu_pd(p.add(8), c10);     _mm256_storeu_pd(p.add(12), c11);
+    _mm256_storeu_pd(p.add(16), c20);    _mm256_storeu_pd(p.add(20), c21);
+    _mm256_storeu_pd(p.add(24), c30);    _mm256_storeu_pd(p.add(28), c31);
+    _mm256_storeu_pd(p.add(32), c40);    _mm256_storeu_pd(p.add(36), c41);
+    _mm256_storeu_pd(p.add(40), c50);    _mm256_storeu_pd(p.add(44), c51);
+    out
+}
+
 /// BLAS `sgemm`, row-major: `C = A·B` in single precision.
 ///
 /// The one routine an LLM needs. The forward pass is NN, `grad_A = g·Bᵀ`
@@ -880,12 +959,8 @@ pub fn sgemm_assign_into(a: &[f32], ta: Trans, b: &[f32], tb: Trans,
     self::f32::gemm_assign_into(a, ta, b, tb, m, k, n, c, parallel)
 }
 
-// NOT instantiated for f64, deliberately. `level3::dgemm` is the
-// column-major BLAS entry point the statistics path already calls, it has
-// its own small-shape fast path and its own tests, and changing it is a
-// separate piece of work with a separate risk. The macro above is written
-// per-type precisely so that instantiation is a one-line change when that
-// work is scheduled — a column-major `C = A·B` is the row-major
+// The f64 instantiation above is reached through `level3::dgemm`, the
+// column-major BLAS entry point: a column-major `C = A·B` is the row-major
 // `Cᵀ = Bᵀ·Aᵀ`, i.e. this kernel with the operands swapped and no
 // transposes materialised at all.
 

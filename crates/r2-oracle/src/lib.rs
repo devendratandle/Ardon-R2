@@ -25,9 +25,13 @@ pub enum Op {
     Reduction,
     /// Per-row distance / nearest-centroid / classification scoring.
     PerPointDistance,
-    /// Dense matrix multiply (`A·B`). Work ≈ m·n·k; parallelised across
-    /// disjoint column bands of C above the threshold.
+    /// Dense matrix multiply (`A·B`, `%*%` — `r2_linalg::dgemm`). Work ≈
+    /// m·n·k; the packed GEMM kernel parallelises it above the threshold.
     MatMul,
+    /// `crossprod` / XᵀX (`r2_linalg::dcrossprod`): dot products, parallel
+    /// over output columns. Work ≈ n²·m. Kept on the threshold `MatMul`
+    /// had before `dgemm` moved to the packed kernel, which it was tuned on.
+    CrossProd,
     /// Matrix multiply from the ML tensor path (`r2-tensor`). Separate
     /// from [`Op::MatMul`] because it is a DIFFERENT kernel with a
     /// different crossover: it does no packing, so it has none of the
@@ -201,12 +205,16 @@ pub fn dispatch(op: Op, shape: Shape) -> Backend {
         Op::PerElementMap     => 50_000,
         Op::Reduction         => 200_000,
         Op::PerPointDistance  => 10_000,
-        // MatMul: work = m·n·k. Measured crossover: 256³ (16.7M) still
-        // *loses* to serial because each parallel band allocates its own
-        // packing buffers; 512³ (134M) wins ~2.2×. Set the bar at ~32M
-        // (≈350³ after core scaling) so only clearly-net-positive sizes
-        // parallelise. GEMM scales well above that (3.7× at 2048³/6 cores).
-        Op::MatMul            => 32_000_000,
+        // MatMul: work = m·n·k, on the packed kernel `sgemm` shares
+        // (per-thread scratch, threaded packing). Measured crossover
+        // (2026-09-25, 6 cores, `--example dgemm_cases`): 64³ (262K) is
+        // faster serial, 96³ (885K) 1.8x faster parallel, 256³ 4.9x. The
+        // old 32M bar was the previous kernel's, which allocated packing
+        // buffers per parallel band; it left 256³ on one core.
+        Op::MatMul            => 500_000,
+        // CrossProd: the dot-product crossprod kernel, unchanged — the
+        // bar the old GEMM crossover measurement set for both.
+        Op::CrossProd         => 32_000_000,
         // TensorMatMul: the dense ML kernel (r2-tensor), which does NO
         // packing — so it has none of the per-band buffer cost that pushes
         // the linalg GEMM crossover out to 32M, and parallelises

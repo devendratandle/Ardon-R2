@@ -8,6 +8,16 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Matrix multiply (`%*%`) at MKL speed — 2026-09-25
+
+- **`%*%` on doubles is 3-16x faster** and now matches Intel MKL's
+  `dgemm` (PyTorch float64, 6 threads, Intel i5-12500): median 0.97-1.02x
+  over 11 shapes, ahead on large squares (2000x2000: 1.6x) — it was 0.23x.
+  It runs on the same packed AVX2 kernel as LLM training, and goes
+  multi-core from much smaller sizes (256x256: 2.95 ms -> 0.18 ms).
+  Tall-and-thin products (`X %*% W` with 100 columns) are still ~0.45x
+  of MKL. Reproduce: `python benchmarks/dgemm_cases.py`.
+
 ### `NA`, assignment, sorting and printing match R — 2026-09-23
 
 - **`sort()` no longer crashes** on NaN (`sort(c(3, NaN, 1))` panicked:
