@@ -8,11 +8,40 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
-### `qr()` and `lm()`'s QR 5x faster — 2026-09-25
+### `solve()` 11x faster, `chol()` added, `svd()` values-only — 2026-09-25
 
-- **The QR decomposition behind `qr()`, `lm()` and least squares is ~6x
-  faster**: 1000x1000 225 ms -> 38 ms on an Intel i5-12500, about 7x
-  faster than R 4.6.1 (285 ms) and ~0.25x of Intel MKL (was 0.04x).
+- **`solve()` is 11x faster** and was slower than R: a 1000x1000 inverse
+  took 1.27 s (R 4.5.3: 0.72 s) and now 0.11 s. The factorisation was
+  already fast; the n column solves after it ran one at a time, and
+  `solve(a, B)` re-factored `a` for every column of `B`. Now one LU and
+  blocked, multi-core triangular solves for all right-hand sides.
+- **`chol(x)`** is available (it was internal only): R's upper factor,
+  `t(R) %*% R == x`; 1000x1000 in 23 ms (R: 120 ms).
+- **`svd(x, nu = 0, nv = 0)`** returns only `$d` and skips building `u`
+  and `v` (it ignored `nu`/`nv`): 1000x1000 761 -> 323 ms (R: 850 ms).
+  `svd()` lists `d`, `u`, `v` in R's order (it was random).
+- **`system.time()`** returns R's `proc_time` value, so
+  `system.time(f())[["elapsed"]]` works; it printed the timing while
+  running and returned NULL.
+- **On the first machine (AMD Ryzen 5 4500U, 6 threads) vs Intel MKL**
+  (PyTorch 2.13 float64): `%*%` median 1.04-1.21x over 11 shapes (two
+  passes; 2000x2000 1.05x, 128x128 0.32-0.41x, tall/deep 0.8-0.9x); at
+  n = 1000 LU 0.43x, Cholesky 0.18x, QR 0.31x, symmetric eigen 0.27x,
+  SVD values 0.27x, SVD with vectors 0.30x. Against R 4.5.3 on the same
+  machine every routine is 2.6-27x faster (`PERFORMANCE.md`).
+- LLM training on the same machine after the Intel work: R2 1.54-1.69x
+  faster than PyTorch (two 100-step pairs, identical losses); an
+  interleaved A/B against the build before it shows no change (35-38 s
+  per 100 steps either way).
+- Differential case `linalg_user` checks `solve`, `chol` and `svd`
+  against R.
+
+### `lm()`'s QR 5x faster — 2026-09-25
+
+- **The QR decomposition behind `lm()` and least squares is ~6x
+  faster** (R2 has no user-level `qr()` yet): 1000x1000 225 ms -> 38 ms
+  on an Intel i5-12500, about 7x faster than R 4.6.1 (285 ms) and ~0.25x
+  of Intel MKL (was 0.04x).
   It now works in blocks of 64 columns applied as matrix multiplies (as
   LAPACK does). Same factor, same results. Reproduce:
   `python benchmarks/lapack_cases.py`.

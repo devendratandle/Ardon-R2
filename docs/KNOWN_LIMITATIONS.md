@@ -59,6 +59,9 @@ to be worse than documented and was fixed here rather than scheduled.
   shares the missing common decimals (`[1] 1.0 2.5` prints `[1]   1 2.5`).
 - `sapply` simplifies length-1 results to a vector; equal-length longer
   results stay a list where R builds a matrix.
+- **No user-level `qr()`** (nor `qr.Q`, `qr.R`, `qr.solve`): the blocked
+  Householder QR exists and serves `lm()` and least squares, but there is
+  no R-style `qr` object yet.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
 - **String collation follows R on Windows / English locales** (letters
   case- and accent-blind first, then accents, then lowercase first;

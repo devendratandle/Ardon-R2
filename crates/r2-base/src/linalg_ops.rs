@@ -22,7 +22,7 @@
 //!     refuse the temptation. Full U/Vᵀ is on the roadmap (tridiag+QR
 //!     replacement of Jacobi, see KNOWN_LIMITATIONS).
 
-use r2_linalg::{dgesvd_full, dsyev_full};
+use r2_linalg::{dgesvd_full, dpotrf, dsyev_full};
 use r2_types::{Attrs, ErrKind, EvalArg, Matrix, R2Err, RVal, Tensor};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -170,8 +170,16 @@ pub fn bi_svd(a: &[EvalArg]) -> Result<RVal, R2Err> {
         _ => return Err(R2Err { msg: "svd() needs a matrix".into(), kind: ErrKind::Runtime }),
     };
     let (m, n) = (mat.nrow, mat.ncol);
-    let (sigma, u_data, vt_data) = dgesvd_full(m, n, &mat.data)
-        .map_err(|e| R2Err { msg: format!("svd failed: {}", e), kind: ErrKind::Runtime })?;
+    let fail = |e: r2_linalg::LinalgError| R2Err { msg: format!("svd failed: {}", e), kind: ErrKind::Runtime };
+    // svd(x, nu = 0, nv = 0): R returns only $d — and the values-only
+    // routine skips building U and V (about half the time at n = 1000).
+    let count = |k: &str| gn(a, k).and_then(|v| v.scalar_f64().ok().flatten());
+    let (want_u, want_v) = (count("nu") != Some(0.0), count("nv") != Some(0.0));
+    if !want_u && !want_v {
+        let sigma = r2_linalg::dgesvd(m, n, &mat.data).map_err(fail)?;
+        return Ok(RVal::List(vec![(Some(Arc::from("d")), rnums(&sigma))]));
+    }
+    let (sigma, u_data, vt_data) = dgesvd_full(m, n, &mat.data).map_err(fail)?;
 
     // R returns V (not Vᵀ) in the $v field. Transpose Vᵀ → V.
     let mut v_data = vec![0.0_f64; n * n];
@@ -181,11 +189,28 @@ pub fn bi_svd(a: &[EvalArg]) -> Result<RVal, R2Err> {
         }
     }
 
-    let mut fields: HashMap<Arc<str>, RVal> = HashMap::new();
-    fields.insert(Arc::from("d"), rnums(&sigma));
-    fields.insert(Arc::from("u"), RVal::Matrix(Matrix::new(u_data, m, n)));
-    fields.insert(Arc::from("v"), RVal::Matrix(Matrix::new(v_data, n, n)));
-    Ok(RVal::List(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()))
+    // In R's order, d then u then v (a HashMap here gave a random order).
+    let mut fields = vec![(Some(Arc::from("d")), rnums(&sigma))];
+    if want_u { fields.push((Some(Arc::from("u")), RVal::Matrix(Matrix::new(u_data, m, n)))); }
+    if want_v { fields.push((Some(Arc::from("v")), RVal::Matrix(Matrix::new(v_data, n, n)))); }
+    Ok(RVal::List(fields))
+}
+
+/// `chol(x)` — R's upper-triangular Cholesky factor R, `t(R) %*% R == x`,
+/// zeros below the diagonal. The blocked `dpotrf` gives the lower factor
+/// L = Rᵀ; this returns its transpose.
+pub fn bi_chol(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    let mat = match &gv(a, 0) {
+        RVal::Matrix(m) if m.nrow == m.ncol => m.clone(),
+        RVal::Matrix(_) => return Err(R2Err { msg: "chol: 'a' must be a square matrix".into(), kind: ErrKind::Runtime }),
+        _ => return Err(R2Err { msg: "chol: 'x' must be a numeric matrix".into(), kind: ErrKind::Runtime }),
+    };
+    let n = mat.nrow;
+    let mut l = mat.data;
+    dpotrf(n, &mut l).map_err(|e| R2Err { msg: format!("chol: {} (the matrix is not positive definite)", e), kind: ErrKind::Runtime })?;
+    let mut r = vec![0.0; n * n];
+    for j in 0..n { for i in 0..=j { r[j * n + i] = l[i * n + j]; } }
+    Ok(RVal::Matrix(Matrix::new(r, n, n)))
 }
 
 /// `eigen(A)` — eigendecomposition, dispatching on symmetry.

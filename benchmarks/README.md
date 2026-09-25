@@ -19,7 +19,10 @@ opponents. Neither one's numbers belong in the other.
 | [`llm/REPORT.md`](llm/REPORT.md) | **R2 vs PyTorch and JAX** — f32 LLM training, `sgemm`, attention, tokenizer | Current. Also lists what measured *worse*, so it isn't retried |
 
 Runnable scripts for the R comparison are in [`v038/`](v038/)
-(`bench_r2.r2` + `bench_r.R`, identical algorithms and sizes). For the LLM
+(`bench_r2.r2` + `bench_r.R`, identical algorithms and sizes);
+[`linalg_vs_r.R`](linalg_vs_r.R) runs unchanged in both engines for the
+linear-algebra table. Kernel-to-kernel against Intel MKL:
+`python benchmarks/dgemm_cases.py` and `python benchmarks/lapack_cases.py`. For the LLM
 comparison see section 7 of `llm/REPORT.md` — every figure there names the
 command that reproduces it.
 

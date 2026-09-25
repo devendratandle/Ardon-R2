@@ -519,6 +519,12 @@ impl fmt::Display for RVal {
         match self {
             RVal::Null => write!(f, "NULL"),
             RVal::Numeric(v, attrs) => {
+                // system.time(): R prints user / system / elapsed only.
+                if attrs.class.as_deref() == Some("proc_time") && v.len() >= 3 {
+                    let shown = Attrs { names: Some(vec![Arc::from("user"), Arc::from("system"), Arc::from("elapsed")]), ..Default::default() };
+                    let strs: Vec<String> = v[..3].iter().map(|x| x.map_or("NA".into(), |n| format!("{:.3}", n))).collect();
+                    if let Some(r) = write_named(f, &shown, &strs) { return r; }
+                }
                 if attrs.names.is_some() {
                     let strs: Vec<String> = v.iter().map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect();
                     if let Some(r) = write_named(f, attrs, &strs) { return r; }

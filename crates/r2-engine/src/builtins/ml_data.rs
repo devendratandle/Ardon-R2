@@ -25,6 +25,9 @@ use crate::err;
 
 // Phase R.4: bi_svd moved to r2-linalg::ops. Returns full thin SVD
 // (`$d`, `$u`, `$v`) via `dgesvd_full` (shipped v0.1.0).
+pub(crate) fn bi_chol(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_base::linalg_ops::bi_chol(a)
+}
 pub(crate) fn bi_svd(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_base::linalg_ops::bi_svd(a)
 }
@@ -65,26 +68,30 @@ pub(crate) fn bi_solve(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
             Ok(RVal::Matrix(Matrix::new(inv, m.nrow, m.ncol)))
         }
         // solve(a, B): solve for each column of B.
+        // solve(a, B): one LU, all columns of B solved together (it once
+        // re-factored A for every column).
         Some(RVal::Matrix(b)) => {
             if b.nrow != m.nrow { return err!(Runtime, "solve: 'b' must have the same number of rows as 'a'"); }
-            let mut out = vec![0.0; b.nrow * b.ncol];
-            for col in 0..b.ncol {
-                let bcol: Vec<f64> = (0..b.nrow).map(|r| b.data[col * b.nrow + r]).collect();
-                let x = m.solve(&bcol)
-                    .map_err(|e| R2Err { msg: format!("solve: {}", e), kind: ErrKind::Runtime })?;
-                for r in 0..b.nrow { out[col * b.nrow + r] = x[r]; }
-            }
+            let out = lu_solve(&m, &b.data, b.ncol)?;
             Ok(RVal::Matrix(Matrix::new(out, b.nrow, b.ncol)))
         }
         // solve(a, b): b a vector.
         Some(other) => {
             let bvec: Vec<f64> = e.as_reals(other)?.into_iter().flatten().collect();
             if bvec.len() != m.nrow { return err!(Runtime, "solve: length of 'b' must match the matrix dimension"); }
-            let x = m.solve(&bvec)
-                .map_err(|e| R2Err { msg: format!("solve: {}", e), kind: ErrKind::Runtime })?;
+            let x = lu_solve(&m, &bvec, 1)?;
             Ok(RVal::Numeric(x.iter().map(|v| Some(*v)).collect::<Vec<_>>().into(), Attrs::default()))
         }
     }
+}
+
+/// `A·X = B` for `nrhs` column-major right-hand sides: LU once, then the
+/// blocked triangular solves.
+fn lu_solve(m: &Matrix, b: &[f64], nrhs: usize) -> Result<Vec<f64>, R2Err> {
+    let fail = |e: r2_linalg::LinalgError| R2Err { msg: format!("solve: {}", e), kind: ErrKind::Runtime };
+    let mut lu = m.data.clone();
+    let ipiv = r2_linalg::dgetrf(m.nrow, &mut lu).map_err(fail)?;
+    r2_linalg::dgetrs(m.nrow, &lu, &ipiv, b, nrhs).map_err(fail)
 }
 
 // ── backsolve()/forwardsolve() — triangular solve ────────────────────

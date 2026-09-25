@@ -265,7 +265,8 @@ kmeans(x,centers)       K-means clustering
 knn(train,test,labels,k) K-nearest neighbors
 naive.bayes(x,y)        Gaussian naive Bayes
 prcomp(x)               Principal component analysis
-svd(x)                  Singular value decomposition
+svd(x)                  Singular value decomposition (nu = 0, nv = 0: values only)
+chol(x)                 Upper Cholesky factor R, t(R) %*% R == x
 eigen(x)                Eigenvalue decomposition (symmetric -> dsyev with
                         vectors; non-symmetric -> dgeev; complex spectra
                         expose $imaginary, $vectors = NULL)

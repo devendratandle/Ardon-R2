@@ -42,6 +42,7 @@ than throttled.
 | 6 | **126.71 s** | 174.97 s | **R2 1.38x** (tiled attention; PyTorch's run drifted up in this window) |
 | 7 | **38.99 / 38.89 s** (100 steps) | 57.9 / 58.5 s | **R2 1.49-1.50x** (attention re-blocked, below; 100-step pairs, 2026-09-20) |
 | 8 | **36.33 / 35.86 s** (100 steps) | 60.4 / 59.4 s | **R2 1.66x / 1.66x** (`sgemm` column-group partition, section below; 2026-09-20) |
+| 9 | **44.8 / 40.8 s** (100 steps) | 75.8 / 62.8 s | **R2 1.69x / 1.54x** (re-check after the Intel-PC work, 2026-09-25; identical losses. The first run of the day was cold: an R2-only A/B right after, old build vs new interleaved, gave 36.9 / 35.4 / 44.7 s vs 35.4 / 34.9 / 38.4 s — no change) |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|

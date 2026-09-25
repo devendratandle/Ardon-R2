@@ -363,9 +363,15 @@ impl Engine {
     fn nse_system_time(&mut self, expr: &Expr, env: &EnvRef) -> Result<RVal, R2Err> {
         let start = std::time::Instant::now();
         let _ = self.eval_in(expr, env)?;
-        let elapsed = start.elapsed();
-        soutln!("   user  system elapsed");
-        soutln!("  {:.3}   0.000   {:.3}", elapsed.as_secs_f64(), elapsed.as_secs_f64());
-        Ok(RVal::Null)
+        let s = start.elapsed().as_secs_f64();
+        // R's proc_time: a named vector (so `[["elapsed"]]` works), printed
+        // as `user system elapsed` only when shown. CPU time is not
+        // measured separately; user time reports the wall clock.
+        let names = ["user.self", "sys.self", "elapsed", "user.child", "sys.child"];
+        Ok(RVal::Numeric(vec![Some(s), Some(0.0), Some(s), None, None].into(), Attrs {
+            names: Some(names.iter().map(|n| Arc::from(*n)).collect()),
+            class: Some(Arc::from("proc_time")),
+            ..Default::default()
+        }))
     }
 }

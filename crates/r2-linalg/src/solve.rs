@@ -53,29 +53,78 @@ fn dtrsv_lt(n: usize, l: &[f64], b: &mut [f64]) -> Result<(), LinalgError> {
     Ok(())
 }
 
-/// Invert a general matrix via LU decomposition
-/// Returns A^(-1) in a new vector
+/// `A⁻¹` (column-major): one LU, then `dgetrs` against the identity. The
+/// n column solves were once n serial `dtrsv` pairs — 1.3 s at n = 1000,
+/// slower than R; as blocked GEMM-based solves they run on every core.
 pub fn dgetri(n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
     if a.len() != n * n { return Err(LinalgError::NotSquare); }
-
-    let mut inv = vec![0.0; n * n];
     let mut lu = a.to_vec();
     let ipiv = dgetrf(n, &mut lu)?;
+    let mut eye = vec![0.0; n * n];
+    for i in 0..n { eye[i * n + i] = 1.0; }
+    dgetrs(n, &lu, &ipiv, &eye, n)
+}
 
-    // Solve A·X = I column by column
-    for col in 0..n {
-        let mut e = vec![0.0; n];
-        e[col] = 1.0;
-        // Apply permutation
-        let mut ep = vec![0.0; n];
-        for i in 0..n { ep[i] = e[ipiv[i]]; }
-        // Solve L·y = P·e then U·x = y
-        dtrsv_lower(n, &lu, &mut ep, true)?;
-        dtrsv_upper(n, &lu, &mut ep)?;
-        // Store column
-        for i in 0..n { inv[col * n + i] = ep[i]; }
+/// Solve `A·X = B` for an n x nrhs column-major `b`, from `dgetrf`'s
+/// factors: permute B's rows, then the unit-lower and the upper triangular
+/// solves, each recursive with GEMM updates as LAPACK's `dtrsm` is. The
+/// factors and the right-hand sides share one n x (n + nrhs) buffer so the
+/// solves address B as columns n.. of the factored matrix.
+pub fn dgetrs(n: usize, lu: &[f64], ipiv: &[usize], b: &[f64], nrhs: usize) -> Result<Vec<f64>, LinalgError> {
+    if lu.len() != n * n { return Err(LinalgError::NotSquare); }
+    if b.len() != n * nrhs { return Err(LinalgError::DimensionMismatch { expected: (n, nrhs), got: (b.len(), 1) }); }
+    let mut aug = Vec::with_capacity(n * (n + nrhs));
+    aug.extend_from_slice(lu);
+    for c in 0..nrhs {
+        let col = &b[c * n..(c + 1) * n];
+        aug.extend(ipiv.iter().map(|&p| col[p]));
     }
-    Ok(inv)
+    crate::decomp::trsm_unit_lower(n, &mut aug, 0, n, n, n + nrhs);
+    trsm_upper(n, &mut aug, 0, n, n, n + nrhs)?;
+    aug.drain(..n * n);
+    Ok(aug)
+}
+
+/// Rows below which [`trsm_upper`] stops recursing.
+const TRSM_UPPER_BASE: usize = 64;
+
+/// In-place upper triangular solve `A[r0..r0+h, c1..c2] ←
+/// U⁻¹·A[r0..r0+h, c1..c2]`, U = the upper part of A[r0..r0+h,
+/// r0..r0+h] (column-major, leading dimension n). The mirror of
+/// `decomp::trsm_unit_lower`: solve the bottom half, one GEMM updates the
+/// top half, solve the top half; narrow blocks one column per task.
+fn trsm_upper(n: usize, a: &mut [f64], r0: usize, h: usize, c1: usize, c2: usize) -> Result<(), LinalgError> {
+    if h <= TRSM_UPPER_BASE {
+        use rayon::prelude::*;
+        if (r0..r0 + h).any(|k| a[k * n + k] == 0.0) { return Err(LinalgError::Singular); }
+        let (left, right) = a.split_at_mut(c1 * n);
+        let ucols = &*left;
+        let solve = |col: &mut [f64]| {
+            for k in (r0..r0 + h).rev() {
+                let x = col[k] / ucols[k * n + k];
+                col[k] = x;
+                if x != 0.0 {
+                    let uc = &ucols[k * n..k * n + n];
+                    for i in r0..k { col[i] -= uc[i] * x; }
+                }
+            }
+        };
+        let right = &mut right[..(c2 - c1) * n];
+        if (c2 - c1) * h * h >= 1 << 16 { right.par_chunks_mut(n).for_each(solve); }
+        else { right.chunks_mut(n).for_each(solve); }
+        return Ok(());
+    }
+    let h1 = h / 2;
+    let h2 = h - h1;
+    trsm_upper(n, a, r0 + h1, h2, c1, c2)?;
+    // A[r0..r0+h1, c1..c2] −= U[r0..r0+h1, r0+h1..r0+h] · X[r0+h1..r0+h, c1..c2]
+    let nc = c2 - c1;
+    let mut u12 = vec![0.0; h1 * h2];
+    for p in 0..h2 { u12[p * h1..(p + 1) * h1].copy_from_slice(&a[(r0 + h1 + p) * n + r0..(r0 + h1 + p) * n + r0 + h1]); }
+    let mut x2 = vec![0.0; h2 * nc];
+    for jj in 0..nc { x2[jj * h2..(jj + 1) * h2].copy_from_slice(&a[(c1 + jj) * n + r0 + h1..(c1 + jj) * n + r0 + h]); }
+    crate::decomp::sub_product(n, a, r0, r0 + h1, c1, c2, &u12, &x2, h2);
+    trsm_upper(n, a, r0, h1, c1, c2)
 }
 
 /// Least squares: minimize ||A·x - b||² using normal equations

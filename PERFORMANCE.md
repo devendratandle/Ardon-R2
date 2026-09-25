@@ -1,6 +1,7 @@
 # Performance — Ardon-R2 vs R
 
-**Timings measured at v0.3.8 (2026-07-15); accuracy re-verified at v0.4.0.**
+**Timings measured at v0.3.8 (2026-07-15), linear algebra re-timed
+2026-09-25; accuracy re-verified at v0.4.0.**
 
 Head-to-head timing and numerical accuracy of Ardon-R2 against CRAN R,
 measured on one 6-core AVX2 workstation (no AVX-512) with an **AMD Radeon
@@ -42,6 +43,28 @@ better is the realistic ceiling.
 | sd (1e6) | **0.0063** | 0.0064 | tie |
 | cor (1e6) | **0.0147** | 0.0378 | R 2.6× |
 | Matrix multiply (500×500) | 0.0707 | **0.0197** | R2 3.6× |
+
+### Linear algebra at n = 1000 (re-timed 2026-09-25)
+
+The same user-level calls in both engines on the same deterministic
+1000×1000 matrices, median of 5, milliseconds, one window on this machine
+(AMD Ryzen 5 4500U, held 2375 MHz, on AC power). R 4.5.3 with its
+reference BLAS/LAPACK; R2 release build (no LTO). Reproduce:
+`Rscript benchmarks/linalg_vs_r.R` then `r2 benchmarks/linalg_vs_r.R`.
+
+| Call | R | R2 | Result |
+|---|---:|---:|---|
+| `A %*% A` | 530 | **19** | R2 27× |
+| `solve(S)` (inverse) | 720 | **112** | R2 6.4× |
+| `chol(S)` | 120 | **23** | R2 5.2× |
+| `eigen(S, symmetric = TRUE)` | 970 | **306** | R2 3.2× |
+| `svd(A, nu = 0, nv = 0)` | 850 | **323** | R2 2.6× |
+| `svd(A)` | 2,000 | **627** | R2 3.2× |
+| `qr(A)` | 2,080 | — | not available in R2 yet |
+
+Against R built on an optimized BLAS (OpenBLAS, MKL) these gaps would be
+far smaller: R2's own routines are 0.15-0.43× of Intel MKL at this size
+(see `CHANGELOG.md`, 2026-09-25).
 
 ## 2. User statistical formulas — R2 JIT vs R interpreter
 

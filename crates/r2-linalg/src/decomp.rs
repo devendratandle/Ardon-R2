@@ -29,7 +29,7 @@ const CHOL_RB: usize = 128;
 /// The product lands in a scratch buffer kept per thread (a fresh one is a
 /// fresh mapping from the OS — ~2,000 page faults at 8 MB) and is
 /// subtracted back one column per task.
-fn sub_product(n: usize, a: &mut [f64], r0: usize, r1: usize, c0: usize, c1: usize,
+pub(crate) fn sub_product(n: usize, a: &mut [f64], r0: usize, r1: usize, c0: usize, c1: usize,
                l: &[f64], u: &[f64], kb: usize) {
     use crate::gemm::{f64 as g, Trans};
     use rayon::prelude::*;
@@ -61,7 +61,7 @@ fn sub_product(n: usize, a: &mut [f64], r0: usize, r1: usize, c0: usize, c1: usi
 /// half up to date, solve the bottom half — so almost all of its
 /// O(h²·(c2−c1)) work is GEMM. Narrow blocks are solved directly, one
 /// column per task (columns are independent).
-fn trsm_unit_lower(n: usize, a: &mut [f64], r0: usize, h: usize, c1: usize, c2: usize) {
+pub(crate) fn trsm_unit_lower(n: usize, a: &mut [f64], r0: usize, h: usize, c1: usize, c2: usize) {
     if h <= TRSM_BASE {
         use rayon::prelude::*;
         let (left, right) = a.split_at_mut(c1 * n);
