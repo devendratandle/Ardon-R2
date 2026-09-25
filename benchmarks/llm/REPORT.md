@@ -884,6 +884,15 @@ monotonically worse).
 
 Ranked by the census above, not by how interesting they are.
 
+- **Intel: the output-head FORWARD (NN, 2048x256x8000) is 1.6x slower on
+  12 threads than on 8** (32-33 ms vs 20-21, three rounds, i5-12500,
+  2026-09-25); its NT and TN are not (23.5 / 16 ms at 12). ~12 ms of a
+  ~280 ms step. Not bandwidth in the obvious sense (TN moves as much), and
+  not L2 capacity: `R2_GEMM_NC` 1024/512/256 at 12 threads leaves it at
+  31-34 ms. Next: time the fork-join's phases (pack_b, the 22 row-block
+  tasks, the barrier) per `jc` panel at 8 vs 12 threads. Check on the AMD
+  machine too — it is also 6 cores / 12 threads.
+
 - **AVX-512 `sgemm` — written, correct, NOT YET TIMED (2026-09-25).**
   `gemm::f32_512`: the same packed kernel at a 12x32 tile (24 ZMM
   accumulators, 27 of 32 registers; the inner loop's assembly has 24
