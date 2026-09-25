@@ -8,6 +8,15 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### `eigen()` on symmetric matrices 3-16x faster — 2026-09-25
+
+- **Symmetric `eigen()` (values and vectors) is 3-16x faster**: 1000x1000
+  3.2 s -> 0.2 s on an Intel i5-12500 — now ~3x faster than R 4.6.1's
+  reference LAPACK (0.6 s) where it was 5x slower, and 0.19-0.29x of
+  Intel MKL (was 0.02-0.09x). Same algorithm and same results; it now
+  walks memory contiguously and uses every core. Reproduce:
+  `python benchmarks/lapack_cases.py`.
+
 ### `solve()`, `det()`, `chol()` faster — 2026-09-25
 
 - **LU (`solve()`, `det()`, inverse) is 2.7-8x faster** and **Cholesky

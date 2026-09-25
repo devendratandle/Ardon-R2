@@ -2,6 +2,7 @@
 //! All column-major storage.
 
 use crate::LinalgError;
+use crate::symeig::dsyev_full;
 
 /// Width at which the recursive LU stops splitting and factors unblocked.
 /// Measured on Intel i5-12500, 6 threads (2026-09-25, `--example
@@ -561,17 +562,6 @@ pub fn dgesvd_full(
     Ok((sigma, u, vt))
 }
 
-/// Givens rotation: compute (c, s) such that
-/// [c  s] [a] = [r]
-/// [-s c] [b]   [0]
-#[inline]
-fn givens(a: f64, b: f64) -> (f64, f64) {
-    if b == 0.0 { return (1.0, 0.0); }
-    if a == 0.0 { return (0.0, 1.0); }
-    let r = (a * a + b * b).sqrt();
-    (a / r, b / r)
-}
-
 /// Symmetric eigenvalue decomposition via Jacobi rotation method
 /// A is n×n symmetric column-major
 /// Returns eigenvalues in descending order
@@ -668,197 +658,7 @@ pub fn dsyev(n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
     Ok(eigenvalues)
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// dsyev_full — symmetric eigendecomposition with eigenvectors (Phase R Tier 1)
-//
-// Replaces the eigenvalues-only Jacobi path for callers that need the
-// rotation matrix (`eigen`, `prcomp$rotation`). Algorithm:
-//
-//   1. Householder tridiagonalization:  A = Q1 · T · Q1ᵀ
-//      Reflects A to symmetric tridiagonal T while accumulating Q1.
-//
-//   2. Implicit symmetric QR with Wilkinson shift on T:
-//      T = Q2 · D · Q2ᵀ
-//      Iteratively zeroes the sub-diagonal via bulge-chasing Givens
-//      rotations, accumulating Q2.
-//
-//   3. Final eigenvectors = Q1 · Q2; eigenvalues = diag(D), sorted
-//      descending with vectors permuted to match.
-//
-// LAPACK calls this `dsyevr`/`dsyev`. Our previous `dsyev` keeps its
-// Jacobi-on-full-matrix path (eigenvalues only). Eventually that callers
-// migrate to this and we retire the Jacobi version.
-//
-// Returns: (eigenvalues_desc, vectors_col_major) where the i-th column
-// of `vectors` is the eigenvector for eigenvalues[i].
-// ─────────────────────────────────────────────────────────────────────
-
-pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgError> {
-    if a.len() != n * n { return Err(LinalgError::NotSquare); }
-    if n == 0 { return Ok((vec![], vec![])); }
-    if n == 1 { return Ok((vec![a[0]], vec![1.0])); }
-
-    // Stage 1 — Householder tridiagonalization, accumulating Q.
-    // Working on a copy; final tridiagonal lives in `d` (diag) + `e` (sub-diag).
-    let mut t = a.to_vec();         // becomes T; off-tridiag entries → 0
-    let mut q = vec![0.0_f64; n * n];
-    for i in 0..n { q[i * n + i] = 1.0; }   // Q = I, then accumulate
-
-    for k in 0..n.saturating_sub(2) {
-        // Build Householder for column k below the sub-diagonal.
-        // Vector x = T[k+1..n, k]; reflect so it becomes ±||x|| e_1.
-        let mut norm_sq = 0.0;
-        for i in (k + 1)..n { let v = t[k * n + i]; norm_sq += v * v; }
-        if norm_sq < 1e-300 { continue; }
-        let xkk = t[k * n + (k + 1)];
-        let alpha = -xkk.signum().max(-1.0) * norm_sq.sqrt();
-        // (signum returns 0 for 0; ensure -1 fallback so alpha is well-defined.)
-        let alpha = if xkk == 0.0 { -norm_sq.sqrt() } else { alpha };
-
-        // v = x − α·e_1 ; β = 2 / (vᵀ v)
-        let mut v = vec![0.0_f64; n];
-        for i in (k + 1)..n { v[i] = t[k * n + i]; }
-        v[k + 1] -= alpha;
-        let vtv: f64 = v.iter().skip(k + 1).map(|x| x * x).sum();
-        if vtv < 1e-300 { continue; }
-        let beta = 2.0 / vtv;
-
-        // Apply H = I − β v vᵀ from BOTH sides: T ← H · T · H.
-        // Compute p = β · T · v (only rows ≥ k+1 active).
-        let mut p = vec![0.0_f64; n];
-        for i in 0..n {
-            let mut s = 0.0;
-            for j in (k + 1)..n { s += t[j * n + i] * v[j]; }
-            p[i] = beta * s;
-        }
-        // w = p − (β/2)·(pᵀ v)·v  (rank-2 update vector)
-        let ptv: f64 = (k + 1..n).map(|j| p[j] * v[j]).sum();
-        let half_beta_ptv = 0.5 * beta * ptv;
-        let mut w = p;
-        for j in (k + 1)..n { w[j] -= half_beta_ptv * v[j]; }
-        // T ← T − v wᵀ − w vᵀ
-        for i in 0..n {
-            for j in 0..n {
-                let dv = if i >= k + 1 { v[i] } else { 0.0 };
-                let dw = if j >= k + 1 { v[j] } else { 0.0 };
-                t[j * n + i] -= dv * w[j] + w[i] * dw;
-            }
-        }
-
-        // Accumulate Q ← Q · H. Q is column-major; H acts on the right,
-        // i.e. on each ROW r of Q: Q[r, :] ← Q[r, :] − β·(Q[r, :]·v)·vᵀ.
-        // (This once updated each COLUMN instead — Q ← H·Q — which builds
-        // Hₙ···H₁, the transpose of Q₁ = H₁···Hₙ. Equal for n ≤ 3, where
-        // there is one reflection; every eigenvector was wrong from 4x4.)
-        for r in 0..n {
-            let mut qrv = 0.0;
-            for j in (k + 1)..n { qrv += q[j * n + r] * v[j]; }
-            let scale = beta * qrv;
-            for j in (k + 1)..n { q[j * n + r] -= scale * v[j]; }
-        }
-    }
-
-    // Extract tridiagonal: d = diag, e = sub-diag (e has length n-1).
-    let mut d: Vec<f64> = (0..n).map(|i| t[i * n + i]).collect();
-    let mut e: Vec<f64> = (0..n - 1).map(|i| t[i * n + (i + 1)]).collect();
-
-    // Stage 2 — Implicit symmetric QR with Wilkinson shift on (d, e),
-    // accumulating Givens rotations into Q.
-    let max_sweeps = 30 * n;
-    let mut end = n - 1;
-    // `start` is unconditionally reassigned inside the deflation loop
-    // before it is first read; the initial value is a placeholder for
-    // definite-assignment. The lint correctly notes the placeholder
-    // assignment is never read — we keep it for clarity rather than
-    // restructuring the loop to declare-then-assign on first iteration.
-    #[allow(unused_assignments)]
-    let mut start = end;
-    let mut sweeps = 0usize;
-
-    while end > 0 {
-        if sweeps > max_sweeps { return Err(LinalgError::InvalidShape("dsyev_full: QR failed to converge".into())); }
-        sweeps += 1;
-
-        // Deflate trailing zeros in `e`.
-        while end > 0 && e[end - 1].abs() <= 1e-14 * (d[end - 1].abs() + d[end].abs()) {
-            e[end - 1] = 0.0;
-            if end == 0 { break; }
-            end -= 1;
-        }
-        if end == 0 { break; }
-
-        // Find start of the active unreduced sub-block.
-        start = end;
-        while start > 0 && e[start - 1].abs() > 1e-14 * (d[start - 1].abs() + d[start].abs()) {
-            start -= 1;
-        }
-        if start == end { continue; }   // shouldn't happen — defensive.
-
-        // Wilkinson shift: eigenvalue of trailing 2×2 closer to d[end].
-        let dd = (d[end - 1] - d[end]) / 2.0;
-        let ee = e[end - 1];
-        let denom = dd.abs() + (dd * dd + ee * ee).sqrt();
-        let sign_dd = if dd >= 0.0 { 1.0 } else { -1.0 };
-        let shift = d[end] - sign_dd * ee * ee / denom.max(1e-300);
-
-        // Implicit QR sweep: bulge-chase from `start` to `end`.
-        let mut x = d[start] - shift;
-        let mut y = e[start];
-        for k in start..end {
-            let (cs, sn) = givens(x, y);
-            // Apply rotation to (d[k], d[k+1], e[k]).
-            if k > start { e[k - 1] = cs * x + sn * y; }
-            let d_k  = d[k];
-            let d_k1 = d[k + 1];
-            let e_k  = e[k];
-            d[k]     = cs * cs * d_k + 2.0 * cs * sn * e_k + sn * sn * d_k1;
-            d[k + 1] = sn * sn * d_k - 2.0 * cs * sn * e_k + cs * cs * d_k1;
-            e[k]     = cs * sn * (d_k1 - d_k) + (cs * cs - sn * sn) * e_k;
-            if k + 1 < end {
-                y = sn * e[k + 1];
-                e[k + 1] *= cs;
-            }
-            x = e[k];
-
-            // Accumulate the Givens rotation into Q (columns k and k+1).
-            for r in 0..n {
-                let a_rk  = q[k * n + r];
-                let a_rk1 = q[(k + 1) * n + r];
-                q[k * n + r]       = cs * a_rk + sn * a_rk1;
-                q[(k + 1) * n + r] = -sn * a_rk + cs * a_rk1;
-            }
-        }
-    }
-
-    // Stage 3 — Sort eigenvalues descending; permute eigenvector columns to match.
-    let mut idx: Vec<usize> = (0..n).collect();
-    idx.sort_by(|&i, &j| d[j].partial_cmp(&d[i]).unwrap_or(std::cmp::Ordering::Equal));
-    let eigenvalues: Vec<f64> = idx.iter().map(|&i| d[i]).collect();
-    let mut vectors = vec![0.0_f64; n * n];
-    for (new_col, &old_col) in idx.iter().enumerate() {
-        for r in 0..n {
-            vectors[new_col * n + r] = q[old_col * n + r];
-        }
-    }
-
-    // Sign convention (matches R / LAPACK): for each eigenvector column,
-    // flip sign so the entry with the largest absolute magnitude is
-    // positive. Makes results reproducible across runs and matches what
-    // R's `prcomp$rotation` / `eigen$vectors` produce.
-    for c in 0..n {
-        let mut max_abs = 0.0_f64;
-        let mut max_val = 0.0_f64;
-        for r in 0..n {
-            let v = vectors[c * n + r];
-            if v.abs() > max_abs { max_abs = v.abs(); max_val = v; }
-        }
-        if max_val < 0.0 {
-            for r in 0..n { vectors[c * n + r] = -vectors[c * n + r]; }
-        }
-    }
-
-    Ok((eigenvalues, vectors))
-}
+// dsyev_full lives in symeig.rs.
 
 #[cfg(test)]
 mod tests {

@@ -25,6 +25,7 @@ pub mod level2;
 pub mod level3;
 pub mod decomp;
 pub mod eigen;
+pub mod symeig;
 pub mod solve;
 
 pub use level1::*;
@@ -32,6 +33,7 @@ pub use level2::*;
 pub use level3::*;
 pub use decomp::*;
 pub use eigen::*;
+pub use symeig::*;
 pub use solve::*;
 
 /// Errors from linear algebra operations
