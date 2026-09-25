@@ -3,25 +3,70 @@
 
 use crate::LinalgError;
 
-/// LU factorization with partial pivoting — blocked algorithm
-/// Modifies A in place: A = P·L·U where L has unit diagonal
-/// Returns permutation vector p (row swaps)
+/// Width at which the recursive LU stops splitting and factors unblocked.
+/// Measured on Intel i5-12500, 6 threads (2026-09-25, `--example
+/// lapack_cases`, getrf ms at n = 500 / 1000 / 2000): 16 → 5.0 / 19.8 /
+/// 113, 32 → 4.4 / 20.2 / 105, 64 → 4.2 / 17.6 / 96.
+const LU_BASE: usize = 64;
+
+/// Panel width of the blocked Cholesky. Same machine and harness, potrf ms
+/// at n = 500 / 1000 / 2000: 32 → 5.9 / 46 / 411, 64 → 4.1 / 26 / 224,
+/// 128 → 3.8 / 19.9 / 152.
+const CHOL_NB: usize = 128;
+
+/// `A[r0..n, c0..c1] -= L·U` on a column-major n x n `a` — the O(n³) trailing
+/// update of a blocked factorisation, on the packed GEMM kernel.
 ///
-/// Uses block panels: factor a panel of NB columns at a time,
-/// then update the trailing matrix using our fast dgemm.
+/// `l` is the m2 x kb panel (m2 = n − r0) and `u` the kb x n2 row block
+/// (n2 = c1 − c0), both column-major and contiguous: the caller copies
+/// them out of `a`, which costs O(n·kb) against the product's O(n²·kb).
+/// The product lands in a scratch m2 x n2 buffer and is subtracted back
+/// one column per task. `lower_only` touches only rows >= column (the
+/// Cholesky trailing update, whose upper triangle is never read).
+fn sub_product(n: usize, a: &mut [f64], r0: usize, c0: usize, c1: usize,
+               l: &[f64], u: &[f64], kb: usize, lower_only: bool) {
+    use crate::gemm::{f64 as g, Trans};
+    use rayon::prelude::*;
+    let (m2, n2) = (n - r0, c1 - c0);
+    if m2 == 0 || n2 == 0 || kb == 0 { return; }
+    let parallel = r2_oracle::should_parallelize(r2_oracle::Op::MatMul, r2_oracle::Shape::nmk(m2, n2, kb));
+    // Column-major T = L·U is row-major Tᵀ = Uᵀ·Lᵀ, and u / l read
+    // row-major ARE Uᵀ (n2 x kb) and Lᵀ (kb x m2) — see level3::dgemm.
+    let t = g::gemm(u, Trans::No, l, Trans::No, n2, kb, m2, parallel);
+    let body = |(jj, col): (usize, &mut [f64])| {
+        let tc = &t[jj * m2..(jj + 1) * m2];
+        let from = if lower_only { (c0 + jj).saturating_sub(r0) } else { 0 };
+        for i in from..m2 { col[r0 + i] -= tc[i]; }
+    };
+    if parallel { a[c0 * n..c1 * n].par_chunks_mut(n).enumerate().for_each(body); }
+    else { a[c0 * n..c1 * n].chunks_mut(n).enumerate().for_each(body); }
+}
+
+/// LU factorization with partial pivoting — recursive, GEMM-based.
+/// Modifies A in place: A = P·L·U where L has unit diagonal.
+/// Returns the permutation: row `i` of P·A is row `ipiv[i]` of A.
+///
+/// LAPACK `dgetrf2`'s recursion ([`lu_rec`]): factor the left half of the
+/// columns, bring the right half up to date with a triangular solve and one
+/// GEMM, recurse into the right half. Almost all the O(n³) work — including
+/// what a fixed-width panel would do one rank-1 update at a time — lands
+/// in the packed GEMM kernel.
 pub fn dgetrf(n: usize, a: &mut [f64]) -> Result<Vec<usize>, LinalgError> {
     if a.len() != n * n { return Err(LinalgError::NotSquare); }
-
     let mut ipiv = (0..n).collect::<Vec<usize>>();
-    const NB: usize = 32; // panel width — fits in L1 cache
+    lu_rec(n, a, &mut ipiv, 0, n)?;
+    Ok(ipiv)
+}
 
-    let mut k = 0;
-    while k < n {
-        let kb = (n - k).min(NB); // actual panel width
-
-        // Factor panel: columns k..k+kb
-        for kk in k..(k + kb) {
-            // Find pivot in column kk, rows kk..n
+/// Factor columns `c..c+w` of the column-major n x n `a`, rows `c..n`,
+/// assuming every column left of `c` is already factored and every column
+/// in `c..c+w` already carries their updates. Row swaps are applied across
+/// the whole row, so columns right of `c+w` are permuted too and only need
+/// their numerical update from the caller.
+fn lu_rec(n: usize, a: &mut [f64], ipiv: &mut [usize], c: usize, w: usize) -> Result<(), LinalgError> {
+    if w <= LU_BASE {
+        // Unblocked base case on a narrow panel.
+        for kk in c..c + w {
             let mut max_val = 0.0f64;
             let mut max_row = kk;
             for i in kk..n {
@@ -29,75 +74,71 @@ pub fn dgetrf(n: usize, a: &mut [f64]) -> Result<Vec<usize>, LinalgError> {
                 if v > max_val { max_val = v; max_row = i; }
             }
             if max_val < 1e-15 { return Err(LinalgError::Singular); }
-
-            // Swap rows
             if max_row != kk {
                 ipiv.swap(kk, max_row);
                 for j in 0..n { a.swap(j * n + kk, j * n + max_row); }
             }
-
-            // Scale column below pivot
             let pivot = a[kk * n + kk];
             for i in (kk + 1)..n { a[kk * n + i] /= pivot; }
-
-            // Update within panel: rank-1 update on columns kk+1..k+kb
-            for j in (kk + 1)..(k + kb) {
+            for j in (kk + 1)..(c + w) {
                 let akj = a[j * n + kk];
                 if akj != 0.0 {
                     for i in (kk + 1)..n { a[j * n + i] -= a[kk * n + i] * akj; }
                 }
             }
         }
-
-        // For every column j right of the panel: first U[k:k+kb, j] =
-        // L[k:k+kb, k:k+kb]⁻¹ · A[k:k+kb, j] (unit-lower forward
-        // substitution), then A[k+kb:n, j] -= L[k+kb:n, k:k+kb] · U[k:k+kb, j].
-        // Both are the same column sweep: walking kk in order and updating
-        // rows kk+1.. — the panel rows below kk ARE the substitution, the
-        // rows past the panel ARE the trailing update — so `u_kj` is final
-        // by the time it is read. (Starting at the trailing rows only once
-        // skipped the substitution: U₁₂ stayed A₁₂ and every n > NB was
-        // wrong.)
-        let trail_start = k + kb;
-        if trail_start < n {
-            for j in trail_start..n {
-                for kk in k..(k + kb) {
-                    let u_kj = a[j * n + kk]; // U[kk, j]
-                    if u_kj != 0.0 {
-                        // 4-way unrolled for SIMD
-                        let mut i = kk + 1;
-                        while i + 3 < n {
-                            a[j * n + i]     -= a[kk * n + i]     * u_kj;
-                            a[j * n + i + 1] -= a[kk * n + i + 1] * u_kj;
-                            a[j * n + i + 2] -= a[kk * n + i + 2] * u_kj;
-                            a[j * n + i + 3] -= a[kk * n + i + 3] * u_kj;
-                            i += 4;
-                        }
-                        while i < n { a[j * n + i] -= a[kk * n + i] * u_kj; i += 1; }
-                    }
+        return Ok(());
+    }
+    let h = w / 2;
+    lu_rec(n, a, ipiv, c, h)?;
+    // Right half, columns c+h..c+w: U₁₂ = L₁₁⁻¹·A₁₂ on rows c..c+h
+    // (unit-lower forward substitution, columns independent), then
+    // A₂₂ −= L₂₁·U₁₂ on rows c+h..n.
+    let (r1, c1, c2) = (c + h, c + h, c + w);
+    {
+        use rayon::prelude::*;
+        let (left, right) = a.split_at_mut(c1 * n);
+        let lcols = &left[c * n..];
+        let trsm = |col: &mut [f64]| {
+            for p in 0..h {
+                let u = col[c + p];
+                if u != 0.0 {
+                    let lc = &lcols[p * n..p * n + n];
+                    for i in (c + p + 1)..r1 { col[i] -= lc[i] * u; }
                 }
             }
-        }
-        k += kb;
+        };
+        let right = &mut right[..(c2 - c1) * n];
+        if (c2 - c1) * h * h >= 1 << 16 { right.par_chunks_mut(n).for_each(trsm); }
+        else { right.chunks_mut(n).for_each(trsm); }
     }
-    Ok(ipiv)
+    if r1 < n {
+        let (m2, n2) = (n - r1, c2 - c1);
+        let mut l = vec![0.0; m2 * h];
+        for p in 0..h { l[p * m2..(p + 1) * m2].copy_from_slice(&a[(c + p) * n + r1..(c + p + 1) * n]); }
+        let mut u = vec![0.0; h * n2];
+        for jj in 0..n2 { u[jj * h..(jj + 1) * h].copy_from_slice(&a[(c1 + jj) * n + c..(c1 + jj) * n + r1]); }
+        sub_product(n, a, r1, c1, c2, &l, &u, h, false);
+    }
+    lu_rec(n, a, ipiv, c1, c2 - c1)
 }
 
 /// Cholesky decomposition: A = L·Lᵀ (for symmetric positive-definite A)
 /// Modifies A in place, storing L in lower triangle
 ///
-/// Blocked algorithm: process NB columns at a time,
-/// use optimized rank-k update for trailing matrix.
+/// Blocked algorithm, `CHOL_NB` columns at a time: factor the diagonal
+/// block, solve the panel below it column by column (contiguous axpys),
+/// then the trailing update A₂₂ −= L₂₁·L₂₁ᵀ on the packed GEMM kernel.
 pub fn dpotrf(n: usize, a: &mut [f64]) -> Result<(), LinalgError> {
     if a.len() != n * n { return Err(LinalgError::NotSquare); }
 
     // Small matrix fast path (most lm() calls: 2-20 predictors)
     if n <= 4 { return dpotrf_unblocked(n, a); }
 
-    const NB: usize = 32;
+    let nb = CHOL_NB;
     let mut j = 0;
     while j < n {
-        let jb = (n - j).min(NB);
+        let jb = (n - j).min(nb);
 
         // Factor diagonal block: A[j:j+jb, j:j+jb]
         // First update it with contributions from previous columns
@@ -122,32 +163,30 @@ pub fn dpotrf(n: usize, a: &mut [f64]) -> Result<(), LinalgError> {
         if j + jb < n {
             for jj in j..(j + jb) {
                 let ljj = a[jj * n + jj];
-                for i in (j + jb)..n {
-                    let mut sum = a[jj * n + i];
-                    for k in j..jj { sum -= a[k * n + i] * a[k * n + jj]; }
-                    a[jj * n + i] = sum / ljj;
+                // Column-oriented: subtract each earlier panel column as a
+                // contiguous axpy, rather than a dot product that strides
+                // across a row (n elements apart per step, a cache miss each).
+                let (lo, hi) = a.split_at_mut(jj * n);
+                let col = &mut hi[j + jb..n];
+                for k in j..jj {
+                    let f = lo[k * n + jj];
+                    if f != 0.0 {
+                        let src = &lo[k * n + j + jb..k * n + n];
+                        for (d, v) in col.iter_mut().zip(src) { *d -= v * f; }
+                    }
                 }
+                for d in col.iter_mut() { *d /= ljj; }
             }
 
-            // Update trailing symmetric block: A[j+jb:n, j+jb:n] -= L_panel * L_panel'
-            // This is the critical syrk operation — use 4-way unrolled
+            // Trailing update A₂₂ −= L₂₁·L₂₁ᵀ (lower triangle) on the GEMM
+            // kernel: L₂₁ copied out contiguous, and its transpose.
             let trail = j + jb;
-            for col in trail..n {
-                for row in col..n {
-                    let mut dot = 0.0;
-                    let _main = j + ((jb) / 4) * 4;
-                    let mut k = j;
-                    while k + 3 < j + jb {
-                        dot += a[k * n + row] * a[k * n + col]
-                             + a[(k+1) * n + row] * a[(k+1) * n + col]
-                             + a[(k+2) * n + row] * a[(k+2) * n + col]
-                             + a[(k+3) * n + row] * a[(k+3) * n + col];
-                        k += 4;
-                    }
-                    while k < j + jb { dot += a[k * n + row] * a[k * n + col]; k += 1; }
-                    a[col * n + row] -= dot;
-                }
-            }
+            let m2 = n - trail;
+            let mut l = vec![0.0; m2 * jb];
+            for p in 0..jb { l[p * m2..(p + 1) * m2].copy_from_slice(&a[(j + p) * n + trail..(j + p + 1) * n]); }
+            let mut lt = vec![0.0; jb * m2];
+            for p in 0..jb { for r in 0..m2 { lt[r * jb + p] = l[p * m2 + r]; } }
+            sub_product(n, a, trail, trail, n, &l, &lt, jb, true);
         }
         j += jb;
     }

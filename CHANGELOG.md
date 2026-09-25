@@ -8,6 +8,15 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### `solve()`, `det()`, `chol()` faster — 2026-09-25
+
+- **LU (`solve()`, `det()`, inverse) is 2.7-8x faster** and **Cholesky
+  (`chol()`, MANOVA, mixed models) 1.2-4.3x**: their O(n³) updates now
+  run on the multi-core matrix-multiply kernel, and LU recurses the way
+  LAPACK's does. On an Intel i5-12500 at 1000x1000: LU 160 -> 19 ms,
+  Cholesky 88 -> 20 ms. Still behind Intel MKL (0.18x and 0.10x of its
+  speed, from 0.02x). Reproduce: `python benchmarks/lapack_cases.py`.
+
 ### `solve()`, `det()` and symmetric `eigen()` vectors fixed — 2026-09-25
 
 - **`solve()`, `det()` and matrix inversion were wrong for matrices
