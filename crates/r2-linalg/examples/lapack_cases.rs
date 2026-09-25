@@ -3,7 +3,8 @@
 //!     cargo run --release -p r2-linalg --example lapack_cases -- getrf 1000
 //!
 //! Routines: getrf (LU), potrf (Cholesky), geqrf (QR), syev (symmetric
-//! eigen, with vectors), gesvd (singular values). Prints milliseconds per
+//! eigen, with vectors), gesvd (singular values), svd (thin SVD with U and
+//! Vᵀ — R's `svd()` default). Prints milliseconds per
 //! call: median of timed calls after one warm call, at least 3 and ~1 s.
 
 use r2_linalg::*;
@@ -20,7 +21,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (routine, n) = match &args[..] {
         [r, n] => (r.clone(), n.parse::<usize>().expect("n")),
-        _ => { eprintln!("usage: lapack_cases <getrf|potrf|geqrf|syev|gesvd> <n>"); std::process::exit(2); }
+        _ => { eprintln!("usage: lapack_cases <getrf|potrf|geqrf|syev|gesvd|svd> <n>"); std::process::exit(2); }
     };
     let g = mat(n, n, 1);
     let general: Vec<f64> = { let mut a = g.clone(); for i in 0..n { a[i * n + i] += n as f64 * 0.5; } a };
@@ -35,6 +36,7 @@ fn main() {
         "geqrf" => Box::new(|| { let mut a = general.clone(); std::hint::black_box(dgeqrf(n, n, &mut a).unwrap()); }),
         "syev"  => Box::new(|| { std::hint::black_box(dsyev_full(n, &symmetric).unwrap()); }),
         "gesvd" => Box::new(|| { std::hint::black_box(dgesvd(n, n, &general).unwrap()); }),
+        "svd"   => Box::new(|| { std::hint::black_box(dgesvd_full(n, n, &general).unwrap()); }),
         r => { eprintln!("unknown routine {r}"); std::process::exit(2); }
     };
     run();

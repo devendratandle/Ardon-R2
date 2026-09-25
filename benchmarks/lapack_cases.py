@@ -7,7 +7,7 @@ after. Ratios above 1 are R2 ahead.
 
 Like for like: getrf <-> torch.linalg.lu_factor, potrf <-> cholesky,
 geqrf <-> torch.geqrf, syev (with vectors) <-> eigh, gesvd (values only)
-<-> svdvals.
+<-> svdvals, svd (thin, with U and Vᵀ) <-> svd(full_matrices=False).
 """
 import os, statistics, subprocess, time
 import torch
@@ -15,7 +15,7 @@ import torch
 EXE = os.path.join("target", "release", "examples", "lapack_cases" + (".exe" if os.name == "nt" else ""))
 torch.set_num_threads(int(os.environ.get("TS_THREADS", "6")))
 SIZES = [int(x) for x in os.environ.get("LAPACK_SIZES", "200,500,1000").split(",")]
-ROUTINES = os.environ.get("LAPACK_ROUTINES", "getrf,potrf,geqrf,syev,gesvd").split(",")
+ROUTINES = os.environ.get("LAPACK_ROUTINES", "getrf,potrf,geqrf,syev,gesvd,svd").split(",")
 
 def med_ms(fn):
     fn()
@@ -37,7 +37,8 @@ for r in ROUTINES:
               "potrf": lambda: torch.linalg.cholesky(spd),
               "geqrf": lambda: torch.geqrf(gen),
               "syev":  lambda: torch.linalg.eigh(sym),
-              "gesvd": lambda: torch.linalg.svdvals(gen)}[r]
+              "gesvd": lambda: torch.linalg.svdvals(gen),
+              "svd":   lambda: torch.linalg.svd(gen, full_matrices=False)}[r]
         with torch.no_grad():
             tm = med_ms(fn)
         rm = float(subprocess.run([EXE, r, str(n)], capture_output=True, text=True, check=True).stdout)

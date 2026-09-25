@@ -137,8 +137,8 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
         for i in k + 2..n { t[k * n + i] = 0.0; t[i * n + k] = 0.0; }
         refl.push((v, beta));
     }
-    let mut d: Vec<f64> = (0..n).map(|i| t[i * n + i]).collect();
-    let mut e: Vec<f64> = (0..n - 1).map(|i| t[i * n + i + 1]).collect();
+    let d: Vec<f64> = (0..n).map(|i| t[i * n + i]).collect();
+    let e: Vec<f64> = (0..n - 1).map(|i| t[i * n + i + 1]).collect();
     drop(t);
 
     // ── Stage 2: Q₁ = H₀·H₁···H_{n−3}, built backwards from I ───────────
@@ -161,20 +161,46 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
     }
     drop(refl);
 
-    // Blocked copy for stage 3: block b holds rows b·RB.. of Q,
-    // column-major within the block (zero rows pad the last block).
-    let nb = n.div_ceil(RB);
-    let mut qb = vec![0.0f64; nb * RB * n];
-    for c in 0..n {
-        for r in 0..n { qb[(r / RB) * RB * n + c * RB + r % RB] = q[c * n + r]; }
-    }
-    drop(q);
+    // Stages 3-4 — shared with the SVD, which arrives already tridiagonal.
+    tridiag_eigen(d, e, Some((q, n)))
+        .map(|(vals, vecs)| (vals, vecs.expect("vectors requested")))
+}
 
-    // ── Stage 3: implicit symmetric QR with Wilkinson shift on (d, e) ────
+/// Eigen-decomposition of the symmetric TRIDIAGONAL matrix with diagonal
+/// `d` (length n) and off-diagonal `e` (length n−1) — stage 3 of
+/// [`dsyev_full`], exposed for the SVD, whose BᵀB is tridiagonal to begin
+/// with (densifying it would cost an O(n³) tridiagonalisation of a matrix
+/// that already is one).
+///
+/// `basis`: `None` for eigenvalues only (no rotation is recorded or
+/// applied — O(n²) overall); `Some((q, n))` to rotate the column-major
+/// n x n `q` (the identity, or Q₁ from a tridiagonalisation) into the
+/// eigenvectors. Returns eigenvalues descending and, with a basis, the
+/// eigenvectors column-major with the largest-magnitude entry of each
+/// positive (R's / LAPACK's sign convention).
+pub(crate) fn tridiag_eigen(mut d: Vec<f64>, mut e: Vec<f64>, basis: Option<(Vec<f64>, usize)>)
+    -> Result<(Vec<f64>, Option<Vec<f64>>), LinalgError> {
+    let n = d.len();
+    if n == 0 { return Ok((vec![], basis.map(|_| vec![]))); }
+    if n == 1 { return Ok((d, basis.map(|(q, _)| q))); }
+    let want = basis.is_some();
+
+    // Blocked copy: block b holds rows b·RB.. of Q, column-major within the
+    // block (zero rows pad the last block).
+    let nb = n.div_ceil(RB);
+    let mut qb = Vec::new();
+    if let Some((q, _)) = basis {
+        qb = vec![0.0f64; nb * RB * n];
+        for c in 0..n {
+            for r in 0..n { qb[(r / RB) * RB * n + c * RB + r % RB] = q[c * n + r]; }
+        }
+    }
+
+    // Implicit symmetric QR with Wilkinson shift on (d, e).
     let max_sweeps = 30 * n;
     let mut end = n - 1;
     let mut sweeps = 0usize;
-    let mut rots: Vec<(usize, f64, f64)> = Vec::with_capacity(ROT_BATCH + n);
+    let mut rots: Vec<(usize, f64, f64)> = Vec::with_capacity(if want { ROT_BATCH + n } else { 0 });
     while end > 0 {
         if sweeps > max_sweeps { return Err(LinalgError::InvalidShape("dsyev_full: QR failed to converge".into())); }
         sweeps += 1;
@@ -211,16 +237,17 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
                 e[k + 1] *= cs;
             }
             x = e[k];
-            rots.push((k, cs, sn));
+            if want { rots.push((k, cs, sn)); }
         }
         if rots.len() >= ROT_BATCH { flush(&mut qb, n, &mut rots); }
     }
     flush(&mut qb, n, &mut rots);
 
-    // ── Sort descending; eigenvector columns follow ─────────────────────
+    // Sort descending; eigenvector columns follow.
     let mut idx: Vec<usize> = (0..n).collect();
     idx.sort_by(|&i, &j| d[j].partial_cmp(&d[i]).unwrap_or(std::cmp::Ordering::Equal));
     let eigenvalues: Vec<f64> = idx.iter().map(|&i| d[i]).collect();
+    if !want { return Ok((eigenvalues, None)); }
     let mut vectors = vec![0.0f64; n * n];
     for (new_col, &old_col) in idx.iter().enumerate() {
         let dst = &mut vectors[new_col * n..(new_col + 1) * n];
@@ -233,5 +260,5 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
         for &v in c.iter() { if v.abs() > max_abs { max_abs = v.abs(); max_val = v; } }
         if max_val < 0.0 { for v in c.iter_mut() { *v = -*v; } }
     }
-    Ok((eigenvalues, vectors))
+    Ok((eigenvalues, Some(vectors)))
 }

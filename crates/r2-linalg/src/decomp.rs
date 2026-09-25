@@ -2,7 +2,6 @@
 //! All column-major storage.
 
 use crate::LinalgError;
-use crate::symeig::dsyev_full;
 
 /// Width at which the recursive LU stops splitting and factors unblocked.
 /// Measured on Intel i5-12500, 6 threads (2026-09-25, `--example
@@ -271,7 +270,7 @@ pub fn dgeqrf(m: usize, n: usize, a: &mut [f64]) -> Result<Vec<f64>, LinalgError
 /// (LAPACK `dbdsqr`) is written, the values come from the full routine,
 /// which `crates/r2-linalg/tests/decomp_large.rs` checks against A itself.
 pub fn dgesvd(m: usize, n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
-    dgesvd_full(m, n, a).map(|(sigma, _, _)| sigma)
+    svd_impl(m, n, a, false).map(|(sigma, _, _)| sigma)
 }
 
 /// Thin SVD with orthogonal factors: A = U · diag(σ) · Vᵀ.
@@ -308,9 +307,21 @@ pub fn dgesvd_full(
     n: usize,
     a: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinalgError> {
+    svd_impl(m, n, a, true)
+}
+
+/// The SVD, with (`vectors`) or without U and Vᵀ. Without them no
+/// reflector is stored or applied, and the singular values come straight
+/// from the tridiagonal BᵀB: O(m·n²) for the bidiagonalisation, O(n²)
+/// after it. Without vectors, U and Vᵀ come back empty.
+fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
+    -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinalgError> {
+    use rayon::prelude::*;
     if a.len() != m * n { return Err(LinalgError::InvalidShape("SVD: A shape".into())); }
     if m < n { return Err(LinalgError::InvalidShape("SVD: need m >= n".into())); }
     if n == 0 { return Ok((vec![], vec![], vec![])); }
+    // Work above which a column / row sweep forks.
+    const PAR: usize = 1 << 15;
 
     // ── Phase 1: bidiagonalize A → U₁ · B · V₁ᵀ ─────────────────────
     //
@@ -365,16 +376,20 @@ pub fn dgesvd_full(
                 // it directly to skip the redundant multiply.
                 work[k * m + k] = alpha;
                 for i in (k + 1)..m { work[k * m + i] = 0.0; }
-                // Other columns j ∈ (k+1)..n.
-                for j in (k + 1)..n {
-                    let mut dot = 0.0_f64;
-                    for i in k..m { dot += hv[i] * work[j * m + i]; }
+                // Other columns j ∈ (k+1)..n, each independent.
+                let hvk = &hv[k..m];
+                let app = |col: &mut [f64]| {
+                    let c = &mut col[k..m];
+                    let dot: f64 = c.iter().zip(hvk).map(|(x, h)| x * h).sum();
                     let scale = tau * dot;
-                    for i in k..m { work[j * m + i] -= scale * hv[i]; }
-                }
+                    for (x, h) in c.iter_mut().zip(hvk) { *x -= scale * h; }
+                };
+                let cols = &mut work[(k + 1) * m..];
+                if (n - k - 1) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
+                else { cols.chunks_mut(m).for_each(app); }
                 // Store the Householder vector (full m-length, zeros above k)
                 // and its tau for later left-to-right application onto U₁.
-                left_vs.push(hv.clone());
+                left_vs.push(if vectors { hv.clone() } else { Vec::new() });
                 left_taus.push(tau);
             } else {
                 work[k * m + k] = alpha;
@@ -421,12 +436,36 @@ pub fn dgesvd_full(
                     for j in (k + 2)..n { work[j * m + k] = 0.0; }
                     // Rows (k+1)..m: w_i ← w_i (I - tau v vᵀ), i.e. for each row,
                     //   row_i[k+1..n] ← row_i[k+1..n] - tau · (row_i · vr) · vrᵀ.
-                    for i in (k + 1)..m {
-                        let mut dot = 0.0_f64;
-                        for j in (k + 1)..n { dot += vr[j] * work[j * m + i]; }
-                        let scale = tau * dot;
-                        for j in (k + 1)..n { work[j * m + i] -= scale * vr[j]; }
+                    // Written row by row this strides n·m apart per step; done
+                    // column-contiguous in two passes instead: dots[i] =
+                    // Σ_j vr[j]·work[i, j] (an axpy per column, rows split
+                    // across threads), then column j −= τ·vr[j]·dots.
+                    let r0 = k + 1;
+                    let mut dots = vec![0.0_f64; m - r0];
+                    {
+                        let w = &work;
+                        let vrr = &vr;
+                        let fill = |(ci, ch): (usize, &mut [f64])| {
+                            let i0 = r0 + ci * 256;
+                            for j in (k + 1)..n {
+                                let vj = vrr[j];
+                                if vj == 0.0 { continue; }
+                                let src = &w[j * m + i0..j * m + i0 + ch.len()];
+                                for (d, x) in ch.iter_mut().zip(src) { *d += vj * x; }
+                            }
+                        };
+                        if (m - r0) * (n - k - 1) >= PAR { dots.par_chunks_mut(256).enumerate().for_each(fill); }
+                        else { dots.chunks_mut(256).enumerate().for_each(fill); }
                     }
+                    let vrr = &vr;
+                    let upd = |(jj, col): (usize, &mut [f64])| {
+                        let s = tau * vrr[k + 1 + jj];
+                        if s == 0.0 { return; }
+                        for (x, d) in col[r0..m].iter_mut().zip(&dots) { *x -= s * d; }
+                    };
+                    let cols = &mut work[(k + 1) * m..n * m];
+                    if (m - r0) * (n - k - 1) >= PAR { cols.par_chunks_mut(m).enumerate().for_each(upd); }
+                    else { cols.chunks_mut(m).enumerate().for_each(upd); }
                     // Store the right Householder vector and tau.
                     right_vs.push(vr);
                     right_taus.push(tau);
@@ -458,19 +497,25 @@ pub fn dgesvd_full(
     //   X ← H_k · X
     //   H_k = I_m - τ_k · v_k · v_kᵀ acts on rows k..m only (v_k zero above k).
     // Resulting X = H_0 · H_1 · ... · H_{n-1} · I_{m×n} = U₁.
-    let mut u1 = vec![0.0_f64; m * n];
-    for i in 0..n { u1[i * m + i] = 1.0; }
-    for k in (0..n).rev() {
-        let tau = left_taus[k];
-        if tau == 0.0 { continue; }
-        let v_k = &left_vs[k];
-        // For each column j of U1, update rows k..m:
-        //   col_j ← col_j - τ · (vᵀ · col_j) · v
-        for j in 0..n {
-            let mut dot = 0.0_f64;
-            for i in k..m { dot += v_k[i] * u1[j * m + i]; }
-            let scale = tau * dot;
-            for i in k..m { u1[j * m + i] -= scale * v_k[i]; }
+    // Columns j < k are still e_j there — zero on rows k.. — so only
+    // columns k.. change, each independently.
+    let mut u1 = Vec::new();
+    if vectors {
+        u1 = vec![0.0_f64; m * n];
+        for i in 0..n { u1[i * m + i] = 1.0; }
+        for k in (0..n).rev() {
+            let tau = left_taus[k];
+            if tau == 0.0 { continue; }
+            let vk = &left_vs[k][k..m];
+            let app = |col: &mut [f64]| {
+                let c = &mut col[k..m];
+                let dot: f64 = c.iter().zip(vk).map(|(x, h)| x * h).sum();
+                let scale = tau * dot;
+                for (x, h) in c.iter_mut().zip(vk) { *x -= scale * h; }
+            };
+            let cols = &mut u1[k * m..];
+            if (n - k) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
+            else { cols.chunks_mut(m).for_each(app); }
         }
     }
 
@@ -479,17 +524,23 @@ pub fn dgesvd_full(
     // V₁ = G_0 · G_1 · ... · G_{last}, built by left-multiplying I_n in
     // reverse: for k = last down to 0, X ← G_k · X. Each G_k acts on rows
     // (k+1)..n only (vr_k zero up to and including k).
-    let mut v1 = vec![0.0_f64; n * n];
-    for i in 0..n { v1[i * n + i] = 1.0; }
-    for k in (0..right_vs.len()).rev() {
-        let tau = right_taus[k];
-        if tau == 0.0 { continue; }
-        let vr_k = &right_vs[k];
-        for j in 0..n {
-            let mut dot = 0.0_f64;
-            for i in (k + 1)..n { dot += vr_k[i] * v1[j * n + i]; }
-            let scale = tau * dot;
-            for i in (k + 1)..n { v1[j * n + i] -= scale * vr_k[i]; }
+    let mut v1 = Vec::new();
+    if vectors {
+        v1 = vec![0.0_f64; n * n];
+        for i in 0..n { v1[i * n + i] = 1.0; }
+        for k in (0..right_vs.len()).rev() {
+            let tau = right_taus[k];
+            if tau == 0.0 { continue; }
+            let vk = &right_vs[k][k + 1..n];
+            let app = |col: &mut [f64]| {
+                let c = &mut col[k + 1..n];
+                let dot: f64 = c.iter().zip(vk).map(|(x, h)| x * h).sum();
+                let scale = tau * dot;
+                for (x, h) in c.iter_mut().zip(vk) { *x -= scale * h; }
+            };
+            let cols = &mut v1[(k + 1) * n..];
+            if (n - k - 1) * (n - k - 1) >= PAR { cols.par_chunks_mut(n).for_each(app); }
+            else { cols.chunks_mut(n).for_each(app); }
         }
     }
 
@@ -498,24 +549,27 @@ pub fn dgesvd_full(
     // T := Bᵀ·B is n×n symmetric tridiagonal with
     //   T[i][i]   = d[i]² + e[i-1]²   (e[-1] := 0)
     //   T[i][i+1] = d[i] · e[i]
-    // Form it densely (column-major) and call dsyev_full → (σ², V₂).
-    let mut t = vec![0.0_f64; n * n];
-    for i in 0..n {
+    // Already tridiagonal: straight to the QR iteration (densifying it
+    // would pay an O(n³) tridiagonalisation of a tridiagonal matrix).
+    let tdiag: Vec<f64> = (0..n).map(|i| {
         let prev_e = if i == 0 { 0.0 } else { e_super[i - 1] };
-        t[i * n + i] = d_diag[i] * d_diag[i] + prev_e * prev_e;
-        if i + 1 < n {
-            let off = d_diag[i] * e_super[i];
-            t[i * n + (i + 1)] = off;
-            t[(i + 1) * n + i] = off;
-        }
-    }
-    let (eig_vals, v2) = dsyev_full(n, &t)?;
+        d_diag[i] * d_diag[i] + prev_e * prev_e
+    }).collect();
+    let toff: Vec<f64> = (0..n - 1).map(|i| d_diag[i] * e_super[i]).collect();
+    let basis = if vectors {
+        let mut id = vec![0.0_f64; n * n];
+        for i in 0..n { id[i * n + i] = 1.0; }
+        Some((id, n))
+    } else { None };
+    let (eig_vals, v2) = crate::symeig::tridiag_eigen(tdiag, toff, basis)?;
     // σ_k = sqrt(max(eig_k, 0)) — tiny negatives can arise from rounding.
     let mut sigma = vec![0.0_f64; n];
     for k in 0..n {
         let lam = eig_vals[k];
         sigma[k] = if lam > 0.0 { lam.sqrt() } else { 0.0 };
     }
+    if !vectors { return Ok((sigma, vec![], vec![])); }
+    let v2 = v2.expect("vectors requested");
 
     // ── Compute U₂ (n×n column-major): u₂_k = (B · v₂_k) / σ_k ──────
     //
@@ -539,22 +593,11 @@ pub fn dgesvd_full(
     }
 
     // ── Assemble U = U₁ · U₂ (m×n) and V = V₁ · V₂ (n×n) ────────────
+    // Both on the packed GEMM kernel (these were strided triple loops).
     let mut u = vec![0.0_f64; m * n];
-    for k in 0..n {
-        for i in 0..m {
-            let mut s = 0.0_f64;
-            for l in 0..n { s += u1[l * m + i] * u2[k * n + l]; }
-            u[k * m + i] = s;
-        }
-    }
+    crate::dgemm(m, n, n, 1.0, &u1, &u2, 0.0, &mut u)?;
     let mut v_mat = vec![0.0_f64; n * n];
-    for k in 0..n {
-        for i in 0..n {
-            let mut s = 0.0_f64;
-            for l in 0..n { s += v1[l * n + i] * v2[k * n + l]; }
-            v_mat[k * n + i] = s;
-        }
-    }
+    crate::dgemm(n, n, n, 1.0, &v1, &v2, 0.0, &mut v_mat)?;
     // Transpose V → Vᵀ (column-major n×n).
     let mut vt = vec![0.0_f64; n * n];
     for i in 0..n { for j in 0..n { vt[i * n + j] = v_mat[j * n + i]; } }
@@ -663,6 +706,7 @@ pub fn dsyev(n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symeig::dsyev_full;
 
     #[test]
     fn test_dpotrf() {
