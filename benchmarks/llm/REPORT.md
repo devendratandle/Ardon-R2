@@ -1,6 +1,7 @@
 # Ardon-R2 vs PyTorch — LLM model training
 
-**Current status, 2026-09-22.** This is the only performance report for LLM
+**Current status, 2026-09-25** (Intel second-machine run added to section 1).
+This is the only performance report for LLM
 training. Earlier ones were deleted rather than kept: a superseded number is
 worse than no number. Everything below describes the code as it stands, not
 how it got there.
@@ -22,7 +23,7 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.5-1.66x FASTER than PyTorch at 7M parameters, 1.40-1.63x at 40M, and 1.25-1.28x faster end to end.**
+**R2 trains 1.5-1.66x FASTER than PyTorch at 7M parameters, 1.40-1.63x at 40M, and 1.25-1.28x faster end to end** (first machine). **On an Intel i5-12500, where MKL runs its own best path, 1.34-1.37x at 7M** (subsection below).
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
@@ -57,6 +58,49 @@ The previous standing figure was 1.10x (two pairs at 500 steps,
 2026-09-09: 269.72/297.32 and 271.79/299.07 s). The step between them is
 one change — the tape is freed off the training thread — and the two
 harnesses below show where it came from.
+
+### On an Intel CPU — MKL on its home hardware (2026-09-25)
+
+Every figure above was measured on one machine whose CPU is not Intel's,
+while PyTorch's GEMMs are Intel MKL, which picks its code paths by CPU
+vendor. That leaves open how much of the lead is MKL running below its
+best. This is the same harness on a second machine, an Intel CPU, where
+MKL has no such excuse:
+
+```
+CPU      Intel Core i5-12500 — 6 cores / 12 threads, AVX2+FMA, NO AVX-512
+         (fused off on Alder Lake). Held 3000 MHz before, between and
+         after every run; no throttling.
+torch    2.14.0+cpu, BLAS_INFO=mkl (Intel MKL 2026.1), MKL-DNN 3.12,
+         "CPU capability usage: AVX2", 6 threads
+R2       rustc 1.98.1, release, LTO off / codegen-units 16 (the gate's
+         override), no target-cpu
+run      tinystories_train, 300 steps x 32 x 64 = 614,400 tokens, 7.24M
+         params, three interleaved pairs, ts_run/ cleared before each
+```
+
+| pair | R2 train | PyTorch train | |
+|---|---:|---:|---|
+| 1 | **93.87 s** (312.9 ms/step) | 128.89 s (429.6) | **R2 1.37x** |
+| 2 | **86.05 s** (286.9) | 118.23 s (394.1) | **R2 1.37x** |
+| 3 | **85.50 s** (285.0) | 114.87 s (382.9) | **R2 1.34x** |
+| tokenize 19.1 MB | **1.18 s** | 11.79 s (HF `tokenizers`) | **R2 10.0x** |
+
+Held-out loss **4.3113 vs 4.3114** in all three pairs, the eleven
+checkpoint losses identical to four decimals, the same generated sentence
+— the same run as on the first machine, bit for bit at the reported
+precision.
+
+**Reading it.** On Intel with MKL at full strength, R2 trains **1.34-1.37x
+faster**. That is below the 1.5-1.66x of the 100-step pairs on the first
+machine, but the two are not a controlled A/B: CPU, step count and torch
+version (2.13 -> 2.14) all changed at once. What this establishes is the
+floor the claim should be quoted with: **R2 is ahead of PyTorch+MKL on
+Intel hardware too, by about a third.** The 1.66x stays a first-machine
+figure and should be labelled so wherever it is cited. Both sides run
+AVX2 here; on an AVX-512 Intel part MKL would use AVX-512 while R2's
+AVX-512 GEMM tier is still unmeasured, so this machine does not predict
+that case either way.
 
 ### Forward, backward, optimizer — and the fourth piece of waste
 
