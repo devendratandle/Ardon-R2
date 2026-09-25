@@ -23,7 +23,7 @@ import os, statistics, subprocess, sys, time
 import torch
 
 EXE = os.path.join("target", "release", "examples", "gemm_cases" + (".exe" if os.name == "nt" else ""))
-torch.set_num_threads(6)
+torch.set_num_threads(int(os.environ.get("TS_THREADS", "6")))   # R2's side: RAYON_NUM_THREADS
 
 # (tokens, k, n, label). k is the layer's input width, n its output width.
 SHAPES = [
@@ -43,6 +43,8 @@ SHAPES = [
 ]
 if os.environ.get("R2_QUICK"):
     SHAPES = SHAPES[:5]
+if os.environ.get("GEMM_SHAPES"):   # e.g. GEMM_SHAPES=0,2,4,7 — indices into SHAPES
+    SHAPES = [SHAPES[int(i)] for i in os.environ["GEMM_SHAPES"].split(",")]
 
 def med_us(flops, fn):
     fn()
