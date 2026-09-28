@@ -4,7 +4,9 @@
 #   Rscript benchmarks/linalg_vs_r.R
 #   r2 benchmarks/linalg_vs_r.R
 n <- 1000
-A <- matrix(sin(1:(n * n)), n, n)
+# Full rank (condition number ~1e4). NOT sin(1:n^2): a sine sequence obeys a
+# two-term recurrence, so that matrix has rank 2 and made qr/svd atypical.
+A <- matrix((sqrt(1:(n * n)) * 1000) %% 1, n, n)
 S <- crossprod(A) + diag(n)          # symmetric positive definite
 med_ms <- function(f) {
   t <- numeric(5)

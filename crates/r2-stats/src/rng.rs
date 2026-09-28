@@ -253,7 +253,7 @@ pub fn bi_rpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
 pub fn bi_set_seed(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let seed = first(a).scalar_f64()?.unwrap_or(42.0) as u64;
     set_seed(seed);
-    soutln!("Random seed set to {}", seed);
+    // silent, as R's set.seed is (it returns NULL invisibly)
     Ok(RVal::Null)
 }
 

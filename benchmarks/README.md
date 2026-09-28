@@ -15,7 +15,7 @@ opponents. Neither one's numbers belong in the other.
 
 | Report | Compares | Status |
 |---|---|---|
-| [`../PERFORMANCE.md`](../PERFORMANCE.md) | **R2 vs CRAN R** — f64 statistics, `%*%`, JIT-compiled user code, plus CPU-vs-GPU and digit-level accuracy | Timings taken at v0.3.8; accuracy re-verified at v0.4.0 (13/13 differential cases) |
+| [`../PERFORMANCE.md`](../PERFORMANCE.md) | **R2 vs CRAN R** — f64 statistics, `%*%`, JIT-compiled user code, plus CPU-vs-GPU and digit-level accuracy | Re-timed 2026-09-28 (GPU table from v0.3.8); 27/27 differential cases |
 | [`llm/REPORT.md`](llm/REPORT.md) | **R2 vs PyTorch and JAX** — f32 LLM training, `sgemm`, attention, tokenizer | Current. Also lists what measured *worse*, so it isn't retried |
 
 Runnable scripts for the R comparison are in [`v038/`](v038/)

@@ -8,6 +8,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Reports re-timed; `sort()` speed restored — 2026-09-28
+
+- **`sort()` of 1e6 numbers was 6.6x slower than R** (0.45 s vs 0.068 s)
+  since the 2026-09-23 rewrite that gave it R's ordering rules — every
+  comparison went through the general NA-aware path. A fast path for a
+  single numeric key sorts value/position pairs: 0.070 s (R 0.065 s), same
+  order as R including NA/NaN placement and `-0`/`0` ties.
+- `set.seed()` no longer prints "Random seed set to ..." (R prints nothing).
+- `PERFORMANCE.md` sections 1-4 re-timed on the AMD laptop (two
+  interleaved passes; they were from v0.3.8): R2 ahead 1.1-1.6x on vector
+  add and sum, 11x on 500x500 `%*%`, 6-10x on loops and ~40,000x on the
+  variance loop; behind on `cor` (2.9x), `sd` and the composed
+  standardize helper (1.2x). The linear-algebra table now uses a
+  full-rank matrix (the old `sin(1:n^2)` one had rank 2, which made `qr`
+  and `svd` atypical): R2 20-25x on `%*%`, 2.0-6.2x on the decompositions.
+  README, `llms.txt`, `benchmarks/README.md` and REPORT.md §5 (dgemm, now
+  at MKL parity) updated to match.
+
 ### `svd()` small singular values and vectors accurate — 2026-09-28
 
 - **Small singular values lost digits**: they came from the square roots

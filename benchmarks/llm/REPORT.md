@@ -992,12 +992,12 @@ Ranked by the census above, not by how interesting they are.
    parity with SDPA in situ, forward and backward, after (sequence, head)
    work units, register-blocked accumulations and real FMA. At seq 256
    it had been 17% of the backward and 3.3x behind.
-4. **`level3::dgemm` is 19-27 GFLOP/s** after its FMA fix (2026-09-20; it
-   was 16-20 with none) — still a fraction of the f64 ceiling, because it
-   has none of the sgemm structure. `sgemm` is a per-type macro, so f64
-   is close to a one-line instantiation; a column-major `C = A·B` is the
-   row-major `Cᵀ = Bᵀ·Aᵀ`, i.e. the same kernel with operands swapped.
-   That would lift `%*%` and every blocked LAPACK algorithm built on it.
+4. **CLOSED 2026-09-25: `dgemm` runs on the packed kernel** (`gemm::f64`,
+   the sgemm macro at a 6x8 tile). `%*%` is at MKL parity: median ~1.0x
+   on the Intel i5-12500, 1.04-1.21x on the AMD laptop (small 128-256
+   shapes 0.3-0.7x); LU, Cholesky, QR, eigen and SVD moved onto it
+   (`benchmarks/dgemm_cases.py`, `lapack_cases.py`; CHANGELOG 2026-09-25).
+   It was 19-27 GFLOP/s after the 2026-09-20 FMA fix.
 5. **13% of a step is still unattributed** — the memory traffic of writing
    every intermediate value and gradient buffer, spread across ops rather
    than concentrated anywhere.

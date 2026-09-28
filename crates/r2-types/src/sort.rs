@@ -137,6 +137,9 @@ pub enum NaLast { Last, First, Remove }
 /// sort by the first key, ties broken by the next. Missing values are
 /// placed by `na_last` whatever `decreasing` says, as in R.
 pub fn order_indices(keys: &[SortCol], decreasing: bool, na_last: NaLast) -> Vec<usize> {
+    if let [key @ (SortCol::Num(_) | SortCol::Int(_))] = keys {
+        return order_numeric(key, decreasing, na_last);
+    }
     let n = keys.first().map_or(0, SortCol::len);
     let mut idx: Vec<usize> = (0..n).collect();
     if na_last == NaLast::Remove {
@@ -154,6 +157,48 @@ pub fn order_indices(keys: &[SortCol], decreasing: bool, na_last: NaLast) -> Vec
         }
         Ordering::Equal
     });
+    idx
+}
+
+/// The common case — one numeric or integer key — without the per-
+/// comparison NA checks and dispatch of the general path (which made
+/// `sort()` of 1e6 doubles 6.6x slower than R): sort (value, position)
+/// pairs, ties by position (stable, as R), then place the missing values.
+fn order_numeric(key: &SortCol, decreasing: bool, na_last: NaLast) -> Vec<usize> {
+    let n = key.len();
+    let mut pairs: Vec<(f64, usize)> = Vec::with_capacity(n);
+    let mut missing: Vec<usize> = Vec::new();
+    for i in 0..n {
+        let v = match key {
+            SortCol::Num(x) => x[i].filter(|v| !v.is_nan()),
+            SortCol::Int(x) => x[i].map(f64::from),
+            _ => unreachable!("order_numeric takes numeric keys"),
+        };
+        match v { Some(v) => pairs.push((v, i)), None => missing.push(i) }
+    }
+    if decreasing {
+        pairs.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    } else {
+        pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    }
+    // total_cmp orders -0.0 before 0.0; R treats them as equal, so restore
+    // position order within a run of zeros.
+    let mut idx: Vec<usize> = Vec::with_capacity(n);
+    let mut k = 0;
+    while k < pairs.len() {
+        if pairs[k].0 == 0.0 {
+            let start = k;
+            while k < pairs.len() && pairs[k].0 == 0.0 { k += 1; }
+            let mut zeros: Vec<usize> = pairs[start..k].iter().map(|p| p.1).collect();
+            zeros.sort_unstable();
+            idx.extend(zeros);
+        } else { idx.push(pairs[k].1); k += 1; }
+    }
+    match na_last {
+        NaLast::Remove => {}
+        NaLast::Last => idx.extend(missing),
+        NaLast::First => { missing.extend(idx); idx = missing; }
+    }
     idx
 }
 
