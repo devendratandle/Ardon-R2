@@ -53,10 +53,13 @@ impl FunctionRegistry {
     /// Number of DISTINCT builtin names across every loaded layer — what
     /// `version()` and the docs report, read from the tables rather than
     /// typed by hand (the typed number sat at "191+" for four releases).
-    pub fn n_functions(&self) -> usize {
-        let mut seen = std::collections::HashSet::new();
-        for l in &self.layers { for k in l.functions.keys() { seen.insert(k.as_str()); } }
-        seen.len()
+    pub fn n_functions(&self) -> usize { self.names().len() }
+
+    /// Every registered name once, sorted.
+    pub fn names(&self) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for l in &self.layers { for k in l.functions.keys() { seen.insert(k.clone()); } }
+        seen.into_iter().collect()
     }
 
     pub fn remove_layer(&mut self, name: &str) -> Result<Vec<String>, String> {

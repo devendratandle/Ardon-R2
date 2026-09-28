@@ -268,7 +268,16 @@ const HELP_OVERVIEW: &str = "Ardon-R2 Help System — Available topics:\n\n  Sta
 
 pub(crate) fn bi_help(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let topic = val_to_str(&gv(a,0));
-    let help_text = match topic.as_str() {
+    match explicit_help(&topic) {
+        Some(text) => { soutln!("\n{}\n", text); Ok(RVal::Null) }
+        None => help_fallback(&topic),
+    }
+}
+
+/// The hand-written entries; every other name is answered from the
+/// FUNCTIONS.md index (`help_fallback`).
+fn explicit_help(topic: &str) -> Option<&'static str> {
+    Some(match topic {
         // Statistics
         "lm" => "lm(formula, data)\n  Linear regression.\n  Example: lm(mpg ~ wt, data = mtcars)\n         lm(mpg ~ ., data = mtcars)  # all predictors\n  Returns: coefficients, residuals, fitted.values, r.squared",
         "glm" => "glm(formula, data, family)\n  Generalized linear model.\n  family: \"gaussian\" (default), \"binomial\" (logistic), \"poisson\"\n  Example: glm(y ~ x, data = df, family = \"binomial\")",
@@ -307,6 +316,12 @@ pub(crate) fn bi_help(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
         "load" => "load(file)\n  Load saved session, data, or model.\n  Returns loaded object for .r2d and .r2m files.\n  Examples:\n    load(\"session.r2s\")        # restore all variables\n    d <- load(\"data.r2d\")      # load data\n    m <- load(\"model.r2m\")     # load model",
         // Core
         "c" => "c(...)\n  Combine values into a vector.\n  Example: c(1, 2, 3)",
+        // Operators and replacement functions (R groups them the same way).
+        "+" | "-" | "*" | "/" | "^" | "%%" => "x + y, x - y, x * y, x / y, x ^ y, x %% y\n  Arithmetic, element-wise; the shorter operand recycles.\n  %% is the remainder (sign of y, as in R); NA propagates.\n  Example: c(1, 2, 3) * 2",
+        "==" | "!=" | "<" | "<=" | ">" | ">=" => "x == y, x != y, x < y, x <= y, x > y, x >= y\n  Comparison, element-wise, giving a logical vector; NA gives NA.\n  Strings compare in R's collation order.\n  Example: c(1, 5, 3) > 2",
+        "%in%" => "x %in% table\n  TRUE for each element of x found in table (match(x, table) > 0).\n  Example: c(\"a\", \"z\") %in% letters[1:5]",
+        "(" => "(expr)\n  Parentheses: group an expression. Around an assignment they also\n  print its value: (x <- 5)",
+        "names<-" | "colnames<-" | "rownames<-" => "names(x) <- value, colnames(x) <- value, rownames(x) <- value\n  Replacement forms: set names on a vector/list, or the column/row\n  names of a data frame or matrix. Nested use works: names(x)[2] <- \"b\"",
         "chol" => "chol(x)\n  Cholesky factor of a symmetric positive-definite matrix: the upper\n  triangular R with t(R) %*% R == x.\n  Example: chol(crossprod(matrix(c(2, 1, 1, 3), 2)))",
         "is.ordered" =>"is.ordered(x)\n  TRUE for an ordered factor (factor(..., ordered = TRUE)).\n  Example: is.ordered(factor(c(\"s\", \"m\"), ordered = TRUE))",
         "library" => "library(package)\n  Load a package.\n  Example: library(mymath)",
@@ -315,8 +330,23 @@ pub(crate) fn bi_help(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
         "scale" => "scale(x, center=TRUE, scale=TRUE)\n  Center and standardize matrix columns.",
         ".Internal" | "internal" => ".Internal(name, ...)\n  Call Rust primitive from Ardon-R2 script.\n  Available primitives:\n    matmul, crossprod, crossprod_vec, solve, solve_lstsq,\n    inverse, cholesky, eigenvalues, svd,\n    rnorm_vec, pnorm, qnorm\n  Example: beta <- .Internal(\"solve_lstsq\", X, y)",
         "summary" | "str" | "head" | "tail" | "names" | "dim" | "class" => "Data inspection functions:\n  summary(x)  — summary statistics\n  str(x)      — structure\n  head(x, n)  — first n rows\n  tail(x, n)  — last n rows\n  names(x)    — column names\n  dim(x)      — dimensions\n  class(x)    — type/class",
-        _ => return help_fallback(&topic),
-    };
-    soutln!("\n{}\n", help_text);
-    Ok(RVal::Null)
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod coverage {
+    /// Every registered builtin answers `?name` — from a hand-written entry
+    /// or from FUNCTIONS.md. A new builtin without either fails here, so
+    /// "every builtin has ?help" stays true instead of being re-checked
+    /// by hand before each release.
+    #[test]
+    fn every_registered_builtin_has_help() {
+        let e = crate::Engine::new();
+        let missing: Vec<String> = e.registry.names().into_iter()
+            .filter(|n| super::explicit_help(n).is_none() && !super::help_index().contains_key(n.as_str()))
+            .collect();
+        assert!(missing.is_empty(),
+            "{} builtins have no ?help — add each to FUNCTIONS.md: {:?}", missing.len(), missing);
+    }
 }

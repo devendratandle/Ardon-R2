@@ -8,10 +8,11 @@
 ;    3.  Compile this script with ISCC:
 ;          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\R2.iss
 ;        Or open it in the Inno Setup Compiler GUI (https://jrsoftware.org/isdl.php).
-;    4.  Output:  installer\Output\R2-Setup-0.2.1.exe
+;    4.  Output:  installer\Output\R2-Setup-<version>.exe  (the version is
+;        read from r2.exe's FileVersion, i.e. the root Cargo.toml)
 ;
-;  v0.2.1 notes:
-;    * R2Gui.exe is the new R2-UI build (winit + wgpu); eframe/egui retired.
+;  Notes (since v0.2.1):
+;    * R2Gui.exe is the R2-UI build (winit + wgpu); eframe/egui retired.
 ;    * r2-ui is statically linked into R2Gui.exe (R2 ships single executables).
 ;    * Console body is white; MDI workspace is khaki (R Console palette).
 ;

@@ -8,6 +8,18 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Documents state the live version and counts — 2026-09-28
+
+- `llms.txt` said "v0.4.0, 438 builtins" after the code had moved to
+  0.4.1 and 458; it now states both correctly and adds the Intel, GPU
+  and linear-algebra results. `FUNCTIONS.md`'s title says 458.
+- **`?help` now covers the operators and replacement functions** (`+`,
+  `==`, `%in%`, `(`, `names<-`, ...): 17 of the 458 had no entry.
+- Tests now enforce this: every registered builtin must have `?help`,
+  and `llms.txt` / `FUNCTIONS.md` must state the registry's count and
+  `llms.txt` the current version — a new builtin or a version bump fails
+  the test gate until the documents are updated.
+
 ### `solve()` 11x faster, `chol()` added, `svd()` values-only — 2026-09-25
 
 - **`solve()` is 11x faster** and was slower than R: a 1000x1000 inverse

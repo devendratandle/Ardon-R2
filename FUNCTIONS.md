@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 438 Built-in Functions
+# Ardon-R2 Function Reference — 458 Built-in Functions and Operators
 
 ## Core (83)
 ```
