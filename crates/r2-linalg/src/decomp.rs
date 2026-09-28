@@ -777,13 +777,29 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
         for i in 0..n { id[i * n + i] = 1.0; }
         Some((id, n))
     } else { None };
-    let (eig_vals, v2) = crate::symeig::tridiag_eigen(tdiag, toff, basis)?;
-    // σ_k = sqrt(max(eig_k, 0)) — tiny negatives can arise from rounding.
+    // Values only: the Golub–Kahan values below are the whole answer.
+    let (eig_vals, v2) = if vectors {
+        crate::symeig::tridiag_eigen(tdiag, toff, basis)?
+    } else {
+        ((0..n).map(|i| -(i as f64)).collect(), None)   // placeholder order: rank = index
+    };
+    // The singular VALUES come from the Golub–Kahan form instead: the 2n×2n
+    // tridiagonal with zero diagonal and off-diagonal d₀,e₀,d₁,e₁,…,d_{n−1}
+    // has eigenvalues ±σ — no squaring, so small σ keep their digits
+    // (through BᵀB, √λ of a tiny λ carries the rounding of the large ones:
+    // Hilbert(10)'s σ₁₀ was 4% off). Values alone are O(n²); the vectors
+    // stay on BᵀB, whose 2n-size version would cost ~8× the vector phase.
+    let gk_off: Vec<f64> = (0..2 * n - 1)
+        .map(|i| if i % 2 == 0 { d_diag[i / 2] } else { e_super[i / 2] }).collect();
+    let (mut gk, _) = crate::symeig::tridiag_eigen(vec![0.0; 2 * n], gk_off, None)?;
+    gk.sort_by(|a, b| b.total_cmp(a));
+    let mut gk_pos: Vec<f64> = gk[..n].iter().map(|s| s.max(0.0)).collect();
+    // Pair each value with its BᵀB eigenvector by rank (the same set of
+    // numbers up to rounding, in the same order).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| eig_vals[j].total_cmp(&eig_vals[i]));
     let mut sigma = vec![0.0_f64; n];
-    for k in 0..n {
-        let lam = eig_vals[k];
-        sigma[k] = if lam > 0.0 { lam.sqrt() } else { 0.0 };
-    }
+    for (r, &k) in order.iter().enumerate() { sigma[k] = std::mem::take(&mut gk_pos[r]); }
     if !vectors { return Ok((sigma, vec![], vec![])); }
     let v2 = v2.expect("vectors requested");
 
@@ -801,12 +817,9 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
                     + (if i + 1 < n { e_super[i] } else { 0.0 }) * next_v;
                 u2[k * n + i] = bv_i / sigma[k];
             }
-        } else {
-            // Rank-deficient: column of U₂ is unconstrained; leave zero.
-            // Caller reconstructing A still gets A ≈ U·Σ·Vᵀ exactly because
-            // the corresponding σ_k is 0, so any U column is fine.
         }
     }
+    orthonormalize_weak_columns(n, &mut u2, &sigma);
 
     // ── Assemble U = U₁ · U₂ (m×n) and V = V₁ · V₂ (n×n) ────────────
     // Both on the packed GEMM kernel (these were strided triple loops).
@@ -828,6 +841,67 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
 /// The Jacobi method is simple and always converges for symmetric matrices.
 /// For small matrices (n < 100), it's fast enough and numerically robust.
 /// Algorithm: repeatedly zero the largest off-diagonal element via Givens rotations.
+/// Make the columns of U₂ (n×n, column-major) that belong to small σ
+/// orthonormal, as LAPACK's are. u_k = B·v_k/σ_k carries rounding of order
+/// ε·σ_max/σ_k, so a column with σ_k < 10⁻³·σ_max is no longer orthogonal
+/// to the rest (Hilbert(10): σ₁₀/σ₁ ≈ 6e-14), and a σ_k = 0 column was left
+/// all zeros. Such columns, largest σ first, are taken in blocks of 64:
+/// projected off every accepted column twice ("twice is enough") as two
+/// GEMMs, then Gram–Schmidt'ed twice within the block and normalised. A
+/// column with nothing of its own (σ = 0: B·v = 0) starts from a fixed
+/// pseudo-random vector instead, so it becomes a valid completion. A·V = U·Σ
+/// is unchanged to rounding (these columns carry tiny σ). Nothing happens
+/// for a well-conditioned matrix; a rank-deficient one costs ~2n³ flops,
+/// nearly all in the GEMM kernel.
+fn orthonormalize_weak_columns(n: usize, u: &mut [f64], sigma: &[f64]) {
+    const BLOCK: usize = 64;
+    let smax = sigma.iter().copied().fold(0.0_f64, f64::max);
+    let strong = |k: usize| sigma[k] > 1e-3 * smax;
+    let mut weak: Vec<usize> = (0..n).filter(|&k| !strong(k)).collect();
+    if weak.is_empty() { return; }
+    weak.sort_by(|&i, &j| sigma[j].total_cmp(&sigma[i]));
+    // Accepted columns, contiguous (n × a, column-major).
+    let mut acc: Vec<f64> = (0..n).filter(|&k| strong(k)).flat_map(|k| u[k * n..(k + 1) * n].to_vec()).collect();
+    let norm = |c: &[f64]| c.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+    for block in weak.chunks(BLOCK) {
+        let b = block.len();
+        let mut x: Vec<f64> = block.iter().flat_map(|&k| u[k * n..(k + 1) * n].to_vec()).collect();
+        for c in 0..b {
+            if norm(&x[c * n..(c + 1) * n]) < 1e-8 {
+                for v in &mut x[c * n..(c + 1) * n] {
+                    seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+                    *v = (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+                }
+            }
+        }
+        // x −= acc·(accᵀ·x), twice
+        let a = acc.len() / n;
+        if a > 0 {
+            let mut acc_t = vec![0.0; a * n];
+            crate::dtranspose(n, a, &acc, &mut acc_t).expect("shapes");
+            let mut p = vec![0.0; a * b];
+            for _pass in 0..2 {
+                crate::dgemm(a, b, n, 1.0, &acc_t, &x, 0.0, &mut p).expect("shapes");
+                crate::dgemm(n, b, a, -1.0, &acc, &p, 1.0, &mut x).expect("shapes");
+            }
+        }
+        // within the block, in σ order, twice; then normalise
+        for c in 0..b {
+            for _pass in 0..2 {
+                for j in 0..c {
+                    let dot: f64 = (0..n).map(|i| x[j * n + i] * x[c * n + i]).sum();
+                    for i in 0..n { x[c * n + i] -= dot * x[j * n + i]; }
+                }
+            }
+            let nc = norm(&x[c * n..(c + 1) * n]);
+            for v in &mut x[c * n..(c + 1) * n] { *v /= nc; }
+        }
+        for (c, &k) in block.iter().enumerate() { u[k * n..(k + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]); }
+        acc.extend_from_slice(&x);
+    }
+}
+
 pub fn dsyev(n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
     if a.len() != n * n { return Err(LinalgError::NotSquare); }
     if n == 0 { return Ok(vec![]); }

@@ -15,12 +15,9 @@
 //!     surfaced honestly (`$imaginary` + a warning); complex eigenvectors
 //!     await a complex type, so `$vectors` is `NULL` in that case rather
 //!     than faked.
-//!   - `bi_svd` returns ONLY `$d` (singular values) — it intentionally
-//!     omits `$u` and `$v` because the underlying `dgesvd` does not yet
-//!     accumulate the orthogonal factors. Returning identity matrices
-//!     while pretending success would silently corrupt callers; we
-//!     refuse the temptation. Full U/Vᵀ is on the roadmap (tridiag+QR
-//!     replacement of Jacobi, see KNOWN_LIMITATIONS).
+//!   - `bi_svd` returns `$d`, `$u`, `$v` (R's order), or only `$d` for
+//!     `nu = 0, nv = 0`; small singular values accurate to ~ε·σ_max and U
+//!     orthonormal even for rank-deficient input (see `bi_svd`).
 
 use r2_linalg::{dgesvd_full, dpotrf, dsyev_full};
 use r2_types::{Attrs, ErrKind, EvalArg, Matrix, R2Err, RVal, Tensor};
@@ -153,17 +150,11 @@ pub fn bi_crossprod(a: &[EvalArg]) -> Result<RVal, R2Err> {
 ///
 /// Implementation: Householder bidiagonalization (Golub-Kahan) with the
 /// orthogonal factors recovered via reverse application of the stored
-/// reflectors onto thin identities (`dorgbr`-style), then diagonalization
-/// of the bidiagonal B by symmetric eigendecomposition of Bᵀ·B via the
-/// already-shipped `dsyev_full` (Householder tridiag + Wilkinson-shift QR).
-///
-/// **Honest accuracy note:** the Bᵀ·B route squares the condition number.
-/// For well-conditioned matrices (κ ≲ 1e7) singular values and vectors are
-/// accurate to ~1e-12. For badly conditioned matrices, small singular
-/// values lose accuracy proportionally. A proper LAPACK `dbdsqr`
-/// (implicit-shift bidiagonal QR with full Givens accumulation) would
-/// give κ-independent accuracy at higher implementation cost — tracked
-/// in KNOWN_LIMITATIONS.
+/// reflectors onto thin identities (`dorgbr`-style). The singular VALUES
+/// come from the Golub–Kahan tridiagonal (eigenvalues ±σ, no squaring:
+/// small σ accurate to ~ε·σ_max, like LAPACK); the vectors from the
+/// tridiagonal eigenproblem of Bᵀ·B, with the columns of U for small σ
+/// re-orthonormalised (see `decomp::svd_impl`).
 pub fn bi_svd(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mat = match &gv(a, 0) {
         RVal::Matrix(m) => m.clone(),

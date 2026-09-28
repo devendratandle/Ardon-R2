@@ -8,6 +8,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### `svd()` small singular values and vectors accurate — 2026-09-28
+
+- **Small singular values lost digits**: they came from the square roots
+  of the eigenvalues of BᵀB, so they carried the rounding of the largest
+  (Hilbert(10)'s smallest, 1.09e-13, was 4% off; absolute error ~4e-15).
+  They now come from the Golub–Kahan form (eigenvalues ±σ, nothing
+  squared): the error is ~3e-18, well under R's own rounding floor.
+- **`svd()$u` was not orthonormal for small or zero singular values**:
+  its columns were `B·v / σ` (rounding amplified by 1/σ) and exactly-zero
+  σ left a zero column. Those columns are now re-orthonormalised
+  (block Gram–Schmidt on the GEMM kernel), as LAPACK's are; a
+  rank-deficient matrix gets a proper orthonormal completion.
+- Cost: `svd(x, nu = 0, nv = 0)` at 1000x1000 ~425 ms (was 323), a full
+  SVD of a rank-deficient 1000x1000 ~1.0 s (R 4.5.3: 2.0 s); a
+  well-conditioned matrix skips the re-orthonormalisation.
+- Differential case `svd_accuracy` (singular values compared as 4-digit
+  strings so the harness's absolute floor cannot hide an error at 1e-13).
+
 ### Small p-values are no longer rounded to zero; distributions checked against R — 2026-09-28
 
 - **t-test and regression p-values below ~1e-16 were reported as 0**:
