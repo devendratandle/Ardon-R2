@@ -98,6 +98,38 @@ jobs:
         run: cargo clippy --workspace --release --all-targets --exclude r2-ui --exclude r2-gui -- -D warnings
         continue-on-error: true   # warnings tracked, not blocking, until cleaned up
 
+  # ── Differential harness: every case runs in R2 AND in GNU R ────
+  # The pre-push gate, now in CI (tests/differential/run.sh). Windows
+  # only, on purpose: string collation follows the OS locale in R, and
+  # the cases pin R's Windows/English order (Linux glibc orders
+  # punctuation differently, so a Linux R would disagree with itself).
+  differential:
+    name: differential harness vs GNU R (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-diff-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.5'
+      - name: Build r2 binary
+        run: cargo build -p r2-repl --release --bin r2
+      - name: Run the differential cases
+        shell: bash
+        env:
+          RSCRIPT: Rscript
+        run: bash tests/differential/run.sh
+
   # ── Optional: smoke-test the REPL binary actually starts ────────
   smoke-test:
     name: smoke-test r2 binary
