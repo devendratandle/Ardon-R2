@@ -142,31 +142,64 @@ pub fn f_sf(f: f64, df1: f64, df2: f64) -> f64 {
     incomplete_beta(df2 / 2.0, df1 / 2.0, x)
 }
 
-/// Student-t quantile via bisection on `t_cdf`. ~50 iterations to f64
-/// precision; fast enough for one-shot CI computation in t.test.
+/// Student-t quantile, lower tail: exact 0 at p = 1/2, symmetry above it,
+/// an expanding bracket (df = 1 puts qt(1e-10) near −3.2e9, far past any
+/// fixed interval), bisection, then Newton steps on `t_cdf` / `t_density`
+/// to full double precision. The old fixed [−50, 50] bisection clipped the
+/// far tail and stopped at ~1e-8.
 pub fn qt(p: f64, df: f64) -> f64 {
-    if p <= 0.0 { return f64::NEG_INFINITY; }
-    if p >= 1.0 { return f64::INFINITY; }
-    if (p - 0.5).abs() < 1e-15 { return 0.0; }
-    let mut lo = -50.0_f64;
-    let mut hi = 50.0_f64;
-    for _ in 0..80 {
+    if p.is_nan() || df.is_nan() || !(0.0..=1.0).contains(&p) { return f64::NAN; }
+    if p == 0.0 { return f64::NEG_INFINITY; }
+    if p == 1.0 { return f64::INFINITY; }
+    if p == 0.5 { return 0.0; }
+    if p > 0.5 { return -qt(1.0 - p, df); }
+    let (mut lo, mut hi) = (-1.0_f64, 0.0_f64);
+    while t_cdf(lo, df) > p {
+        hi = lo;
+        lo *= 2.0;
+        if lo < -1e300 { return f64::NEG_INFINITY; }
+    }
+    for _ in 0..200 {
         let mid = 0.5 * (lo + hi);
         if t_cdf(mid, df) < p { lo = mid; } else { hi = mid; }
+        if hi - lo <= 1e-12 * hi.abs().max(1e-300) { break; }
     }
-    0.5 * (lo + hi)
+    let mut x = 0.5 * (lo + hi);
+    for _ in 0..8 {
+        let d = t_density(x, df);
+        if !(d > 0.0) { break; }
+        let step = (t_cdf(x, df) - p) / d;
+        x -= step;
+        if step.abs() <= 4e-16 * x.abs() { break; }
+    }
+    x
 }
 
-/// Student-t CDF using the regularised incomplete-beta identity:
-///   P(T ≤ t) = 1 − ½ · I_{x}(df/2, ½)     where x = df / (df + t²)
-/// for `t ≥ 0`; reflect for negative `t`. The Lentz CF reaches ~1e-7
-/// across all df (the previous shortcut to a normal-approx for df > 30
-/// produced ~1e-3 error at moderate df, which mattered for printed
-/// p-values around the 0.05 threshold).
+/// The Student-t density, in log form so large `df` and far tails do not
+/// overflow before they cancel.
+pub fn t_density(t: f64, df: f64) -> f64 {
+    let lc = ln_gamma((df + 1.0) / 2.0) - ln_gamma(df / 2.0) - 0.5 * (df * std::f64::consts::PI).ln();
+    (lc - (df + 1.0) / 2.0 * (t * t / df).ln_1p()).exp()
+}
+
+/// Student-t CDF from the regularised incomplete beta, choosing the
+/// identity whose value is the SMALL probability, so neither side cancels
+/// (`incomplete_beta` gives only I, not its complement, as R's bratio does):
+///   |t| < 1: P(|T| ≤ |t|) = I_y(½, df/2), y = t² / (df + t²)
+///   |t| ≥ 1: P(|T| > |t|) = I_x(df/2, ½), x = df / (df + t²)
+/// The second alone loses t near the centre — x rounds to 1 for
+/// |t| < ~1e-8·√df, so every such t gave exactly ½ and `qt(0.5)` came out
+/// −1e-8. The first alone cancels in the tail (0.5 − (0.5 − tiny)). The
+/// continued fraction converges to 1e-15 (`betacf`). (A normal shortcut
+/// for df > 30 was once used here and cost ~1e-3.)
 pub fn t_cdf(t: f64, df: f64) -> f64 {
     if df <= 0.0 { return f64::NAN; }
-    let x = df / (df + t * t);
-    let half_ib = 0.5 * incomplete_beta(df / 2.0, 0.5, x);
+    let t2 = t * t;
+    if t2 < 1.0 {
+        let half = 0.5 * incomplete_beta(0.5, df / 2.0, t2 / (df + t2));
+        return if t >= 0.0 { 0.5 + half } else { 0.5 - half };
+    }
+    let half_ib = 0.5 * incomplete_beta(df / 2.0, 0.5, df / (df + t2));
     if t >= 0.0 { 1.0 - half_ib } else { half_ib }
 }
 

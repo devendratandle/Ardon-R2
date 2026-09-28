@@ -153,7 +153,7 @@ fn welch_two_sample(
     let diff = mx - my;
     let t_stat = diff / se;
     let df = (vx + vy).powi(2) / (vx.powi(2) / (nx - 1.0) + vy.powi(2) / (ny - 1.0));
-    let p_value = 2.0 * (1.0 - t_cdf(t_stat.abs(), df));
+    let p_value = 2.0 * t_cdf(-t_stat.abs(), df);   // the tail itself: 1 - cdf cancels small p to 0
     let alpha = 1.0 - conf_level;
     let t_crit = qt(1.0 - alpha / 2.0, df);
     let ci_lo = diff - t_crit * se;
@@ -276,7 +276,7 @@ fn paired_t_test(
     let se = sd_d / nf.sqrt();
     let t_stat = (mean_d - mu) / se;
     let df = nf - 1.0;
-    let p_value = 2.0 * (1.0 - t_cdf(t_stat.abs(), df));
+    let p_value = 2.0 * t_cdf(-t_stat.abs(), df);   // the tail itself: 1 - cdf cancels small p to 0
     let alpha = 1.0 - conf_level;
     let t_crit = qt(1.0 - alpha / 2.0, df);
     let ci_lo = mean_d - t_crit * se;
@@ -324,7 +324,7 @@ fn one_sample_t_test(
     let se = sd / n.sqrt();
     let t_stat = (mean - mu) / se;
     let df = n - 1.0;
-    let p_value = 2.0 * (1.0 - t_cdf(t_stat.abs(), df));
+    let p_value = 2.0 * t_cdf(-t_stat.abs(), df);   // the tail itself: 1 - cdf cancels small p to 0
     let alpha = 1.0 - conf_level;
     let t_crit = qt(1.0 - alpha / 2.0, df);
     let ci_lo = mean - t_crit * se;
@@ -563,7 +563,7 @@ pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let t_stat = if (1.0 - r * r).abs() > 1e-15 { r * (df / (1.0 - r * r)).sqrt() } else { f64::INFINITY };
     // R: pt(-|t|, df)*2 — the t distribution, not the normal. The normal
     // shortcut understates p at small n (n=10: 0.0128 vs R's 0.0264).
-    let p_value = 2.0 * (1.0 - t_cdf(t_stat.abs(), df));
+    let p_value = 2.0 * t_cdf(-t_stat.abs(), df);   // the tail itself: 1 - cdf cancels small p to 0
 
     soutln!("\n  Pearson's product-moment correlation\n");
     soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), n - 2, fmt_pval(p_value));

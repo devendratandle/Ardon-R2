@@ -58,6 +58,12 @@ to be worse than documented and was fixed here rather than scheduled.
   the printed rows match R.
 - `sapply` simplifies length-1 results to a vector; equal-length longer
   results stay a list where R builds a matrix.
+- **Missing distributions**: the beta and gamma families (`dbeta`,
+  `pbeta`, `qbeta`, `dgamma`, `pgamma`, `qgamma`), the F density `df`,
+  and uniform, Weibull, lognormal, Cauchy, logistic, geometric, negative
+  binomial, hypergeometric. The implemented ones match R to 1e-13 on the
+  `distribution_grid` case except `qf` (bisection, ~1e-11).
+- Taking a column of a matrix (`m[, 4]`) drops the row names R keeps.
 - **No user-level `qr()`** (nor `qr.Q`, `qr.R`, `qr.solve`): the blocked
   Householder QR exists and serves `lm()` and least squares, but there is
   no R-style `qr` object yet.

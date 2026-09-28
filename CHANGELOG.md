@@ -8,6 +8,30 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Small p-values are no longer rounded to zero; distributions checked against R — 2026-09-28
+
+- **t-test and regression p-values below ~1e-16 were reported as 0**:
+  they were computed as `2 * (1 - pt(|t|))`, which cancels. `lm(mpg ~ wt,
+  mtcars)` gave the intercept p = 0; it is now 8.241799e-19, R's value.
+  Same fix in `t.test` (all forms) and `cor.test`.
+- **`qt()` was accurate to only ~1e-8** (`qt(0.5, df)` gave -1e-8, not 0)
+  and clipped the far tail (the t-test's quantile searched only [-50, 50];
+  `qt(1e-10, 1)` is about -3.2e9). Now: exact at 0.5, an expanding
+  bracket and Newton refinement to full precision.
+- `pt()` lost precision near 0 and in the far tails (either identity alone
+  cancels on one side); it now picks the identity that gives the small
+  probability directly.
+- **`ppois()` / `pbinom()` upper tails** were `1 - lower`: `ppois(150, 0.5,
+  lower.tail = FALSE, log.p = TRUE)` was `-Inf` (R: -715.2) and
+  `ppois(150, 4, ...)` -34 (R: -405). The small tail is now summed directly
+  in log space.
+- `log.p = TRUE` of a probability near 1 (`log(1 - 1e-10)`) keeps all its
+  digits (it kept six).
+- New differential case `distribution_grid`: 555 values of `pt`, `qt`,
+  `dt`, `pf`, `qf`, `pnorm`, `qnorm`, `dnorm`, `pbinom`, `qbinom`,
+  `dbinom`, `ppois`, `qpois`, `dpois`, `pexp`, `qexp`, `dexp` including far
+  tails and `log.p`; 543 agree with R to 1e-13, the worst (`qf`) to 4e-11.
+
 ### `summary()`, `anova()`, `aov()` return values and print only when shown — 2026-09-28
 
 - **`summary()` returns an object and prints nothing while computing**, as

@@ -1,7 +1,7 @@
 fit <- lm(mpg ~ wt, data = mtcars)
 s <- summary(fit)
 class(s)
-s$coefficients[, 1:3]
+s$coefficients
 sv <- summary(c(1, 2, 3, 4, 100))
 sv
 inherits(sv, "summaryDefault")

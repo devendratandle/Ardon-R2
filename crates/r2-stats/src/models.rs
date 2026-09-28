@@ -270,7 +270,7 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
             std_errors[j] = if var_j > 0.0 { var_j.sqrt() } else { 0.0 };
             t_values[j] = if std_errors[j] > 1e-15 { coeffs[j] / std_errors[j] } else { 0.0 };
             p_values[j] = if df_resid > 0.0 {
-                2.0 * (1.0 - crate::htest::t_cdf(t_values[j].abs(), df_resid))
+                2.0 * crate::htest::t_cdf(-t_values[j].abs(), df_resid)   // tail directly; 1 - cdf cancelled to 0
             } else { 1.0 };
         }
     }

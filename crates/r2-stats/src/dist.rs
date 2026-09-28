@@ -289,7 +289,7 @@ pub fn bi_qnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
 // special functions in `crate::htest`.
 // ─────────────────────────────────────────────────────────────────────
 
-use crate::htest::{t_cdf, incomplete_beta, ln_gamma};
+use crate::htest::{t_cdf, incomplete_beta, ln_gamma, qt};
 
 /// `x * ln(y)` with the convention `0 * ln(0) = 0` (avoids NaN in pmf logs).
 #[inline]
@@ -334,8 +334,52 @@ fn flag(a: &[EvalArg], name: &str, pos: usize, dflt: bool) -> bool {
 /// tails computed so that neither is `1 - other` where that cancels.
 #[inline]
 fn tail_out(lower_v: f64, upper_v: f64, lower: bool, logp: bool) -> f64 {
-    let v = if lower { lower_v } else { upper_v };
-    if logp { v.ln() } else { v }
+    let (v, other) = if lower { (lower_v, upper_v) } else { (upper_v, lower_v) };
+    // log of a value near 1 from its small complement: ln(1 - 1e-10) as
+    // ln_1p(-1e-10) keeps every digit; v.ln() would keep six.
+    if logp { if v > 0.5 { (-other).ln_1p() } else { v.ln() } } else { v }
+}
+
+/// ln(1 − e^x) for x ≤ 0 without cancellation (R's `R_Log1_Exp`).
+fn log1mexp(x: f64) -> f64 {
+    if x > -std::f64::consts::LN_2 { (-x.exp_m1()).ln() } else { (-x.exp()).ln_1p() }
+}
+
+/// Both tails of a discrete distribution at `k`, as logs: P(X ≤ k) and
+/// P(X > k). The SMALL tail is summed directly in log space (no `1 − s`
+/// cancellation, no underflow of a tail far below 1e-308), the other is
+/// ln(1 − small). `log_term(i)` is ln P(X = i) on the support [0, `hi`];
+/// `mode` picks which side is small.
+fn discrete_log_tails(k: f64, hi: f64, mode: f64, log_term: impl Fn(f64) -> f64) -> (f64, f64) {
+    if k < 0.0 { return (f64::NEG_INFINITY, 0.0); }
+    if k >= hi { return (0.0, f64::NEG_INFINITY); }
+    // log-sum-exp over i in the range, stopping once terms stop mattering
+    let log_sum = |from: f64, to: f64, down: bool| -> f64 {
+        let (mut m, mut s) = (f64::NEG_INFINITY, 0.0);
+        let mut i = if down { to } else { from };
+        loop {
+            let t = log_term(i);
+            if t > m { s = s * (m - t).exp() + 1.0; m = t; } else { s += (t - m).exp(); }
+            // past the peak, a term 40 orders below the running sum is noise
+            if m.is_finite() && t < m - 92.0 { break; }
+            i = if down { i - 1.0 } else { i + 1.0 };
+            if (down && i < from) || (!down && i > to) { break; }
+        }
+        m + s.ln()
+    };
+    if k < mode {
+        let lo = log_sum(0.0, k.floor(), true);
+        (lo, log1mexp(lo))
+    } else {
+        let up = log_sum(k.floor() + 1.0, hi, false);
+        (log1mexp(up), up)
+    }
+}
+
+/// A (log) tail pair from `discrete_log_tails` as the p-function's value.
+fn tail_out_log(lo: f64, up: f64, lower: bool, logp: bool) -> f64 {
+    let v = if lower { lo } else { up };
+    if logp { v } else { v.exp() }
 }
 
 /// A q-function's `p` as a LOWER-tail probability, honouring `lower.tail`
@@ -378,7 +422,9 @@ fn no_ncp(a: &[EvalArg], f: &str, pos: usize) -> Result<(), R2Err> {
     }
 }
 fn ln_binom(n: f64, x: f64, p: f64) -> f64 {
-    ln_gamma(n + 1.0) - ln_gamma(x + 1.0) - ln_gamma(n - x + 1.0) + xlogy(x, p) + xlogy(n - x, 1.0 - p)
+    // ln(1 - p) as ln_1p(-p): `1.0 - p` alone loses digits of a small p
+    let n_x = n - x;
+    ln_gamma(n + 1.0) - ln_gamma(x + 1.0) - ln_gamma(n_x + 1.0) + xlogy(x, p) + if n_x == 0.0 { 0.0 } else { n_x * (-p).ln_1p() }
 }
 
 pub fn bi_dexp(a: &[EvalArg]) -> Result<RVal, R2Err> { let r = param(a,"rate",1,1.0); map_x(a, move |x| if x < 0.0 { 0.0 } else { r * (-r * x).exp() }) }
@@ -404,9 +450,10 @@ pub fn bi_dbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
 pub fn bi_pbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let n = param(a,"size",1,0.0); let p = param(a,"prob",2,0.5);
     let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
-    map_x(a, move |q| { let qi = q.floor(); let mut s = 0.0; let mut i = 0.0;
-        while i <= qi && i <= n { s += ln_binom(n, i, p).exp(); i += 1.0; }
-        let s = s.min(1.0); tail_out(s, 1.0 - s, lower, logp) })
+    map_x(a, move |q| {
+        let (lo, up) = discrete_log_tails(q.floor(), n, n * p, |i| ln_binom(n, i, p));
+        tail_out_log(lo, up, lower, logp)
+    })
 }
 pub fn bi_dpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let lam = param(a,"lambda",1,1.0);
@@ -415,9 +462,10 @@ pub fn bi_dpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
 pub fn bi_ppois(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let lam = param(a,"lambda",1,1.0);
     let (lower, logp) = (flag(a, "lower.tail", 2, true), flag(a, "log.p", 3, false));
-    map_x(a, move |q| { let qi = q.floor(); let mut s = 0.0; let mut i = 0.0;
-        while i <= qi { s += (xlogy(i, lam) - lam - ln_gamma(i + 1.0)).exp(); i += 1.0; }
-        let s = s.min(1.0); tail_out(s, 1.0 - s, lower, logp) })
+    map_x(a, move |q| {
+        let (lo, up) = discrete_log_tails(q.floor(), f64::INFINITY, lam, |i| xlogy(i, lam) - lam - ln_gamma(i + 1.0));
+        tail_out_log(lo, up, lower, logp)
+    })
 }
 pub fn bi_dt(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let df = param(a,"df",1,1.0);
@@ -485,7 +533,7 @@ pub fn bi_qt(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
     map_x(a, move |p| {
         let p = if logp { p.exp() } else { p };
-        let q = quantile_bisect(p, -1.0e7, 1.0e7, |x| t_cdf(x, df));
+        let q = qt(p, df);
         if lower { q } else { -q }                   // symmetric
     })
 }
