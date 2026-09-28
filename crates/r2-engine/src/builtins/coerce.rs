@@ -393,15 +393,25 @@ pub(crate) fn bi_format(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     // `print` uses — `format(pi)` is "3.141593", not every digit of the double
     let digits = gn(a,"digits").and_then(|x| e.scalar_f64(&x).ok().flatten())
         .filter(|d| *d >= 1.0).map(|d| d as usize).unwrap_or(7);
-    let out: Vec<Option<Arc<str>>> = match &v {
-        RVal::Numeric(nv, _) => nv.iter().copied().map(|o| o.map(|x| {
-            let s = if nsmall > 0 { format!("{:.*}", nsmall, x) }
-                    else { r2_types::with_print_digits(digits, || r2_types::fmt_num(x)) };
-            Arc::from(s.as_str())
-        })).collect(),
-        other => str_vec(other),
+    // R's format.default: the whole vector in one format and one width —
+    // numbers with common decimals (`nsmall` a minimum, not an exact
+    // count), numbers and logicals right-aligned, text left-aligned; NA
+    // becomes the string "NA".
+    let strs: Vec<String> = match &v {
+        RVal::Numeric(nv, _) => r2_types::format_reals(nv, digits, nsmall),
+        other => {
+            let raw: Vec<String> = str_vec(other).into_iter().map(|s| s.map_or("NA".into(), |s| s.to_string())).collect();
+            let w = raw.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+            let left = matches!(other, RVal::Character(..) | RVal::Factor(_));
+            raw.into_iter().map(|s| if left { format!("{:<w$}", s) } else { format!("{:>w$}", s) }).collect()
+        }
     };
-    Ok(RVal::Character(out, Attrs::default()))
+    let names = match &v {
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) => at.names.clone(),
+        _ => None,
+    };
+    Ok(RVal::Character(strs.into_iter().map(|s| Some(Arc::from(s.as_str()))).collect(),
+        Attrs { names, ..Default::default() }))
 }
 
 pub(crate) fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Numeric(..)|RVal::Integer(..)))) }

@@ -52,11 +52,9 @@ to be worse than documented and was fixed here rather than scheduled.
   called**, so `summary(fit)$coefficients` shows the whole summary first.
   The hypothesis tests were fixed by keeping their report on the result;
   these need the same treatment.
-- **`format()` of a vector formats each element on its own**: R pads a
-  vector to common decimals (`format(c(1, 2.5))` is `"1.0" "2.5"`, R2
-  gives `"1" "2.5"`), and `nsmall` is treated as an exact decimal count
-  rather than R's minimum. `print` pads to a common width like R but
-  shares the missing common decimals (`[1] 1.0 2.5` prints `[1]   1 2.5`).
+- **A data frame or matrix prints at most 20 rows** (then `... (n more
+  rows)`); R prints them all (up to `max.print`). Values and layout of
+  the printed rows match R.
 - `sapply` simplifies length-1 results to a vector; equal-length longer
   results stay a list where R builds a matrix.
 - **No user-level `qr()`** (nor `qr.Q`, `qr.R`, `qr.solve`): the blocked

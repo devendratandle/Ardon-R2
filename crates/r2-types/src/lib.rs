@@ -36,6 +36,7 @@ pub mod infer;
 //   factor   — R's default factor levels (sorted) + level labels
 //   sort     — R's orderings: collation, sort/order keys, unique keys
 //   replace  — `x[i] <- v`: subscripts, growth, type widening
+//   numfmt   — R's formatReal: one common format per numeric vector
 mod error;
 mod columnar;
 mod matrix;
@@ -44,6 +45,7 @@ mod expr;
 mod factor;
 mod sort;
 mod replace;
+mod numfmt;
 
 pub use error::*;
 pub use columnar::*;
@@ -53,6 +55,7 @@ pub use expr::*;
 pub use factor::*;
 pub use sort::*;
 pub use replace::*;
+pub use numfmt::*;
 
 #[derive(Debug, Clone, Default)]
 pub struct Attrs {
@@ -472,6 +475,9 @@ pub fn with_print_digits<R>(digits: usize, f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// The significant digits printing uses: 7, or `n` inside `print(x, digits = n)`.
+pub fn print_digits() -> usize { PRINT_DIGITS.with(|d| d.get()) }
+
 /// Central numeric formatting: `digits` (7 unless `with_print_digits`)
 /// significant digits, scientific for extreme values. At 7 every branch
 /// is exactly what it always was.
@@ -525,11 +531,12 @@ impl fmt::Display for RVal {
                     let strs: Vec<String> = v[..3].iter().map(|x| x.map_or("NA".into(), |n| format!("{:.3}", n))).collect();
                     if let Some(r) = write_named(f, &shown, &strs) { return r; }
                 }
+                // One common format for the whole vector, as R prints it.
+                let strs = format_reals(v, print_digits(), 0);
                 if attrs.names.is_some() {
-                    let strs: Vec<String> = v.iter().map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect();
                     if let Some(r) = write_named(f, attrs, &strs) { return r; }
                 }
-                write_vec(f, v, |x| match x { Some(n) => fmt_num(*n), None => "NA".into() }, false, "numeric(0)")
+                write_vec(f, &strs, |s| s.trim_start().to_string(), false, "numeric(0)")
             }
             RVal::Single(v, _) => {
                 // Print like Numeric but with `(single)` annotation
@@ -578,24 +585,31 @@ impl fmt::Display for RVal {
                 // Compute column widths
                 let mut col_widths: Vec<usize> = Vec::new();
                 let mut col_headers: Vec<String> = Vec::new();
+                // R formats each column as one vector: common decimals per column.
+                let mut cells: Vec<Vec<String>> = Vec::with_capacity(m.ncol);
                 for c in 0..m.ncol {
                     let header = m.col_names.as_ref().and_then(|cn| cn.get(c)).map(|s| s.to_string()).unwrap_or(format!("[,{}]", c + 1));
-                    let max_val = (0..max_rows).map(|r| fmt_num(m.get(r, c)).len()).max().unwrap_or(1);
+                    let col: Vec<Real> = (0..m.nrow).map(|r| Some(m.get(r, c))).collect();
+                    let strs: Vec<String> = format_reals(&col, print_digits(), 0).into_iter().take(max_rows)
+                        .map(|s| s.trim_start().to_string()).collect();
+                    let max_val = strs.iter().map(|s| s.len()).max().unwrap_or(1);
                     col_widths.push(header.len().max(max_val));
                     col_headers.push(header);
+                    cells.push(strs);
                 }
                 // Header
                 write!(f, "{:>w$}", "", w = rn_width)?;
                 for (c, h) in col_headers.iter().enumerate() { write!(f, " {:>w$}", h, w = col_widths[c])?; }
                 writeln!(f)?;
                 // Rows
+                // Newlines between rows only: the printer ends the last line.
                 for r in 0..max_rows {
+                    if r > 0 { writeln!(f)?; }
                     let rn = m.row_names.as_ref().and_then(|rn| rn.get(r)).map(|s| s.to_string()).unwrap_or(format!("[{},]", r + 1));
                     write!(f, "{:>w$}", rn, w = rn_width)?;
-                    for c in 0..m.ncol { write!(f, " {:>w$}", fmt_num(m.get(r, c)), w = col_widths[c])?; }
-                    writeln!(f)?;
+                    for c in 0..m.ncol { write!(f, " {:>w$}", cells[c][r], w = col_widths[c])?; }
                 }
-                if m.nrow > 20 { writeln!(f, "... ({} more rows)", m.nrow - 20)?; }
+                if m.nrow > 20 { write!(f, "\n... ({} more rows)", m.nrow - 20)?; }
                 Ok(())
             }
             RVal::DataFrame(df) => {
@@ -606,36 +620,39 @@ impl fmt::Display for RVal {
                 // Compute column widths based on content and header
                 let mut col_strs: Vec<Vec<String>> = Vec::new();
                 let mut col_widths: Vec<usize> = Vec::new();
-                let mut is_char: Vec<bool> = Vec::new();
                 for (name, col) in &df.columns {
-                    let elems: Vec<String> = (0..nrow).map(|r| fmt_elem(col, r)).collect();
+                    // A numeric column is one vector to R: common decimals.
+                    let elems: Vec<String> = match col {
+                        RVal::Numeric(v, _) => format_reals(v, print_digits(), 0).into_iter()
+                            .map(|s| s.trim_start().to_string()).collect(),
+                        _ => (0..nrow).map(|r| fmt_elem(col, r)).collect(),
+                    };
                     let max_elem = elems.iter().map(|s| s.len()).max().unwrap_or(0);
                     let w = name.len().max(max_elem);
                     col_widths.push(w);
-                    is_char.push(matches!(col, RVal::Character(..) | RVal::Factor(..)));
                     col_strs.push(elems);
                 }
 
-                // Header row
-                write!(f, "{:>w$}", "", w = rn_width + 1)?;
+                // Row labels: the row names if set, else 1..n; left-aligned
+                // as R prints them.
+                let labels: Vec<String> = (0..nrow).map(|r| df.row_names.as_ref()
+                    .and_then(|rn| rn.get(r)).map(|s| s.to_string()).unwrap_or_else(|| (r + 1).to_string())).collect();
+                let rn_width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(rn_width);
+
+                // Header row (no trailing newline: the printer adds one)
+                write!(f, "{:>w$}", "", w = rn_width)?;
                 for (i, (name, _)) in df.columns.iter().enumerate() {
                     write!(f, " {:>w$}", name, w = col_widths[i])?;
                 }
-                writeln!(f)?;
-
-                // Data rows
-                for r in 0..nrow {
-                    write!(f, "{:>w$}", r + 1, w = rn_width)?;
-                    for c in 0..ncol {
-                        if is_char[c] {
-                            write!(f, " {:>w$}", col_strs[c][r], w = col_widths[c])?;
-                        } else {
-                            write!(f, " {:>w$}", col_strs[c][r], w = col_widths[c])?;
-                        }
-                    }
+                // Data rows; strings right-aligned, as print.data.frame does
+                for (r, label) in labels.iter().enumerate() {
                     writeln!(f)?;
+                    write!(f, "{:<w$}", label, w = rn_width)?;
+                    for c in 0..ncol {
+                        write!(f, " {:>w$}", col_strs[c][r], w = col_widths[c])?;
+                    }
                 }
-                if df.nrow() > 20 { writeln!(f, "... ({} more rows)", df.nrow() - 20)?; }
+                if df.nrow() > 20 { write!(f, "\n... ({} more rows)", df.nrow() - 20)?; }
                 Ok(())
             }
             RVal::TypeInstance(inst) => {

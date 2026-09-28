@@ -8,6 +8,23 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Numbers print with R's common decimals — 2026-09-28
+
+- **A numeric vector prints in one format, as R's does**: `c(1, 2.5)` is
+  `[1] 1.0 2.5` (it was `1 2.5`), `c(1.123456789, 100)` is
+  `1.123457 100.000000`, `c(0.5, 100000)` is `5e-01 1e+05` — the most
+  decimals any element needs, fixed unless scientific is narrower (R's
+  `formatReal`). Named vectors, matrix columns and data-frame columns
+  print the same way; `print(x, digits = n)` applies.
+- **`format()`** gives the whole vector one format and one width
+  (`format(c(1, 10, 100))` is `"  1" " 10" "100"`), treats `nsmall` as a
+  minimum (`format(3.14159, nsmall = 2)` is `"3.14159"`), pads text on the
+  right and keeps names.
+- A data frame's header is no longer indented one space too far, its row
+  names print when set, and matrices and data frames no longer print a
+  blank line after themselves.
+- Whole-output differential case `output/print_numbers`.
+
 ### Documents state the live version and counts — 2026-09-28
 
 - `llms.txt` said "v0.4.0, 438 builtins" after the code had moved to

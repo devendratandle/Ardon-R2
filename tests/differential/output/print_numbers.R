@@ -1,0 +1,21 @@
+c(1, 2.5)
+c(1.123456789, 100)
+c(a = 1, b = 2.5)
+x <- c(0.001234, 12.5, NA, 1000)
+x
+print(pi, digits = 3)
+1e5
+c(0.5, 100000)
+c(-1e-5, 3)
+1:3 / 7
+c(-1.5, 0, 2)
+seq(0, 1, by = 0.25)
+matrix(c(1, 2.5, 3, 4), 2)
+data.frame(a = c(1, 2.5), b = c("x", "y"), c = c(10, 200))
+format(c(1, 2.5))
+format(c(1, 10, 100))
+format(3.14159, nsmall = 2)
+format(2, nsmall = 2)
+format(c("a", "bbb", NA))
+format(c(TRUE, FALSE))
+format(c(1L, 10L))
