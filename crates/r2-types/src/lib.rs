@@ -531,6 +531,14 @@ impl fmt::Display for RVal {
                     let strs: Vec<String> = v[..3].iter().map(|x| x.map_or("NA".into(), |n| format!("{:.3}", n))).collect();
                     if let Some(r) = write_named(f, &shown, &strs) { return r; }
                 }
+                // summary(x): 4 significant digits (R: digits - 3), the NA
+                // count as a whole number.
+                if attrs.class.as_deref() == Some("summaryDefault") && attrs.names.is_some() {
+                    let k = v.len().min(6);
+                    let mut strs = format_reals(&v[..k], print_digits().saturating_sub(3).max(3), 0);
+                    strs.extend(v[k..].iter().map(|x| x.map_or("NA".into(), |n| format!("{}", n as i64))));
+                    if let Some(r) = write_named(f, attrs, &strs) { return r; }
+                }
                 // One common format for the whole vector, as R prints it.
                 let strs = format_reals(v, print_digits(), 0);
                 if attrs.names.is_some() {
@@ -581,7 +589,11 @@ impl fmt::Display for RVal {
             }
             RVal::Matrix(m) => {
                 let max_rows = m.nrow.min(20);
-                let rn_width = format!("[{},]", max_rows).len();
+                // Row labels: names left-aligned to the longest (R), else "[i,]" right-aligned.
+                let rn_width = match &m.row_names {
+                    Some(rn) => rn.iter().take(max_rows).map(|s| s.chars().count()).max().unwrap_or(0),
+                    None => format!("[{},]", max_rows).len(),
+                };
                 // Compute column widths
                 let mut col_widths: Vec<usize> = Vec::new();
                 let mut col_headers: Vec<String> = Vec::new();
@@ -606,7 +618,7 @@ impl fmt::Display for RVal {
                 for r in 0..max_rows {
                     if r > 0 { writeln!(f)?; }
                     let rn = m.row_names.as_ref().and_then(|rn| rn.get(r)).map(|s| s.to_string()).unwrap_or(format!("[{},]", r + 1));
-                    write!(f, "{:>w$}", rn, w = rn_width)?;
+                    if m.row_names.is_some() { write!(f, "{:<w$}", rn, w = rn_width)?; } else { write!(f, "{:>w$}", rn, w = rn_width)?; }
                     for c in 0..m.ncol { write!(f, " {:>w$}", cells[c][r], w = col_widths[c])?; }
                 }
                 if m.nrow > 20 { write!(f, "\n... ({} more rows)", m.nrow - 20)?; }

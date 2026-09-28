@@ -793,7 +793,9 @@ pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     }
     Ok(RVal::Null)
 }
-pub(crate) fn bi_summary(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+/// The printed report of `summary(x)`; `summary::bi_summary` captures it and
+/// returns a value that prints it.
+pub(crate) fn summary_report(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
     // Phase R.2 step 5: data-shaped paths (DataFrame, Numeric) handled by
     // r2-data::summary. Returns Some(()) if handled; falls through here

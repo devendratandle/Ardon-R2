@@ -8,6 +8,23 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### `summary()`, `anova()`, `aov()` return values and print only when shown — 2026-09-28
+
+- **`summary()` returns an object and prints nothing while computing**, as
+  in R: `s <- summary(fit)` is silent, `s` prints the summary, and
+  `summary(fit)$coefficients` is R's matrix (Estimate, Std. Error,
+  t value, Pr(>|t|), rows named by the coefficients) — it printed the
+  whole summary and returned the model itself. `class(s)` is
+  `summary.lm` / `summary.glm`.
+- `summary(x)` of numbers returns R's `summaryDefault` (Min., 1st Qu.,
+  Median, Mean, 3rd Qu., Max., and NA's when present), printed at 4
+  significant digits like R; it returned NULL. `summary(df)` returns a
+  value that prints the table.
+- `anova()`, `aov()`, `manova()` and `system.time()` results no longer
+  print on assignment, and print when shown.
+- Matrices with row names print them left-aligned, as R does.
+- Differential case `output/summary_values`.
+
 ### Numbers print with R's common decimals — 2026-09-28
 
 - **A numeric vector prints in one format, as R's does**: `c(1, 2.5)` is

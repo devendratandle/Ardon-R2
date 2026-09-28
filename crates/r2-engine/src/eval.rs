@@ -404,24 +404,23 @@ impl Engine {
     }
 }
 
-/// The hypothesis tests: their report is kept on the result they return
-/// (see `call_fn`) and shown when that result is printed — not when the
-/// test runs. So `res <- chisq.test(m)` prints nothing, `res` prints the
-/// report, and `chisq.test(m)$p.value` prints just the number.
+/// The hypothesis tests and the ANOVA tables: their report is kept on the
+/// result they return (see `call_fn`) and shown when that result is
+/// printed — not when they run. So `res <- chisq.test(m)` prints nothing,
+/// `res` prints the report, and `chisq.test(m)$p.value` prints just the
+/// number. (`summary` does the same inside `bi_summary`.)
 pub(crate) fn is_htest_builtin(name: &str) -> bool {
     matches!(name,
         "t.test" | "chisq.test" | "wilcox.test" | "var.test" | "ks.test" |
         "fisher.test" | "cor.test" | "prop.test" | "binom.test" |
         "oneway.test" | "kruskal.test" | "shapiro.test" | "bartlett.test" |
-        "poisson.test" | "hotelling.test")
+        "poisson.test" | "hotelling.test" | "anova" | "aov" | "manova")
 }
 
 /// Functions whose value R returns invisibly — their result is not
 /// auto-printed at the top level, and a user function ending in one of
 /// them returns invisibly too (`f <- function(v) print(v); f(1)` prints
-/// once). `anova`, `aov`, `manova`, `summary` and `str` are here because
-/// R2's versions still print their report as they run; they leave this
-/// list when they keep it on their result, as the hypothesis tests do.
+/// once). `str` is here because R's `str` prints and returns NULL.
 pub(crate) fn is_invisible_builtin(name: &str) -> bool {
     matches!(name,
         "invisible" | "print" | "cat" | "message" | "warning" | "writeLines" |
@@ -433,9 +432,7 @@ pub(crate) fn is_invisible_builtin(name: &str) -> bool {
         "clear" | "cls" | "clr" |
         "plot" | "hist" | "boxplot" | "barplot" | "lines" | "points" | "abline" | "legend" | "text" |
         "save.plot" | "dev.view" | "dev.off" |
-        "system.time" |
-        "anova" | "aov" | "manova" |
-        "summary" | "str")
+        "str")
 }
 
 /// Builtins that evaluate user code and return its value: they keep the

@@ -48,10 +48,11 @@ to be worse than documented and was fixed here rather than scheduled.
   interval and estimates in a fixed order. The values are the same.
   (When the report appears is now R's: on printing the result, never while
   the test runs.)
-- **`anova`, `aov`, `manova`, `summary` and `str` still print when
-  called**, so `summary(fit)$coefficients` shows the whole summary first.
-  The hypothesis tests were fixed by keeping their report on the result;
-  these need the same treatment.
+- **The printed layout of `summary(fit)` and ANOVA tables differs from
+  R's** (column widths, digits, the Residuals block); their values and
+  the `coefficients` matrix match. `class()` gives one class where R
+  gives two (`summaryDefault` without `table`, `anova` without
+  `data.frame`); `inherits()` works.
 - **A data frame or matrix prints at most 20 rows** (then `... (n more
   rows)`); R prints them all (up to `max.print`). Values and layout of
   the printed rows match R.
