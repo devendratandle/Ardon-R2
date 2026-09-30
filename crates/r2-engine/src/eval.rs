@@ -74,6 +74,12 @@ impl Engine {
                 // T / F default to TRUE / FALSE when not bound (R semantics).
                 else if name.as_ref() == "T" { Ok(rbool(true)) }
                 else if name.as_ref() == "F" { Ok(rbool(false)) }
+                else if name.contains('.') && std::path::Path::new(name.as_ref()).is_file() {
+                    // `read.csv(DASS.csv)`: a file of that name is right here —
+                    // the quotes are missing (R gives only the first sentence).
+                    err!(Runtime, "object '{}' not found — a file named {} is in the working directory; \
+                                   file names need quotes: \"{}\"", name, name, name)
+                }
                 else { err!(Runtime, "object '{}' not found", name) }
             }
             Expr::Assign { target, value, superassign } => self.eval_assign(target, value, *superassign, env),

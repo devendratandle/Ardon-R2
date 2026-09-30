@@ -14,15 +14,23 @@ use crate::env_insert;
 
 // ── working directory ────────────────────────────────────────────────
 
-pub(crate) fn bi_getwd(_: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let cwd = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    Ok(rstr(&cwd))
+/// The working directory as R reports it: forward slashes on Windows too
+/// (`C:/Users/...`), so it can be pasted back into a string unescaped.
+fn working_dir() -> String {
+    std::env::current_dir().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default()
 }
 
+pub(crate) fn bi_getwd(_: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(rstr(&working_dir()))
+}
+
+/// `setwd(dir)` returns the PREVIOUS directory (invisibly), as R does, so
+/// `old <- setwd(dir); ...; setwd(old)` restores it.
 pub(crate) fn bi_setwd(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let path = val_to_str(&gv(a,0));
-    std::env::set_current_dir(&path).map_err(|e| R2Err{msg:format!("cannot set working directory: {}", e),kind:ErrKind::Runtime})?;
-    Ok(rstr(&path))
+    let old = working_dir();
+    std::env::set_current_dir(&path).map_err(|_| R2Err{msg:format!("cannot change working directory to \"{}\"", path),kind:ErrKind::Runtime})?;
+    Ok(rstr(&old))
 }
 
 // ── waiting for time or input ────────────────────────────────────────

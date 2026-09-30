@@ -144,13 +144,19 @@ pub fn bi_substr(a: &[EvalArg]) -> Result<RVal, R2Err> {
 /// on AND the pattern parses, `None` otherwise (caller falls back to
 /// literal substring matching).
 #[cfg(feature = "regex")]
-fn compile_pattern(pattern: &str, fixed: bool) -> Option<regex_lite::Regex> {
+fn compile_pattern(pattern: &str, fixed: bool, icase: bool) -> Option<regex_lite::Regex> {
     if fixed { return None; }
-    regex_lite::Regex::new(pattern).ok()
+    if icase { regex_lite::Regex::new(&format!("(?i){}", pattern)).ok() } else { regex_lite::Regex::new(pattern).ok() }
+}
+
+/// `ignore.case = TRUE` (grep, grepl, sub, gsub, regexpr, list.files).
+fn ignore_case_arg(a: &[EvalArg]) -> bool {
+    a.iter().find(|x| x.name.as_deref() == Some("ignore.case"))
+        .and_then(|x| x.value.as_logicals().ok()).and_then(|v| v.first().copied().flatten()).unwrap_or(false)
 }
 
 #[cfg(not(feature = "regex"))]
-fn compile_pattern(_pattern: &str, _fixed: bool) -> Option<()> { None }
+fn compile_pattern(_pattern: &str, _fixed: bool, _icase: bool) -> Option<()> { None }
 
 fn fixed_arg(a: &[EvalArg]) -> bool {
     a.iter().find(|x| x.name.as_ref().map(|n| n.as_ref()) == Some("fixed"))
@@ -170,7 +176,7 @@ pub fn bi_grep(a: &[EvalArg]) -> Result<RVal, R2Err> {
         _ => return Err(type_err("grep needs character vector")),
     };
     let fixed = fixed_arg(a);
-    let re = compile_pattern(&pattern, fixed);
+    let re = compile_pattern(&pattern, fixed, ignore_case_arg(a));
     let indices: Vec<Integer> = x.iter().enumerate().filter_map(|(i, s)| {
         s.as_ref().and_then(|s| {
             let hit = match &re {
@@ -189,7 +195,7 @@ pub fn bi_grep(a: &[EvalArg]) -> Result<RVal, R2Err> {
 pub fn bi_grepl(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let pattern = val_to_str(&gv(a, 0));
     let fixed = fixed_arg(a);
-    let re = compile_pattern(&pattern, fixed);
+    let re = compile_pattern(&pattern, fixed, ignore_case_arg(a));
     match &gv(a, 1) {
         RVal::Character(v, _) => {
             let result: Vec<Logical> = v.iter().map(|x| x.as_ref().map(|s| {
@@ -221,7 +227,7 @@ pub fn bi_gsub(a: &[EvalArg]) -> Result<RVal, R2Err> {
         _ => return Err(type_err("gsub needs character")),
     };
     let fixed = fixed_arg(a);
-    let re = compile_pattern(&pattern, fixed);
+    let re = compile_pattern(&pattern, fixed, ignore_case_arg(a));
     let result: Vec<Character> = x.iter().map(|s| s.as_ref().map(|s| {
         let out = match &re {
             #[cfg(feature = "regex")]
@@ -239,7 +245,7 @@ pub fn bi_sub(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let pattern = val_to_str(&gv(a, 0));
     let replacement = val_to_str(&gv(a, 1));
     let fixed = fixed_arg(a);
-    let re = compile_pattern(&pattern, fixed);
+    let re = compile_pattern(&pattern, fixed, ignore_case_arg(a));
     match &gv(a, 2) {
         RVal::Character(v, _) => {
             let result: Vec<Character> = v.iter().map(|x| x.as_ref().map(|s| {
@@ -267,7 +273,7 @@ pub fn bi_sub(a: &[EvalArg]) -> Result<RVal, R2Err> {
 pub fn bi_regexpr(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let pattern = val_to_str(&gv(a, 0));
     let fixed = fixed_arg(a);
-    let re = compile_pattern(&pattern, fixed);
+    let re = compile_pattern(&pattern, fixed, ignore_case_arg(a));
     match &gv(a, 1) {
         RVal::Character(v, _) => {
             let result: Vec<Integer> = v.iter().map(|x| x.as_ref().map(|s| {
@@ -309,7 +315,7 @@ pub fn bi_gregexpr(a: &[EvalArg]) -> Result<RVal, R2Err> {
         _ => return Err(type_err("gregexpr() needs a pattern")),
     };
     let fixed = fixed_arg(a);
-    let re = compile_pattern(&pattern, fixed);
+    let re = compile_pattern(&pattern, fixed, ignore_case_arg(a));
     let texts: Vec<Character> = match &gv(a, 1) {
         RVal::Character(v, _) => v.clone(),
         _ => return Err(type_err("gregexpr() needs character")),

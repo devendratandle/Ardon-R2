@@ -309,7 +309,14 @@ impl Engine {
     }
 
     pub fn new() -> Self {
-        let global = Env::new_global();
+        // As in R, the constants and datasets live OUTSIDE the workspace, in
+        // a base environment that is the global environment's parent:
+        // lookups find them, and `ls()` lists only what the user created.
+        let base: EnvRef = Arc::new(Env {
+            name: Some(Arc::from("base")), bindings: std::sync::RwLock::new(HashMap::new()),
+            parent: None, locked: false,
+        });
+        let global = Env::new_child(base.clone(), Some(".GlobalEnv"));
         let mut e = Engine {
             global_env: global, policy: Policy::allow_all(), mode: ErrorMode::Strict, visible: true,
             registry: FunctionRegistry::new(),
@@ -344,19 +351,19 @@ impl Engine {
         e.registry.add_layer(mkpkg("utils", PackageTier::Base, registry_tables::utils_table()));
 
         // ── DATASETS ─────────────────────────────────────────────────
-        r2_base::register_datasets(&mut e.global_env.bindings.write().unwrap());
+        r2_base::register_datasets(&mut base.bindings.write().unwrap());
 
         // ── BUILT-IN CONSTANTS (Phase R.M.1) ─────────────────────────
         // R-compatible numeric constants. Users write `pi`, `Inf`, `NaN`
         // and they resolve to these without needing a function call.
         let scalar = |x: f64| RVal::Numeric(vec![Some(x)].into(), Attrs::default());
-        e.global_env.set(Arc::from("pi"),  scalar(std::f64::consts::PI));
-        e.global_env.set(Arc::from("Inf"), scalar(f64::INFINITY));
-        e.global_env.set(Arc::from("NaN"), scalar(f64::NAN));
+        base.set(Arc::from("pi"),  scalar(std::f64::consts::PI));
+        base.set(Arc::from("Inf"), scalar(f64::INFINITY));
+        base.set(Arc::from("NaN"), scalar(f64::NAN));
         // Typed missing values (`NA` itself is a logical literal).
-        e.global_env.set(Arc::from("NA_real_"), RVal::Numeric(vec![None].into(), Attrs::default()));
-        e.global_env.set(Arc::from("NA_integer_"), RVal::Integer(vec![None].into(), Attrs::default()));
-        e.global_env.set(Arc::from("NA_character_"), RVal::Character(vec![None], Attrs::default()));
+        base.set(Arc::from("NA_real_"), RVal::Numeric(vec![None].into(), Attrs::default()));
+        base.set(Arc::from("NA_integer_"), RVal::Integer(vec![None].into(), Attrs::default()));
+        base.set(Arc::from("NA_character_"), RVal::Character(vec![None], Attrs::default()));
         e
     }
 

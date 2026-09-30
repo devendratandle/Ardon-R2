@@ -838,7 +838,6 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
     if raw_rows.is_empty() { return err!(Runtime, "empty CSV file"); }
 
     let ncol = col_names.len().max(raw_rows.iter().map(|r| r.len()).max().unwrap_or(0));
-    let nrow = raw_rows.len();
 
     // Build columns with type inference
     let mut columns = Vec::new();
@@ -870,7 +869,8 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
         }
     }
 
-    soutln!("Read {} rows × {} columns from '{}'", nrow, ncol, path);
+    // Silent, as R's read.csv is (it printed "Read n rows × m columns");
+    // `dim(df)` or `str(df)` shows the size.
     Ok(RVal::DataFrame(DataFrame { columns, row_names: None }))
 }
 

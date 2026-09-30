@@ -8,6 +8,30 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Files, folders and strings behave as in R — 2026-09-30
+
+- **`list.files()` honours its arguments**: `pattern` (a regular
+  expression on the file name), `full.names`, `recursive`, `all.files`,
+  `ignore.case`, `include.dirs`; `list.files(pattern = "\\.csv$")` returned
+  nothing (only the first argument was read, as a folder). New: `dir()`
+  (same function), `file.path()`, `basename()`, `dirname()`.
+- **`getwd()` uses forward slashes** on Windows (`C:/Users/...`), as R does;
+  **`setwd()` returns the previous folder**, so `old <- setwd(d); ...;
+  setwd(old)` restores it (it returned the new one).
+- **`ls()` lists only your own objects**, sorted: `pi`, `Inf`, the typed
+  NAs and the built-in datasets (`iris`, `mtcars`, ...) now live in a base
+  environment that is the workspace's parent, as in R, instead of
+  appearing in every `ls()`.
+- **String escapes**: `"say \"hi\""` kept its backslashes (10 characters,
+  not 8) — only `\n`, `\t`, `\\` were read. Now also `\"`, `\'`, `\r`, `\a`,
+  `\b`, `\f`, `\v`, octal, `\xhh`, `\uXXXX`, `\U{...}`. Printed strings are
+  escaped as R prints them (`"C:\\Users"`, `"a\tb\nc"` on one line).
+- `grepl`, `grep`, `sub`, `gsub` and `regexpr` accept `ignore.case = TRUE`.
+- `read.csv(DASS.csv)` (no quotes) adds to R's "object not found" that a
+  file of that name is in the working directory and needs quotes.
+- `read.csv()` no longer prints "Read n rows × m columns" (R is silent).
+- Whole-output differential case `output/files_and_strings`.
+
 ### Reports re-timed; `sort()` speed restored — 2026-09-28
 
 - **`sort()` of 1e6 numbers was 6.6x slower than R** (0.45 s vs 0.068 s)

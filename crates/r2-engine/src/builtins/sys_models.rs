@@ -741,10 +741,12 @@ pub(crate) fn bi_message(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
 }
 
 pub(crate) fn bi_ls(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let names: Vec<Character> = e.global_env.bindings.read().unwrap().keys()
-        .map(|k| Some(k.clone()))
-        .collect();
-    Ok(RVal::Character(names, Attrs::default()))
+    // The user's objects only (built-ins live in the parent `base` env),
+    // sorted as R sorts `ls()`, hidden `.names` left out as R does.
+    let mut names: Vec<Arc<str>> = e.global_env.bindings.read().unwrap().keys()
+        .filter(|k| !k.starts_with('.')).cloned().collect();
+    names.sort_by_cached_key(|k| r2_types::collation_key(k));
+    Ok(RVal::Character(names.into_iter().map(Some).collect(), Attrs::default()))
 }
 
 pub(crate) fn bi_rm(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

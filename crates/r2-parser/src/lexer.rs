@@ -110,9 +110,50 @@ impl Lexer {
         loop { match self.advance() {
             None => return Err(LexErr { msg: "unterminated string".into(), line: self.line, col: self.col }),
             Some(c) if c == q => break,
-            Some('\\') => match self.advance() { Some('n') => s.push('\n'), Some('t') => s.push('\t'), Some('\\') => s.push('\\'), Some(c) => { s.push('\\'); s.push(c); } None => return Err(LexErr { msg: "unterminated escape".into(), line: self.line, col: self.col }) },
+            Some('\\') => self.read_escape(&mut s)?,
             Some(c) => s.push(c),
         }} Ok(Token::Str(s))
+    }
+    /// One escape after `\` in a string literal, as R reads them: \n \t \r
+    /// \a \b \f \v \\ \" \' \` \0-7 octal, \xhh, \uXXXX or \u{XXXX},
+    /// \UXXXXXXXX or \U{XXXXXXXX}. (Only \n \t \\ were read before, so
+    /// "say \"hi\"" kept its backslashes.) An unknown escape is kept as
+    /// written — R rejects it — so older R2 scripts using "\d" still run.
+    fn read_escape(&mut self, s: &mut String) -> Result<(), LexErr> {
+        let err = |me: &Self, msg: &str| LexErr { msg: msg.into(), line: me.line, col: me.col };
+        let c = self.advance().ok_or_else(|| err(self, "unterminated escape"))?;
+        let simple = match c {
+            'n' => Some('\n'), 't' => Some('\t'), 'r' => Some('\r'), 'a' => Some('\x07'), 'b' => Some('\x08'),
+            'f' => Some('\x0c'), 'v' => Some('\x0b'), '\\' | '"' | '\'' | '`' | ' ' => Some(c),
+            _ => None,
+        };
+        if let Some(ch) = simple { s.push(ch); return Ok(()); }
+        // digits in `radix`, up to `max`, optionally inside { }
+        let digits = |me: &mut Self, radix: u32, max: usize, braced_ok: bool| -> Option<u32> {
+            let braced = braced_ok && me.peek() == Some('{');
+            if braced { me.advance(); }
+            let mut v: u32 = 0; let mut n = 0;
+            while n < max {
+                match me.peek().and_then(|d| d.to_digit(radix)) { Some(d) => { v = v * radix + d; me.advance(); n += 1; } None => break }
+            }
+            if braced { if me.peek() == Some('}') { me.advance(); } else { return None; } }
+            if n == 0 { None } else { Some(v) }
+        };
+        let code = match c {
+            '0'..='7' => {
+                let mut v = c.to_digit(8).unwrap_or(0);
+                for _ in 0..2 { match self.peek().and_then(|d| d.to_digit(8)) { Some(d) => { v = v * 8 + d; self.advance(); } None => break } }
+                Some(v)
+            }
+            'x' => digits(self, 16, 2, false),
+            'u' => digits(self, 16, 4, true),
+            'U' => digits(self, 16, 8, true),
+            _ => { s.push('\\'); s.push(c); return Ok(()); }
+        };
+        match code.and_then(char::from_u32) {
+            Some(ch) if ch != '\0' => { s.push(ch); Ok(()) }
+            _ => Err(err(self, &format!("'\\{}' used without valid digits in character string", c))),
+        }
     }
     fn read_fstring(&mut self) -> Result<Token, LexErr> {
         self.advance(); self.advance(); let mut s = String::new();

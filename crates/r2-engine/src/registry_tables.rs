@@ -181,7 +181,7 @@ pub(crate) fn utils_table() -> Vec<(&'static str, BuiltinFn)> {
         ("source",bi_source),("system.time",bi_system_time),
         ("read.table",bi_read_table),("write.table",bi_write_table),("read.delim",bi_read_delim),
         ("help",bi_help),("getwd",bi_getwd),("setwd",bi_setwd),
-        ("file.exists",bi_file_exists),("list.files",bi_list_files),("Sys.getenv",bi_sys_getenv),("save",bi_save),("load",bi_load),("version",bi_version),(".Internal",bi_internal),
+        ("file.exists",bi_file_exists),("list.files",bi_list_files),("dir",bi_list_files),("file.path",bi_file_path),("basename",bi_basename),("dirname",bi_dirname),("Sys.getenv",bi_sys_getenv),("save",bi_save),("load",bi_load),("version",bi_version),(".Internal",bi_internal),
     ]
 }
 

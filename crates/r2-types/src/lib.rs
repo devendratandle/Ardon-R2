@@ -560,7 +560,7 @@ impl fmt::Display for RVal {
                 write_vec(f, v, |x| match x { Some(n) => format!("{}", n), None => "NA".into() }, false, "integer(0)")
             }
             RVal::Character(v, attrs) => {
-                let cell = |x: &Character| match x { Some(s) => format!("\"{}\"", s), None => "NA".into() };
+                let cell = |x: &Character| match x { Some(s) => format!("\"{}\"", escape_string(s)), None => "NA".into() };
                 if attrs.names.is_some() {
                     let strs: Vec<String> = v.iter().map(cell).collect();
                     if let Some(r) = write_named(f, attrs, &strs) { return r; }
@@ -729,6 +729,30 @@ impl fmt::Display for RVal {
             _ => write!(f, "<{}>", self.type_name()),
         }
     }
+}
+
+/// A string as R's `print` shows it inside quotes (`encodeString`):
+/// backslash, the quote and control characters escaped, so
+/// "C:\\Users" prints with its backslashes doubled and a newline stays on
+/// one line as `\n`. `cat` writes the raw text.
+pub fn escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            '\x0b' => out.push_str("\\v"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\{:03o}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A named vector as R prints it: every field right-aligned to ONE common

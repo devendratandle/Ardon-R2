@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 458 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 462 Built-in Functions and Operators
 
 ## Core (83)
 ```
@@ -395,7 +395,11 @@ source(file)        Run R2 script
 save(file)          Save session
 load(file)          Load session
 file.exists(path)   Check if file exists
-list.files(path)    List directory
+list.files(path, pattern, full.names, recursive, ignore.case)   Files in a folder (pattern: regex on the name)
+dir(path, ...)      Same as list.files
+file.path(...)      Join path parts with "/"
+basename(path)      Last part of a path ("DASS.csv")
+dirname(path)       Folder part of a path
 readLines(path,n=)  Read text file lines into a character vector
 writeLines(text,con=) Write a character vector as lines (file or console)
 ```
@@ -498,8 +502,8 @@ require(pkg)        Try to load package
 search()            Search path
 help(topic)         Help on topic (also ?topic, ??topic)
 version()           Ardon-R2 version info
-getwd()             Working directory
-setwd(path)         Change directory
+getwd()             Working directory (forward slashes)
+setwd(path)         Change directory; returns the old one invisibly
 Sys.time()          Current time
 Sys.getenv(var)     Environment variable
 Sys.sleep(n)        Pause n seconds
