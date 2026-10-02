@@ -571,7 +571,7 @@ still be evaluable. See docs/PHASE_L_LANGUAGE_OBJECTS.md.
 ::              Package access
 $               Column/field access
 ==  !=          Equality
-<  >  <=  >=   Comparison
-&  |  &&  ||   Logical
+<  >  <=  >=    Comparison
+&  |  &&  ||    Logical
 !               Negation
 ```

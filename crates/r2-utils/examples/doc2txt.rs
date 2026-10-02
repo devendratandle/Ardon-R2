@@ -52,11 +52,13 @@ fn md_to_txt(md: &str) -> String {
         if t.starts_with("```") {
             flush(&mut para, &mut out);
             blank(&mut out);
+            let plain = t == "```"; // untagged fence: a name/description list, not code
             i += 1;
-            while i < lines.len() && !lines[i].trim().starts_with("```") {
-                out.push(format!("    {}", lines[i]));
-                i += 1;
-            }
+            let start = i;
+            while i < lines.len() && !lines[i].trim().starts_with("```") { i += 1; }
+            let body: Vec<String> = lines[start..i].iter().map(|l| l.to_string()).collect();
+            let body = if plain { align_columns(body) } else { body };
+            out.extend(body.iter().map(|l| format!("    {l}")));
             blank(&mut out);
         } else if t.is_empty() {
             flush(&mut para, &mut out);
@@ -152,6 +154,49 @@ fn list_item(line: &str) -> Option<(usize, String, &str)> {
     let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
     if digits > 0 && t[digits..].starts_with(". ") { return Some((indent, t[..digits + 1].to_string(), &t[digits + 2..])); }
     None
+}
+
+/// Gaps of two or more spaces in a line: (chars before the gap, column after it).
+/// A line that starts with whitespace is a continuation and has none.
+fn gaps(line: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let (mut out, mut j) = (Vec::new(), 0);
+    if chars.first().map_or(true, |c| c.is_whitespace()) { return out; }
+    while j < chars.len() {
+        if chars[j] == ' ' {
+            let s = j;
+            while j < chars.len() && chars[j] == ' ' { j += 1; }
+            if j - s >= 2 && j < chars.len() { out.push((s, j)); }
+        } else { j += 1; }
+    }
+    out
+}
+
+/// Line up the description column of a name/description list such as
+/// `&  |  &&  ||   Logical`: the names themselves hold double-spaced operators,
+/// so the column is the one most lines agree on, and a stray line's last gap
+/// is moved to it (never narrower than two spaces). Only a near miss (two
+/// columns or less) moves: a line further off belongs to a layout of its own.
+fn align_columns(lines: Vec<String>) -> Vec<String> {
+    // box-drawing diagrams are laid out by hand
+    if lines.iter().any(|l| l.chars().any(|c| ('\u{2500}'..='\u{259F}').contains(&c))) { return lines; }
+    let mut count = std::collections::HashMap::new();
+    for l in &lines { if let Some(&(_, c)) = gaps(l).last() { *count.entry(c).or_insert(0) += 1; } }
+    let Some((&col, &n)) = count.iter().max_by_key(|&(c, n)| (*n, usize::MAX - c)) else { return lines };
+    if n < 3 { return lines; }
+    lines.into_iter().map(|l| {
+        let g = gaps(&l);
+        if g.is_empty() || g.iter().any(|&(_, c)| c == col) { return l; }
+        match g.last().filter(|&&(s, c)| s + 2 <= col && c.abs_diff(col) <= 2) {
+            Some(&(s, c)) => {
+                let chars: Vec<char> = l.chars().collect();
+                let left: String = chars[..s].iter().collect();
+                let right: String = chars[c..].iter().collect();
+                format!("{left}{}{right}", " ".repeat(col - s))
+            }
+            None => l,
+        }
+    }).collect()
 }
 
 /// Cells of a `| a | b |` row; a `|` inside backticks or escaped is not a separator.
@@ -307,6 +352,19 @@ mod tests {
         let wide = md_to_txt(&format!("| | R | R2 |\n|---|---|---|\n| Install size | {} | ~9 MB |\n", "x".repeat(80)));
         assert!(wide.contains("  * Install size\n      R: x"));
         assert!(wide.contains("      R2: ~9 MB"));
+    }
+
+    #[test]
+    fn operator_list_columns_line_up() {
+        let md = "```\n<-  =           Assignment\n+  -  *  /      Arithmetic\n<  >  <=  >=   Comparison\n&  |  &&  ||   Logical\n!               Negation\n```\n";
+        let txt = md_to_txt(md);
+        for (op, desc) in [("&  |  &&  ||", "Logical"), ("<  >  <=  >=", "Comparison"), ("!", "Negation")] {
+            let want = format!("    {op}{}{desc}", " ".repeat(16 - op.chars().count()));
+            assert!(txt.lines().any(|l| l == want), "{want:?} not in\n{txt}");
+        }
+        // a tagged fence is code and is left exactly as written
+        let code = md_to_txt("```r\nx <- 1   # one\nyy  <- 2  # two\nz <- 3    # three\n```\n");
+        assert!(code.contains("    yy  <- 2  # two"));
     }
 
     #[test]
