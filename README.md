@@ -62,7 +62,7 @@ holds, and where to look next.
 | LLM training on an integrated GPU | — | 1× (PyTorch-DirectML) | **1.3–2.0× faster, identical loss** |
 | Matrix multiply (500²) | 1× (reference BLAS) | not measured | **11× faster than R** |
 | User loops / library code | 1× (interpreted) | 1× (interpreted) | **6×–40,000× (JIT-compiled)** |
-| Numerical accuracy vs R | — | — | **15–16 sig figs (27/27 differential cases)** |
+| Numerical accuracy vs R | — | — | **15–16 sig figs (28/28 differential cases)** |
 | Cloud required? | No | Often yes | **No** |
 
 ## Quick start
@@ -93,7 +93,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 | Path | What you'll find |
 |------|------------------|
 | **[`samples/`](samples)** | Programs you can run to **test R2 on your machine and cross-check against R**. `smoke.r` runs on *both* R and R2 (compare the output); `capabilities.r2` tours the R2-specific features; `graph_gallery.r2` draws the plots above. **Found a mismatch or error? Please [open an issue](https://github.com/devendratandle/Ardon-R2/issues).** |
-| **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy. Accuracy **matches CRAN R (27/27 differential cases)**; at parity with R on most C internals, 11–25× on matrix multiply, 2–6× on linear algebra, and **6×–40,000× faster on user loops and library code** the JIT compiles. Includes a CPU-vs-integrated-GPU table (from v0.3.8). Re-timed 2026-09-28. |
+| **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy. Accuracy **matches CRAN R (28/28 differential cases)**; at parity with R on most C internals, 11–25× on matrix multiply, 2–6× on linear algebra, and **6×–40,000× faster on user loops and library code** the JIT compiles. Includes a CPU-vs-integrated-GPU table (from v0.3.8). Re-timed 2026-09-28. |
 | **[`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md)** | **R2 vs PyTorch and JAX on LLM training** — the single source for those numbers. A 7.24M-parameter model trained on TinyStories trains **1.5–1.66× faster than PyTorch 2.13+MKL** (1.40–1.63× at 40M parameters) and **learns identically** (same loss to four decimals at every checkpoint, from shared initial weights; forward 1.48× and backward 1.41× faster phase by phase). BPE tokenization is **~11× faster than HuggingFace `tokenizers`**. Includes what was tried and measured *worse*, so it isn't retried. |
 | **[`benchmarks/`](benchmarks)** | The runnable benchmark harness (tuned parallel `.R`/`.r2` files) behind PERFORMANCE.md — reproduce the numbers yourself. |
 | **[`FUNCTIONS.md`](FUNCTIONS.md)** | Complete reference for the 400+ built-in functions. |

@@ -6,7 +6,22 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
-## v0.4.1 (October 2026)
+## v0.4.2 (October 2026)
+
+Version 0.4.1 was never released; everything listed here since v0.4.0
+ships in 0.4.2.
+
+### Installer documentation opens in Notepad — 2026-10-02
+
+- The Windows installer and the Windows zip ship the documentation as real
+  plain text (`README.txt`, `CHANGELOG.txt`, `FUNCTIONS.txt`, ...): a
+  double-click opens it in Notepad (Windows has no default program for
+  `.md`), and it reads as text, not Markdown source — headings underlined,
+  `**`/HTML markup removed, links as "text (url)", lines wrapped at 78
+  columns, and tables restructured (aligned columns when narrow, one
+  labelled block per row when wide). Generated at build time from the
+  Markdown by `cargo run -p r2-utils --example doc2txt`, so they never go
+  stale. The Start menu gains an "Ardon-R2 Read Me" shortcut.
 
 ### Windows paths can be pasted as they are — 2026-10-02
 

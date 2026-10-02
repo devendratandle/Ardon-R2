@@ -47,6 +47,8 @@ scratch/
 
 # The compiled installer .exe — recreated by Inno Setup from .iss + r2.ico
 installer/Output/
+# Plain-text docs generated for the installer by the doc2txt example
+installer/docs-txt/
 
 # installer/r2.ico is committed (NOT ignored): r2-gui/build.rs only
 # embeds the icon when this file already exists, and cargo may build

@@ -4,3 +4,7 @@ version = "0.1.1"
 edition = "2021"
 [dependencies]
 r2-types = { path = "../r2-types" }
+
+[[example]]
+name = "doc2txt"
+test = true

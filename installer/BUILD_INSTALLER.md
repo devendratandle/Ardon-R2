@@ -40,13 +40,21 @@ build machine, not on the user's.
 
 ## Step 3 — Compile the installer
 
+0. Generate the plain-text docs the installer ships (Notepad-readable:
+   markup removed, tables restructured, lines wrapped; the script refuses
+   to compile without them):
+
+   ```
+   cargo run -p r2-utils --example doc2txt -- installer/docs-txt README.md LICENSE CHANGELOG.md FUNCTIONS.md CONTRIBUTING.md VISION.md docs/ARCHITECTURE.md docs/KNOWN_LIMITATIONS.md
+   ```
+
 1. Launch **"Inno Setup Compiler"** from the Start menu.
 2. **File → Open…** → choose `installer\R2.iss`.
 3. **Build → Compile** (or press F9).
 4. Done. The output appears at:
 
 ```
-installer\Output\R2-Setup-0.4.1.exe
+installer\Output\R2-Setup-0.4.2.exe
 ```
 
 That single file is everything a user needs to install Ardon-R2.
@@ -55,7 +63,7 @@ That single file is everything a user needs to install Ardon-R2.
 
 ## What the installer does
 
-When the user runs `R2-Setup-0.4.1.exe`:
+When the user runs `R2-Setup-0.4.2.exe`:
 
 * Default install path: `%LOCALAPPDATA%\Programs\Ardon-R2` (no admin needed).
 * Optional install path: `C:\Program Files\Ardon-R2` (admin needed).
@@ -91,7 +99,7 @@ If you don't want an installer at all, just zip the release directory:
 
 ```bash
 cd target/release
-7z a R2-portable-0.4.1.zip r2.exe ../../../samples ../../../docs
+7z a R2-portable-0.4.2.zip r2.exe ../../../samples ../../../docs
 ```
 
 Users unzip and run `r2.exe` directly. No registry writes, no PATH changes,

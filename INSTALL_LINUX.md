@@ -38,7 +38,7 @@ R2Gui                                       # opens the GUI window
 ./install-linux.sh --cli                  # CLI only
 ./install-linux.sh --gui                  # GUI only
 ./install-linux.sh --source               # build from source instead of downloading
-./install-linux.sh --version v0.4.1       # pin a specific release (default: latest)
+./install-linux.sh --version v0.4.2       # pin a specific release (default: latest)
 ./install-linux.sh --prefix "$HOME/.local"   # install WITHOUT sudo (per-user)
 ```
 

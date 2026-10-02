@@ -29,6 +29,9 @@
   #error r2.exe is not built: cargo build --release -p r2-repl -p r2-gui
 #endif
 #define MyAppVersion     GetStringFileInfo(R2Exe, "FileVersion")
+#if !FileExists(AddBackslash(SourcePath) + "docs-txt\README.txt")
+  #error Plain-text docs missing: run  cargo run -p r2-utils --example doc2txt -- installer/docs-txt README.md LICENSE CHANGELOG.md FUNCTIONS.md CONTRIBUTING.md VISION.md docs/ARCHITECTURE.md docs/KNOWN_LIMITATIONS.md
+#endif
 #if FileExists(GuiExe)
   #if GetStringFileInfo(GuiExe, "FileVersion") != MyAppVersion
     #error R2Gui.exe and r2.exe carry different versions: rebuild both
@@ -83,15 +86,13 @@ Source: "..\target\release\R2Gui.exe"; DestDir: "{app}"; Flags: ignoreversion sk
 ; embedded icon is somehow missing.
 Source: "r2.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
-; Documentation.
-Source: "..\README.md";                  DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\LICENSE";                    DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\CHANGELOG.md";               DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\FUNCTIONS.md";               DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\CONTRIBUTING.md";            DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\VISION.md";                  DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\docs\ARCHITECTURE.md";       DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\docs\KNOWN_LIMITATIONS.md";  DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
+; Documentation as plain text that reads well in Notepad: generated from the
+; Markdown by the doc2txt example (headings underlined, markup removed,
+; tables restructured, wrapped at 78 columns) into installer\docs-txt:
+;   cargo run -p r2-utils --example doc2txt -- installer/docs-txt README.md LICENSE
+;       CHANGELOG.md FUNCTIONS.md CONTRIBUTING.md VISION.md
+;       docs/ARCHITECTURE.md docs/KNOWN_LIMITATIONS.md
+Source: "docs-txt\*.txt"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 ; Sample scripts.
 Source: "..\samples\*.r2"; DestDir: "{app}\samples"; Flags: ignoreversion recursesubdirs
@@ -101,6 +102,7 @@ Source: "..\samples\*.r2"; DestDir: "{app}\samples"; Flags: ignoreversion recurs
 Name: "{group}\Ardon-R2 (GUI)";       Filename: "{app}\R2Gui.exe"; IconFilename: "{app}\r2.ico"
 ; CLI version for scripts / automation / SSH.
 Name: "{group}\Ardon-R2 (Console)";   Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\r2.ico"
+Name: "{group}\Ardon-R2 Read Me";    Filename: "{app}\docs\README.txt"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 ; Desktop shortcut launches the GUI by default.
 Name: "{autodesktop}\{#MyAppName}";   Filename: "{app}\R2Gui.exe"; Tasks: desktopicon; IconFilename: "{app}\r2.ico"

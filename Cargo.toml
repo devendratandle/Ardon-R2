@@ -39,7 +39,7 @@ members = [
 # A release is: bump this line, add the CHANGELOG heading (a test in
 # r2-repl fails without it), commit, tag v<version>.
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 
 [workspace.dependencies]
 thiserror = "1"

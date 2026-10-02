@@ -72,7 +72,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/r2.exe dist/
-          Copy-Item README.md,LICENSE,CHANGELOG.md dist/ -ErrorAction SilentlyContinue
+          # plain-text docs that read well in Notepad (no default .md app)
+          cargo run -p r2-utils --example doc2txt -- dist README.md LICENSE CHANGELOG.md
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}" -Force
 
       - name: Attach to release
@@ -201,6 +202,9 @@ jobs:
 
       - name: Build r2.exe + R2Gui.exe (release)
         run: cargo build --release -p r2-repl -p r2-gui
+
+      - name: Plain-text docs for the installer
+        run: cargo run -p r2-utils --example doc2txt -- installer/docs-txt README.md LICENSE CHANGELOG.md FUNCTIONS.md CONTRIBUTING.md VISION.md docs/ARCHITECTURE.md docs/KNOWN_LIMITATIONS.md
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
