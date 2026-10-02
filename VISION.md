@@ -19,11 +19,20 @@ Modern data science wastes enormous computational resources:
 
 **One language. Minimal glue. Direct to hardware.**
 
-### V0.4.0 — Current Release (2026-09)
-- **438 built-in functions** across 29 crates — no packages to install
-- Accuracy **matches CRAN R on 13/13 differential cases**, and R2's LLM
-  gradients match an independent float64 implementation to f32 rounding
-  across all 21 parameter blocks
+### V0.4.1 — Current Release (2026-10)
+- **462 built-in functions and operators** across 29 crates — no packages
+  to install; every one has `?help`, enforced by a test
+- Accuracy **matches CRAN R on 28/28 differential cases**, now including a
+  555-value grid of distribution functions (far tails, `log.p`), SVD
+  accuracy, R's printing, sorting, factors and element assignment; R2's
+  LLM gradients match an independent float64 implementation to f32
+  rounding across all 21 parameter blocks
+- **Linear algebra rebuilt on the packed kernel**: `%*%` at Intel MKL's
+  speed and 20–25x R's reference BLAS; `solve`, `chol`, `eigen`, `svd`
+  2–6x R (and four wrong-result bugs fixed on the way)
+- **GPU training step** on any wgpu device, 1.3–2.0x PyTorch-DirectML on
+  an integrated GPU with identical losses; on an Intel CPU, where MKL is
+  at home, LLM training is still 1.34–1.37x PyTorch
 - **LLM training faster than PyTorch**: a 7.24M-parameter model on
   TinyStories trains **1.5-1.66x faster than PyTorch 2.13+MKL** and learns
   *identically* — same loss to four decimals at every checkpoint over 500
@@ -97,9 +106,13 @@ Modern data science wastes enormous computational resources:
 ```
 DONE       V0.1-0.3 →  Full SVD, branchy JIT, RFC 4180 CSV, regex, columnar
                        storage, graphics backends, native GUI, self-check.
-NOW        V0.4.0  →  LLM training faster than PyTorch on CPU: packed
+DONE       V0.4.0  →  LLM training faster than PyTorch on CPU: packed
                        AVX2 sgemm, fused attention, vectorised exp.
                        438 builtins, 638 tests.
+NOW        V0.4.1  →  R semantics made exact (printing, NA, assignment,
+                       sorting, factors, distributions, SVD), linear
+                       algebra on the GEMM kernel, GPU training step.
+                       462 builtins, 690 tests, 28/28 differential.
 Next       V0.5.0  →  Out-of-core training data (Arrow/Parquet + memmap),
                        so a corpus larger than RAM trains without a
                        preprocessing step. Closing the remaining sgemm

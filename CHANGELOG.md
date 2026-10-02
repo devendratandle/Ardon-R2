@@ -6,7 +6,7 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
-## v0.4.1 (September 2026)
+## v0.4.1 (October 2026)
 
 ### Windows paths can be pasted as they are — 2026-10-02
 
