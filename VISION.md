@@ -2,7 +2,7 @@
 
 ## What R2 Is
 
-R2 is a statistical computing language inspired by R, built from scratch in Rust.
+R2 is a statistical computing and AI model training language inspired by R, built from scratch in Rust.
 It is NOT an R package, NOT a wrapper, NOT a binding. It is a new language that
 speaks R's syntax but runs at Rust's speed.
 

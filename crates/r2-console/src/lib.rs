@@ -45,7 +45,7 @@ use r2_types::{Expr, RVal};
 /// window"), never edit or reorder them.
 pub fn banner_lines(version: &str) -> Vec<String> {
     vec![
-        format!("Ardon-R2 {} — Statistical Computing, Reimagined", version),
+        format!("Ardon-R2 {} — Statistics & AI Training, Reimagined", version),
         "Pure Rust. Inspired by R. | Created by Devendra Tandale".to_string(),
         "An AI-Assisted Project | AGPL-3.0".to_string(),
         "Assignment: both <- and = work. Mode: strict.".to_string(),

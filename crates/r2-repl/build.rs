@@ -83,7 +83,7 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon(ico_path.to_str().unwrap());
         res.set("ProductName",  "Ardon-R2");
-        res.set("FileDescription", "Ardon-R2 — statistical computing reimagined");
+        res.set("FileDescription", "Ardon-R2 — statistics & AI training, reimagined");
         res.set("CompanyName",  "Devendra Tandale");
         res.set("LegalCopyright", "AGPL-3.0");
         if let Err(e) = res.compile() {

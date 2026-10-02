@@ -271,7 +271,7 @@ pub(crate) fn bi_version(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<R
     // the function count from the registry, the cores from rayon. The
     // typed version sat at 0.1.1 and the function count at "191+" for
     // four releases.
-    soutln!("\nArdon-R2 — Statistical Computing, Reimagined");
+    soutln!("\nArdon-R2 — Statistics & AI Training, Reimagined");
     soutln!("Version: {}", crate::product_version());
     soutln!("Created by: Devendra Tandale");
     soutln!("An AI assisted project");
