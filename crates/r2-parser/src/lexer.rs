@@ -105,8 +105,29 @@ impl Lexer {
         Ok(tokens)
     }
 
+    /// Windows only: does the string literal starting at `self.pos` look
+    /// like a path pasted from Explorer with SINGLE backslashes —
+    /// `C:\Users\...` or `\\server\share`? R reads `\U`, `\n`, `\t` in such
+    /// a string as escapes (an error, or the wrong path); R2 reads it
+    /// literally. Correctly escaped R (`"C:\\Users"`, `"\\\\server"`) does
+    /// not match, so it keeps R's meaning; other platforms follow R.
+    fn is_pasted_windows_path(&self) -> bool {
+        if !cfg!(windows) { return false; }
+        let at = |k: usize| self.src.get(self.pos + k).copied();
+        let drive = matches!(at(0), Some(c) if c.is_ascii_alphabetic()) && at(1) == Some(':')
+            && at(2) == Some('\\') && at(3) != Some('\\');
+        let unc = at(0) == Some('\\') && at(1) == Some('\\') && !matches!(at(2), Some('\\') | None);
+        drive || unc
+    }
     fn read_string(&mut self, q: char) -> Result<Token, LexErr> {
         self.advance(); let mut s = String::new();
+        if self.is_pasted_windows_path() {
+            loop { match self.advance() {
+                None => return Err(LexErr { msg: "unterminated string".into(), line: self.line, col: self.col }),
+                Some(c) if c == q => return Ok(Token::Str(s)),
+                Some(c) => s.push(c),
+            }}
+        }
         loop { match self.advance() {
             None => return Err(LexErr { msg: "unterminated string".into(), line: self.line, col: self.col }),
             Some(c) if c == q => break,
@@ -206,5 +227,35 @@ impl Lexer {
         self.advance(); let mut s = String::new();
         loop { match self.advance() { None => return Err(LexErr { msg: "unterminated backtick".into(), line: self.line, col: self.col }), Some('`') => break, Some(c) => s.push(c), } }
         Ok(Token::Ident(s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn string_of(src: &str) -> String {
+        let toks = Lexer::new(src).tokenize().expect("lexes");
+        toks.into_iter().find_map(|t| match t.token { Token::Str(s) => Some(s), _ => None }).expect("a string")
+    }
+
+    #[test]
+    fn r_escapes_are_read() {
+        assert_eq!(string_of(r#""say \"hi\"""#), "say \"hi\"");
+        assert_eq!(string_of(r#""a\tb\nc""#), "a\tb\nc");
+        assert_eq!(string_of(r#""C:\\Users\\deven""#), r"C:\Users\deven");
+        assert_eq!(string_of(r#""\u00e9\x41\101""#), "éAA");
+    }
+
+    /// A path pasted from Explorer, single backslashes: literal on Windows
+    /// (R would read \U, \n as escapes); escaped R strings are unaffected.
+    #[test]
+    fn pasted_windows_paths() {
+        if cfg!(windows) {
+            assert_eq!(string_of(r#""C:\Users\deven\new folder\DASS.csv""#), r"C:\Users\deven\new folder\DASS.csv");
+            assert_eq!(string_of(r#""\\server\share\data.csv""#), r"\\server\share\data.csv");
+        }
+        assert_eq!(string_of(r#""\\\\server\\share""#), r"\\server\share");
+        assert_eq!(string_of(r#""Category:\nvalue""#), "Category:\nvalue");
     }
 }

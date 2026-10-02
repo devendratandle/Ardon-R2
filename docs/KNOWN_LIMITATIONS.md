@@ -42,6 +42,14 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Language / evaluation
 
+- **Deliberate difference (Windows only):** a string literal that starts
+  like a pasted path — `"C:\Users\..."` or `"\\server\share"`, single
+  backslashes — is read literally, where R treats `\U`, `\n` as escapes.
+  A *relative* path with single backslashes (`"data\new.csv"`) is still
+  read the R way (`\n` = newline): write `"data/new.csv"` or
+  `"data\\new.csv"`. R2 also keeps unknown escapes such as `"\d"` as
+  written where R reports an error.
+
 - **A hypothesis test's report is laid out differently from R's
   `print.htest`**: R2 prints the method, then the statistic line; R adds
   the `data:` line, tab-indents the title, and prints the alternative,

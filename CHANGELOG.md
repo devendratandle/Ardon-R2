@@ -8,6 +8,20 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ## v0.4.1 (September 2026)
 
+### Windows paths can be pasted as they are — 2026-10-02
+
+- **On Windows, a path copied from Explorer works in a string literal**:
+  `setwd("C:\Users\deven\Desktop\DAS paper")` and
+  `read.csv("C:\Users\...\DASS.csv")` read the backslashes literally. In R
+  these fail (`\U` is an escape) or silently go wrong (`\n` in
+  `...\new folder` becomes a newline). The rule applies only to a string
+  that starts with a drive path (`C:\` followed by a non-backslash) or a
+  network path (`\\server\share`), so correctly escaped R code
+  (`"C:\\Users"`) keeps R's meaning. Forward slashes and `\\` work as in R.
+  On Linux and macOS strings follow R exactly.
+- Paths R2 reports stay R's style: `getwd()` and `list.files(full.names =
+  TRUE)` use forward slashes on every OS.
+
 ### Files, folders and strings behave as in R — 2026-09-30
 
 - **`list.files()` honours its arguments**: `pattern` (a regular
