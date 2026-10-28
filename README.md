@@ -58,7 +58,7 @@ holds, and where to look next.
 | Install size | 200+ MB | 5–8 GB | **~9 MB installer** |
 | Setup time | minutes | hours (pip conflicts) | **0 seconds** |
 | ML packages needed | 5–10 installs | 3–5 installs | **0 (built-in)** |
-| LLM training, 7M-parameter transformer (CPU) | — | 1× (PyTorch + Intel MKL) | **1.5–1.7× faster, identical loss** |
+| LLM training, 7M-parameter transformer (CPU) | — | 1× (PyTorch + Intel MKL) | **1.45–1.9× faster, identical loss** |
 | LLM training on an integrated GPU | — | 1× (PyTorch-DirectML) | **1.3–2.0× faster, identical loss** |
 | Matrix multiply (500²) | 1× (reference BLAS) | not measured | **11× faster than R** |
 | User loops / library code | 1× (interpreted) | 1× (interpreted) | **6×–40,000× (JIT-compiled)** |
@@ -94,7 +94,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 |------|------------------|
 | **[`samples/`](samples)** | Programs you can run to **test R2 on your machine and cross-check against R**. `smoke.r` runs on *both* R and R2 (compare the output); `capabilities.r2` tours the R2-specific features; `graph_gallery.r2` draws the plots above. **Found a mismatch or error? Please [open an issue](https://github.com/devendratandle/Ardon-R2/issues).** |
 | **[`PERFORMANCE.md`](PERFORMANCE.md)** | The R-vs-R2 benchmarks + accuracy. Accuracy **matches CRAN R (28/28 differential cases)**; at parity with R on most C internals, 11–25× on matrix multiply, 2–6× on linear algebra, and **6×–40,000× faster on user loops and library code** the JIT compiles. Includes a CPU-vs-integrated-GPU table (from v0.3.8). Re-timed 2026-09-28. |
-| **[`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md)** | **R2 vs PyTorch and JAX on LLM training** — the single source for those numbers. A 7.24M-parameter model trained on TinyStories trains **1.5–1.66× faster than PyTorch 2.13+MKL** (1.40–1.63× at 40M parameters) and **learns identically** (same loss to four decimals at every checkpoint, from shared initial weights; forward 1.48× and backward 1.41× faster phase by phase). BPE tokenization is **~11× faster than HuggingFace `tokenizers`**. Includes what was tried and measured *worse*, so it isn't retried. |
+| **[`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md)** | **R2 vs PyTorch and JAX on LLM training** — the single source for those numbers. A 7.24M-parameter model trained on TinyStories trains **1.45–1.9× faster than PyTorch 2.13+MKL** (1.40–1.63× at 40M parameters) and **learns identically** (same loss to four decimals at every checkpoint, from shared initial weights; forward 1.48× and backward 1.41× faster phase by phase). BPE tokenization is **~11× faster than HuggingFace `tokenizers`**. Includes what was tried and measured *worse*, so it isn't retried. |
 | **[`benchmarks/`](benchmarks)** | The runnable benchmark harness (tuned parallel `.R`/`.r2` files) behind PERFORMANCE.md — reproduce the numbers yourself. |
 | **[`FUNCTIONS.md`](FUNCTIONS.md)** | Complete reference for the 400+ built-in functions. |
 | **[`CHANGELOG.md`](CHANGELOG.md)** | Per-version history — what functions were added and what problems were fixed, release by release. |
@@ -108,7 +108,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 ## Highlights
 
 - **462 built-in functions and operators**, every one with `?help` — stats, ML, AI training, data manipulation, graphics, time series — no packages to install.
-- **AI model training, faster than PyTorch** — BPE tokenizer, autograd tape, fused attention and an Adam trainer, all in Rust with no C and no Python, driven from R2 code (`llm.new`, `llm.train`, `llm.generate`, `llm.save`). A 7.24M-parameter transformer trains **1.5–1.7× faster than PyTorch + MKL** (1.40–1.63× at 40M parameters; 1.34–1.37× on an Intel CPU, MKL's home ground) and learns identically. A whole-step **GPU trainer** on any Vulkan/DirectX/Metal GPU via wgpu runs **1.3–2.0× faster than PyTorch-DirectML** on an integrated GPU. See [`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md).
+- **AI model training, faster than PyTorch** — BPE tokenizer, autograd tape, fused attention and an Adam trainer, all in Rust with no C and no Python, driven from R2 code (`llm.new`, `llm.train`, `llm.generate`, `llm.save`). A 7.24M-parameter transformer trains **1.45–1.9× faster than PyTorch + MKL** (1.40–1.63× at 40M parameters; 1.34–1.37× on an Intel CPU, MKL's home ground) and learns identically. A whole-step **GPU trainer** on any Vulkan/DirectX/Metal GPU via wgpu runs **1.3–2.0× faster than PyTorch-DirectML** on an integrated GPU. See [`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md).
 - **Statistics**: `lm`/`glm`/`aov` (incl. repeated-measures `Error()`), `t.test`/`cor.test`/`shapiro.test`, Hotelling's T², MANOVA (Wilks/Pillai/Hotelling-Lawley/Roy).
 - **Machine learning, built in**: decision tree, random forest, gradient boosting, KNN, naive Bayes, PCA, K-means, cross-validation.
 - **Graphics**: in-memory device, full `par()` multi-panel layouts, scatter/line/bar/hist/box/pie, PNG/SVG/PDF output, and a live browser plot viewer (`dev.view()`).

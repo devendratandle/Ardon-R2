@@ -1,6 +1,7 @@
 # Ardon-R2 vs PyTorch — LLM model training
 
-**Current status, 2026-09-25** (Intel second-machine run added to section 1).
+**Current status, 2026-10-29** (section 1 re-measured on the first machine;
+numerics audited against f64, section 2).
 This is the only performance report for LLM
 training. Earlier ones were deleted rather than kept: a superseded number is
 worse than no number. Everything below describes the code as it stands, not
@@ -15,7 +16,7 @@ torch    2.13.0+cpu, BLAS_INFO=mkl (Intel MKL 2026.1), OpenMP, 6 threads
 jax      0.11.1, CPU backend (XLA -> Eigen)
 corpus   corpus.txt — 19.4 MB of TinyStories
 config   dim 256, 4 layers, vocab 8,000, ffn 768 — 7.24M parameters
-run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
+run      300 steps x 32 x 64 = 614,400 tokens (section 1, the headline)
          30 steps x 32 x 64 for the op-level arms (sections 3-4)
 ```
 
@@ -23,42 +24,42 @@ run      500 steps x 32 x 64 = 1,024,000 tokens (section 1, the headline)
 
 ## 1. Result
 
-**R2 trains 1.5-1.66x FASTER than PyTorch at 7M parameters, 1.40-1.63x at 40M, and 1.25-1.28x faster end to end** (first machine). **On an Intel i5-12500, where MKL runs its own best path, 1.34-1.37x at 7M** (subsection below).
+**R2 trains 1.45-1.90x FASTER than PyTorch at 7M parameters (median
+1.73x), 1.40-1.63x at 40M, and 1.57-2.03x faster end to end** (first
+machine, 2026-10-29). **On an Intel i5-12500, where MKL runs its own best
+path, 1.34-1.37x at 7M** (subsection below). The 40M and Intel figures are
+from 2026-09-20 and 2026-09-25 and were not re-run.
 
 This is a real training run rather than a step benchmark: **300 Adam steps
 on TinyStories, 614,400 tokens, a 7.24M-parameter model**, both sides from
-the SAME initial weights on the SAME token stream, in one window
-(2026-09-19). The machine held **2375 MHz before, between and after every
-run** — verified, not assumed, so these seconds are representative rather
-than throttled.
+the SAME initial weights on the SAME token stream, three pairs interleaved
+in one window, `ts_run/` cleared before each. The machine held **2375 MHz
+before and after every pair**, on AC power. The code is v0.4.2 with the
+2026-10-29 changes (RoPE angles in f64 on both sides, the row-parallel
+cross-entropy forward, the column-parallel RMSNorm weight gradient).
 
 | pair | R2 train | PyTorch train | |
 |---|---:|---:|---|
-| 1 | **168.80 s** | 196.06 s | **R2 1.16x** |
-| 2 | **159.85 s** | 183.77 s | **R2 1.15x** |
-| 3 | **147.32 s** | 174.67 s | **R2 1.19x** (cold machine after a reboot; fastest run on both sides) |
-| 4 | **140.63 s** | 172.30 s | **R2 1.23x** (with the tape's value-buffer pool, below) |
-| 5 | **131.82 s** | 169.83 s | **R2 1.29x** (gradients pooled too, first writer assigns) |
-| 6 | **126.71 s** | 174.97 s | **R2 1.38x** (tiled attention; PyTorch's run drifted up in this window) |
-| 7 | **38.99 / 38.89 s** (100 steps) | 57.9 / 58.5 s | **R2 1.49-1.50x** (attention re-blocked, below; 100-step pairs, 2026-09-20) |
-| 8 | **36.33 / 35.86 s** (100 steps) | 60.4 / 59.4 s | **R2 1.66x / 1.66x** (`sgemm` column-group partition, section below; 2026-09-20) |
-| 9 | **44.8 / 40.8 s** (100 steps) | 75.8 / 62.8 s | **R2 1.69x / 1.54x** (re-check after the Intel-PC work, 2026-09-25; identical losses. The first run of the day was cold: an R2-only A/B right after, old build vs new interleaved, gave 36.9 / 35.4 / 44.7 s vs 35.4 / 34.9 / 38.4 s — no change) |
+| 1 | **104.61 s** | 180.83 s | **R2 1.73x** |
+| 2 | **132.68 s** | 193.00 s | **R2 1.45x** (R2's slowest run of the three, clock steady) |
+| 3 | **107.60 s** | 204.33 s | **R2 1.90x** |
 
 | phase | R2 | PyTorch | |
 |---|---:|---:|---|
-| **tokenize 19.1 MB** | **1.70 s** | 16.90 s | **R2 9.97x faster** |
-| **train, 300 steps** | **168.8 s** | 196.1 s | **R2 1.16x faster** |
-| **TOTAL** | **170.5 s** | 213.0 s | **R2 1.25x faster** |
+| **tokenize 19.1 MB** | **1.71-1.79 s** | 18.12-18.46 s | **R2 10.3-10.6x faster** |
+| **train, 300 steps** | **104.6-132.7 s** | 180.8-204.3 s | **R2 1.45-1.90x faster** |
+| **TOTAL** | **106.4-134.5 s** | 199.3-222.5 s | **R2 1.57-2.03x faster** |
 
-3,640-3,844 vs 3,134-3,343 tokens/s; 533-563 vs 613-654 ms/step. Held-out
-loss **4.3113 vs 4.3114**, perplexity 74.54 on both, the training loss
-identical to four decimals at all eleven checkpoints, and both models
-generate the same sentence from the same prompt.
+4,631-5,873 vs 3,007-3,398 tokens/s; 349-442 vs 603-681 ms/step. Held-out
+loss **4.3113 vs 4.3114** in all three pairs, perplexity 74.54 on both,
+the training loss identical to four decimals at all eleven checkpoints,
+and both models generate the same sentence from the same prompt.
 
-The previous standing figure was 1.10x (two pairs at 500 steps,
-2026-09-09: 269.72/297.32 and 271.79/299.07 s). The step between them is
-one change — the tape is freed off the training thread — and the two
-harnesses below show where it came from.
+The scatter is the machine's, not the code's: the same binaries ran each
+pair, and between pairs R2 moved by 27% and PyTorch by 13%. Quote the
+range. The
+previous standing figure was 1.5-1.66x (100-step pairs, 2026-09-20); the
+pair-by-pair history behind it is in git.
 
 ### On an Intel CPU — MKL on its home hardware (2026-09-25)
 
@@ -534,9 +535,13 @@ parameter gradient blocks**:
 
 ```
 loss     R2 5.0328483582   ref 5.0328480242   diff 3.3e-07
-logits   max abs diff 1.2e-06  (relative 5.7e-07)
-median relative error 7.3e-07, worst 1.0e-06     PASS
+logits   max abs diff 1.0e-06  (relative 4.7e-07)
+median relative error 5.6e-07, worst 8.5e-07     PASS
 ```
+
+(2026-10-29, with RoPE angles in f64. Before: logits 1.2e-06, median
+7.3e-07, worst 1.0e-06 — the f32 angles were a measurable part of R2's
+distance from the exact model.)
 
 Flat across every block at f32 epsilon — rounding, not a defect. Verified
 to have teeth: perturbing one gradient element by 50% makes it fail and
@@ -544,6 +549,30 @@ names the right block.
 
 Reading it: a **uniform** error across all blocks means the harness is
 wrong; **one block far above the rest** means that operator is.
+
+### Every primitive against f64 (2026-10-29)
+
+`cargo run --release -p r2-tensor --example numerics_audit` measures each
+numeric kernel of a training step against an f64 reference — `exp` and
+`log` over **every float** in their range, the rest on training shapes:
+
+| kernel | max error | |
+|---|---:|---|
+| `exp_r2` (and its AVX2 lanes, bit-identical) | 1.01 ulp | libm `expf` 0.50 |
+| `log_r2` | 0.83 ulp | |
+| silu / silu' | 2.4 ulp / 1e-6 abs | |
+| softmax-CE log-sum-exp (vocab 8,000) | 3.2 ulp | loss within 1e-6 relative |
+| RMSNorm (d 256, 768) | 3.9 ulp | |
+| **RoPE cos/sin, f32 angles (before)** | **9e-6 at pos < 256, 7e-5 < 2,048, 3e-4 < 8,192, 1.2e-3 < 32,768** | grows with position |
+| **RoPE cos/sin, f64 angles (now)** | **3e-8 at every position** | correctly rounded |
+
+RoPE was the one real defect: `pos * freq` rounded in f32 rounds the angle
+itself, by half an ulp of a number that grows with the position — the
+long-context RoPE precision problem. `ops::rope_cos_sin` now computes the
+angle and its sin/cos in f64 and rounds once; the tape, inference and the
+GPU table share it, and `tinystories_train.py` builds its table the same
+way, so the two sides still compute one model. PyTorch's own convention
+(f32 angles) has the same error.
 
 ---
 
@@ -560,7 +589,7 @@ per-row verdict, so the comparison cannot be quietly skipped.
 | `sgemm` — forward, `grad_A`, `grad_B` | **AHEAD of MKL kernel to kernel** on every case from dim 768 up: median NN 1.37x, NT 1.26x, TN 1.32x over 23 shapes (`gemm_cases.py`, 2026-09-20); dim-256 shapes with M or N = 256 ~0.7x | **39-80%** by size |
 | Attention forward | **parity with SDPA in situ** (30-34 vs 34-40 ms at dim 768 / seq 256); ahead at >= 2,048 tokens isolated | 4-5% |
 | Attention backward | **parity with SDPA in situ** (84-89 vs 78-101 ms) — was 3.3x behind | 5-8% |
-| `softmax_ce` | fused; not separately compared | 2-7% |
+| `softmax_ce` | fused; forward row-parallel since 2026-10-29 (14.9 -> 3.8 ms/step at 7M, same bits); not separately compared | 2-4% |
 | Embedding | 1.9-3.8x fwd+bwd | 0.07% |
 
 Nothing R2 ships is clearly behind its reference any more (2026-09-20);

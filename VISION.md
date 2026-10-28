@@ -34,7 +34,7 @@ Modern data science wastes enormous computational resources:
   an integrated GPU with identical losses; on an Intel CPU, where MKL is
   at home, LLM training is still 1.34–1.37x PyTorch
 - **LLM training faster than PyTorch**: a 7.24M-parameter model on
-  TinyStories trains **1.5-1.66x faster than PyTorch 2.13+MKL** and learns
+  TinyStories trains **1.45-1.90x faster than PyTorch 2.13+MKL** and learns
   *identically* — same loss to four decimals at every checkpoint over 500
   steps from shared initial weights. See `benchmarks/llm/REPORT.md`
 - **BPE tokenizer ~11x faster than HuggingFace `tokenizers`** — which is
