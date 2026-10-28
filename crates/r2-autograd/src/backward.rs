@@ -423,13 +423,24 @@ impl Tape {
                 for (r, (gx, ri)) in grads[xi].chunks_mut(d).zip(rinv.iter_mut()).enumerate() { row(r, gx, ri); }
             }
         }
-        // dL/dw_j = Σ_r g_rj x_rj r_r — in row order, as before.
-        let gw = &mut grads[wi];
-        for r in 0..rows {
-            let xr = &vx[r * d..r * d + d];
-            let gr = &g[r * d..r * d + d];
-            let ri = rinv[r];
-            for j in 0..d { gw[j] += gr[j] * xr[j] * ri; }
+        // dL/dw_j = Σ_r g_rj x_rj r_r — in row order, as before. The sum is
+        // over rows, so it is split by COLUMN: each task owns 16 columns (one
+        // cache line of a row) and adds every row into them in row order,
+        // which is the serial loop's order exactly. Serial, this pass was
+        // most of the 10 ms the 9 rmsnorm backwards took per step.
+        const CB: usize = 16;
+        let cols = |c: usize, gw: &mut [f32]| {
+            let j0 = c * CB;
+            for r in 0..rows {
+                let (xr, gr, ri) = (&vx[r * d + j0..], &g[r * d + j0..], rinv[r]);
+                for j in 0..gw.len() { gw[j] += gr[j] * xr[j] * ri; }
+            }
+        };
+        if rows * d >= PAR_MIN {
+            use rayon::prelude::*;
+            grads[wi].par_chunks_mut(CB).enumerate().for_each(|(c, gw)| cols(c, gw));
+        } else {
+            grads[wi].chunks_mut(CB).enumerate().for_each(|(c, gw)| cols(c, gw));
         }
     }
 

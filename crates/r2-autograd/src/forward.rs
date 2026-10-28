@@ -329,15 +329,28 @@ impl Tape {
         let rows = targets.len();
         assert_eq!(x.len(), rows * d, "softmax_ce: logits are not rows x d");
         let mut lse = vec![0.0f32; rows];
-        let mut loss = 0.0f32;
-        for (r, &t) in targets.iter().enumerate() {
-            let row = &x[r * d..r * d + d];
+        // Rows are independent, so the log-sum-exps run in parallel (at
+        // vocab 8,000 this was 16.4M exps on one core, 14.9 ms a step while
+        // the parallel backward took 10.2). Each row's loss term is kept and
+        // the terms are summed afterwards in row order, so the loss has the
+        // serial loop's bits.
+        let mut term = vec![0.0f32; rows];
+        let row_lse = |r: usize, l: &mut f32, tm: &mut f32| {
+            let (row, t) = (&x[r * d..r * d + d], targets[r]);
             debug_assert!(t < d, "softmax_ce: target {t} out of range for d={d}");
             let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let l = m + r2_tensor::ops::exp_shift_sum_only(row, m).ln();
-            lse[r] = l;
-            loss += l - row[t];
+            *l = m + r2_tensor::ops::exp_shift_sum_only(row, m).ln();
+            *tm = *l - row[t];
+        };
+        if rows * d >= PAR_MIN {
+            use rayon::prelude::*;
+            lse.par_iter_mut().zip(term.par_iter_mut()).enumerate()
+                .for_each(|(r, (l, tm))| row_lse(r, l, tm));
+        } else {
+            lse.iter_mut().zip(term.iter_mut()).enumerate().for_each(|(r, (l, tm))| row_lse(r, l, tm));
         }
+        let mut loss = 0.0f32;
+        for tm in &term { loss += tm; }
         loss /= rows as f32;
         let req = self.requires[logits.0];
         self.push(vec![loss], Op::SoftmaxCE { logits, d, targets, lse }, req)
