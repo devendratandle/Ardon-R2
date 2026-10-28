@@ -119,13 +119,20 @@ class R2Model(torch.nn.Module):
             torch.nn.Parameter(load_f32(f"init_{b['i']}.bin", b["len"]))
             for b in d["blocks"])
 
-        half = self.hd // 2
-        freq = self.base ** (-2.0 * torch.arange(half, dtype=torch.float32) / self.hd)
-        ang = torch.arange(seq, dtype=torch.float32)[:, None] * freq[None, :]
         # Registered so a longer generation prompt cannot silently index past
         # the table — it is rebuilt for the length actually needed.
-        self.register_buffer("rope_cos", ang.cos(), persistent=False)
-        self.register_buffer("rope_sin", ang.sin(), persistent=False)
+        cos, sin = self.rope_tables(seq)
+        self.register_buffer("rope_cos", cos, persistent=False)
+        self.register_buffer("rope_sin", sin, persistent=False)
+
+    def rope_tables(self, t):
+        """cos/sin of the angles in float64, rounded once to float32 — what
+        R2's `ops::rope_cos_sin` computes. In float32 the angle itself is
+        rounded, an error that grows with the position (3e-4 by 8,192)."""
+        half = self.hd // 2
+        freq = self.base ** (-2.0 * torch.arange(half, dtype=torch.float64) / self.hd)
+        ang = torch.arange(t, dtype=torch.float64)[:, None] * freq[None, :]
+        return ang.cos().float(), ang.sin().float()
 
     def rms_norm(self, x, w):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * w
@@ -133,10 +140,8 @@ class R2Model(torch.nn.Module):
     def rope(self, x, t):
         """Rotate ADJACENT pairs (2i, 2i+1) — R2's interleaved convention."""
         if self.rope_cos.shape[0] < t:
-            half = self.hd // 2
-            freq = self.base ** (-2.0 * torch.arange(half, dtype=torch.float32) / self.hd)
-            ang = torch.arange(t, dtype=torch.float32)[:, None] * freq[None, :]
-            self.rope_cos, self.rope_sin = ang.cos().to(x.device), ang.sin().to(x.device)
+            cos, sin = self.rope_tables(t)
+            self.rope_cos, self.rope_sin = cos.to(x.device), sin.to(x.device)
         c = self.rope_cos[:t][None, :, None, :]
         s = self.rope_sin[:t][None, :, None, :]
         a, b = x[..., 0::2], x[..., 1::2]

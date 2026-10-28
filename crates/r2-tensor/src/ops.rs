@@ -636,20 +636,30 @@ pub fn swiglu(gate: &[f32], up: &[f32]) -> Vec<f32> {
 /// two multiplies and two adds per pair.
 ///
 /// Build this once per call and the inner loop becomes exactly that.
-/// The values are computed by the same expressions in the same order as
-/// `rope_inplace`, so a table-driven pass is bit-identical to it.
+/// Every value comes from [`rope_cos_sin`], as `rope_inplace`'s do, so a
+/// table-driven pass is bit-identical to it.
 pub fn rope_table(period: usize, head_dim: usize, base: f32) -> Vec<(f32, f32)> {
     let half = head_dim / 2;
     let mut t = Vec::with_capacity(period.max(1) * half);
     for pos in 0..period.max(1) {
-        for p in 0..half {
-            let freq = 1.0 / base.powf(2.0 * p as f32 / head_dim as f32);
-            let theta = pos as f32 * freq;
-            let (s, c) = theta.sin_cos();
-            t.push((c, s));
-        }
+        for p in 0..half { t.push(rope_cos_sin(pos, p, head_dim, base)); }
     }
     t
+}
+
+/// `(cos θ, sin θ)` for pair `p` at position `pos`, `θ = pos / base^(2p/d)`,
+/// correctly rounded to f32 (the angle and both functions in f64).
+///
+/// In f32 the angle itself is rounded, to half an ulp of `θ`, and that
+/// error grows with the position: measured against f64 (`--example
+/// numerics_audit`) the f32 form was off by 9e-6 below position 256, 7e-5
+/// below 2,048, 3e-4 below 8,192 and 1.2e-3 below 32,768 — where an f32
+/// cos/sin can be right to 3e-8. That is the long-context RoPE precision
+/// problem; the table is built once per call, so f64 costs nothing.
+pub fn rope_cos_sin(pos: usize, p: usize, head_dim: usize, base: f32) -> (f32, f32) {
+    let freq = (base as f64).powf(-2.0 * p as f64 / head_dim as f64);
+    let (s, c) = (pos as f64 * freq).sin_cos();
+    (c as f32, s as f32)
 }
 
 /// Rotary position embedding (RoPE) applied in place to one head vector
@@ -659,9 +669,7 @@ pub fn rope_inplace(x: &mut [f32], pos: usize, base: f32) {
     let d = x.len();
     let half = d / 2;
     for i in 0..half {
-        let freq = 1.0 / base.powf(2.0 * i as f32 / d as f32);
-        let theta = pos as f32 * freq;
-        let (s, c) = theta.sin_cos();
+        let (c, s) = rope_cos_sin(pos, i, d, base);
         let a = x[2 * i];
         let b = x[2 * i + 1];
         x[2 * i] = a * c - b * s;

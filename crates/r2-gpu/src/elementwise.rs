@@ -536,20 +536,20 @@ pub fn flat_bwd(op: Flat, a: &Tensor, b: &Tensor, g: &Tensor, ga: Option<(&Tenso
 }
 
 /// `(cos, sin)` per (position, pair), flattened — `r2_tensor::ops::
-/// rope_table`, the CPU tape's table, by the same expressions in the same
-/// order (so the same bits; `rope_table_matches_the_cpu` pins it). It is
-/// computed on the host, where `powf` and `sin_cos` are one library for
-/// both the CPU tape and the device.
+/// rope_table`, the CPU tape's table, by `rope_cos_sin`'s f64 expressions
+/// (r2-tensor depends on this crate, so they are repeated, not called; the
+/// same bits — `rope_table_matches_the_cpu` pins it). It is computed on the
+/// host, where `powf` and `sin_cos` are one library for both the CPU tape
+/// and the device.
 pub fn rope_table(period: usize, head_dim: usize, base: f32) -> Vec<f32> {
     let half = head_dim / 2;
     let mut t = Vec::with_capacity(period.max(1) * half * 2);
     for pos in 0..period.max(1) {
         for p in 0..half {
-            let freq = 1.0 / base.powf(2.0 * p as f32 / head_dim as f32);
-            let theta = pos as f32 * freq;
-            let (s, c) = theta.sin_cos();
-            t.push(c);
-            t.push(s);
+            let freq = (base as f64).powf(-2.0 * p as f64 / head_dim as f64);
+            let (s, c) = (pos as f64 * freq).sin_cos();
+            t.push(c as f32);
+            t.push(s as f32);
         }
     }
     t

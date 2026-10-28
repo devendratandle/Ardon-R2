@@ -11,6 +11,27 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Version 0.4.1 was never released; everything listed here since v0.4.0
 ships in 0.4.2.
 
+### LLM numerics audited; RoPE exact at any context length — 2026-10-29
+
+- **RoPE positions are now correctly rounded at every context length.** The
+  rotation angles were computed in f32, which rounds the angle itself, and
+  that error grows with the position: cos/sin were off by 9e-6 below
+  position 256, 3e-4 by 8,192 and 1.2e-3 by 32,768. They are now computed
+  in f64 and rounded once, right to 3e-8 (half an f32 ulp) at every
+  position — on the CPU tape, in inference and on the GPU alike. The
+  PyTorch reference in `benchmarks/llm/` computes its table the same way,
+  and a 300-step TinyStories pair still trains to identical losses
+  (held-out 4.3113 vs 4.3114, the same generated sentence).
+- **Every other LLM primitive was measured against f64** and is within a
+  few ulps: `exp` 1.01 ulp and `log` 0.83 ulp over every float in range,
+  silu 2.4, softmax cross-entropy 3.2, RMSNorm 3.9. `cargo run --release
+  -p r2-tensor --example numerics_audit` reproduces the table.
+- **Training step: two serial passes made parallel, bit for bit.** The
+  cross-entropy forward (14.9 -> 3.8 ms a step on the 7M model) and the
+  RMSNorm weight gradient (10.2 -> 7.1 ms) now use every core and give the
+  same bits as before — the loss and a hash over all 7.24M gradients are
+  unchanged (`--example grad_fingerprint`).
+
 ### Installer documentation opens in Notepad — 2026-10-02
 
 - The Windows installer and the Windows zip ship the documentation as real
