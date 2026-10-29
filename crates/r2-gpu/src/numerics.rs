@@ -188,6 +188,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Does this adapter's `fma` round ONCE?
+///
+/// Every correctly rounded kernel here (`div_cr`, `sqrt_cr`, `exp_r2`,
+/// and through them Adam, SiLU and the softmax) assumes it: the remainder
+/// a correction step computes is exact only if `fma` is fused. WGSL does
+/// not require that, and a driver may lower `fma` to a multiply and an
+/// add — Mesa's llvmpipe does (0.03% of `fma` results exact), and there
+/// the GPU's Adam, `exp_r2` and SiLU land one ULP off the CPU's. Nothing
+/// is wrong with the arithmetic; the bit-identity promise simply does not
+/// hold on such a device, and this is how a caller or a test finds out.
+///
+/// Probed once per process on 2^16 inputs. `None` without an adapter.
+pub fn fma_exact() -> Option<bool> {
+    static F: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| probe(1 << 16).map(|s| s[4].exact == s[4].n))
+}
+
 /// Distance in ULPs between two finite f32s (0 when bit-identical).
 pub fn ulps(a: f32, b: f32) -> u64 {
     if a.to_bits() == b.to_bits() { return 0; }
@@ -326,6 +343,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     #[test]
     fn gpu_exp_r2_is_bit_identical_to_the_cpu() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        if fma_exact() == Some(false) { eprintln!("adapter's fma is not fused: bit-identity is not promised here; skipped"); return; }
         let n = 1 << 20;
         let mut xs: Vec<f32> = (0..n).map(|i| -90.0 + 180.0 * i as f32 / n as f32).collect();
         xs.extend_from_slice(&[0.0, -0.0, -87.336_54, -87.336_55, 88.376_26, 88.4, f32::MIN_POSITIVE, -1e-30]);
@@ -394,6 +412,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     #[test]
     fn gpu_silu_is_bit_identical_to_the_cpu() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        if fma_exact() == Some(false) { eprintln!("adapter's fma is not fused: bit-identity is not promised here; skipped"); return; }
         let n = 1 << 20;
         let xs: Vec<f32> = (0..n).map(|i| -40.0 + 80.0 * i as f32 / n as f32).collect();
         let got = gpu_map("div_cr(x, 1.0 + exp_r2(-x))", &xs);

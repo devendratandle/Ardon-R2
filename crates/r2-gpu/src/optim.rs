@@ -103,6 +103,9 @@ mod tests {
     #[test]
     fn gpu_adam_is_bit_identical_to_the_cpu_adam() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        if crate::numerics::fma_exact() == Some(false) {
+            eprintln!("adapter's fma is not fused: bit-identity is not promised here; skipped"); return;
+        }
         let n = 10_007usize;
         let init: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.011).sin()).collect();
         // every seventh parameter never gets a gradient — an embedding row

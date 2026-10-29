@@ -92,7 +92,11 @@ pub fn adapter_offers_f16() -> bool {
 /// One line about the adapter, for reports.
 pub fn adapter_line() -> String {
     match gpu() {
-        Some(g) => format!("{} ({:?}, backend {:?})", g.info.name, g.info.device_type, g.info.backend),
+        Some(g) => format!("{} ({:?}, backend {:?}){}", g.info.name, g.info.device_type, g.info.backend,
+                           // said where every run prints its device, not left for a test to find
+                           if crate::numerics::fma_exact() == Some(false) {
+                               "; fma not fused: results not bit-identical to the CPU"
+                           } else { "" }),
         None => "no adapter (CPU fallback active)".into(),
     }
 }

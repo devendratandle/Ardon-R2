@@ -98,6 +98,39 @@ jobs:
         run: cargo clippy --workspace --release --all-targets --exclude r2-ui --exclude r2-gui -- -D warnings
         continue-on-error: true   # warnings tracked, not blocking, until cleaned up
 
+  # ── Debug builds, and the GPU path on a software GPU ────────────
+  # The job above tests release builds, where integer overflow wraps
+  # silently: `f16_to_f32` underflowed a u32 for every |x| < 1 and still
+  # returned the right answer, so only a debug build caught it. The GPU
+  # path (`--features gpu`) is never built above at all. Mesa's llvmpipe
+  # gives the runner a Vulkan device, so every r2-gpu kernel test and the
+  # GPU trainer's tests run here. Its `fma` is not fused, so the three
+  # bit-identity tests report themselves skipped (`numerics::fma_exact`);
+  # on real hardware they run.
+  debug-and-gpu:
+    name: debug-build tests + GPU on llvmpipe (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install Mesa's software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      - name: Test numeric crates (debug, overflow checks on)
+        run: cargo test --no-fail-fast -p r2-linalg -p r2-tensor -p r2-autograd -p r2-train
+      - name: Test the GPU path on llvmpipe (debug)
+        run: |
+          cargo test --no-fail-fast -p r2-gpu --features gpu
+          cargo test --no-fail-fast -p r2-train --features gpu
+
   # ── Differential harness: every case runs in R2 AND in GNU R ────
   # The pre-push gate, now in CI (tests/differential/run.sh). Windows
   # only, on purpose: string collation follows the OS locale in R, and

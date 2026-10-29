@@ -160,9 +160,16 @@ pub mod f64 {
 /// and `R2_SIMD` not set to `avx2` (the same cap `level3`'s `dot4` honours,
 /// for a machine where AVX-512 downclocks the rest of the workload).
 ///
-/// NOT yet tuned or timed: the machines R2 is developed on have no
-/// AVX-512. It is checked for correctness under Intel SDE; `KC`/`MC`/`NC`
-/// are the AVX2 kernel's until an AVX-512 machine measures them.
+/// Timed once, NOT yet tuned: the machines R2 is developed on have no
+/// AVX-512. On a 4-vCPU cloud Xeon (AVX-512, 2026-10-29) it ran 1.5x the
+/// AVX2 kernel on the same machine and 0.66-0.71x MKL (geometric mean of
+/// the 30 cases of `benchmarks/llm/gemm_cases.py`; small shapes like
+/// 2048x256x128 0.4-0.6x). The micro-kernel itself reached ~90% of the
+/// core's FMA peak; the gap is packing and tile handling around it. That
+/// VM's timing noise (±8%) was too large to tune against — `KC`/`MC`/`NC`
+/// remain the AVX2 kernel's until a quiet AVX-512 machine measures them.
+/// `KC` must stay 256 regardless: it fixes each element's summation order,
+/// which is what keeps this bit-identical to the AVX2 kernel.
 pub mod f32_512 {
     use super::{nthreads, stats_on, Trans, PACK_PAR_MIN, STATS};
     blocked_gemm_for!(f32, 12, 32, 256, 96, 1024, "avx512f", super::avx512f_allowed());
