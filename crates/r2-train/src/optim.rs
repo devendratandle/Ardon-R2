@@ -75,20 +75,26 @@ fn have_avx2() -> bool {
 }
 
 /// The Adam update for one block. The reference form.
-#[allow(clippy::too_many_arguments)]
 ///
-/// `keep` is the AdamW shrink factor `1 - lr * weight_decay`; at exactly
-/// 1 the shrink is skipped, so plain Adam's bits are untouched.
+/// `c` is AdamW's decay coefficient `lr * weight_decay`; at exactly 0 the
+/// decay is skipped, so plain Adam's bits are untouched. The decay is
+/// `p - c*p` in one fused multiply-add, not `p * (1 - c)`: `1 - c` rounded
+/// to f32 misstates a decay of 3e-5 by up to 1e-3 of itself, the same way
+/// on every step, so the error compounds (`--example adam_audit`). The
+/// fused form rounds once per weight per step, and those errors do not
+/// line up. On a CPU without FMA, `mul_add` is a slower software fma —
+/// the price of matching the AVX2 lanes bit for bit.
+#[allow(clippy::too_many_arguments)]
 fn adam_scalar(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
                b1: f32, b2: f32, bc1: f32, bc2: f32, lr: f32, eps: f32, scale: f32,
-               keep: f32) {
+               c: f32) {
     for i in 0..p.len() {
         let gi = g[i] / scale;
         m[i] = b1 * m[i] + (1.0 - b1) * gi;
         v[i] = b2 * v[i] + (1.0 - b2) * gi * gi;
         let mh = m[i] / bc1;
         let vh = v[i] / bc2;
-        if keep != 1.0 { p[i] *= keep; }
+        if c != 0.0 { p[i] = (-c).mul_add(p[i], p[i]); }
         p[i] -= lr * mh / (vh.sqrt() + eps);
     }
 }
@@ -117,13 +123,13 @@ fn adam_scalar(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
 #[allow(clippy::too_many_arguments)]
 unsafe fn adam_avx2(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
                     b1: f32, b2: f32, bc1: f32, bc2: f32, lr: f32, eps: f32, scale: f32,
-                    keep: f32) {
+                    c: f32) {
     use std::arch::x86_64::*;
     let (vb1, vb2) = (_mm256_set1_ps(b1), _mm256_set1_ps(b2));
     let (v1b1, v1b2) = (_mm256_set1_ps(1.0 - b1), _mm256_set1_ps(1.0 - b2));
     let (vbc1, vbc2) = (_mm256_set1_ps(bc1), _mm256_set1_ps(bc2));
     let (vlr, veps, vsc) = (_mm256_set1_ps(lr), _mm256_set1_ps(eps), _mm256_set1_ps(scale));
-    let (decay, vkeep) = (keep != 1.0, _mm256_set1_ps(keep));
+    let (decay, vc) = (c != 0.0, _mm256_set1_ps(c));
     let n = p.len();
     let mut i = 0usize;
     while i + 8 <= n {
@@ -140,13 +146,13 @@ unsafe fn adam_avx2(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
         let den = _mm256_add_ps(_mm256_sqrt_ps(_mm256_div_ps(vv, vbc2)), veps);
         let upd = _mm256_div_ps(_mm256_mul_ps(vlr, _mm256_div_ps(mv, vbc1)), den);
         let mut pv = _mm256_loadu_ps(p.as_ptr().add(i));
-        if decay { pv = _mm256_mul_ps(pv, vkeep); }
+        if decay { pv = _mm256_fnmadd_ps(vc, pv, pv); }   // p - c*p, one rounding
         _mm256_storeu_ps(p.as_mut_ptr().add(i), _mm256_sub_ps(pv, upd));
         i += 8;
     }
     if i < n {
         adam_scalar(&mut p[i..], &g[i..], &mut m[i..], &mut v[i..],
-                    b1, b2, bc1, bc2, lr, eps, scale, keep);
+                    b1, b2, bc1, bc2, lr, eps, scale, c);
     }
 }
 
@@ -213,10 +219,10 @@ impl Adam {
         let bc1 = 1.0 - self.beta1.powi(self.t as i32);
         let bc2 = 1.0 - self.beta2.powi(self.t as i32);
 
-        let shrink = 1.0 - self.lr * self.weight_decay;
+        let shrink = self.lr * self.weight_decay;
         let mut off = 0usize;
         for (bi, (p, g)) in params.iter_mut().zip(grads).enumerate() {
-            let keep = if self.weight_decay != 0.0 && decay.is_none_or(|d| d[bi]) { shrink } else { 1.0 };
+            let c = if self.weight_decay != 0.0 && decay.is_none_or(|d| d[bi]) { shrink } else { 0.0 };
             if p.len() != g.len() {
                 return Err(format!("Adam::step_blocks: block is {} params, {} gradients",
                                    p.len(), g.len()));
@@ -228,12 +234,12 @@ impl Adam {
                 // SAFETY: `have_avx2()` confirmed AVX2+FMA on this CPU, and
                 // the four slices are all exactly `n` long (checked above).
                 unsafe { adam_avx2(p, g, m, v, self.beta1, self.beta2, bc1, bc2,
-                                   self.lr, self.eps, scale, keep) };
+                                   self.lr, self.eps, scale, c) };
                 off += n;
                 continue;
             }
             adam_scalar(p, g, m, v, self.beta1, self.beta2, bc1, bc2,
-                        self.lr, self.eps, scale, keep);
+                        self.lr, self.eps, scale, c);
             off += n;
         }
         Ok(())
@@ -409,14 +415,14 @@ mod tests {
         let p0: Vec<f32> = (0..n).map(|i| ((i % 41) as f32 - 20.0) * 0.027).collect();
         let g: Vec<f32> = (0..n).map(|i| ((i % 29) as f32 - 14.0) * 0.013).collect();
         let (lr, wd) = (0.003f32, 0.1f32);
-        let keep = 1.0 - lr * wd;
+        let c = lr * wd;
         let (mut ps, mut ms, mut vs) = (p0.clone(), vec![0.0f32; n], vec![0.0f32; n]);
         let (mut pv, mut mv, mut vv) = (p0.clone(), vec![0.0f32; n], vec![0.0f32; n]);
         for t in 1..=3i32 {
             let (bc1, bc2) = (1.0 - 0.9f32.powi(t), 1.0 - 0.999f32.powi(t));
-            adam_scalar(&mut ps, &g, &mut ms, &mut vs, 0.9, 0.999, bc1, bc2, lr, 1e-8, 2.0, keep);
+            adam_scalar(&mut ps, &g, &mut ms, &mut vs, 0.9, 0.999, bc1, bc2, lr, 1e-8, 2.0, c);
             // SAFETY: AVX2+FMA checked above; all slices are `n` long.
-            unsafe { adam_avx2(&mut pv, &g, &mut mv, &mut vv, 0.9, 0.999, bc1, bc2, lr, 1e-8, 2.0, keep) };
+            unsafe { adam_avx2(&mut pv, &g, &mut mv, &mut vv, 0.9, 0.999, bc1, bc2, lr, 1e-8, 2.0, c) };
         }
         for i in 0..n {
             assert_eq!(ps[i].to_bits(), pv[i].to_bits(), "param {i}");

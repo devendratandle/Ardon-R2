@@ -23,7 +23,12 @@ ships in 0.4.2.
   plain Adam. The TinyStories harness takes `R2_SCHED=cosine`,
   `R2_WARMUP`, `R2_MIN_LR`, `R2_CLIP`, `R2_WD` and the PyTorch half applies
   the same recipe: with all three on, 100 steps, the two learn identically
-  (every checkpoint to four decimals, held-out 5.8068 vs 5.8068). The GPU
+  (every checkpoint to four decimals, held-out 5.8068 vs 5.8068). The
+  decay is applied as `p - (lr*wd)*p` in one fused multiply-add rather
+  than `p * (1 - lr*wd)`, whose rounded factor misstates a small decay the
+  same way every step: against an exact f64 AdamW over 3,000 steps
+  (`--example adam_audit`) the weights now stay within 9e-6 of exact
+  (relative to how far they moved), down from 7.2e-5; plain Adam 5.7e-6. The GPU
   trainer follows the schedule and refuses decay or clipping with a clear
   error until the device has them.
 - GPU: an adapter whose `fma` is not fused (Mesa's software llvmpipe) is
