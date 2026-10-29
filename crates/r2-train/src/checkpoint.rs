@@ -83,6 +83,7 @@ impl Checkpoint {
         self.put_scalar(&format!("{prefix}.beta1"), opt.beta1 as f64);
         self.put_scalar(&format!("{prefix}.beta2"), opt.beta2 as f64);
         self.put_scalar(&format!("{prefix}.eps"), opt.eps as f64);
+        self.put_scalar(&format!("{prefix}.weight_decay"), opt.weight_decay as f64);
     }
 
     /// Rebuild an optimizer exactly — including `t`, without which bias
@@ -100,6 +101,9 @@ impl Checkpoint {
             beta1: self.scalar(&format!("{prefix}.beta1"))? as f32,
             beta2: self.scalar(&format!("{prefix}.beta2"))? as f32,
             eps: self.scalar(&format!("{prefix}.eps"))? as f32,
+            // Absent from checkpoints written before AdamW existed: those
+            // trained plain Adam, which is decay 0.
+            weight_decay: self.scalar(&format!("{prefix}.weight_decay")).unwrap_or(0.0) as f32,
         })
     }
 

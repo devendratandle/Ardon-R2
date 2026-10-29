@@ -11,6 +11,27 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Version 0.4.1 was never released; everything listed here since v0.4.0
 ships in 0.4.2.
 
+### LLM training recipe: AdamW, warmup + cosine schedule, gradient clipping — 2026-10-30
+
+- `r2_train::llm::Trainer` gains the three pieces every modern LLM run
+  uses, all **off by default** (a run that sets none of them is bit-for-bit
+  the run it was): AdamW decoupled weight decay (`opt.weight_decay`; every
+  matrix decays, RMSNorm gains never do), a linear-warmup + cosine-decay
+  learning rate (`sched: Some(LrSchedule { .. })`), and global-norm
+  gradient clipping as `torch.nn.utils.clip_grad_norm_` (`clip`), with the
+  norm reported per step. Checkpoints store the decay; older ones load as
+  plain Adam. The TinyStories harness takes `R2_SCHED=cosine`,
+  `R2_WARMUP`, `R2_MIN_LR`, `R2_CLIP`, `R2_WD` and the PyTorch half applies
+  the same recipe: with all three on, 100 steps, the two learn identically
+  (every checkpoint to four decimals, held-out 5.8068 vs 5.8068). The GPU
+  trainer follows the schedule and refuses decay or clipping with a clear
+  error until the device has them.
+- GPU: an adapter whose `fma` is not fused (Mesa's software llvmpipe) is
+  named as such in the device line, and the CPU bit-identity tests skip
+  there with the reason; on real GPUs they run (they pass on the Vega).
+  CI gains a debug-build job (overflow checks on) that also runs the GPU
+  path on llvmpipe — the class of bug `f16_to_f32` was.
+
 ### LLM numerics audited; RoPE exact at any context length — 2026-10-29
 
 - **RoPE positions are now correctly rounded at every context length.** The

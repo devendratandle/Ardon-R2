@@ -13,7 +13,7 @@
 use r2_autograd::{Tape, Var};
 use r2_tensor::model::{Config, Layer, Model};
 
-use crate::optim::Adam;
+use crate::optim::{Adam, LrSchedule};
 
 /// A trainable model: the same shape as [`Model`], held as flat parameter
 /// blocks so the optimizer sees one contiguous vector per tensor.
@@ -25,6 +25,32 @@ pub struct Trainer {
     pub step: u64,
     /// Value buffers from the previous step, reused by the next tape.
     pub pool: r2_autograd::BufPool,
+    /// Learning rate per step; `None` keeps `opt.lr` constant.
+    pub sched: Option<LrSchedule>,
+    /// Clip the global gradient L2 norm to this, as
+    /// `torch.nn.utils.clip_grad_norm_` does; `None` leaves it unclipped.
+    pub clip: Option<f32>,
+    /// The global gradient norm of the last step, before clipping. Only
+    /// measured when `clip` is set (it costs a pass over every gradient).
+    pub last_grad_norm: Option<f32>,
+}
+
+/// Σ g² over every gradient block, in f64.
+///
+/// Eight independent accumulators in a fixed order: the sum is the same on
+/// every run and every machine (no reassociation by thread count), and the
+/// chains are short enough to vectorise. f64 because 7M squares summed in
+/// f32 lose the small ones entirely.
+fn global_sq_norm(grads: &[&[f32]]) -> f64 {
+    let mut acc = [0f64; 8];
+    for g in grads {
+        let mut chunks = g.chunks_exact(8);
+        for c in &mut chunks {
+            for (a, &x) in acc.iter_mut().zip(c) { *a += x as f64 * x as f64; }
+        }
+        for (a, &x) in acc.iter_mut().zip(chunks.remainder()) { *a += x as f64 * x as f64; }
+    }
+    acc.iter().sum()
 }
 
 /// Per-layer parameter blocks, in the order they are stored.
@@ -59,11 +85,7 @@ impl Trainer {
         };
         let d = cfg.dim;
         let params: Vec<Vec<f32>> = shapes.iter().enumerate().map(|(i, &n)| {
-            let is_norm = i == 1 || (i >= 3 && {
-                let k = (i - 3) % 9;
-                k == 0 || k == 5
-            });
-            if is_norm {
+            if Self::is_norm_block(i) {
                 vec![1.0; n]
             } else {
                 let scale = 1.0 / (d as f32).sqrt();
@@ -73,13 +95,25 @@ impl Trainer {
 
         let total: usize = shapes.iter().sum();
         let opt = Adam::new(total, lr);
-        Ok(Trainer { cfg, params, opt, step: 0, pool: r2_autograd::BufPool::new() })
+        Ok(Trainer { cfg, params, opt, step: 0, pool: r2_autograd::BufPool::new(),
+                     sched: None, clip: None, last_grad_norm: None })
     }
 
     /// Total trainable parameters — equals `Config::n_params`.
     pub fn n_params(&self) -> usize { self.params.iter().map(|p| p.len()).sum() }
 
     fn layer_block(&self, layer: usize, part: usize) -> usize { 3 + layer * 9 + part }
+
+    /// Is block `i` (in [`Trainer::block_shapes`] order) an RMSNorm gain?
+    pub fn is_norm_block(i: usize) -> bool {
+        i == 1 || (i >= 3 && matches!((i - 3) % 9, 0 | 5))
+    }
+
+    /// Which blocks AdamW decays: every matrix (embeddings and output head
+    /// included, as GPT-2 and nanoGPT do), never a norm gain.
+    pub fn decay_mask(&self) -> Vec<bool> {
+        (0..self.params.len()).map(|i| !Self::is_norm_block(i)).collect()
+    }
 
     /// Forward one sequence through the tape, returning the logits var.
     /// Mirrors `Model::forward_step` over a whole sequence at once —
@@ -248,8 +282,22 @@ impl Trainer {
             self.params[i] = tape.take_value(lv);
         }
         let grads: Vec<&[f32]> = leaves.iter().map(|&lv| tape.grad(lv)).collect();
+        // Clipping folds into the scale Adam already divides by: the
+        // gradient it uses is `g / scale`, so multiplying that by
+        // `max / norm` is dividing by `scale * norm / max`.
+        let mut scale = scale;
+        self.last_grad_norm = None;
+        if let Some(max) = self.clip {
+            let norm = (global_sq_norm(&grads).sqrt() / scale as f64) as f32;
+            self.last_grad_norm = Some(norm);
+            // torch's coefficient: max / (norm + 1e-6), applied when < 1
+            let coef = max / (norm + 1e-6);
+            if coef < 1.0 { scale /= coef; }
+        }
+        if let Some(sch) = self.sched { self.opt.lr = sch.at(self.step); }
+        let mask = (self.opt.weight_decay != 0.0).then(|| self.decay_mask());
         let Trainer { params, opt, .. } = self;
-        opt.step_blocks(params, &grads, scale)?;
+        opt.step_blocks_masked(params, &grads, scale, mask.as_deref())?;
         drop(grads);
         // Value buffers back to the pool for the next step; gradient
         // buffers freed off the training thread (a reused gradient buffer
@@ -540,5 +588,89 @@ impl Trainer {
         let logits = self.forward_fused(&mut tape, &toks, seq, &leaves);
         let _ = tape.softmax_ce(logits, self.cfg.vocab, vec![0; toks.len()]);
         (tape.len(), tape.elements())
+    }
+}
+
+#[cfg(test)]
+mod recipe_tests {
+    //! The training recipe beyond constant-rate Adam: schedule, clipping,
+    //! decay mask. Each is off by default, so the first test pins that
+    //! turning nothing on changes nothing.
+    use super::*;
+    use crate::optim::LrSchedule;
+
+    fn tiny() -> Config {
+        Config { dim: 16, n_heads: 4, n_kv_heads: 2, n_layers: 2, vocab: 10,
+                 ffn_hidden: 32, max_seq: 16, rope_base: 10000.0, eps: 1e-5 }
+    }
+    fn batch() -> Vec<(Vec<usize>, Vec<usize>)> {
+        vec![(vec![1, 2, 3, 4], vec![2, 3, 4, 5]), (vec![5, 6, 7, 8], vec![6, 7, 8, 9])]
+    }
+
+    #[test]
+    fn a_clip_that_never_binds_is_bit_identical_to_no_clip() {
+        let mut a = Trainer::new(tiny(), 0.02, 3).unwrap();
+        let mut b = Trainer::new(tiny(), 0.02, 3).unwrap();
+        b.clip = Some(1e30);
+        for _ in 0..5 { a.train_step(&batch()).unwrap(); b.train_step(&batch()).unwrap(); }
+        assert_eq!(a.params, b.params);
+        assert!(a.last_grad_norm.is_none() && b.last_grad_norm.is_some());
+    }
+
+    #[test]
+    fn the_recorded_norm_is_the_norm_of_the_gradients() {
+        let t = Trainer::new(tiny(), 0.02, 3).unwrap();
+        let (_, _, grads) = t.loss_logits_grads(&batch()).unwrap();
+        let want = grads.iter().flatten().map(|&g| g as f64 * g as f64).sum::<f64>().sqrt();
+        let mut c = Trainer::new(tiny(), 0.02, 3).unwrap();
+        c.clip = Some(1e30);
+        c.train_step(&batch()).unwrap();
+        let got = c.last_grad_norm.unwrap() as f64;
+        assert!((got - want).abs() <= 1e-5 * want, "norm {got} vs {want}");
+    }
+
+    #[test]
+    fn a_binding_clip_changes_the_trajectory_and_still_trains() {
+        let mut a = Trainer::new(tiny(), 0.02, 3).unwrap();
+        let mut b = Trainer::new(tiny(), 0.02, 3).unwrap();
+        b.clip = Some(1e-3);
+        let first = b.train_step(&batch()).unwrap();
+        a.train_step(&batch()).unwrap();
+        let mut last = first;
+        for _ in 0..60 { a.train_step(&batch()).unwrap(); last = b.train_step(&batch()).unwrap(); }
+        assert_ne!(a.params, b.params, "a clip far below the norm must change the updates");
+        assert!(last < first, "clipped training must still descend: {first} -> {last}");
+    }
+
+    #[test]
+    fn the_schedule_drives_the_rate_step_by_step() {
+        let mut t = Trainer::new(tiny(), 0.02, 3).unwrap();
+        let s = LrSchedule { base: 0.02, min: 0.002, warmup: 2, total: 6 };
+        t.sched = Some(s);
+        for k in 0..8u64 {
+            t.train_step(&batch()).unwrap();
+            assert_eq!(t.opt.lr, s.at(k), "step {k}");
+        }
+    }
+
+    #[test]
+    fn decay_skips_exactly_the_norm_gains() {
+        let t = Trainer::new(tiny(), 0.02, 3).unwrap();
+        let mask = t.decay_mask();
+        for (i, p) in t.params.iter().enumerate() {
+            // norms are the blocks initialised to exactly 1.0
+            let is_norm = p.iter().all(|&x| x == 1.0);
+            assert_eq!(mask[i], !is_norm, "block {i}");
+        }
+        // and with decay on, a norm gain moves exactly as it would without
+        let mut a = Trainer::new(tiny(), 0.02, 3).unwrap();
+        let mut b = Trainer::new(tiny(), 0.02, 3).unwrap();
+        b.opt.weight_decay = 0.5;
+        a.train_step(&batch()).unwrap();
+        b.train_step(&batch()).unwrap();
+        for i in 0..a.params.len() {
+            if Trainer::is_norm_block(i) { assert_eq!(a.params[i], b.params[i], "norm block {i}"); }
+            else { assert_ne!(a.params[i], b.params[i], "matrix block {i} must decay"); }
+        }
     }
 }

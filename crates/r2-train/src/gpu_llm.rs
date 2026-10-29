@@ -108,6 +108,8 @@ pub struct GpuTrainer {
     v: Vec<Tensor>,
     sizes: Vec<usize>,
     lr: f32, beta1: f32, beta2: f32, eps: f32,
+    /// The CPU trainer's schedule, applied to the same step index.
+    sched: Option<crate::optim::LrSchedule>,
     t: u64,
     pub step: u64,
     /// Activation checkpointing: keep only each layer's input, recompute
@@ -131,6 +133,15 @@ impl GpuTrainer {
     /// trainer keeps its buffers; `download_into` brings the device's
     /// state back.
     pub fn from_trainer(tr: &Trainer) -> Result<GpuTrainer, String> {
+        // The device Adam has no decay pass and the step no norm
+        // reduction yet. Refuse rather than train a different recipe
+        // than the CPU half would.
+        if tr.opt.weight_decay != 0.0 {
+            return Err("weight decay is not implemented on the GPU path yet (CPU only)".into());
+        }
+        if tr.clip.is_some() {
+            return Err("gradient clipping is not implemented on the GPU path yet (CPU only)".into());
+        }
         let up = |d: &[f32]| Tensor::upload(d).ok_or_else(|| "no GPU device".to_string());
         let mut w = Vec::new(); let mut g = Vec::new(); let mut m = Vec::new(); let mut v = Vec::new();
         let mut sizes = Vec::new();
@@ -146,7 +157,7 @@ impl GpuTrainer {
         }
         let w16 = (0..w.len()).map(|_| None).collect();
         Ok(GpuTrainer { cfg: tr.cfg, w, w16, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
-                        beta2: tr.opt.beta2, eps: tr.opt.eps, t: tr.opt.t, step: tr.step,
+                        beta2: tr.opt.beta2, eps: tr.opt.eps, sched: tr.sched, t: tr.opt.t, step: tr.step,
                         checkpoint: false, precision: Precision::F32, loss_scale: 1.0,
                         clean_steps: 0, overflows: 0, acts: None })
     }
@@ -184,6 +195,7 @@ impl GpuTrainer {
             off += n;
         }
         tr.opt.t = self.t;
+        tr.opt.lr = self.lr;
         tr.step = self.step;
     }
 
@@ -234,6 +246,7 @@ impl GpuTrainer {
             return Ok(loss);
         }
         // ── Adam, one launch per block; the loss scale divided back out ──
+        if let Some(sch) = self.sched { self.lr = sch.at(self.step); }
         self.t += 1;
         for i in 0..self.w.len() {
             if !adam_step(&self.w[i], &self.g[i], &self.m[i], &self.v[i], self.sizes[i],

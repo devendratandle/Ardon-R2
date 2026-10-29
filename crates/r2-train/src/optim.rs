@@ -9,7 +9,8 @@
 //! weights. Every serious training loop therefore checkpoints the
 //! optimizer, and `r2_train::checkpoint` does.
 
-/// Adam (Kingma & Ba), with the standard bias correction.
+/// Adam (Kingma & Ba), with the standard bias correction, and AdamW's
+/// decoupled weight decay (Loshchilov & Hutter) when `weight_decay > 0`.
 #[derive(Debug, Clone)]
 pub struct Adam {
     /// First moment (momentum) per parameter.
@@ -22,6 +23,43 @@ pub struct Adam {
     pub beta1: f32,
     pub beta2: f32,
     pub eps: f32,
+    /// Decoupled weight decay: each decayed parameter is first shrunk by
+    /// `1 - lr * weight_decay`, then takes the Adam step — `torch.optim.
+    /// AdamW`'s order. 0 (the default) is plain Adam, bit for bit: the
+    /// decay pass is skipped, not multiplied by one.
+    pub weight_decay: f32,
+}
+
+/// Linear warmup, then cosine decay to a floor: the schedule GPT-2,
+/// nanoGPT and Llama train with.
+///
+/// `at(step)` is the rate for the update with 0-based index `step`.
+/// Warmup is linear from `base / warmup` to `base` at step `warmup - 1`;
+/// from `warmup` to `total` the rate follows half a cosine down to `min`,
+/// and stays at `min` after. Computed in f64 and rounded once, so the
+/// PyTorch half of the comparison (`benchmarks/llm/tinystories_train.py`,
+/// same formula in Python floats) feeds its optimizer the same rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LrSchedule {
+    pub base: f32,
+    pub min: f32,
+    pub warmup: u64,
+    pub total: u64,
+}
+
+impl LrSchedule {
+    pub fn at(&self, step: u64) -> f32 {
+        let (base, min) = (self.base as f64, self.min as f64);
+        if step < self.warmup {
+            return (base * (step + 1) as f64 / self.warmup as f64) as f32;
+        }
+        if step >= self.total {
+            return self.min;
+        }
+        let span = (self.total - self.warmup).max(1) as f64;
+        let r = (step - self.warmup) as f64 / span;
+        (min + 0.5 * (1.0 + (std::f64::consts::PI * r).cos()) * (base - min)) as f32
+    }
 }
 
 /// Is AVX2+FMA available? Resolved once.
@@ -38,14 +76,19 @@ fn have_avx2() -> bool {
 
 /// The Adam update for one block. The reference form.
 #[allow(clippy::too_many_arguments)]
+///
+/// `keep` is the AdamW shrink factor `1 - lr * weight_decay`; at exactly
+/// 1 the shrink is skipped, so plain Adam's bits are untouched.
 fn adam_scalar(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
-               b1: f32, b2: f32, bc1: f32, bc2: f32, lr: f32, eps: f32, scale: f32) {
+               b1: f32, b2: f32, bc1: f32, bc2: f32, lr: f32, eps: f32, scale: f32,
+               keep: f32) {
     for i in 0..p.len() {
         let gi = g[i] / scale;
         m[i] = b1 * m[i] + (1.0 - b1) * gi;
         v[i] = b2 * v[i] + (1.0 - b2) * gi * gi;
         let mh = m[i] / bc1;
         let vh = v[i] / bc2;
+        if keep != 1.0 { p[i] *= keep; }
         p[i] -= lr * mh / (vh.sqrt() + eps);
     }
 }
@@ -73,12 +116,14 @@ fn adam_scalar(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
 #[target_feature(enable = "avx2", enable = "fma")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn adam_avx2(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
-                    b1: f32, b2: f32, bc1: f32, bc2: f32, lr: f32, eps: f32, scale: f32) {
+                    b1: f32, b2: f32, bc1: f32, bc2: f32, lr: f32, eps: f32, scale: f32,
+                    keep: f32) {
     use std::arch::x86_64::*;
     let (vb1, vb2) = (_mm256_set1_ps(b1), _mm256_set1_ps(b2));
     let (v1b1, v1b2) = (_mm256_set1_ps(1.0 - b1), _mm256_set1_ps(1.0 - b2));
     let (vbc1, vbc2) = (_mm256_set1_ps(bc1), _mm256_set1_ps(bc2));
     let (vlr, veps, vsc) = (_mm256_set1_ps(lr), _mm256_set1_ps(eps), _mm256_set1_ps(scale));
+    let (decay, vkeep) = (keep != 1.0, _mm256_set1_ps(keep));
     let n = p.len();
     let mut i = 0usize;
     while i + 8 <= n {
@@ -94,13 +139,14 @@ unsafe fn adam_avx2(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32],
         _mm256_storeu_ps(v.as_mut_ptr().add(i), vv);
         let den = _mm256_add_ps(_mm256_sqrt_ps(_mm256_div_ps(vv, vbc2)), veps);
         let upd = _mm256_div_ps(_mm256_mul_ps(vlr, _mm256_div_ps(mv, vbc1)), den);
-        _mm256_storeu_ps(p.as_mut_ptr().add(i),
-                         _mm256_sub_ps(_mm256_loadu_ps(p.as_ptr().add(i)), upd));
+        let mut pv = _mm256_loadu_ps(p.as_ptr().add(i));
+        if decay { pv = _mm256_mul_ps(pv, vkeep); }
+        _mm256_storeu_ps(p.as_mut_ptr().add(i), _mm256_sub_ps(pv, upd));
         i += 8;
     }
     if i < n {
         adam_scalar(&mut p[i..], &g[i..], &mut m[i..], &mut v[i..],
-                    b1, b2, bc1, bc2, lr, eps, scale);
+                    b1, b2, bc1, bc2, lr, eps, scale, keep);
     }
 }
 
@@ -108,7 +154,7 @@ impl Adam {
     /// Standard defaults (β₁=0.9, β₂=0.999, ε=1e-8) for `n` parameters.
     pub fn new(n: usize, lr: f32) -> Self {
         Adam { m: vec![0.0; n], v: vec![0.0; n], t: 0,
-               lr, beta1: 0.9, beta2: 0.999, eps: 1e-8 }
+               lr, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.0 }
     }
 
     /// Number of parameters this optimizer is sized for.
@@ -137,6 +183,23 @@ impl Adam {
     pub fn step_blocks(&mut self, params: &mut [Vec<f32>], grads: &[&[f32]], scale: f32)
         -> Result<(), String>
     {
+        self.step_blocks_masked(params, grads, scale, None)
+    }
+
+    /// [`Adam::step_blocks`] with weight decay restricted to the blocks
+    /// where `decay[i]` is true (`None`: every block). Language models do
+    /// not decay their norm gains — shrinking an RMSNorm weight toward 0
+    /// shrinks the signal it scales — so [`crate::llm::Trainer`] passes
+    /// a mask that excludes them.
+    pub fn step_blocks_masked(&mut self, params: &mut [Vec<f32>], grads: &[&[f32]], scale: f32,
+                              decay: Option<&[bool]>) -> Result<(), String>
+    {
+        if let Some(d) = decay {
+            if d.len() != params.len() {
+                return Err(format!("Adam::step_blocks: {} parameter blocks, {} decay flags",
+                                   params.len(), d.len()));
+            }
+        }
         if params.len() != grads.len() {
             return Err(format!("Adam::step_blocks: {} parameter blocks, {} gradient blocks",
                                params.len(), grads.len()));
@@ -150,8 +213,10 @@ impl Adam {
         let bc1 = 1.0 - self.beta1.powi(self.t as i32);
         let bc2 = 1.0 - self.beta2.powi(self.t as i32);
 
+        let shrink = 1.0 - self.lr * self.weight_decay;
         let mut off = 0usize;
-        for (p, g) in params.iter_mut().zip(grads) {
+        for (bi, (p, g)) in params.iter_mut().zip(grads).enumerate() {
+            let keep = if self.weight_decay != 0.0 && decay.is_none_or(|d| d[bi]) { shrink } else { 1.0 };
             if p.len() != g.len() {
                 return Err(format!("Adam::step_blocks: block is {} params, {} gradients",
                                    p.len(), g.len()));
@@ -163,12 +228,12 @@ impl Adam {
                 // SAFETY: `have_avx2()` confirmed AVX2+FMA on this CPU, and
                 // the four slices are all exactly `n` long (checked above).
                 unsafe { adam_avx2(p, g, m, v, self.beta1, self.beta2, bc1, bc2,
-                                   self.lr, self.eps, scale) };
+                                   self.lr, self.eps, scale, keep) };
                 off += n;
                 continue;
             }
             adam_scalar(p, g, m, v, self.beta1, self.beta2, bc1, bc2,
-                        self.lr, self.eps, scale);
+                        self.lr, self.eps, scale, keep);
             off += n;
         }
         Ok(())
@@ -331,5 +396,87 @@ mod tests {
         assert_eq!(opt.t, 0);
         assert!(opt.m.iter().all(|&x| x == 0.0) && opt.v.iter().all(|&x| x == 0.0));
         assert_eq!(opt.lr, 0.05);
+    }
+
+    /// AdamW's decay pass must keep the AVX2 and scalar forms bit-identical,
+    /// as plain Adam's are — including the scalar tail of a block that is
+    /// not a multiple of eight.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn adamw_avx2_is_bit_identical_to_scalar() {
+        if !have_avx2() { return; }
+        let n = 1003;
+        let p0: Vec<f32> = (0..n).map(|i| ((i % 41) as f32 - 20.0) * 0.027).collect();
+        let g: Vec<f32> = (0..n).map(|i| ((i % 29) as f32 - 14.0) * 0.013).collect();
+        let (lr, wd) = (0.003f32, 0.1f32);
+        let keep = 1.0 - lr * wd;
+        let (mut ps, mut ms, mut vs) = (p0.clone(), vec![0.0f32; n], vec![0.0f32; n]);
+        let (mut pv, mut mv, mut vv) = (p0.clone(), vec![0.0f32; n], vec![0.0f32; n]);
+        for t in 1..=3i32 {
+            let (bc1, bc2) = (1.0 - 0.9f32.powi(t), 1.0 - 0.999f32.powi(t));
+            adam_scalar(&mut ps, &g, &mut ms, &mut vs, 0.9, 0.999, bc1, bc2, lr, 1e-8, 2.0, keep);
+            // SAFETY: AVX2+FMA checked above; all slices are `n` long.
+            unsafe { adam_avx2(&mut pv, &g, &mut mv, &mut vv, 0.9, 0.999, bc1, bc2, lr, 1e-8, 2.0, keep) };
+        }
+        for i in 0..n {
+            assert_eq!(ps[i].to_bits(), pv[i].to_bits(), "param {i}");
+            assert_eq!(ms[i].to_bits(), mv[i].to_bits(), "m {i}");
+            assert_eq!(vs[i].to_bits(), vv[i].to_bits(), "v {i}");
+        }
+    }
+
+    /// One AdamW step against the update written out by hand in
+    /// `torch.optim.AdamW`'s order (shrink, then the Adam step), and the
+    /// mask: an excluded block takes the plain Adam step, undecayed.
+    #[test]
+    fn adamw_step_matches_the_definition_and_honours_the_mask() {
+        let (lr, wd) = (0.01f32, 0.5f32);
+        let mut opt = Adam::new(4, lr);
+        opt.weight_decay = wd;
+        let mut blocks = vec![vec![1.0f32, -2.0], vec![3.0f32, 0.5]];
+        let g = [vec![0.2f32, -0.4], vec![0.1f32, 0.3]];
+        let grads: Vec<&[f32]> = g.iter().map(|b| b.as_slice()).collect();
+        opt.step_blocks_masked(&mut blocks, &grads, 1.0, Some(&[true, false])).unwrap();
+        let (bc1, bc2) = (1.0 - 0.9f32, 1.0 - 0.999f32);
+        let adam = |p: f32, gi: f32| {
+            let m = 0.1 * gi;
+            let v = 0.001 * gi * gi;
+            p - lr * (m / bc1) / ((v / bc2).sqrt() + 1e-8)
+        };
+        let want = [adam(1.0 * (1.0 - lr * wd), 0.2), adam(-2.0 * (1.0 - lr * wd), -0.4),
+                    adam(3.0, 0.1), adam(0.5, 0.3)];
+        let got = [blocks[0][0], blocks[0][1], blocks[1][0], blocks[1][1]];
+        for (a, b) in got.iter().zip(&want) {
+            assert!((a - b).abs() <= 1e-6 * b.abs().max(1.0), "got {got:?}, want {want:?}");
+        }
+        // The undecayed block moved by the Adam step alone: ~lr each.
+        assert!((blocks[1][0] - (3.0 - lr)).abs() < 1e-6);
+        // Decay off: the masked entry point is plain Adam, bit for bit.
+        let mut a = Adam::new(4, lr);
+        let mut b = Adam::new(4, lr);
+        let mut pa = vec![vec![1.0f32, -2.0], vec![3.0f32, 0.5]];
+        let mut pb = pa.clone();
+        a.step_blocks(&mut pa, &grads, 1.0).unwrap();
+        b.step_blocks_masked(&mut pb, &grads, 1.0, Some(&[true, false])).unwrap();
+        assert_eq!(pa, pb);
+    }
+
+    #[test]
+    fn lr_schedule_warms_up_then_decays_to_the_floor() {
+        let s = LrSchedule { base: 1e-3, min: 1e-4, warmup: 10, total: 110 };
+        assert!((s.at(0) - 1e-4).abs() < 1e-10);          // base / warmup
+        assert_eq!(s.at(9), 1e-3);                         // end of warmup
+        assert_eq!(s.at(10), 1e-3);                        // cosine starts at base
+        assert!((s.at(60) - 5.5e-4).abs() < 1e-9);         // halfway: the midpoint
+        assert_eq!(s.at(110), 1e-4);                       // floor
+        assert_eq!(s.at(10_000), 1e-4);
+        let mut prev = f32::INFINITY;
+        for t in 10..=110 {
+            assert!(s.at(t) <= prev, "cosine must not rise (step {t})");
+            prev = s.at(t);
+        }
+        // No warmup: the first step already runs at base.
+        let s0 = LrSchedule { base: 2e-3, min: 0.0, warmup: 0, total: 50 };
+        assert_eq!(s0.at(0), 2e-3);
     }
 }

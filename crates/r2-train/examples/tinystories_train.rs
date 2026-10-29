@@ -290,12 +290,31 @@ fn main() {
         rope_base: 10000.0, eps: 1e-5,
     };
     let mut tr = Trainer::new(cfg, lr, seed).unwrap_or_else(|e| die("trainer", e));
+    // The training recipe beyond plain constant-rate Adam, all off by
+    // default so a run without these variables is the run it always was:
+    //   R2_SCHED=cosine  linear warmup over R2_WARMUP steps (default 0),
+    //                    then cosine decay to R2_MIN_LR (default lr / 10)
+    //   R2_CLIP=1.0      clip the global gradient norm
+    //   R2_WD=0.1        AdamW weight decay on every matrix, not the norms
+    // The manifest records all three and the PyTorch half applies the same.
+    let sched_on = std::env::var("R2_SCHED").map(|v| v == "cosine").unwrap_or(false);
+    let warmup: u64 = env("R2_WARMUP", 0u64);
+    let min_lr: f32 = env("R2_MIN_LR", lr / 10.0);
+    if sched_on {
+        tr.sched = Some(r2_train::optim::LrSchedule { base: lr, min: min_lr, warmup, total: steps as u64 });
+    }
+    let clip: f32 = env("R2_CLIP", 0.0f32);
+    if clip > 0.0 { tr.clip = Some(clip); }
+    tr.opt.weight_decay = env("R2_WD", 0.0f32);
     assert_eq!(tr.n_params(), cfg.n_params(), "trainer and config disagree on size");
     println!("  model      {:.2}M parameters, dim {} x {} layers, ffn {}, {} q / {} kv heads",
              cfg.n_params() as f64 / 1e6, cfg.dim, cfg.n_layers, cfg.ffn_hidden,
              cfg.n_heads, cfg.n_kv_heads);
-    println!("  schedule   {steps} steps x {bn} x {seq} = {} tokens, Adam lr {lr}",
-             steps * bn * seq);
+    println!("  schedule   {steps} steps x {bn} x {seq} = {} tokens, {} lr {lr}{}{}",
+             steps * bn * seq,
+             if tr.opt.weight_decay > 0.0 { format!("AdamW (wd {})", tr.opt.weight_decay) } else { "Adam".into() },
+             if sched_on { format!(", warmup {warmup} + cosine to {min_lr}") } else { String::new() },
+             if clip > 0.0 { format!(", clip {clip}") } else { String::new() });
 
     // What this configuration will ask for, before it asks. A run that
     // does not fit dies inside an allocator with a byte count and no
@@ -432,6 +451,9 @@ fn main() {
     j.push_str(&format!("  \"n_params\": {},\n", cfg.n_params()));
     j.push_str(&format!("  \"steps\": {steps}, \"batch\": {bn}, \"seq\": {seq},\n"));
     j.push_str(&format!("  \"lr\": {lr}, \"seed\": {seed},\n"));
+    j.push_str(&format!("  \"sched\": \"{}\", \"warmup\": {warmup}, \"min_lr\": {min_lr},\n",
+                        if sched_on { "cosine" } else { "none" }));
+    j.push_str(&format!("  \"clip\": {clip}, \"weight_decay\": {},\n", tr.opt.weight_decay));
     j.push_str(&format!("  \"val_batches\": {val_batches},\n"));
     j.push_str(&format!("  \"corpus_bytes\": {}, \"train_bytes\": {}, \"val_bytes\": {},\n",
                         flen, cut, flen - cut));

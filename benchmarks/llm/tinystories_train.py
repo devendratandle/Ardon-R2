@@ -268,7 +268,9 @@ def main():
     print(f"  model      {d['n_params']/1e6:.2f}M parameters, dim {d['dim']} x "
           f"{d['n_layers']} layers, ffn {d['ffn_hidden']}, vocab {d['vocab']}")
     print(f"  schedule   {steps} steps x {bn} x {seq} = {steps*bn*seq} tokens, "
-          f"Adam lr {d['lr']}")
+          f"{'AdamW (wd %g)' % d['weight_decay'] if d.get('weight_decay', 0) > 0 else 'Adam'} lr {d['lr']}"
+          f"{', warmup %d + cosine to %g' % (d['warmup'], d['min_lr']) if d.get('sched') == 'cosine' else ''}"
+          f"{', clip %g' % d['clip'] if d.get('clip', 0) > 0 else ''}")
 
     model = R2Model(d, max(seq, 64)).to(DEV)
     n = sum(p.numel() for p in model.parameters())
@@ -292,9 +294,33 @@ def main():
     # `foreach=False` on DirectML: the fused multi-tensor Adam uses
     # `_foreach_lerp_`, which DML lacks — every step would fall back to the
     # CPU and copy the moments across.
-    opt = torch.optim.Adam(model.parameters(), lr=d["lr"],
-                           betas=(0.9, 0.999), eps=1e-8,
-                           foreach=False if DEVICE == "dml" else None)
+    # The recipe R2 recorded (absent from older manifests: plain Adam at a
+    # constant rate, unclipped). Weight decay goes through AdamW on every
+    # block except the RMSNorm gains — R2's `Trainer::is_norm_block` rule,
+    # applied to the same block indices.
+    wd = d.get("weight_decay", 0.0)
+    clip = d.get("clip", 0.0)
+    sched = d.get("sched", "none")
+    is_norm = lambda i: i == 1 or (i >= 3 and (i - 3) % 9 in (0, 5))
+    if wd > 0:
+        groups = [{"params": [p for i, p in enumerate(model.P) if not is_norm(i)], "weight_decay": wd},
+                  {"params": [p for i, p in enumerate(model.P) if is_norm(i)], "weight_decay": 0.0}]
+        opt = torch.optim.AdamW(groups, lr=d["lr"], betas=(0.9, 0.999), eps=1e-8,
+                                foreach=False if DEVICE == "dml" else None)
+    else:
+        opt = torch.optim.Adam(model.parameters(), lr=d["lr"],
+                               betas=(0.9, 0.999), eps=1e-8,
+                               foreach=False if DEVICE == "dml" else None)
+
+    def lr_at(step):
+        # `r2_train::optim::LrSchedule::at`, line for line, in Python floats
+        base, lo, w, total = float(d["lr"]), float(d.get("min_lr", d["lr"])), d.get("warmup", 0), steps
+        if step < w:
+            return base * (step + 1) / w
+        if step >= total:
+            return lo
+        r = (step - w) / max(total - w, 1)
+        return lo + 0.5 * (1.0 + math.cos(math.pi * r)) * (base - lo)
     every = max(steps // 10, 1)
     curve = []
     device_sync()
@@ -305,6 +331,11 @@ def main():
         loss = loss_on(model, idx, tgt)
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        if clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+        if sched == "cosine":
+            for g in opt.param_groups:
+                g["lr"] = lr_at(s)
         opt.step()
         last = loss.item()
         if s == 0:
