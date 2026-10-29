@@ -574,6 +574,29 @@ GPU table share it, and `tinystories_train.py` builds its table the same
 way, so the two sides still compute one model. PyTorch's own convention
 (f32 angles) has the same error.
 
+### Every f32 bit pattern through the vector lanes (2026-10-29)
+
+The sweeps above call each function on one element at a time, which runs
+the SCALAR tail; the AVX2 lanes a step actually runs were checked on
+samples. `cargo run --release -p r2-tensor --example numerics_exhaustive`
+feeds all 2^32 bit patterns through the lanes in slices of 65,536:
+
+| claim | result over all 4,294,967,296 inputs |
+|---|---|
+| exp lanes (`exp_shift_sum`) == `exp_r2` | bit-identical, every input (NaN, ±inf included) |
+| silu lanes == scalar `silu` | bit-identical, every input |
+| silu' lanes == scalar tail, assign / accumulate | **was 0.50% / 0.09% different** (tail rounded 3–4 times where the lane rounds twice); fixed, now bit-identical |
+| silu lanes vs f64, x ≥ -87.34 | max 2.403 ulp |
+| silu' lanes vs f64, x ≥ -87.34 | max 9.75e-7 absolute |
+
+Open (not changed, they touch the GPU's `exp_r2` too): `exp_r2` saturates
+at 2.4061436e38 for every x > 88.376 — `exp_r2(+inf)` included — where the
+true value runs to 3.4e38 and then +inf; so `silu(x)` for x < -87.34 is
+`x / 2.4e38` rather than ~0 (`silu(-1e38) = -0.42`). And `log_r2` of a
+subnormal is wrong by up to 2e6 ulp rather than refused. Neither reaches a
+training step: softmax only takes `exp(x - max) <= 1`, and every `log_r2`
+caller passes a sum >= 1.
+
 ---
 
 ## 3. Standing, stage by stage

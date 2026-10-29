@@ -467,11 +467,25 @@ unsafe fn silu_bwd_avx2(v: &[f32], g: &[f32], gout: &mut [f32], accumulate: bool
         i += 8;
     }
     while i < n {
-        let s = 1.0 / (1.0 + exp_r2(-v[i]));
-        let d = g[i] * (s + v[i] * s * (1.0 - s));
-        if accumulate { gout[i] += d; } else { gout[i] = d; }
+        gout[i] = silu_bwd_one(v[i], g[i], if accumulate { gout[i] } else { 0.0 });
         i += 1;
     }
+}
+
+/// One element of [`silu_bwd_acc`], in the vector lane's exact operations:
+/// `d = fma(v*s, 1-s, s)`, then `fma(g, d, acc)` with `acc = +0` for the
+/// assign form. The tail used to compute `g * (s + v*s*(1-s))` and `+=`,
+/// three or four roundings where the lane has two, so an element's bits
+/// depended on whether it fell in a lane or the tail — on 0.50% of all
+/// 2^32 inputs assigning and 0.09% accumulating
+/// (`--example numerics_exhaustive`). `mul_add` is one rounding on every
+/// platform, so this is also what the non-AVX2 path computes. The `+0`
+/// addend is the lane's, not a no-op: it turns a `-0` product into `+0`.
+#[inline(always)]
+fn silu_bwd_one(v: f32, g: f32, acc: f32) -> f32 {
+    let s = 1.0 / (1.0 + exp_r2(-v));
+    let d = (v * s).mul_add(1.0 - s, s);
+    g.mul_add(d, acc)
 }
 
 /// `gout[j] += g[j] * silu'(v[j])`. Dispatches to AVX2.
@@ -491,9 +505,7 @@ pub fn silu_bwd_acc(v: &[f32], g: &[f32], gout: &mut [f32], accumulate: bool) {
         return;
     }
     for ((go, &vv), &gg) in gout.iter_mut().zip(v).zip(g) {
-        let s = 1.0 / (1.0 + exp_r2(-vv));
-        let d = gg * (s + vv * s * (1.0 - s));
-        if accumulate { *go += d; } else { *go = d; }
+        *go = silu_bwd_one(vv, gg, if accumulate { *go } else { 0.0 });
     }
 }
 
@@ -881,5 +893,32 @@ mod tests {
         let table = vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0]; // 3 vocab × 2
         let out = embed(&table, &[2, 0], 2);
         assert_eq!(out, vec![30.0, 31.0, 10.0, 11.0]);
+    }
+
+    /// An element's silu' must not depend on whether it lands in an AVX2
+    /// lane or the scalar tail (the row length mod 8). The tail used to
+    /// round differently on 0.50% of all f32 inputs; this pins it on
+    /// 2^20 random bit patterns — every class of float, NaN and infinities
+    /// included — plus the first input `numerics_exhaustive` caught, in
+    /// both the assign and the accumulate form, with g != 1.
+    #[test]
+    fn silu_bwd_tail_is_bit_identical_to_the_lanes() {
+        let mut st = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || { st ^= st << 13; st ^= st >> 7; st ^= st << 17; st };
+        let mut xs: Vec<f32> = (0..1 << 20).map(|_| f32::from_bits(next() as u32)).collect();
+        xs[0] = 1.192_092_9e-7;
+        let gs: Vec<f32> = (0..xs.len()).map(|i| 0.5 + (i % 7) as f32 * 0.37).collect();
+        for accumulate in [false, true] {
+            let init: Vec<f32> = (0..xs.len()).map(|i| (i % 5) as f32 * 0.25 - 0.5).collect();
+            let mut lanes = init.clone();
+            silu_bwd_acc(&xs, &gs, &mut lanes, accumulate);
+            for i in 0..xs.len() {
+                let mut one = [init[i]];
+                silu_bwd_acc(&xs[i..i + 1], &gs[i..i + 1], &mut one, accumulate);
+                let (a, b) = (lanes[i], one[0]);
+                assert!(a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                        "x = {:e}, accumulate {accumulate}: lane {a:e} vs tail {b:e}", xs[i]);
+            }
+        }
     }
 }
