@@ -54,7 +54,8 @@ pub fn f16_to_f32(h: u16) -> f32 {
     } else if exp == 0x1f {
         sign | 0x7f80_0000 | (mant << 13)
     } else {
-        sign | ((exp - 15 + 127) << 23) | (mant << 13)
+        // rebias in this order: `exp - 15` underflows u32 for |x| < 1
+        sign | ((exp + 127 - 15) << 23) | (mant << 13)
     };
     f32::from_bits(bits)
 }
