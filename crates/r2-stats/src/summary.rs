@@ -30,6 +30,45 @@ fn first(a: &[EvalArg]) -> RVal { a.first().map(|x| x.value.clone()).unwrap_or(R
 fn nth(a: &[EvalArg], i: usize) -> RVal { a.get(i).map(|x| x.value.clone()).unwrap_or(RVal::Null) }
 
 #[inline]
+fn named(a: &[EvalArg], name: &str) -> Option<RVal> {
+    a.iter().find(|x| x.name.as_deref() == Some(name)).map(|x| x.value.clone())
+}
+
+/// Ranks with ties averaged — R's `rank(x, ties.method = "average")`.
+fn avg_ranks(x: &[f64]) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..x.len()).collect();
+    idx.sort_by(|&i, &j| x[i].total_cmp(&x[j]));
+    let mut r = vec![0.0; x.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i;
+        while j + 1 < idx.len() && x[idx[j + 1]] == x[idx[i]] { j += 1; }
+        let avg = (i + j) as f64 / 2.0 + 1.0;
+        for k in i..=j { r[idx[k]] = avg; }
+        i = j + 1;
+    }
+    r
+}
+
+/// Kendall's tau-b, what R's `cor(method = "kendall")` returns:
+/// `(C - D) / sqrt((n0 - n1)(n0 - n2))` with ties in x and y counted
+/// apart. O(n^2), as R's own implementation is.
+fn kendall_tau_b(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len();
+    let (mut s, mut tx, mut ty) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let a = (x[i] - x[j]).signum() * if x[i] == x[j] { 0.0 } else { 1.0 };
+            let b = (y[i] - y[j]).signum() * if y[i] == y[j] { 0.0 } else { 1.0 };
+            s += a * b;
+            tx += a * a;
+            ty += b * b;
+        }
+    }
+    s / (tx * ty).sqrt()
+}
+
+#[inline]
 fn rnum(n: f64) -> RVal { RVal::Numeric(vec![Some(n)].into(), Attrs::default()) }
 
 #[inline]
@@ -52,6 +91,31 @@ pub fn bi_cor(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
     if x.len() != y.len() { return Err(R2Err { msg: "incompatible dimensions".into(), kind: ErrKind::Runtime }); }
+    // `method =` used to be ignored: every call was Pearson's r.
+    let method = match named(a, "method") {
+        Some(RVal::Character(v, _)) => v.first().cloned().flatten().map(|s| s.to_string()).unwrap_or_default(),
+        _ => "pearson".to_string(),
+    };
+    if method != "pearson" {
+        let (xs, ys): (Vec<f64>, Vec<f64>) = x.iter().zip(&y)
+            .filter_map(|(a, b)| Some(((*a)?, (*b)?))).unzip();
+        // NaN (0/0) is not NA but still has no rank: NA, as R gives
+        if xs.len() < 2 || xs.iter().chain(&ys).any(|v| v.is_nan()) { return Ok(rna()); }
+        let r = match method.as_str() {
+            "spearman" => {
+                // Pearson on the average-tie ranks, as R's cor does
+                let (rx, ry) = (avg_ranks(&xs), avg_ranks(&ys));
+                let (_, _, _, sxx, syy, sxy) = crate::moments::centred2_dense(&rx, &ry);
+                crate::moments::pearson_from(sxx, syy, sxy)
+            }
+            "kendall" => kendall_tau_b(&xs, &ys),
+            m => return Err(R2Err {
+                msg: format!("cor: method must be \"pearson\", \"kendall\" or \"spearman\", not \"{m}\""),
+                kind: ErrKind::Runtime,
+            }),
+        };
+        return Ok(if r.is_nan() { rna() } else { rnum(r) });
+    }
     match crate::moments::centred2_pairwise(&x, &y) {
         Some((_, _, _, sxx, syy, sxy)) => {
             let r = crate::moments::pearson_from(sxx, syy, sxy);
@@ -186,12 +250,55 @@ pub fn bi_quantile(a: &[EvalArg]) -> Result<RVal, R2Err> {
         vec![0.0, 0.25, 0.5, 0.75, 1.0]
     };
     let n = v.len();
-    let result: Vec<Real> = probs.iter().map(|p| {
-        let idx = p * (n - 1) as f64;
-        let lo = idx.floor() as usize;
-        let hi = idx.ceil() as usize;
-        let frac = idx - lo as f64;
-        Some(v[lo.min(n - 1)] * (1.0 - frac) + v[hi.min(n - 1)] * frac)
+    // `type =` 1..9, R's `quantile.default` line for line (Hyndman & Fan
+    // 1996). It used to be ignored: every type returned type 7.
+    let qtype = named(a, "type").and_then(|t| t.as_reals().ok())
+        .and_then(|t| t.first().copied().flatten()).unwrap_or(7.0) as i64;
+    if !(1..=9).contains(&qtype) {
+        r2_memory::scratch_release(v);
+        return Err(R2Err { msg: "quantile: 'type' must be 1, 2, ..., 9".into(), kind: ErrKind::Runtime });
+    }
+    let fuzz = 4.0 * f64::EPSILON;
+    let result: Vec<Real> = probs.iter().map(|&p| {
+        if qtype == 7 {
+            // R's own type-7 branch: x[lo], moved toward x[hi] only when
+            // they differ (so a tie returns the value exactly).
+            let index = (n - 1) as f64 * p;
+            let (lo, hi) = (index.floor() as usize, index.ceil() as usize);
+            let (lo, hi) = (lo.min(n - 1), hi.min(n - 1));
+            let mut q = v[lo];
+            if index > lo as f64 && v[hi] != q {
+                let h = index - lo as f64;
+                q = (1.0 - h) * q + h * v[hi];
+            }
+            return Some(q);
+        }
+        let nf = n as f64;
+        let (j, h) = if qtype <= 3 {
+            let nppm = if qtype == 3 { nf * p - 0.5 } else { nf * p };
+            let j = (nppm + fuzz).floor();
+            let h = match qtype {
+                1 => if nppm > j { 1.0 } else { 0.0 },
+                2 => ((if nppm > j { 1.0 } else { 0.0 }) + 1.0) / 2.0,
+                _ => if nppm != j || (j as i64).rem_euclid(2) == 1 { 1.0 } else { 0.0 },
+            };
+            (j, h)
+        } else {
+            let (aa, bb) = match qtype { 4 => (0.0, 1.0), 5 => (0.5, 0.5), 6 => (0.0, 0.0),
+                                         8 => (1.0 / 3.0, 1.0 / 3.0), _ => (3.0 / 8.0, 3.0 / 8.0) };
+            let nppm = aa + p * (nf + 1.0 - aa - bb);
+            let j = (nppm + fuzz).floor();
+            let h = nppm - j;
+            (j, if h.abs() < fuzz { 0.0 } else { h })
+        };
+        // R pads x as c(x[1], x[1], x, x[n], x[n]) and reads x[j+2] and
+        // x[j+3] (1-based): padded position k is v[k - 3], clamped.
+        let at = |k: f64| v[((k as i64) - 3).clamp(0, n as i64 - 1) as usize];
+        let (xl, xh) = (at(j + 2.0), at(j + 3.0));
+        let mut q = xl;
+        if h == 1.0 { q = xh; }
+        else if 0.0 < h && h < 1.0 && xl != xh { q = (1.0 - h) * xl + h * xh; }
+        Some(q)
     }).collect();
     r2_memory::scratch_release(v);
     Ok(RVal::Numeric(result.into(), Attrs::default()))

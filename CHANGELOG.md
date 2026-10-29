@@ -11,6 +11,36 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Version 0.4.1 was never released; everything listed here since v0.4.0
 ships in 0.4.2.
 
+### Statistics fixed against R: chisq.test, t.test, glm, lm, quantile, cor — 2026-10-30
+
+Found by four new differential cases (221 values, compared at 15
+significant digits — `sprintf("%.15g")`, so the harness's 1e-9 tolerance
+is really applied). Each was a mismatch with R first; 32/32 cases pass.
+
+- **`chisq.test(correct = FALSE)` and every table larger than 2x2 gave the
+  wrong X²**: cells below their expectation were counted as zero, about
+  half the statistic — a 2x3 table read 5.52 (p 0.063) where R has 10.27
+  (p 0.0059), so the conclusion flipped. Yates' correction now applies to
+  2x2 tables only, as in R.
+- **`t.test(var.equal = TRUE)`** now runs the pooled-variance test (it was
+  always Welch), and the two-sample `mu =` is honoured.
+- **`glm`**: the Poisson AIC was missing a term (300.19 where R has 46.50);
+  log(y!) for large counts is exact (`lgamma`); gaussian p-values come from
+  t on the residual df, not the normal (3.9e-26 where R has 5.6e-6); the
+  Poisson fit starts where R's does (μ = y + 0.1) and no longer diverges
+  on counts in the hundreds.
+- **`lm`/`glm` with an NA no longer crash the session**: rows with a missing
+  response or predictor are dropped (R's `na.omit`). An exactly collinear
+  column is reported `NA` and the fit uses the rest, as R does (it returned
+  coefficients of 2e13).
+- **`aov(y ~ a + b)`** stops with a clear error instead of silently fitting
+  `a` alone (multi-factor ANOVA: `docs/KNOWN_LIMITATIONS.md`).
+- **`quantile(type = 1..9)`** and **`cor(method = "spearman" / "kendall")`**
+  were ignored (always type 7 / Pearson); both now follow R, ties included.
+- The silu backward's scalar tail now rounds as the AVX2 lanes do (it
+  differed on 0.5% of inputs; training bits unchanged — FFN widths are
+  multiples of 8). `--example numerics_exhaustive` checks all 2^32 floats.
+
 ### LLM training recipe: AdamW, warmup + cosine schedule, gradient clipping — 2026-10-30
 
 - `r2_train::llm::Trainer` gains the three pieces every modern LLM run

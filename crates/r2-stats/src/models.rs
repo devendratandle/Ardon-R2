@@ -108,6 +108,62 @@ pub fn model_matrix_expand(base_name: &str, col: &RVal)
     }
 }
 
+/// The columns of `x` that are estimable, in order — R's `dqrdc2` rule.
+///
+/// A column is aliased when, after removing what the columns kept before
+/// it explain, less than `1e-7` of its norm is left (`lm`'s `tol`). Its
+/// coefficient is then `NA` and the fit uses the others, as R does. On a
+/// design with an exactly collinear column the solve otherwise returned
+/// coefficients of 2e13 with no warning. Gram–Schmidt with one
+/// re-orthogonalisation pass is enough to decide a 1e-7 threshold.
+fn estimable_columns(x: &Matrix) -> Vec<usize> {
+    let n = x.nrow;
+    let mut basis: Vec<Vec<f64>> = Vec::new();
+    let mut kept = Vec::new();
+    for j in 0..x.ncol {
+        let col = &x.data[j * n..(j + 1) * n];
+        let norm0 = col.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let mut v = col.to_vec();
+        for _ in 0..2 {
+            for q in &basis {
+                let d: f64 = q.iter().zip(&v).map(|(a, b)| a * b).sum();
+                for (vi, qi) in v.iter_mut().zip(q) { *vi -= d * qi; }
+            }
+        }
+        let norm = v.iter().map(|a| a * a).sum::<f64>().sqrt();
+        if norm0 > 0.0 && norm > 1e-7 * norm0 {
+            for vi in v.iter_mut() { *vi /= norm; }
+            basis.push(v);
+            kept.push(j);
+        }
+    }
+    kept
+}
+
+/// R's default `na.action = na.omit` for a model frame: keep the rows
+/// where the response and every predictor column are present.
+///
+/// The fits used to drop NAs from the response alone, so one missing `y`
+/// left a 9-row response against 10-row predictors and `Matrix::new`
+/// PANICKED on the size mismatch — the process died on R's most ordinary
+/// input. A predictor NA arrives as NaN (`model_matrix_expand`). Lengths
+/// that genuinely differ get R's own error rather than a guess.
+fn complete_cases(y: &[Option<f64>], cols: &[Vec<f64>]) -> Result<(Vec<f64>, Vec<Vec<f64>>), R2Err> {
+    let n = y.len();
+    if let Some(c) = cols.iter().find(|c| c.len() != n) {
+        return Err(R2Err {
+            msg: format!("variable lengths differ (response has {}, a predictor has {})", n, c.len()),
+            kind: ErrKind::Runtime,
+        });
+    }
+    let keep: Vec<usize> = (0..n)
+        .filter(|&i| y[i].is_some_and(|v| !v.is_nan()) && cols.iter().all(|c| !c[i].is_nan()))
+        .collect();
+    let yk = keep.iter().map(|&i| y[i].unwrap()).collect();
+    let ck = cols.iter().map(|c| keep.iter().map(|&i| c[i]).collect()).collect();
+    Ok((yk, ck))
+}
+
 fn is_formula(v: &RVal) -> bool {
     match v {
         RVal::List(items) => items.iter().any(|(n, v)| {
@@ -136,8 +192,7 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
             RVal::List(items) if !items.is_empty() => items[0].1.clone(),
             other => other.clone(),
         };
-        let y: Vec<f64> = lhs.as_reals()?.into_iter().filter_map(|x| x).collect();
-        let n = y.len();
+        let y_raw = lhs.as_reals()?;
 
         let mut predictor_cols: Vec<Vec<f64>> = Vec::new();
         let mut names: Vec<String> = vec!["(Intercept)".into()];
@@ -195,16 +250,19 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
             }
         }
 
+        let (y, predictor_cols) = complete_cases(&y_raw, &predictor_cols)?;
+        let n = y.len();
         let p = predictor_cols.len() + 1;
         let mut x_data = vec![1.0f64; n];
         for col in &predictor_cols { x_data.extend(col); }
         (y, Matrix::new(x_data, n, p), names)
     } else {
         // Two-vector legacy path: lm(y, x). Phase S.1 — expand factor/char x.
-        let y: Vec<f64> = gv(a, 0).as_reals()?.into_iter().filter_map(|x| x).collect();
-        let n = y.len();
+        let y_raw = gv(a, 0).as_reals()?;
         let x_raw_val = gv(a, 1);
         let (x_cols, x_names) = model_matrix_expand("x1", &x_raw_val)?;
+        let (y, x_cols) = complete_cases(&y_raw, &x_cols)?;
+        let n = y.len();
         let p = x_cols.len() + 1;
         let mut x_data = vec![1.0f64; n];
         for col in &x_cols { x_data.extend(col); }
@@ -214,6 +272,15 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     };
 
     let n = y_vec.len();
+    // Aliased columns are fitted out and reported NA (see
+    // `estimable_columns`); with none, everything below is unchanged.
+    let p_full = x_mat.ncol;
+    let kept = estimable_columns(&x_mat);
+    let x_mat = if kept.len() < p_full {
+        let mut d = Vec::with_capacity(n * kept.len());
+        for &j in &kept { d.extend_from_slice(&x_mat.data[j * n..(j + 1) * n]); }
+        Matrix::new(d, n, kept.len())
+    } else { x_mat };
     let p = x_mat.ncol;
 
     // Solve the least-squares system via Householder QR (does not form
@@ -279,10 +346,16 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
         (ss_reg / (p - 1) as f64) / (ss_res / (n - p) as f64)
     } else { 0.0 };
 
+    // Back to one entry per design column: NA where a column was aliased.
+    let full = |v: &[f64]| -> Vec<Option<f64>> {
+        let mut out = vec![None; p_full];
+        for (k, &j) in kept.iter().enumerate() { out[j] = Some(v[k]); }
+        out
+    };
+    let num = |v: Vec<Option<f64>>, attrs: Attrs| RVal::Numeric(v.into(), attrs);
     let mut coef_attrs = Attrs::default();
     coef_attrs.names = Some(col_names.iter().map(|s| Arc::from(s.as_str())).collect());
-    let coef_val = RVal::Numeric(
-        coeffs.iter().map(|c| Some(*c)).collect::<Vec<_>>().into(), coef_attrs);
+    let coef_val = num(full(&coeffs), coef_attrs);
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("coefficients"), coef_val);
@@ -292,9 +365,10 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     fields.insert(Arc::from("adj.r.squared"), rnum(adj_r2));
     fields.insert(Arc::from("df"), rint((n - p) as i32));
     fields.insert(Arc::from("sigma"), rnum(rse));
-    fields.insert(Arc::from("std.errors"), rnums(&std_errors));
-    fields.insert(Arc::from("t.values"), rnums(&t_values));
-    fields.insert(Arc::from("p.values"), rnums(&p_values));
+    fields.insert(Arc::from("std.errors"), num(full(&std_errors), Attrs::default()));
+    fields.insert(Arc::from("t.values"), num(full(&t_values), Attrs::default()));
+    fields.insert(Arc::from("p.values"), num(full(&p_values), Attrs::default()));
+    fields.insert(Arc::from("rank"), rint(p as i32));
     fields.insert(Arc::from("f.statistic"), rnum(f_stat));
     if let Some(call_str) = gn(a, "_call") { fields.insert(Arc::from("call"), call_str); }
     Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("lm"), fields }))
@@ -326,8 +400,7 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let lhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~lhs")).map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
     let rhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~rhs")).map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
     let lhs = match &lhs_raw { RVal::List(items) if !items.is_empty() => items[0].1.clone(), other => other.clone() };
-    let y: Vec<f64> = lhs.as_reals()?.into_iter().filter_map(|x| x).collect();
-    let n = y.len();
+    let y_raw = lhs.as_reals()?;
 
     let mut predictor_cols: Vec<Vec<f64>> = Vec::new();
     let mut col_names: Vec<String> = vec!["(Intercept)".into()];
@@ -353,6 +426,8 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
             for n in names { col_names.push(n); }
         }
     }
+    let (y, predictor_cols) = complete_cases(&y_raw, &predictor_cols)?;
+    let n = y.len();
     let p = predictor_cols.len() + 1;
     let mut x_data = vec![1.0f64; n];
     for col in &predictor_cols { x_data.extend(col); }
@@ -418,14 +493,28 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
             let var_j = inv[j * p + j] * dispersion;
             std_errors[j] = if var_j > 0.0 { var_j.sqrt() } else { 0.0 };
             z_values[j] = if std_errors[j] > 1e-15 { coeffs[j] / std_errors[j] } else { 0.0 };
-            p_values[j] = 2.0 * phi_upper(z_values[j].abs());
+            // R's summary.glm: when the dispersion is ESTIMATED (gaussian
+            // here) the statistic is t on the residual df, not z — at
+            // n = 10 the normal tail understated the p-value by ~20
+            // orders of magnitude (5.6e-6 in R, 3.9e-26 here).
+            p_values[j] = if family == "gaussian" && n > p {
+                2.0 * crate::htest::t_cdf(-z_values[j].abs(), (n - p) as f64)
+            } else {
+                2.0 * phi_upper(z_values[j].abs())
+            };
         }
     }
 
     // AIC = -2·logL + 2k. logL uses the family-specific likelihood.
     let aic = match family.as_str() {
         "binomial" => deviance + 2.0 * p as f64,
-        "poisson"  => deviance + 2.0 * p as f64 + 2.0 * log_factorial_sum(&y),
+        // -2 logL = 2 Σ(μ - y ln μ) + 2 Σ ln y!
+        //         = deviance - 2 Σ(y ln y - y) + 2 Σ ln y!   (0 ln 0 = 0)
+        // The middle term was missing: 300.19 for a fit R puts at 46.50.
+        "poisson"  => {
+            let ylny: f64 = y.iter().map(|&yi| if yi > 0.0 { yi * yi.ln() - yi } else { 0.0 }).sum();
+            deviance - 2.0 * ylny + 2.0 * p as f64 + 2.0 * log_factorial_sum(&y)
+        }
         _          => {
             // Gaussian MLE: log L = -n/2 [log(2π·σ²) + 1], σ² = SS_res/n
             let sigma2 = residuals.iter().map(|r| r * r).sum::<f64>() / n as f64;
@@ -474,7 +563,7 @@ fn family_deviance(family: &str, y: &[f64], fitted: &[f64], resid: &[f64]) -> f6
     }
 }
 
-/// Σ log(y_i!) for the Poisson AIC normalization. Uses Stirling for large y.
+/// Σ log(y_i!) for the Poisson AIC normalization.
 fn log_factorial_sum(y: &[f64]) -> f64 {
     y.iter().map(|yi| {
         let n = yi.round() as i64;
@@ -483,9 +572,10 @@ fn log_factorial_sum(y: &[f64]) -> f64 {
             // Exact for small integers.
             (2..=n).map(|k| (k as f64).ln()).sum()
         } else {
-            // Stirling: log(n!) ≈ n·log(n) − n + 0.5·log(2π·n)
-            let nf = n as f64;
-            nf * nf.ln() - nf + 0.5 * (2.0 * std::f64::consts::PI * nf).ln()
+            // lgamma(n + 1), as R's dpois uses. (This was the three-term
+            // Stirling formula, short by ~1/(12n) per count: 1.6e-3 at
+            // n = 51, a visible shift in the AIC of any count model.)
+            crate::htest::ln_gamma(n as f64 + 1.0)
         }
     }).sum()
 }
@@ -518,26 +608,27 @@ fn irls_binomial(x_mat: &Matrix, y: &[f64], n: usize, p: usize) -> Result<(Vec<f
 }
 
 fn irls_poisson(x_mat: &Matrix, y: &[f64], n: usize, p: usize) -> Result<(Vec<f64>, usize), R2Err> {
-    let mut beta = vec![0.0; p];
+    // Start where R's `poisson()$initialize` does, mu = y + 0.1, not at
+    // beta = 0. From beta = 0 every mu is 1, the first working response
+    // `eta + (y - mu)/mu` is ~y, and with counts in the hundreds that
+    // step overflowed: deviance 9.3e50 on data R fits to 0.23.
+    let mut eta: Vec<f64> = y.iter().map(|&yi| (yi + 0.1).ln()).collect();
+    let mut beta: Option<Vec<f64>> = None;
     let mut iter_used = 0;
     for it in 1..=25 {
         iter_used = it;
-        let mut mu = vec![0.0; n];
-        for i in 0..n {
-            let eta: f64 = (0..p).map(|j| x_mat.get(i, j) * beta[j]).sum();
-            mu[i] = eta.exp().max(1e-10);
-        }
-        let mut z = vec![0.0; n];
-        for i in 0..n {
-            let eta: f64 = (0..p).map(|j| x_mat.get(i, j) * beta[j]).sum();
-            z[i] = eta + (y[i] - mu[i]) / mu[i];
-        }
+        let mu: Vec<f64> = eta.iter().map(|e| e.exp().max(1e-10)).collect();
+        let z: Vec<f64> = (0..n).map(|i| eta[i] + (y[i] - mu[i]) / mu[i]).collect();
         let new_beta = solve_wls(x_mat, &mu, &z, n, p)?;
-        let converged = beta.iter().zip(new_beta.iter()).all(|(a, b)| (a - b).abs() < 1e-8);
-        beta = new_beta;
+        let converged = beta.as_ref()
+            .is_some_and(|b| b.iter().zip(new_beta.iter()).all(|(a, c)| (a - c).abs() < 1e-8));
+        for (i, e) in eta.iter_mut().enumerate() {
+            *e = (0..p).map(|j| x_mat.get(i, j) * new_beta[j]).sum();
+        }
+        beta = Some(new_beta);
         if converged { break; }
     }
-    Ok((beta, iter_used))
+    Ok((beta.expect("at least one IRLS step"), iter_used))
 }
 
 /// One IRLS step: min ‖W^{1/2}(z − Xβ)‖₂ by Householder QR of W^{1/2}X —
@@ -618,6 +709,22 @@ pub fn bi_aov(a: &[EvalArg]) -> Result<RVal, R2Err> {
         let y_col = match &lhs { RVal::List(items) if !items.is_empty() => items[0].1.clone(), v => v.clone() };
         let y: Vec<f64> = y_col.as_reals()?.into_iter().filter_map(|x| x).collect();
 
+        // One-way only. A second term used to be dropped without a word —
+        // `aov(y ~ g + b)` returned the one-way table for `g`, with `b`'s
+        // variation left in the residual (1.97 where R's two-way table
+        // has 1.637). Refuse instead of answering a different question.
+        if let RVal::List(terms) = &rhs {
+            let named: Vec<&str> = terms.iter()
+                .filter_map(|(n, _)| n.as_deref().filter(|s| !s.starts_with('~')))
+                .collect();
+            if named.len() > 1 {
+                return Err(R2Err {
+                    msg: format!("aov: only one-way designs are supported (one grouping term, got {}: {}); \
+                                  multi-factor ANOVA is not implemented yet", named.len(), named.join(", ")),
+                    kind: ErrKind::Runtime,
+                });
+            }
+        }
         let group_col = match &rhs {
             RVal::List(items) => items.iter().find(|(n, _)| !n.as_ref().map(|s| s.starts_with("~")).unwrap_or(true))
                 .map(|(_, v)| match v { RVal::List(inner) if !inner.is_empty() => inner[0].1.clone(), v => v.clone() })

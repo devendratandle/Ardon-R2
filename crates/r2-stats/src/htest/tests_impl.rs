@@ -134,8 +134,13 @@ fn pearson_r(x: &[f64], y: &[f64]) -> f64 {
     crate::moments::pearson_from(sxx, syy, sxy)
 }
 
-fn welch_two_sample(
-    x: &[f64], y: &[f64], lab_x: &str, lab_y: &str,
+/// The two-sample t-test: Welch's by default, the pooled-variance
+/// ("Student's") test with `var.equal = TRUE`. `mu` is the hypothesised
+/// difference of means, as R's `mu =`: it shifts the statistic, not the
+/// interval.
+#[allow(clippy::too_many_arguments)]
+fn two_sample_t(
+    x: &[f64], y: &[f64], lab_x: &str, lab_y: &str, mu: f64, var_equal: bool,
     conf_level: f64, data_line: &str,
 ) -> Result<RVal, R2Err> {
     if x.len() < 2 || y.len() < 2 {
@@ -149,10 +154,16 @@ fn welch_two_sample(
     let sy2 = y.iter().map(|v| (v - my).powi(2)).sum::<f64>() / (ny - 1.0);
     let vx = sx2 / nx;
     let vy = sy2 / ny;
-    let se = (vx + vy).sqrt();
+    let (se, df) = if var_equal {
+        // R: v <- (nx-1)*var(x) + (ny-1)*var(y); v <- v/df; sqrt(v*(1/nx+1/ny))
+        let df = nx + ny - 2.0;
+        let v = ((nx - 1.0) * sx2 + (ny - 1.0) * sy2) / df;
+        ((v * (1.0 / nx + 1.0 / ny)).sqrt(), df)
+    } else {
+        ((vx + vy).sqrt(), (vx + vy).powi(2) / (vx.powi(2) / (nx - 1.0) + vy.powi(2) / (ny - 1.0)))
+    };
     let diff = mx - my;
-    let t_stat = diff / se;
-    let df = (vx + vy).powi(2) / (vx.powi(2) / (nx - 1.0) + vy.powi(2) / (ny - 1.0));
+    let t_stat = (diff - mu) / se;
     let p_value = 2.0 * t_cdf(-t_stat.abs(), df);   // the tail itself: 1 - cdf cancels small p to 0
     let alpha = 1.0 - conf_level;
     let t_crit = qt(1.0 - alpha / 2.0, df);
@@ -160,10 +171,12 @@ fn welch_two_sample(
     let ci_hi = diff + t_crit * se;
     let conf_pct = (conf_level * 100.0).round() as i64;
 
-    soutln!("\n\tWelch Two Sample t-test\n");
+    // R's method strings, the pooled one with its leading space
+    let method = if var_equal { " Two Sample t-test" } else { "Welch Two Sample t-test" };
+    soutln!("\n\t{}\n", method.trim_start());
     soutln!("data:  {}", data_line);
     soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), fmt_n(df), fmt_n(p_value));
-    soutln!("alternative hypothesis: true difference in means is not equal to 0");
+    soutln!("alternative hypothesis: true difference in means is not equal to {}", fmt_n(mu));
     soutln!("{} percent confidence interval:", conf_pct);
     soutln!("  {}  {}", fmt_n(ci_lo), fmt_n(ci_hi));
     soutln!("sample estimates:");
@@ -177,7 +190,8 @@ fn welch_two_sample(
     fields.insert(Arc::from("estimate"), named(&[mx, my], &[&nx, &ny]));
     fields.insert(Arc::from("conf.int"), rnums(&[ci_lo, ci_hi]));
     fields.insert(Arc::from("conf.level"), rnum(conf_level));
-    fields.insert(Arc::from("method"), rstr("Welch Two Sample t-test"));
+    fields.insert(Arc::from("method"), rstr(method));
+    fields.insert(Arc::from("null.value"), rnum(mu));
     fields.insert(Arc::from("group1"), rstr(lab_x));
     fields.insert(Arc::from("group2"), rstr(lab_y));
     Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("htest"), fields }))
@@ -387,6 +401,9 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
             "t.test: conf.level must be in (0, 1), got {}", conf_level)));
     }
     let id_arg = arg_named(a, "id");
+    let var_equal = arg_named(a, "var.equal").and_then(|v| v.as_logicals().ok())
+        .and_then(|v| v.first().copied().flatten())
+        .unwrap_or(false);
 
     // Formula form: t.test(value ~ group)
     if let Some((lhs, rhs)) = extract_formula(&first(a)) {
@@ -465,7 +482,7 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
             }
             return paired_t_test(&g1, &g2, &lab1, &lab2, mu, conf_level, &data_line);
         }
-        return welch_two_sample(&g1, &g2, &lab1, &lab2, conf_level, &data_line);
+        return two_sample_t(&g1, &g2, &lab1, &lab2, mu, var_equal, conf_level, &data_line);
     }
 
     let x: Vec<f64> = first(a).as_reals()?.into_iter().filter_map(|v| v).collect();
@@ -475,7 +492,7 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
         if paired {
             return paired_t_test(&x, &y, "x", "y", mu, conf_level, "x and y");
         }
-        return welch_two_sample(&x, &y, "x", "y", conf_level, "x and y");
+        return two_sample_t(&x, &y, "x", "y", mu, var_equal, conf_level, "x and y");
     }
     one_sample_t_test(&x, "x", mu, conf_level)
 }
@@ -485,9 +502,11 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
         RVal::Matrix(mat) => {
             let (nr, nc) = (mat.nrow, mat.ncol);
             let n: f64 = mat.data.iter().sum();
+            // R: `if (correct && nrow(x) == 2L && ncol(x) == 2L)` — Yates
+            // applies to 2x2 tables only, whatever `correct` says.
             let correct = arg_named(a, "correct").and_then(|v| v.as_logicals().ok())
                 .map(|v| v.first().copied().flatten() == Some(true))
-                .unwrap_or(nr == 2 && nc == 2);
+                .unwrap_or(true) && nr == 2 && nc == 2;
             let row_totals: Vec<f64> = (0..nr).map(|r| (0..nc).map(|c| mat.get(r, c)).sum()).collect();
             let col_totals: Vec<f64> = (0..nc).map(|c| (0..nr).map(|r| mat.get(r, c)).sum()).collect();
             let mut chi_sq = 0.0;
@@ -496,8 +515,14 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
                     let observed = mat.get(r, c);
                     let expected = row_totals[r] * col_totals[c] / n;
                     if expected > 0.0 {
-                        let diff = if correct { (observed - expected).abs() - 0.5 } else { observed - expected };
-                        chi_sq += diff.max(0.0).powi(2) / expected;
+                        // Uncorrected, a cell below its expectation counts
+                        // as much as one above: `(o - e)^2`. (This was
+                        // `diff.max(0.0)`, which zeroed every negative
+                        // deviation — about half of X-squared.) With Yates
+                        // on a 2x2 table every |o - e| is the same, so
+                        // flooring at 0 is R's `min(0.5, |o - e|)`.
+                        let diff = if correct { ((observed - expected).abs() - 0.5).max(0.0) } else { observed - expected };
+                        chi_sq += diff.powi(2) / expected;
                     }
                 }
             }
