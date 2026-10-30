@@ -413,8 +413,26 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
         // non-data form (where eval_in gave back the raw vector directly)
         // is unchanged because unwrap_stratum_column is a no-op for it.
         let lhs = unwrap_stratum_column(&lhs);
-        let rhs = unwrap_stratum_column(&rhs);
-        let values: Vec<f64> = lhs.as_reals()?.into_iter().filter_map(|v| v).collect();
+        let raw = lhs.as_reals()?;
+        // R's t.test.formula goes through model.frame, whose na.omit drops
+        // the WHOLE row where the response is NA. Filtering the response
+        // alone left the group (and any id / Error() column) a row longer —
+        // "LHS length (7) != RHS length (8)" — and in the paired-by-row
+        // paths it would have paired the wrong observations. Every per-row
+        // column is cut by the same rows; `rows` is a no-op on a column that
+        // is already cut or is not per-row.
+        let keep: Vec<usize> = (0..raw.len()).filter(|&i| raw[i].is_some_and(|v| !v.is_nan())).collect();
+        let values: Vec<f64> = keep.iter().map(|&i| raw[i].unwrap_or(f64::NAN)).collect();
+        let n_rows = raw.len();
+        let rows = |v: RVal| -> RVal {
+            let len = match &v {
+                RVal::Numeric(x, _) => x.len(), RVal::Integer(x, _) => x.len(),
+                RVal::Logical(x, _) => x.len(), RVal::Character(x, _) => x.len(),
+                RVal::Factor(f) => f.codes.len(), _ => return v,
+            };
+            if keep.len() < n_rows && len == n_rows { r2_types::take(&v, &keep) } else { v }
+        };
+        let rhs = rows(unwrap_stratum_column(&rhs));
 
         // Phase R.S.1 — `t.test(y ~ Error(subject), paired=T)` shortcut.
         // When the formula RHS has no treatment grouping (just an Error
@@ -423,7 +441,7 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
         // first becomes "obs1" and the second becomes "obs2". Cleaner
         // than asking the user to manually split into x and y vectors.
         let error_stratum_for_order = extract_error_stratum(&first(a))
-            .map(|v| unwrap_stratum_column(&v));
+            .map(|v| rows(unwrap_stratum_column(&v)));
         let rhs_is_null = matches!(rhs, RVal::Null);
         if rhs_is_null && error_stratum_for_order.is_some() {
             if !paired {
@@ -446,11 +464,11 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
         // implicit id= argument when paired=TRUE. Explicit id= still wins
         // if both are supplied.
         let error_id = if id_arg.is_some() { None } else {
-            extract_error_stratum(&first(a)).map(|v| unwrap_stratum_column(&v))
+            extract_error_stratum(&first(a)).map(|v| rows(unwrap_stratum_column(&v)))
         };
 
         if paired {
-            let id_source = id_arg.or(error_id);
+            let id_source = id_arg.or(error_id).map(rows);
             if let Some(id_val) = id_source {
                 let ids = id_to_strings(&id_val)
                     .ok_or_else(|| runtime_err(
@@ -490,7 +508,17 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     if two_sample {
         let y: Vec<f64> = nth(a, 1).as_reals()?.into_iter().filter_map(|v| v).collect();
         if paired {
-            return paired_t_test(&x, &y, "x", "y", mu, conf_level, "x and y");
+            // R: `complete.cases(x, y)` — a pair goes when EITHER half is
+            // NA. Filtering x and y apart shifted every pair after the
+            // first NA onto the wrong partner.
+            let (xr, yr) = (first(a).as_reals()?, nth(a, 1).as_reals()?);
+            if xr.len() != yr.len() {
+                return Err(runtime_err(format!(
+                    "t.test(paired = TRUE): x and y have different lengths ({} and {})", xr.len(), yr.len())));
+            }
+            let (xs, ys): (Vec<f64>, Vec<f64>) = xr.iter().zip(&yr)
+                .filter_map(|(a, b)| Some(((*a)?, (*b)?))).unzip();
+            return paired_t_test(&xs, &ys, "x", "y", mu, conf_level, "x and y");
         }
         return two_sample_t(&x, &y, "x", "y", mu, var_equal, conf_level, "x and y");
     }

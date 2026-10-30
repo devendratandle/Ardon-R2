@@ -33,6 +33,11 @@ is really applied). Each was a mismatch with R first; 32/32 cases pass.
   response or predictor are dropped (R's `na.omit`). An exactly collinear
   column is reported `NA` and the fit uses the rest, as R does (it returned
   coefficients of 2e13).
+- **`t.test` with missing values drops the whole row, as R does**: the
+  formula form (`t.test(score ~ grp, data = d)` with an NA score failed
+  with "LHS length (7) != RHS length (8)"), its `id =` / `Error()` forms,
+  and `t.test(x, y, paired = TRUE)`, which used to pair every observation
+  after the first NA with the wrong partner.
 - **`aov(y ~ a + b)`** stops with a clear error instead of silently fitting
   `a` alone (multi-factor ANOVA: `docs/KNOWN_LIMITATIONS.md`).
 - **`quantile(type = 1..9)`** and **`cor(method = "spearman" / "kendall")`**
