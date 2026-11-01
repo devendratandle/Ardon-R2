@@ -905,8 +905,14 @@ pub fn bi_matplot(a: &[EvalArg]) -> Result<RVal, R2Err> {
 /// `hist(x, breaks=, main=)` — text + SVG histogram into the device.
 pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x: Vec<f64> = gv(a, 0).as_reals()?.into_iter().filter_map(|x| x).collect();
-    let nbins = gn(a, "breaks").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(10.0) as usize;
-    let nbins = nbins.max(1);
+    // R's breaks and counts (crate::histogram), for the object returned
+    // and for the bars drawn — one computation, so the picture is the
+    // numbers. `plot = FALSE` returns the object and draws nothing.
+    let hg = crate::histogram::compute(&x, gn(a, "breaks").as_ref())?;
+    let obj = crate::histogram::to_rval(&hg, "x");
+    let plot = gn(a, "plot").and_then(|v| v.as_logicals().ok())
+        .and_then(|v| v.first().copied().flatten()).unwrap_or(true);
+    if !plot { return Ok(obj); }
     let title = gn(a, "main").map(|v| val_to_str(&v)).unwrap_or_else(|| "Histogram".into());
     let sub   = gn(a, "sub" ).map(|v| val_to_str(&v)).unwrap_or_default();
     let xlab  = gn(a, "xlab").map(|v| val_to_str(&v)).unwrap_or_else(|| "x".into());
@@ -920,24 +926,15 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let col_fill   = gn(a, "col"   ).map(|v| val_to_str(&v)).unwrap_or_else(|| "lightgray".into());
     let col_border = gn(a, "border").map(|v| val_to_str(&v)).unwrap_or_else(|| "black".into());
 
-    // Raw data range, then add a 4 % cushion on each side so the
-    // first / last bars don't sit flush against the axis frame.
-    // Y-axis stays anchored at 0 (histogram convention).
-    let xmin_raw = x.iter().cloned().fold(f64::INFINITY, f64::min);
-    let xmax_raw = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    // The breaks' range, then a 4 % cushion on each side so the first /
+    // last bars don't sit flush against the axis frame. Y-axis stays
+    // anchored at 0 (histogram convention).
+    let (xmin_raw, xmax_raw) = (hg.breaks[0], hg.breaks[hg.breaks.len() - 1]);
     let xrange_raw = if (xmax_raw - xmin_raw).abs() < 1e-10 { 1.0 } else { xmax_raw - xmin_raw };
     let pad = 0.04;
     let xmin = xmin_raw - xrange_raw * pad;
     let xmax = xmax_raw + xrange_raw * pad;
-    let bin_width = (xmax_raw - xmin_raw) / nbins as f64;
-    let bin_width = if bin_width.is_finite() && bin_width > 0.0 { bin_width } else { 1.0 };
-
-    let mut counts = vec![0usize; nbins];
-    for &val in &x {
-        let bin = ((val - xmin_raw) / bin_width).floor() as usize;
-        let bin = bin.min(nbins - 1);
-        counts[bin] += 1;
-    }
+    let counts: Vec<usize> = hg.counts.iter().map(|&c| c as usize).collect();
     let max_count = *counts.iter().max().unwrap_or(&1);
 
     let (ox, oy, w, h) = begin_plot();
@@ -962,8 +959,7 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let xrange_padded = xmax - xmin;
     for (i, &count) in counts.iter().enumerate() {
         let bh = if max_count > 0 { count as f64 / max_count as f64 * ph } else { 0.0 };
-        let bin_lo = xmin_raw + i as f64 * bin_width;
-        let bin_hi = bin_lo + bin_width;
+        let (bin_lo, bin_hi) = (hg.breaks[i], hg.breaks[i + 1]);
         let bx = ox + ml + (bin_lo - xmin) / xrange_padded * pw;
         let bx_hi = ox + ml + (bin_hi - xmin) / xrange_padded * pw;
         let bw_px = bx_hi - bx;
@@ -985,7 +981,7 @@ pub fn bi_hist(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     with_device(|d| d.svg_body.push_str(&frag));
     crate::device::finish_plot("hist.svg");
-    Ok(RVal::Null)
+    Ok(obj)
 }
 
 /// `boxplot(g1=, g2=, ..., main=)` — multi-group box-and-whisker into the device.
@@ -1181,11 +1177,18 @@ mod tests {
     }
 
     #[test]
-    fn hist_returns_null_and_writes() {
+    fn hist_draws_and_returns_the_histogram_object() {
+        // R's hist(1:10): Sturges 5 cells -> pretty breaks 0, 2, ..., 10,
+        // counts 2 2 2 2 2. The same object whether or not it draws.
         dev_off();
         let a = vec![evarg(nums(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]))];
+        let field = |r: &RVal, k: &str| match r {
+            RVal::TypeInstance(t) if &*t.type_name == "histogram" => t.fields[k].as_reals().unwrap(),
+            other => panic!("hist returned {other:?}, not a histogram"),
+        };
         let r = bi_hist(&a).unwrap();
-        assert!(matches!(r, RVal::Null));
+        assert_eq!(field(&r, "breaks"), [0.0, 2.0, 4.0, 6.0, 8.0, 10.0].map(Some));
+        assert_eq!(field(&r, "counts"), [2.0; 5].map(Some));
         dev_off();
     }
 

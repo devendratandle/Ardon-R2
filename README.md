@@ -107,7 +107,7 @@ Prebuilt installers: **Windows** — `installer/Output/R2-Setup-*.exe`;
 
 ## Highlights
 
-- **462 built-in functions and operators**, every one with `?help` — stats, ML, AI training, data manipulation, graphics, time series — no packages to install.
+- **464 built-in functions and operators**, every one with `?help` — stats, ML, AI training, data manipulation, graphics, time series — no packages to install.
 - **AI model training, faster than PyTorch** — BPE tokenizer, autograd tape, fused attention and an Adam trainer, all in Rust with no C and no Python, driven from R2 code (`llm.new`, `llm.train`, `llm.generate`, `llm.save`). A 7.24M-parameter transformer trains **1.45–1.9× faster than PyTorch + MKL** (1.40–1.63× at 40M parameters; 1.34–1.37× on an Intel CPU, MKL's home ground) and learns identically. A whole-step **GPU trainer** on any Vulkan/DirectX/Metal GPU via wgpu runs **1.3–2.0× faster than PyTorch-DirectML** on an integrated GPU. See [`benchmarks/llm/REPORT.md`](benchmarks/llm/REPORT.md).
 - **Statistics**: `lm`/`glm`/`aov` (incl. repeated-measures `Error()`), `t.test`/`cor.test`/`shapiro.test`, Hotelling's T², MANOVA (Wilks/Pillai/Hotelling-Lawley/Roy).
 - **Machine learning, built in**: decision tree, random forest, gradient boosting, KNN, naive Bayes, PCA, K-means, cross-validation.

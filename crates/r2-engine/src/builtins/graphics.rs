@@ -88,6 +88,14 @@ pub(crate) fn bi_plot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 pub(crate) fn bi_hist(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::plots::bi_hist(a)
 }
+/// `pretty()` and `nclass.Sturges()` live with `hist()`'s computation (R's
+/// algorithms, in `r2_graphics::histogram`); neither draws.
+pub(crate) fn bi_pretty(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::histogram::bi_pretty(a)
+}
+pub(crate) fn bi_nclass_sturges(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    r2_graphics::histogram::bi_nclass_sturges(a)
+}
 pub(crate) fn bi_boxplot(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_graphics::plots::bi_boxplot(a)
 }

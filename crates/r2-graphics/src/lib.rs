@@ -34,6 +34,7 @@ pub fn __rout(s: &str) { r2_types::out::rout(s); }
 
 pub mod colors;
 pub mod device;
+pub mod histogram;
 pub mod overlays;
 pub mod params;
 pub mod plots;

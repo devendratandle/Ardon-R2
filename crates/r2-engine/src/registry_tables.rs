@@ -154,7 +154,7 @@ pub(crate) fn stats_table() -> Vec<(&'static str, BuiltinFn)> {
 /// GRAPHICS tier — high-level plots, overlays, devices, color helpers.
 pub(crate) fn graphics_table() -> Vec<(&'static str, BuiltinFn)> {
     vec![
-        ("plot",bi_plot),("hist",bi_hist),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),("plot.new",bi_plot_new),("plot.window",bi_plot_window),
+        ("plot",bi_plot),("hist",bi_hist),("pretty",bi_pretty),("nclass.Sturges",bi_nclass_sturges),("boxplot",bi_boxplot),("barplot",bi_barplot),("pairs",bi_pairs),("pie",bi_pie),("matplot",bi_matplot),("plot.new",bi_plot_new),("plot.window",bi_plot_window),
         ("save.plot",bi_save_plot),
         ("lines",bi_lines),("points",bi_points),("abline",bi_abline),("legend",bi_legend),("text",bi_text),("title",bi_title),("axis",bi_axis),("rect",bi_rect),
         ("par",bi_par),("dev.off",bi_dev_off),("save_plot",bi_save_plot),("dev.view",bi_dev_view),("pdf",bi_pdf),("png",bi_png),("svg",bi_svg),

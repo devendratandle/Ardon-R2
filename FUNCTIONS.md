@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 462 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 464 Built-in Functions and Operators
 
 ## Core (83)
 ```
@@ -404,7 +404,7 @@ readLines(path,n=)  Read text file lines into a character vector
 writeLines(text,con=) Write a character vector as lines (file or console)
 ```
 
-## Graphics (39)
+## Graphics (41)
 ```
 plot.new()         Start a new, empty plot frame
 plot.window(xlim,ylim)   Set the coordinate system of the current frame
@@ -420,7 +420,9 @@ adjustcolor(col,alpha=)     Add transparency to a colour
 rainbow(n)         n evenly spaced hues
 heat.colors(n) / terrain.colors(n) / topo.colors(n) / cm.colors(n)   R's standard palettes
 plot(x,y)         Scatter/line plot; inline params col=/cex=/pch=/type=/lwd=/las=
-hist(x)           Histogram
+hist(x, breaks=, plot=)   Histogram with R's breaks (Sturges + pretty) and counts; returns the "histogram" object ($breaks/$counts/$density/$mids); plot=FALSE draws nothing
+pretty(x, n=5)    R's "pretty" breakpoints: about n+1 round values covering range(x)
+nclass.Sturges(x) Sturges' number of histogram classes, ceiling(log2(length(x)) + 1)
 boxplot(x)        Box-and-whisker
 barplot(x)        Bar chart
 pairs(df)         Scatterplot matrix of a data.frame / matrix

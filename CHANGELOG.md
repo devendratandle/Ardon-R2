@@ -11,6 +11,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Version 0.4.1 was never released; everything listed here since v0.4.0
 ships in 0.4.2.
 
+### `hist()` computes what R's does; `pretty()` and `nclass.Sturges()` — 2026-11-01
+
+- **`hist(x, plot = FALSE)` returns R's `"histogram"` object** —
+  `$breaks`, `$counts`, `$density`, `$mids`, `$equidist` — and draws
+  nothing. It used to ignore `plot = FALSE`, write `hist.svg` into the
+  working folder and return NULL, so R code that reads a histogram's
+  numbers could not run. With `plot = TRUE` it draws and returns the same
+  object.
+- **R's breaks and counts**: Sturges' rule through `pretty()` by default
+  (it was 10 equal-width bins over the data range), `breaks = n` as a
+  suggested number of cells, `breaks = c(...)` as given; right-closed bins
+  with the lowest break closed, as R's `C_BinCount` counts them. The bars
+  drawn are those counts.
+- **New builtins `pretty(x, n = 5)`** (R's `R_pretty`, line for line) and
+  **`nclass.Sturges(x)`**. 464 builtins. Differential case `hist_pretty`:
+  every break, count, density and mid, and ten `pretty()` ranges, equal to
+  R 4.5.3.
+
 ### Statistics fixed against R: chisq.test, t.test, glm, lm, quantile, cor — 2026-10-30
 
 Found by four new differential cases (221 values, compared at 15

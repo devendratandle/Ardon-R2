@@ -32,6 +32,7 @@ to be worse than documented and was fixed here rather than scheduled.
 | Split-plot ANOVA: `Error(subject/within)` collapses to the outer stratum | Medium | **v0.5.0** |
 | Multi-factor `aov(y ~ a + b)` is not implemented — it now stops with an error (it used to fit `a` alone silently); one-way and `+ Error(subject)` work | Medium | **v0.5.0** |
 | `anova(lm)` gives one overall "Model" row, not R's sequential (Type I) table per term; the totals agree | Medium — code ported from R reads a different table | **v0.5.0** |
+| `hist(breaks = "Scott" / "FD" / a function)` is not supported (Sturges, a number of cells or a vector of breaks are); `hist(x, plot = FALSE)` typed at the console does not print the object (assign it); `freq =` / `right =` / `include.lowest =` are not read | Low | **next release** |
 | `quantile()` drops NAs silently (R errors unless `na.rm = TRUE`) and its result is unnamed (R: `"30%"`) | Low | **next release** |
 | Parquet corpora must be converted first (`r2-arrow/parquet_io.rs` is unwired from training) | Low — memmap path now ships | **v0.5.0** |
 | `read.parquet` cannot read zstd-compressed files — the only zstd implementation is C, and R2 ships none. snappy/gzip/lz4/brotli read fine; recompress zstd files with snappy | Low — a `pyarrow` one-liner | by design — needs a pure-Rust zstd in the `parquet` crate |
