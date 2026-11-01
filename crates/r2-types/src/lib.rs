@@ -1273,6 +1273,22 @@ pub mod out {
 
     thread_local! {
         static CLEAR_HOOK: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
+        static VIEW_HOOK: RefCell<Option<Box<dyn FnMut(&str, &super::RVal)>>> = RefCell::new(None);
+    }
+
+    /// Install (or clear) the per-thread `View()` hook. The GUI installs one
+    /// that opens its data viewer; without one `View()` prints the value.
+    pub fn set_view_hook(hook: Option<Box<dyn FnMut(&str, &super::RVal)>>) {
+        VIEW_HOOK.with(|h| *h.borrow_mut() = hook);
+    }
+
+    /// Hand `val` to the installed `View()` hook under `title`. False when
+    /// no hook is installed (a terminal), so the caller prints instead.
+    pub fn request_view(title: &str, val: &super::RVal) -> bool {
+        VIEW_HOOK.with(|h| match h.borrow_mut().as_mut() {
+            Some(f) => { f(title, val); true }
+            None => false,
+        })
     }
 
     /// Install (or clear) the per-thread "clear console" hook. The GUI

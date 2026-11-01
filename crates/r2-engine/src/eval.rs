@@ -306,6 +306,13 @@ impl Engine {
                 }
             }
         }
+        // `View(df)` titles its viewer with the expression, as R's does
+        // (deparse(substitute(x))) — builtins only see values otherwise.
+        if matches!(func, Expr::Symbol(n) if n.as_ref() == "View")
+            && !args.is_empty() && !ea.iter().any(|a| a.name.as_deref() == Some("title")) {
+            ea.push(EvalArg { name: Some(Arc::from("title")),
+                              value: rstr(&crate::formula::fmt_expr(&args[0].value)) });
+        }
         let result = self.call_fn(&f, &ea, env);
         if pushed_nse { self.nse_stack.pop(); }
         result
@@ -435,7 +442,7 @@ pub(crate) fn is_invisible_builtin(name: &str) -> bool {
         "assign" | "rm" | "remove" | "stopifnot" |
         "write.csv" | "write.table" | "saveRDS" | "save" | "sink" |
         "install.packages" | "uninstall" | "q" | "quit" |
-        "clear" | "cls" | "clr" |
+        "clear" | "cls" | "clr" | "View" |
         "plot" | "hist" | "boxplot" | "barplot" | "lines" | "points" | "abline" | "legend" | "text" |
         "save.plot" | "dev.view" | "dev.off" |
         "str")

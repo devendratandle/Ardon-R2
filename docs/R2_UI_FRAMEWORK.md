@@ -412,6 +412,14 @@ one needs a doc revision.
 | F5 / Ctrl+R | Run current input (alias for Enter; explicit visible button) |
 | Esc | Cancel modal dialog / clear selection |
 
+**Amendment (2026-11-01) — keys for editors built on r2-ui.** Five more
+`KeyCode`s: S, Z, Y, O, N. Ctrl-held letters reach an app only through
+`KeyCode` (`Char` is suppressed while Ctrl is held), so without them an
+application built on this framework — such as the separate IDE project's
+script editor — could not offer Ctrl+S / Ctrl+Z / Ctrl+Y / Ctrl+O /
+Ctrl+N. Editors themselves stay out of the framework (§15); R2Gui's
+console table above is unchanged.
+
 ## 10. Testing strategy
 
 R2-UI's tests target behavior, not pixels. Three layers:

@@ -27,6 +27,11 @@ pub enum KeyCode {
     /// Letter keys we care about for hotkeys (A, C, V, X). Other
     /// letters arrive as printable Chars.
     KeyA, KeyC, KeyV, KeyX,
+    /// Editor hotkeys for apps built on r2-ui: save, undo, redo, open, new
+    /// (amendment, docs/R2_UI_FRAMEWORK.md §9). Without them Ctrl+S /
+    /// Ctrl+Z never reached an app: Char events are suppressed while
+    /// Ctrl is held, and these letters had no KeyCode.
+    KeyS, KeyZ, KeyY, KeyO, KeyN,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -283,6 +288,11 @@ pub fn from_winit(
                         'c' => Some(KeyCode::KeyC),
                         'v' => Some(KeyCode::KeyV),
                         'x' => Some(KeyCode::KeyX),
+                        's' => Some(KeyCode::KeyS),
+                        'z' => Some(KeyCode::KeyZ),
+                        'y' => Some(KeyCode::KeyY),
+                        'o' => Some(KeyCode::KeyO),
+                        'n' => Some(KeyCode::KeyN),
                         _   => None,
                     }
                 }

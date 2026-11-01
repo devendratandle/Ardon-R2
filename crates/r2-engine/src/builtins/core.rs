@@ -144,6 +144,20 @@ pub(crate) fn bi_clear(_e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RV
     Ok(RVal::Null)
 }
 
+/// `View(x, title)`: open `x` in the GUI's data viewer through the
+/// frontend's hook; with no hook (the CLI) it prints `x`, as R does
+/// without a GUI. Returns NULL invisibly.
+pub(crate) fn bi_view(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let val = a.iter().find(|x| x.name.is_none()).map(|x| x.value.clone()).unwrap_or(RVal::Null);
+    let title = a.iter().find(|x| x.name.as_deref() == Some("title"))
+        .and_then(|x| match &x.value { RVal::Character(v, _) => v.first().cloned().flatten(), _ => None })
+        .map(|s| s.to_string()).unwrap_or_else(|| "View".into());
+    if !r2_types::out::request_view(&title, &val) {
+        r2_types::out::rout(&format!("{}\n", val));
+    }
+    Ok(RVal::Null)
+}
+
 pub(crate) fn bi_typeof(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rstr(gv(a,0).type_name())) }
 pub(crate) fn bi_class(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     // Read the class attribute (so a Date reports "Date", not "numeric");

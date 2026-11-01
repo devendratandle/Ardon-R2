@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 464 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 465 Built-in Functions and Operators
 
-## Core (83)
+## Core (84)
 ```
 seq(from,to,by=)   Regular sequence; also seq(along=x), seq_len(n)
 rep(x,times=,each=)   Repeat a vector
@@ -32,6 +32,7 @@ length(x)           Length of vector
 print(x)            Print value
 cat(...)            Print without newline
 clear() / cls()     Clear the console (GUI buffer / terminal)
+View(x, title)      Open a data frame, matrix or vector in the GUI's data viewer (prints x in the CLI)
 typeof(x)           Type name: "numeric", "character", etc.
 class(x)            Class of object
 list(...)           Create named list

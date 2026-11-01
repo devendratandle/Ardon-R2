@@ -11,6 +11,17 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Version 0.4.1 was never released; everything listed here since v0.4.0
 ships in 0.4.2.
 
+### `View()`, and editor keys for apps built on R2 — 2026-11-01
+
+- **`View(x)`**, as in R: a GUI built on R2 that installs a viewer (the
+  separate IDE project does) opens `x` in its data viewer, titled with
+  the expression (`View(trial)` → "trial"); `View(x, title = "...")` sets
+  the title. Without a viewer — the `r2` command line and R2Gui — it
+  prints `x`. Returns NULL invisibly.
+- **r2-ui**: five more keys (S, Z, Y, O, N) reach applications while Ctrl
+  is held, so an editor built on the framework can offer Ctrl+S / Ctrl+Z /
+  Ctrl+Y / Ctrl+O / Ctrl+N. R2Gui's console keys are unchanged.
+
 ### `hist()` computes what R's does; `pretty()` and `nclass.Sturges()` — 2026-11-01
 
 - **`hist(x, plot = FALSE)` returns R's `"histogram"` object** —

@@ -22,7 +22,7 @@ use super::*;
 pub(crate) fn core_table() -> Vec<(&'static str, BuiltinFn)> {
     vec![
         ("c",bi_c),("length",bi_length),("print",bi_print),("cat",bi_cat),
-        ("clear",bi_clear),("cls",bi_clear),("clr",bi_clear),
+        ("View",bi_view),("clear",bi_clear),("cls",bi_clear),("clr",bi_clear),
         ("typeof",bi_typeof),("class",bi_class),("is.na",bi_is_na),
         ("is.nan",bi_is_nan),("is.infinite",bi_is_infinite),("is.finite",bi_is_finite),
         ("is.numeric",bi_is_num),("is.character",bi_is_chr),("is.logical",bi_is_lgl),
