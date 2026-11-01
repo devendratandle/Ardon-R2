@@ -806,6 +806,9 @@ fn fmt_elem(col: &RVal, row: usize) -> String {
         RVal::Integer(v, _) => v.get(row).map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).unwrap_or_default(),
         RVal::Character(v, _) => v.get(row).map(|x| match x { Some(s) => s.to_string(), None => "NA".into() }).unwrap_or_default(),
         RVal::Logical(v, _) => v.get(row).map(|x| match x { Some(true) => "TRUE".into(), Some(false) => "FALSE".into(), None => "NA".into() }).unwrap_or_default(),
+        // a factor cell prints its level, as R's print.data.frame does
+        RVal::Factor(fc) => fc.codes.get(row).map(|c| c.and_then(|i| fc.levels.get(i as usize))
+            .map(|s| s.to_string()).unwrap_or_else(|| "<NA>".into())).unwrap_or_default(),
         _ => "?".into(),
     }
 }

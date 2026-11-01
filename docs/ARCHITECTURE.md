@@ -73,7 +73,7 @@ locked unless this file is changed.
 | Frontend | Parser → AST | ✅ built | `crates/r2-parser/src/parser.rs` (333 LoC) |
 | Frontend | REPL | ✅ built | `crates/r2-repl/src/main.rs` |
 | Frontend | Type Inferencer | ✅ built | `crates/r2-types/src/infer.rs` (typed annotation pass) |
-| Frontend | GUI / panels / machine protocol | ✅ built | `crates/r2-gui` (desktop console), `crates/r2-panel` (declarative button apps from a manifest), `r2 --json` / `r2 --serve` (NDJSON, HTTP eval server with the security model in `FRONTEND_IO_CONTRACT.md`) |
+| Frontend | GUI / panels / machine protocol | ✅ built | `crates/r2-gui` (desktop console), `crates/r2-panel` (declarative button apps from a manifest), `r2 --json` / `r2 --ide` / `r2 --serve` (NDJSON; the separate IDE's engine protocol in `IDE_PROTOCOL.md`; HTTP eval server with the security model in `FRONTEND_IO_CONTRACT.md`) |
 | IR | Typed SSA | ✅ built | `crates/r2-ir/src/lib.rs` (SSA-with-phi) |
 | Oracle | Auto-scheduler | ✅ V1 built | `crates/r2-oracle/`. `dispatch(Op, Shape) → Backend{Serial\|Rayon}`, hardware-scaled thresholds. V2 adds GPU/Cloud tiers. |
 | JIT | Cranelift backend | ◐ numeric + iterative algorithms → native | `crates/r2-jit/`. Compiles counted loops, imperative indexed element loops (`x[i]`, `y[i]<-…`), whole-vector/-matrix reductions & maps, and the statistics primitive set to native **checked** code — fused, CSE'd, F64X2-SIMD; guards deopt to the interpreter, NA propagates. Capability detail in §5. |

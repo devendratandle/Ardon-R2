@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod serve;
+mod ide;
 
 fn main() {
     r2_engine::set_product_version(env!("CARGO_PKG_VERSION"));
@@ -22,6 +23,11 @@ fn main() {
     }
     if args.len() >= 2 && args[1] == "--json" {
         std::process::exit(json_main());
+    }
+    // The engine of a separate IDE: JSON lines on stdin/stdout
+    // (docs/IDE_PROTOCOL.md).
+    if args.len() >= 2 && args[1] == "--ide" {
+        std::process::exit(ide::ide_main());
     }
     if args.len() >= 2 && (args[1] == "--self-check" || args[1] == "--selfcheck") {
         std::process::exit(self_check());

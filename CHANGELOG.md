@@ -11,6 +11,21 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Version 0.4.1 was never released; everything listed here since v0.4.0
 ships in 0.4.2.
 
+### `r2 --ide`: R2 as the engine of a separate IDE — 2026-11-01
+
+- **`r2 --ide`** runs R2 as the engine of a separate IDE program, the way
+  RStudio drives an R session: one JSON object per line on stdin/stdout.
+  The IDE links no R2 code. Operations: `hello` (versions), `eval`
+  (console input; output streams as it is printed; unfinished input
+  reported as `incomplete`; a changed plot returned as SVG), `value` (any
+  value as JSON at full precision, nothing printed), `env` (Environment
+  pane rows), `view` (a page of the data viewer, formatted as `print()`
+  formats), `interrupt` (stops running code), `quit`. Specification:
+  `docs/IDE_PROTOCOL.md`. `r2 --json` is unchanged.
+- **A factor column in a printed data frame shows its levels** (an NA as
+  `<NA>`), as R does; it printed `?` in every cell. Found by the `--ide`
+  smoke test; `tests/differential/output/df_factor_print.R`.
+
 ### `View()`, and editor keys for apps built on R2 — 2026-11-01
 
 - **`View(x)`**, as in R: a GUI built on R2 that installs a viewer (the

@@ -72,7 +72,7 @@ pub(crate) fn json_str(line: &str, key: &str) -> Option<String> {
 }
 
 /// Decode a JSON number value following `"key":`.
-fn json_num(line: &str, key: &str) -> Option<f64> {
+pub(crate) fn json_num(line: &str, key: &str) -> Option<f64> {
     let pat = format!("\"{}\"", key);
     let k = line.find(&pat)?;
     let colon = line[k + pat.len()..].find(':')? + k + pat.len();
