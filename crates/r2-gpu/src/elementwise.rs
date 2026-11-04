@@ -390,9 +390,15 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
     red[tid] = sum;
 {tree}
     if (tid == 0u) {{
-        let lse = mx + log(red[0]);
-        st_LSE(r, lse);
-        st_LOSS(r, lse - ld_X(r * p.d + ids[r]));
+        // an ignored row (r2_autograd::IGNORE, narrowed) has no loss at all
+        if (ids[r] == 0xFFFFFFFFu) {{
+            st_LSE(r, 0.0);
+            st_LOSS(r, 0.0);
+        }} else {{
+            let lse = mx + log(red[0]);
+            st_LSE(r, lse);
+            st_LOSS(r, lse - ld_X(r * p.d + ids[r]));
+        }}
     }}
 }}
 "#, T = ROW_THREADS, half = ROW_THREADS / 2, tree = tree_sum())
@@ -407,6 +413,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     if (i >= p.n) {{ return; }}
     let r = i / p.d;
     let j = i % p.d;
+    if (ids[r] == 0xFFFFFFFFu) {{
+        if (p.a == 0u) {{ st_GX(i, 0.0); }}
+        return;
+    }}
     var v = exp_r2(ld_X(i) - ld_LSE(r));
     if (j == ids[r]) {{ v = v - 1.0; }}
     v = v * p.x;

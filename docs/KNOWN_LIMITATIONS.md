@@ -35,6 +35,11 @@ to be worse than documented and was fixed here rather than scheduled.
 | `hist(breaks = "Scott" / "FD" / a function)` is not supported (Sturges, a number of cells or a vector of breaks are); `hist(x, plot = FALSE)` typed at the console does not print the object (assign it); `freq =` / `right =` / `include.lowest =` are not read | Low | **next release** |
 | `quantile()` drops NAs silently (R errors unless `na.rm = TRUE`) and its result is unnamed (R: `"30%"`) | Low | **next release** |
 | Parquet corpora must be converted first (`r2-arrow/parquet_io.rs` is unwired from training) | Low — memmap path now ships | **v0.5.0** |
+| LLM tokens have no end-of-text marker, so `llm.generate` runs on past a learned answer for the `n` it was asked for | Medium — fine-tuned answers need trimming | **next release** |
+| On the GPU (`device = "gpu"`), frozen blocks, LoRA adapters and `accum` stop with an error (CPU only); AdamW, clipping, the schedule, ignored targets and padded batches run there | Medium | **v0.5.0** |
+| `device = "gpu"` needs a build with `--features gpu`; the shipped `r2` is CPU only, and nothing picks the device for you | Low | **v0.5.0** |
+| `llm.train` holds the tokens of its text in RAM (4 bytes each); only `tinystories_train` streams a corpus to a memory-mapped token file. `Model::load_dir` copies all weights to the heap: a model larger than RAM cannot be served yet, though the file is memory-mapped | Medium — sets the largest model and corpus | **v0.5.0** |
+| Checkpoints stall the training thread while they write (124 ms at 7.24M, disk included); no background writer | Low | **v0.5.0** |
 | `read.parquet` cannot read zstd-compressed files — the only zstd implementation is C, and R2 ships none. snappy/gzip/lz4/brotli read fine; recompress zstd files with snappy | Low — a `pyarrow` one-liner | by design — needs a pure-Rust zstd in the `parquet` crate |
 | `confint(glm)` is the Wald interval (R's `confint.default`), not the profile-likelihood interval R's `confint.glm` computes | Low — they agree away from the boundary | **v0.5.0** |
 | `format(Sys.time())` prints UTC where R prints local time; `Sys.time() - t` is numeric, not `difftime` | Low | **next release** |

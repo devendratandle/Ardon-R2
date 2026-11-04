@@ -63,6 +63,15 @@ ships in 0.4.2.
   gradients are checked against finite differences; served logits against the
   tape's. Fine-tuning starts from R2's own models: there is no importer for
   other projects' weights. `samples/llm/finetune.r2` is the whole recipe.
+  At 7.24M, rank 8: 57,344 values train instead of 7.24M, a checkpoint is
+  0.66 MB instead of 82.9, an adapter 0.22 MB against 27.64 of weights, and a
+  step about 15% faster. Peak memory is about equal (658 vs 641 MB): at this
+  size activations dominate RAM, and the saving is disk and optimizer state.
+- **On the GPU:** AdamW (bit-identical to the CPU, one fused multiply-add per
+  weight), gradient clipping (a double-f32 norm on the device, within 1e-10 of
+  f64, reading back 14 KB instead of 29 MB), and ignored targets with padded
+  batches. `device = "gpu"` in `llm.train` and `llm.finetune`, in a build with
+  `--features gpu` (`r2-engine`, `r2-repl`); the default build compiles no wgpu.
 
 ### `r2 --ide`: R2 as the engine of a separate IDE — 2026-11-01
 

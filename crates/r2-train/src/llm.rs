@@ -219,9 +219,13 @@ impl Trainer {
         let y = tape.matmul(x, leaves[self.layer_block(l, part)], rows, k, n);
         let Some(lora) = &self.lora else { return y };
         let Some((a, b)) = lora.blocks(&self.cfg, l, part) else { return y };
+        // Scaled while it is `rows x rank`: scaling the `rows x n` product
+        // instead put two more full-width buffers and their gradients on the
+        // tape per adapter, which measured 10% MORE peak memory than training
+        // the whole model.
         let low = tape.matmul(x, leaves[a], rows, k, lora.rank);
+        let low = tape.scale(low, lora.scale());
         let delta = tape.matmul(low, leaves[b], rows, lora.rank, n);
-        let delta = tape.scale(delta, lora.scale());
         tape.add(y, delta)
     }
 

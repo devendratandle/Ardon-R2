@@ -532,7 +532,7 @@ readline(prompt)    Block until stdin line is entered; returns character.
 ```
 llm.new(dim=128, layers=4, heads=4, kv.heads=heads, ffn=3*dim, vocab=8000, ctx=64, lr=0.003, seed=42)
                     Create a transformer model; returns an integer handle
-llm.train(m, text, steps=50, batch=8, seq=16, report=0, shuffle=FALSE, lr=, wd=, clip=, schedule="constant", warmup=0, min.lr=lr/10, accum=1, checkpoint=NULL, every=steps/10, keep=3)
+llm.train(m, text, steps=50, batch=8, seq=16, report=0, shuffle=FALSE, lr=, wd=, clip=, schedule="constant", warmup=0, min.lr=lr/10, accum=1, device="cpu", checkpoint=NULL, every=steps/10, keep=3)
                     Train handle m on a text (string or file path), walking through all of it; report= prints every n steps
 llm.finetune(m, prompts, completions, steps=100, batch=4, seq=64, shuffle=TRUE, ...)
                     Teach what follows each prompt: only completion tokens count in the loss, batches pad to their longest example; takes llm.train's settings

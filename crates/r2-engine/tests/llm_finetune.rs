@@ -122,6 +122,46 @@ fn lora_trains_small_adapters_and_they_travel_two_ways() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The device runs the same recipe: same losses to within f32 rounding, and
+/// the weights come back, so generating and saving work as after a CPU run.
+#[cfg(feature = "gpu")]
+#[test]
+fn the_gpu_runs_the_same_recipe() {
+    if r2_gpu::adapter_info().contains("no GPU") { eprintln!("no GPU adapter; skipped"); return; }
+    let go = |device: &str| text(&run(&format!(
+        "{MODEL}{EXAMPLES}\
+         a <- llm.finetune(m, p, q, steps = 150, batch = 2, seq = 16, wd = 0.01, clip = 1, \
+                           schedule = \"cosine\", warmup = 5, device = \"{device}\")\n\
+         paste0(a, \"|\", llm.generate(m, \"france:\", n = 6))\n")));
+    let (cpu, gpu) = (go("cpu"), go("gpu"));
+    let split = |s: &str| { let (l, t) = s.split_once('|').unwrap(); (l.parse::<f64>().unwrap(), t.to_string()) };
+    let ((lc, tc), (lg, tg)) = (split(&cpu), split(&gpu));
+    assert!((lc - lg).abs() < 2e-3 * lc.max(1.0), "loss cpu {lc}, gpu {lg}");
+    assert_eq!(tc, tg, "cpu and gpu learned different things");
+    assert_eq!(tg, " paris");
+}
+
+/// Adapters are CPU only so far: an error that says so, not a wrong run.
+#[cfg(feature = "gpu")]
+#[test]
+fn lora_on_the_gpu_is_refused_by_name() {
+    if r2_gpu::adapter_info().contains("no GPU") { return; }
+    let e = run_err(&format!("{MODEL}{EXAMPLES}invisible(llm.lora(m, rank = 2))\n\
+                              llm.finetune(m, p, q, steps = 1, device = \"gpu\")"));
+    assert!(e.contains("CPU only"), "{e}");
+}
+
+#[cfg(not(feature = "gpu"))]
+#[test]
+fn a_build_without_gpu_support_says_so() {
+    assert!(run_err(&format!("{MODEL}{EXAMPLES}llm.finetune(m, p, q, steps = 1, device = \"gpu\")")).contains("--features gpu"));
+}
+
+#[test]
+fn an_unknown_device_is_refused() {
+    assert!(run_err(&format!("{MODEL}{EXAMPLES}llm.finetune(m, p, q, steps = 1, device = \"tpu\")")).contains("unknown device"));
+}
+
 #[test]
 fn bad_examples_are_refused_by_name() {
     assert!(run_err(&format!("{MODEL}llm.finetune(m, c(\"a\", \"b\"), \"c\")")).contains("2 prompts but 1"));

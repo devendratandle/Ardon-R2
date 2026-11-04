@@ -28,3 +28,7 @@ r2-io = { path = "../r2-io" }
 r2-pkg = { path = "../r2-pkg" }
 r2-console = { path = "../r2-console" }
 rayon = "1.10"
+
+[features]
+# llm.train(device = "gpu"). Off by default: a normal build compiles no wgpu.
+gpu = ["r2-train/gpu"]

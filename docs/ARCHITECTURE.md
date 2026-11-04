@@ -219,10 +219,11 @@ runs on a GPU without `GpuTrainer`; cooperative-matrix WGSL once a
 device with matrix cores is available to run it (Vega has none).
 
 **LLM capability around the trainer.** A GGUF reader (mmap the tensor
-table; `safetensors` exists), LoRA adapters over frozen projections (the
-one-machine fine-tune path), and the R2-script NN tier: expose the
+table; `safetensors` exists), and the R2-script NN tier: expose the
 tensor/autograd primitives as builtins and write layers, losses and
-optimizers as script recipes (`LLM_TRILLION_ARCHITECTURE.md`).
+optimizers as script recipes (`LLM_TRILLION_ARCHITECTURE.md`). LoRA adapters
+over frozen projections, the one-machine fine-tune path, have shipped
+(`r2_train::lora`, `llm.lora`).
 
 **Mesh at hardware scale.** `NcclCollective` / `RcclCollective` /
 `MpiCollective` behind the `Collective` trait; a 1F1B pipeline-parallel

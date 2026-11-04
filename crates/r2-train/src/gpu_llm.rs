@@ -110,6 +110,14 @@ pub struct GpuTrainer {
     lr: f32, beta1: f32, beta2: f32, eps: f32,
     /// The CPU trainer's schedule, applied to the same step index.
     sched: Option<crate::optim::LrSchedule>,
+    /// AdamW's decay and the blocks it applies to, as the CPU trainer's.
+    weight_decay: f32,
+    decay: Vec<bool>,
+    /// Clip the global gradient norm to this, as `Trainer::clip`.
+    clip: Option<f32>,
+    /// The global gradient norm of the last step, before clipping.
+    pub last_grad_norm: Option<f32>,
+    norm_scratch: Tensor,
     t: u64,
     pub step: u64,
     /// Activation checkpointing: keep only each layer's input, recompute
@@ -133,17 +141,8 @@ impl GpuTrainer {
     /// trainer keeps its buffers; `download_into` brings the device's
     /// state back.
     pub fn from_trainer(tr: &Trainer) -> Result<GpuTrainer, String> {
-        // The device Adam has no decay pass and the step no norm
-        // reduction yet. Refuse rather than train a different recipe
-        // than the CPU half would.
         if !tr.frozen.is_empty() || tr.lora.is_some() {
             return Err("frozen blocks and LoRA adapters are not implemented on the GPU path yet (CPU only)".into());
-        }
-        if tr.opt.weight_decay != 0.0 {
-            return Err("weight decay is not implemented on the GPU path yet (CPU only)".into());
-        }
-        if tr.clip.is_some() {
-            return Err("gradient clipping is not implemented on the GPU path yet (CPU only)".into());
         }
         let up = |d: &[f32]| Tensor::upload(d).ok_or_else(|| "no GPU device".to_string());
         let mut w = Vec::new(); let mut g = Vec::new(); let mut m = Vec::new(); let mut v = Vec::new();
@@ -159,8 +158,11 @@ impl GpuTrainer {
             off += n;
         }
         let w16 = (0..w.len()).map(|_| None).collect();
+        let norm_scratch = tz(r2_gpu::optim::norm_scratch_len(&sizes))?;
         Ok(GpuTrainer { cfg: tr.cfg, w, w16, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
                         beta2: tr.opt.beta2, eps: tr.opt.eps, sched: tr.sched, t: tr.opt.t, step: tr.step,
+                        weight_decay: tr.opt.weight_decay, decay: tr.decay_mask(), clip: tr.clip,
+                        last_grad_norm: None, norm_scratch,
                         checkpoint: false, precision: Precision::F32, loss_scale: 1.0,
                         clean_steps: 0, overflows: 0, acts: None })
     }
@@ -249,11 +251,24 @@ impl GpuTrainer {
             return Ok(loss);
         }
         // ── Adam, one launch per block; the loss scale divided back out ──
+        // Clipping folds into the scale Adam divides by, as on the CPU.
+        let mut scale = self.loss_scale;
+        self.last_grad_norm = None;
+        if let Some(max) = self.clip {
+            let sq = r2_gpu::optim::grad_sq_norm(&self.g, &self.sizes, &self.norm_scratch)
+                .ok_or("GPU kernel failed: gradient norm")?;
+            let norm = (sq.sqrt() / scale as f64) as f32;
+            self.last_grad_norm = Some(norm);
+            let coef = max / (norm + 1e-6);
+            if coef < 1.0 { scale /= coef; }
+        }
         if let Some(sch) = self.sched { self.lr = sch.at(self.step); }
         self.t += 1;
+        let shrink = self.lr * self.weight_decay;
         for i in 0..self.w.len() {
+            let c = if self.weight_decay != 0.0 && self.decay[i] { shrink } else { 0.0 };
             if !adam_step(&self.w[i], &self.g[i], &self.m[i], &self.v[i], self.sizes[i],
-                          self.lr, self.beta1, self.beta2, self.eps, self.t as u32, self.loss_scale) {
+                          self.lr, self.beta1, self.beta2, self.eps, self.t as u32, scale, c) {
                 return Err("GPU kernel failed: adam".into());
             }
         }
@@ -390,7 +405,9 @@ impl GpuTrainer {
         // ── backward: the same graph reversed; the residual stream's
         //    gradient lives in `gres` and is accumulated down the layers ──
         let g = &self.g;
-        let inv = self.loss_scale / t as f32;         // the mean over tokens, times the loss scale
+        // the mean over the tokens that count (r2_autograd::IGNORE), times the loss scale
+        let kept = tgts.iter().filter(|&&x| x != r2_autograd::IGNORE).count().max(1);
+        let inv = self.loss_scale / kept as f32;
         ok(ew::softmax_ce_bwd(&a.logits, &tg_ids, &a.lse_ce, &a.glogits, t, vocab, inv, true), "softmax_ce bwd")?;
         ok(flag(&a.glogits, t * vocab), "overflow check")?;
         ok(gemm(&a.xn, true, &a.glogits, false, d, t, vocab, &g[2], false), "head grad_B")?;
@@ -460,7 +477,7 @@ impl GpuTrainer {
             }
             eprintln!("  {:<20} {:>6} {total:>10.2}", "total", tb.iter().map(|r| r.1).sum::<u32>());
         }
-        Ok((rows[..t].iter().sum::<f32>() / t as f32, rows[t] != 0.0))
+        Ok((rows[..t].iter().sum::<f32>() / kept as f32, rows[t] != 0.0))
     }
 }
 
@@ -580,6 +597,61 @@ mod tests {
     /// track and the weights that come back are the tape's to f32
     /// rounding — the round trip `from_trainer` / `download_into` is what
     /// evaluation and checkpoints go through.
+    /// The fine-tuning recipe on the device: AdamW, clipping and a schedule
+    /// track the CPU trainer from the same state, and the norm it clips by
+    /// is the CPU's.
+    #[test]
+    fn gpu_adamw_clipping_and_schedule_track_the_cpu_trainer() {
+        if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        let c = cfg();
+        let mut cpu = Trainer::new(c, 1e-3, 21).unwrap();
+        cpu.opt.weight_decay = 0.1;
+        cpu.clip = Some(0.5);
+        cpu.sched = Some(crate::optim::LrSchedule { base: 1e-3, min: 1e-4, warmup: 2, total: 6 });
+        let mut gt = GpuTrainer::from_trainer(&cpu).unwrap();
+        let b = batch(2, 16, c.vocab);
+        for step in 0..6 {
+            let (lc, lg) = (cpu.train_step(&b).unwrap(), gt.train_step(&b).unwrap());
+            assert!((lc - lg).abs() < 1e-3 * lc.abs().max(1.0), "step {step}: loss cpu {lc} gpu {lg}");
+            let (nc, ng) = (cpu.last_grad_norm.unwrap(), gt.last_grad_norm.unwrap());
+            assert!((nc - ng).abs() < 1e-4 * nc, "step {step}: norm cpu {nc} gpu {ng}");
+            assert!(nc > 0.5, "the test must actually clip");
+        }
+        let mut back = Trainer::new(c, 1e-3, 21).unwrap();
+        gt.download_into(&mut back);
+        for i in 0..cpu.params.len() {
+            let e = max_rel(&back.params[i], &cpu.params[i]);
+            assert!(e < 1e-4, "block {i}: weights differ by {e} after six steps");
+        }
+    }
+
+    /// Prompt-and-completion batches on the device: ignored targets and
+    /// padding give the tape's loss and gradients, at a new shape every step.
+    #[test]
+    fn gpu_ignores_prompts_and_padding_as_the_tape_does() {
+        if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        let c = cfg();
+        let tr = Trainer::new(c, 1e-3, 5).unwrap();
+        let pairs: Vec<_> = (0..6u32).map(|i| {
+            let p: Vec<u32> = (0..2 + i % 3).map(|k| (k * 3 + i) % c.vocab as u32).collect();
+            let q: Vec<u32> = (0..1 + 2 * i).map(|k| (k * 7 + i) % c.vocab as u32).collect();
+            (p, q)
+        }).collect();
+        let set = crate::data::PairSet::new(&pairs, 15, 0).unwrap();
+        let mut gt = GpuTrainer::from_trainer(&tr).unwrap();
+        for step in 0..3 {
+            let b = set.at(2, step, crate::data::Order::Sequential);
+            assert!(b.iter().flat_map(|(_, t)| t).any(|&t| t == r2_autograd::IGNORE));
+            let (lc, _, gc) = tr.loss_logits_grads(&b).unwrap();
+            let (lg, gg) = gt.loss_and_grads(&b).unwrap();
+            assert!((lc - lg).abs() < 1e-4 * lc.abs().max(1.0), "step {step}: loss cpu {lc} gpu {lg}");
+            for i in 0..gc.len() {
+                let e = max_rel(&gg[i], &gc[i]);
+                assert!(e < 1e-4, "step {step}, block {i}: gradients differ by {e}");
+            }
+        }
+    }
+
     #[test]
     fn gpu_steps_track_the_cpu_trainer_and_round_trip_the_state() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }

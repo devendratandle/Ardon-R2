@@ -24,6 +24,7 @@ fn fail(ctx: &str, e: impl std::fmt::Display) -> R2Err {
 
 /// The settings `llm.train` and `llm.finetune` share.
 struct Settings {
+    gpu: bool,
     steps: usize,
     report: usize,
     accum: usize,
@@ -47,7 +48,13 @@ impl Settings {
             Some("cosine") => true,
             Some(other) => return err!(Runtime, "{}: unknown schedule '{}' (\"constant\" or \"cosine\")", ctx, other),
         };
+        let gpu = match gn(a, "device").map(|v| str_arg(&v)).transpose()?.as_deref() {
+            None | Some("cpu") => false,
+            Some("gpu") => true,
+            Some(other) => return err!(Runtime, "{}: unknown device '{}' (\"cpu\" or \"gpu\")", ctx, other),
+        };
         Ok(Settings {
+            gpu,
             steps,
             report: num_arg(a, "report", 0.0) as usize,
             accum: (num_arg(a, "accum", 1.0) as usize).max(1),
@@ -93,22 +100,43 @@ fn run_steps(ctx: &str, id: u32, s: &Settings, tok: &Tokenizer, batch_at: impl F
             None => return err!(Runtime, "{}: unknown model handle {}", ctx, id),
         };
         s.apply(t);
+        let first_step = t.step as usize;
+        #[cfg(feature = "gpu")]
+        let mut device = if s.gpu {
+            if s.accum > 1 { return err!(Runtime, "{}: accum is CPU only so far", ctx); }
+            Some(r2_train::gpu_llm::GpuTrainer::from_trainer(t).map_err(|e| fail(ctx, e))?)
+        } else { None };
+        #[cfg(not(feature = "gpu"))]
+        if s.gpu {
+            return err!(Runtime, "{}: this build has no GPU support (build with --features gpu)", ctx);
+        }
         let mut last = 0.0f32;
         for n in 1..=s.steps {
-            let batch = batch_at(t.step as usize);
-            last = if s.accum > 1 {
-                let parts: Vec<&[(Vec<usize>, Vec<usize>)]> = batch.chunks(batch.len().div_ceil(s.accum).max(1)).collect();
-                t.train_step_parts(&parts)
-            } else {
-                t.train_step(&batch)
+            let batch = batch_at(first_step + n - 1);
+            #[cfg(feature = "gpu")]
+            let on_device = device.as_mut().map(|g| g.train_step(&batch));
+            #[cfg(not(feature = "gpu"))]
+            let on_device: Option<Result<f32, String>> = None;
+            last = match on_device {
+                Some(r) => r,
+                None if s.accum > 1 => {
+                    let parts: Vec<&[(Vec<usize>, Vec<usize>)]> = batch.chunks(batch.len().div_ceil(s.accum).max(1)).collect();
+                    t.train_step_parts(&parts)
+                }
+                None => t.train_step(&batch),
             }.map_err(|e| fail(ctx, e))?;
             if s.report > 0 && (n % s.report == 0 || n == 1) {
                 r2_types::out::rout(&format!("step {:>5}  loss {:.4}\n", n, last));
             }
             if let Some(dir) = s.checkpoint.as_ref().filter(|_| n % s.every == 0 || n == s.steps) {
+                #[cfg(feature = "gpu")]
+                if let Some(g) = &device { g.download_into(t); }
                 t.save_checkpoint(dir, s.keep).map_err(|e| fail(ctx, e))?;
             }
         }
+        // the weights live on the device until here
+        #[cfg(feature = "gpu")]
+        if let Some(g) = &device { g.download_into(t); }
         Ok(as_num(last as f64))
     })
 }
