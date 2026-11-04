@@ -323,6 +323,7 @@ def main():
         return lo + 0.5 * (1.0 + math.cos(math.pi * r)) * (base - lo)
     every = max(steps // 10, 1)
     curve = []
+    eval_every, eval_s, held = d.get("eval_every", 0), 0.0, []
     device_sync()
     t0 = time.perf_counter()
     first = last = 0.0
@@ -344,8 +345,18 @@ def main():
             curve.append((s + 1, last))
             print(f"  step {s+1:>4}/{steps}  loss {last:.4f}   "
                   f"{time.perf_counter()-t0:.1f} s elapsed")
+        # R2_EVAL_EVERY in the manifest: held-out loss at R2's steps, off the
+        # training clock, as there.
+        if eval_every and (s + 1) % eval_every == 0:
+            device_sync()
+            t_eval = time.perf_counter()
+            v = eval_loss(model, val_ids, bn, seq, d["val_batches"])
+            model.train()
+            eval_s += time.perf_counter() - t_eval
+            held.append((s + 1, v))
+            print(f"  held-out  step {s+1:>6}  loss {v:.4f}")
     device_sync()
-    train_s = time.perf_counter() - t0
+    train_s = time.perf_counter() - t0 - eval_s
     val_after = eval_loss(model, val_ids, bn, seq, d["val_batches"])
     bpb = val_after / math.log(2) * (d["val_tokens"] / d["val_bytes"])
     torch_tokenize_s = measure_tokenize(d)
@@ -431,6 +442,12 @@ def main():
     print(f"    {'step':>6}{'R2':>10}{'PyTorch':>10}{'diff':>10}")
     for (s1, l1), (s2, l2) in zip(d["curve"], curve):
         print(f"    {s1:>6}{l1:>10.4f}{l2:>10.4f}{abs(l1-l2):>10.4f}")
+
+    if held:
+        print("\n  held-out curve")
+        print(f"    {'step':>6}{'R2':>10}{'PyTorch':>10}{'diff':>10}")
+        for (s1, l1), (s2, l2) in zip(d.get("held", []), held):
+            print(f"    {s1:>6}{l1:>10.4f}{l2:>10.4f}{abs(l1-l2):>10.4f}")
 
     print(f"\n  prompt   {d['prompt']!r}")
     print(f"  R2       {d['sample']!r}")

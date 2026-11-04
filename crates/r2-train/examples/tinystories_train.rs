@@ -383,6 +383,9 @@ fn main() {
 
     let mut curve: Vec<(usize, f32)> = Vec::new();
     let every = (steps / 10).max(1);
+    let eval_every: usize = env("R2_EVAL_EVERY", 0usize);
+    let mut held: Vec<(usize, f32)> = Vec::new();
+    let mut eval_s = 0.0f64;
     let t0 = std::time::Instant::now();
     let mut first = 0.0f32;
     let mut last = 0.0f32;
@@ -411,6 +414,17 @@ fn main() {
             println!("  step {:>4}/{steps}  loss {loss:.4}   {:.1} s elapsed",
                      s + 1, t0.elapsed().as_secs_f64());
         }
+        // R2_EVAL_EVERY=n: held-out loss every n steps, which is where a long
+        // run shows it has stopped learning. Off the training clock.
+        if eval_every > 0 && (s + 1) % eval_every == 0 {
+            let t = std::time::Instant::now();
+            #[cfg(feature = "gpu")]
+            if let Some(g) = &gpu_tr { g.download_into(&mut tr); }
+            let v = tr.eval_loss(&val).unwrap_or_else(|e| die("eval", e));
+            eval_s += t.elapsed().as_secs_f64();
+            held.push((s + 1, v));
+            println!("  held-out  step {:>6}  loss {v:.4}", s + 1);
+        }
     }
     #[cfg(feature = "gpu")]
     if let Some(g) = &gpu_tr {
@@ -419,7 +433,7 @@ fn main() {
             println!("  loss scale {} at the end, {} overflowed steps skipped", g.loss_scale, g.overflows);
         }
     }
-    let train_s = t0.elapsed().as_secs_f64();
+    let train_s = t0.elapsed().as_secs_f64() - eval_s;
     let val_after = tr.eval_loss(&val).unwrap_or_else(|e| die("eval", e));
 
     // Bits per byte: the loss is per TOKEN, and a token is not a fixed
@@ -471,6 +485,8 @@ fn main() {
                         if sched_on { "cosine" } else { "none" }));
     j.push_str(&format!("  \"clip\": {clip}, \"weight_decay\": {},\n", tr.opt.weight_decay));
     j.push_str(&format!("  \"val_batches\": {val_batches},\n"));
+    let held_json: Vec<String> = held.iter().map(|(s, l)| format!("[{s}, {l:.6}]")).collect();
+    j.push_str(&format!("  \"eval_every\": {eval_every}, \"held\": [{}],\n", held_json.join(", ")));
     j.push_str(&format!("  \"corpus_bytes\": {}, \"train_bytes\": {}, \"val_bytes\": {},\n",
                         flen, cut, flen - cut));
     j.push_str(&format!("  \"train_tokens\": {}, \"val_tokens\": {},\n",
