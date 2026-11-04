@@ -68,8 +68,9 @@ ships in 0.4.2.
   step about 15% faster. Peak memory is about equal (658 vs 641 MB): at this
   size activations dominate RAM, and the saving is disk and optimizer state.
 - **On the GPU:** AdamW (bit-identical to the CPU, one fused multiply-add per
-  weight), gradient clipping (a double-f32 norm on the device, within 1e-10 of
-  f64, reading back 14 KB instead of 29 MB), and ignored targets with padded
+  weight), gradient clipping (a norm summed on the device in short chunks,
+  within 2e-8 of f64 on any driver, reading back 226 KB instead of 29 MB), and
+  ignored targets with padded
   batches. `device = "gpu"` in `llm.train` and `llm.finetune`, in a build with
   `--features gpu` (`r2-engine`, `r2-repl`); the default build compiles no wgpu.
 

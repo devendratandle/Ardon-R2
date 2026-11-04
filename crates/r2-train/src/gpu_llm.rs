@@ -619,9 +619,11 @@ mod tests {
         }
         let mut back = Trainer::new(c, 1e-3, 21).unwrap();
         gt.download_into(&mut back);
+        // an adapter without a fused fma (llvmpipe) promises less, as it says
+        let tol = if r2_gpu::numerics::fma_exact() == Some(false) { 1e-3 } else { 1e-4 };
         for i in 0..cpu.params.len() {
             let e = max_rel(&back.params[i], &cpu.params[i]);
-            assert!(e < 1e-4, "block {i}: weights differ by {e} after six steps");
+            assert!(e < tol, "block {i}: weights differ by {e} after six steps");
         }
     }
 

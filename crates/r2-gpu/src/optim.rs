@@ -95,13 +95,19 @@ pub fn adam_step(w: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, n: usize,
     true
 }
 
-/// Gradient values summed per chunk. The host adds the chunks in f64.
-const NORM_CHUNK: usize = 4096;
+/// Gradient values summed per chunk. The host adds the chunks in f64. Short
+/// chunks are the accuracy that holds on every driver, because a sum over 256
+/// values cannot drift far, whatever happens to the compensation below.
+const NORM_CHUNK: usize = 256;
 
-/// `Σ g²` per chunk, in double-f32: each square is exact (`fma` recovers what
-/// the product rounded away) and each sum keeps its rounding error (TwoSum).
-/// Plain f32 would lose the small squares among 7M values, and the CPU's norm
-/// is f64, so clipping would not scale by the same factor.
+/// `Σ g²` per chunk, in f32 with its errors kept: `fma` recovers what each
+/// square rounded away and TwoSum what each addition did. Plain f32 over a
+/// whole block would lose the small squares among 7M values, and the CPU's
+/// norm is f64, so clipping would not scale by the same factor.
+///
+/// The compensation is a bonus, not the guarantee. WGSL lets a driver simplify
+/// float expressions, and llvmpipe's `(hi - (s - b)) + (a - b)` comes out as 0:
+/// at chunks of 4096 that cost it 4.9e-8 where the Vega has 5e-13.
 fn norm_src() -> String {
     format!(r#"
 struct P {{ n: u32, base: u32, pad0: u32, pad1: u32 }};
@@ -138,7 +144,7 @@ pub fn norm_scratch_len(sizes: &[usize]) -> usize {
 }
 
 /// `Σ g²` over every block, in f64: what `r2_train`'s CPU clipping computes,
-/// without bringing 29 MB of gradients back to read 14 KB of sums.
+/// without bringing 29 MB of gradients back to read 226 KB of sums.
 pub fn grad_sq_norm(grads: &[Tensor], sizes: &[usize], scratch: &Tensor) -> Option<f64> {
     let gpu = gpu()?;
     let p = NORM_PIPE.get_or_init(|| {
@@ -212,22 +218,46 @@ mod tests {
         assert!(uw.download().iter().zip(&blocks[1]).all(|(a, b)| a.to_bits() == b.to_bits()), "undecayed block");
     }
 
-    /// The device's Σg² against f64 on the host, across blocks of very
-    /// different magnitudes, where a plain f32 sum loses the small squares.
+    /// Blocks of very different magnitudes, where one f32 sum over all of
+    /// them would lose the small squares.
+    fn norm_blocks() -> Vec<Vec<f32>> {
+        vec![(0..100_003).map(|i| ((i as f32) * 0.37).sin() * 3.0).collect(),
+             (0..17).map(|i| 1e-4 * (i as f32 - 8.0)).collect(),
+             (0..4096).map(|i| 1e-3 * ((i as f32) * 0.11).cos()).collect()]
+    }
+
+    /// What every driver must reach, compensation or not. In f32, on the
+    /// worst case below, this is about 1e-8; the norm's error is half that.
+    const NORM_TOLERANCE: f64 = 2e-8;
+
+    fn norm_host(blocks: &[Vec<f32>]) -> f64 {
+        blocks.iter().flatten().map(|&x| x as f64 * x as f64).sum()
+    }
+
+    /// The device's Σg² against f64 on the host.
     #[test]
     fn gpu_grad_norm_matches_f64_on_the_host() {
         if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
-        let blocks: Vec<Vec<f32>> = vec![
-            (0..100_003).map(|i| ((i as f32) * 0.37).sin() * 3.0).collect(),
-            (0..17).map(|i| 1e-4 * (i as f32 - 8.0)).collect(),
-            (0..4096).map(|i| 1e-3 * ((i as f32) * 0.11).cos()).collect(),
-        ];
+        let blocks = norm_blocks();
         let sizes: Vec<usize> = blocks.iter().map(Vec::len).collect();
         let tensors: Vec<Tensor> = blocks.iter().map(|b| Tensor::upload(b).unwrap()).collect();
         let scratch = Tensor::zeros(norm_scratch_len(&sizes)).unwrap();
         let got = grad_sq_norm(&tensors, &sizes, &scratch).unwrap();
-        let want: f64 = blocks.iter().flatten().map(|&x| x as f64 * x as f64).sum();
-        assert!((got - want).abs() < 1e-10 * want, "device {got}, host {want}");
+        let want = norm_host(&blocks);
+        assert!((got - want).abs() < NORM_TOLERANCE * want, "device {got}, host {want}");
+    }
+
+    /// The driver that cancels the shader's compensation: plain f32 sums over
+    /// the same chunks, on the host, needing no device. llvmpipe reached
+    /// 4.9e-8 at chunks of 4096, which is what this gives there.
+    #[test]
+    fn the_chunks_alone_hold_the_norm_without_any_compensation() {
+        let blocks = norm_blocks();
+        let plain: f64 = blocks.iter()
+            .flat_map(|b| b.chunks(NORM_CHUNK))
+            .map(|c| c.iter().fold(0.0f32, |s, &x| s + x * x) as f64).sum();
+        let want = norm_host(&blocks);
+        assert!((plain - want).abs() < NORM_TOLERANCE * want, "chunked f32 {plain}, f64 {want}");
     }
 
     /// Three steps on the device against three on the CPU, from the same
