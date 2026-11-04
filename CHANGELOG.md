@@ -40,6 +40,19 @@ ships in 0.4.2.
   saving and twice while loading. Tensors are written and read in bulk.
   `llm.generate` copied the whole model per call and `llm.save` twice; neither
   copies now (`Trainer::with_model` lends the weights). Files are unchanged.
+- **Fine-tuning from script.** `llm.finetune(m, prompts, completions, ...)`:
+  only completion tokens count in the loss. New in the tape: targets marked
+  `r2_autograd::IGNORE` take no part, as PyTorch's `ignore_index` (checked
+  against it). Batches are right-padded to their longest example and grouped by
+  length; attention is causal, so padding changes neither loss nor gradient (a
+  test holds this to the bit) and needs no attention mask.
+- **`llm.freeze(m, blocks)`**: frozen blocks keep their bits, take no gradient
+  and hold no Adam state; checkpoints leave them out and `llm.resume(dir, base =)`
+  takes them from the model they came from, refusing different weights.
+- **Training settings in script**: `lr`, `wd`, `clip`, `schedule = "cosine"`,
+  `warmup`, `min.lr` and `accum` (gradient accumulation, on
+  `Trainer::train_step_parts`) in `llm.train` and `llm.finetune`. `llm.train`
+  on a BPE model also stopped ignoring `llm.new(lr =)` on its first call.
 
 ### `r2 --ide`: R2 as the engine of a separate IDE — 2026-11-01
 

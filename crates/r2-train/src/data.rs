@@ -5,6 +5,8 @@
 //! seen, and a corpus of any size costs O(batch x seq) resident memory —
 //! shuffling included, because the order is computed, not stored.
 
+use r2_autograd::IGNORE;
+
 use crate::tokens::TokenStore;
 
 /// `(input, target)` token sequences, the shape the trainers take.
@@ -74,6 +76,70 @@ impl Batcher {
                 (permute(pos % windows, windows, key) * self.seq + shift) % span
             }
         }
+    }
+}
+
+/// Prompt-and-completion examples: the model is shown the whole text but is
+/// only marked on the completion. Each example's targets are [`IGNORE`] over
+/// the prompt, so the loss teaches what follows a prompt, not the prompts.
+///
+/// A batch is padded on the right to its own longest example. Attention is
+/// causal, so a padding token cannot affect any position before it, and its
+/// own targets are [`IGNORE`]: padding changes neither loss nor gradient (a
+/// test holds this to the bit), and no attention mask is needed.
+pub struct PairSet {
+    /// Whole examples, shortest first, so neighbours make tight batches.
+    examples: Vec<(Vec<usize>, usize)>,
+    pad: usize,
+}
+
+impl PairSet {
+    /// `pairs` are `(prompt, completion)` ids. An example longer than
+    /// `max_len` loses the end of its completion; one with no completion
+    /// left to learn is an error, because the model would be silently taught
+    /// nothing from it.
+    pub fn new(pairs: &[(Vec<u32>, Vec<u32>)], max_len: usize, pad: u32) -> Result<PairSet, String> {
+        let mut examples = Vec::with_capacity(pairs.len());
+        for (i, (p, c)) in pairs.iter().enumerate() {
+            if p.is_empty() { return Err(format!("example {}: empty prompt", i + 1)); }
+            if c.is_empty() { return Err(format!("example {}: empty completion", i + 1)); }
+            if p.len() >= max_len {
+                return Err(format!("example {}: a prompt of {} tokens leaves no room in seq = {}; \
+                                    raise seq or shorten it", i + 1, p.len(), max_len - 1));
+            }
+            let ids: Vec<usize> = p.iter().chain(c).take(max_len).map(|&t| t as usize).collect();
+            examples.push((ids, p.len()));
+        }
+        if examples.is_empty() { return Err("no examples".into()); }
+        examples.sort_by_key(|(ids, _)| ids.len());
+        Ok(PairSet { examples, pad: pad as usize })
+    }
+
+    pub fn len(&self) -> usize { self.examples.len() }
+    pub fn is_empty(&self) -> bool { self.examples.is_empty() }
+
+    /// The batch for `step`. With `Order::Shuffled`, batches of similar
+    /// lengths are visited in a new order each epoch: little padding, so
+    /// little wasted work, and still a different order every time. With
+    /// `Order::Sequential` they come shortest first.
+    pub fn at(&self, batch: usize, step: usize, order: Order) -> Batch {
+        let batches = self.examples.len().div_ceil(batch.max(1));
+        let g = step % batches;
+        let g = match order {
+            Order::Sequential => g,
+            Order::Shuffled(seed) => permute(g, batches, mix(seed ^ mix((step / batches) as u64))),
+        };
+        let group = &self.examples[g * batch..((g + 1) * batch).min(self.examples.len())];
+        let longest = group.iter().map(|(ids, _)| ids.len()).max().unwrap_or(1);
+        group.iter().map(|(ids, prompt)| {
+            let n = longest - 1;
+            let mut input = ids[..ids.len() - 1].to_vec();
+            let mut target: Vec<usize> = ids[1..].to_vec();
+            for t in target.iter_mut().take(prompt - 1) { *t = IGNORE; }
+            input.resize(n, self.pad);
+            target.resize(n, IGNORE);
+            (input, target)
+        }).collect()
     }
 }
 
@@ -150,6 +216,47 @@ mod tests {
         let other = Batcher { order: Order::Shuffled(8), ..b };
         let e8: Vec<usize> = (0..windows).map(|i| other.at(&s[..], i)[0].0[0]).collect();
         assert_ne!(e0, e8, "and the seed picks it");
+    }
+
+    fn pairs() -> Vec<(Vec<u32>, Vec<u32>)> {
+        vec![(vec![1, 2], vec![3, 4, 5]), (vec![6], vec![7]), (vec![8, 9, 10], vec![11]),
+             (vec![12], vec![13, 14, 15, 16])]
+    }
+
+    #[test]
+    fn only_the_completion_is_marked_and_padding_is_ignored() {
+        let s = PairSet::new(&pairs(), 16, 0).unwrap();
+        // shortest first: [6,7] then the three-to-five token examples
+        let b = s.at(2, 0, Order::Sequential);
+        assert_eq!(b[0].0, vec![6, 0, 0], "padded on the right to the batch's longest");
+        assert_eq!(b[0].1, vec![7, IGNORE, IGNORE], "predicting 7 from 6 is the only mark");
+        assert_eq!(b[1].0, vec![8, 9, 10]);
+        assert_eq!(b[1].1, vec![IGNORE, IGNORE, 11], "the prompt's own tokens are not marked");
+    }
+
+    #[test]
+    fn every_example_is_seen_each_epoch_in_a_new_order() {
+        let s = PairSet::new(&pairs(), 16, 0).unwrap();
+        for order in [Order::Sequential, Order::Shuffled(3)] {
+            let mut firsts: Vec<usize> = (0..2).flat_map(|st| s.at(2, st, order)).map(|(i, _)| i[0]).collect();
+            firsts.sort();
+            assert_eq!(firsts, vec![1, 6, 8, 12], "{order:?}");
+        }
+        let orders: std::collections::HashSet<Vec<usize>> = (0..10)
+            .map(|e| s.at(2, e * 2, Order::Shuffled(3)).iter().map(|(i, _)| i[0]).collect()).collect();
+        assert!(orders.len() > 1, "shuffling must reorder batches between epochs");
+    }
+
+    #[test]
+    fn long_examples_lose_their_end_and_useless_ones_are_refused() {
+        let s = PairSet::new(&pairs(), 4, 0).unwrap();
+        for st in 0..2 {
+            assert!(s.at(4, st, Order::Sequential).iter().all(|(i, _)| i.len() <= 3));
+        }
+        assert!(PairSet::new(&[(vec![1, 2, 3, 4], vec![5])], 4, 0).err().unwrap().contains("seq"));
+        assert!(PairSet::new(&[(vec![], vec![5])], 4, 0).err().unwrap().contains("empty prompt"));
+        assert!(PairSet::new(&[(vec![5], vec![])], 4, 0).err().unwrap().contains("empty completion"));
+        assert!(PairSet::new(&[], 4, 0).is_err());
     }
 
     #[test]

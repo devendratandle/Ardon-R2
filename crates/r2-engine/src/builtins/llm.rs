@@ -22,17 +22,16 @@ use std::sync::Mutex;
 use r2_tensor::infer::{Sampler, SamplerConfig};
 use r2_tensor::model::{Config, Model};
 use r2_tensor::tokenizer::Tokenizer;
-use r2_train::data::{Batcher, Order};
 use r2_train::llm::Trainer;
 use r2_types::*;
 
 use crate::{err, gn, gv, Engine};
 
-const TOKENIZER_FILE: &str = "tokenizer.json";
+pub(super) const TOKENIZER_FILE: &str = "tokenizer.json";
 
 /// What a handle refers to: a model being trained, or one loaded purely
 /// for serving (no optimizer state, so it costs a third of the memory).
-enum Slot {
+pub(super) enum Slot {
     Training(Box<Trainer>),
     Serving(Box<Model>),
 }
@@ -45,20 +44,20 @@ enum Slot {
 /// model has a learned vocabulary, a generate that rebuilt a byte tokenizer
 /// would decode the model's ids against the wrong table and emit plausible
 /// nonsense. Pairing the tokenizer with the handle makes that unrepresentable.
-type Toks = std::collections::HashMap<u32, Tokenizer>;
-fn with_tokenizers<R>(f: impl FnOnce(&mut Toks) -> R) -> R {
+pub(super) type Toks = std::collections::HashMap<u32, Tokenizer>;
+pub(super) fn with_tokenizers<R>(f: impl FnOnce(&mut Toks) -> R) -> R {
     use std::sync::{Mutex, OnceLock};
     static T: OnceLock<Mutex<Toks>> = OnceLock::new();
     f(&mut T.get_or_init(|| Mutex::new(Toks::new())).lock().unwrap())
 }
 
 /// The tokenizer for `id`, or byte-level if none was attached.
-fn tokenizer_for(id: u32) -> Tokenizer {
+pub(super) fn tokenizer_for(id: u32) -> Tokenizer {
     with_tokenizers(|t| t.get(&id).cloned()).unwrap_or_else(Tokenizer::byte_level)
 }
 
 impl Slot {
-    fn config(&self) -> Config {
+    pub(super) fn config(&self) -> Config {
         match self {
             Slot::Training(t) => t.cfg,
             Slot::Serving(m) => m.cfg,
@@ -77,7 +76,7 @@ impl Slot {
 static REGISTRY: Mutex<Option<HashMap<u32, Slot>>> = Mutex::new(None);
 static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
-fn with_registry<R>(f: impl FnOnce(&mut HashMap<u32, Slot>) -> R) -> R {
+pub(super) fn with_registry<R>(f: impl FnOnce(&mut HashMap<u32, Slot>) -> R) -> R {
     let mut g = REGISTRY.lock().unwrap();
     f(g.get_or_insert_with(HashMap::new))
 }
@@ -88,18 +87,18 @@ fn insert(slot: Slot) -> u32 {
     id
 }
 
-fn handle(v: &RVal) -> Result<u32, R2Err> {
+pub(super) fn handle(v: &RVal) -> Result<u32, R2Err> {
     match v.scalar_f64() {
         Ok(Some(x)) if x >= 1.0 => Ok(x as u32),
         _ => err!(Runtime, "llm: expected a model handle from llm.new() or llm.load()"),
     }
 }
 
-fn num_arg(a: &[EvalArg], name: &str, default: f64) -> f64 {
+pub(super) fn num_arg(a: &[EvalArg], name: &str, default: f64) -> f64 {
     gn(a, name).and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(default)
 }
 
-fn str_arg(v: &RVal) -> Result<String, R2Err> {
+pub(super) fn str_arg(v: &RVal) -> Result<String, R2Err> {
     match v {
         RVal::Character(s, _) => match s.first().and_then(|x| x.clone()) {
             Some(t) => Ok(t.to_string()),
@@ -109,20 +108,11 @@ fn str_arg(v: &RVal) -> Result<String, R2Err> {
     }
 }
 
-fn bool_arg(a: &[EvalArg], name: &str, default: bool) -> bool {
+pub(super) fn bool_arg(a: &[EvalArg], name: &str, default: bool) -> bool {
     gn(a, name).and_then(|v| v.as_logicals().ok()?.first().copied().flatten()).unwrap_or(default)
 }
 
-/// Training text: the text itself, or the path of a file holding it.
-fn corpus_text(s: String) -> Result<String, R2Err> {
-    if s.len() < 4096 && !s.contains('\n') && std::path::Path::new(&s).is_file() {
-        return std::fs::read_to_string(&s).map_err(|e| R2Err {
-            msg: format!("llm.train: cannot read '{}': {}", s, e), kind: ErrKind::Runtime });
-    }
-    Ok(s)
-}
-
-fn as_num(x: f64) -> RVal { RVal::Numeric(vec![Some(x)].into(), Attrs::default()) }
+pub(super) fn as_num(x: f64) -> RVal { RVal::Numeric(vec![Some(x)].into(), Attrs::default()) }
 
 /// `llm.new(dim=, layers=, heads=, kv.heads=, ffn=, ctx=)` — create a
 /// trainable model. Vocabulary is the 256 byte values, so any text (any
@@ -171,110 +161,6 @@ pub(crate) fn bi_llm_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
         Ok(t) => Ok(as_num(insert(Slot::Training(Box::new(t))) as f64)),
         Err(e) => err!(Runtime, "llm.new: {}", e),
     }
-}
-
-/// `llm.train(model, text, steps=, seq=, batch=)` — train on a string.
-/// Returns the final loss so a script can decide whether to keep going.
-pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let id = handle(&gv(a, 0))?;
-    let text = corpus_text(str_arg(&gv(a, 1))?)?;
-    let steps = num_arg(a, "steps", 50.0) as usize;
-    let seq = num_arg(a, "seq", 16.0) as usize;
-    let max_batch = num_arg(a, "batch", 8.0) as usize;
-    let report = num_arg(a, "report", 0.0) as usize;
-
-    // Attach a tokenizer to this handle the first time it trains. A model
-    // asked for vocab > 256 learns a BPE from THIS text — the merges have
-    // to come from somewhere, and the training text is the only corpus the
-    // builtin is given.
-    let want_vocab = with_registry(|r| r.get(&id).map(|s| s.config().vocab))
-        .unwrap_or(256);
-    if with_tokenizers(|t| !t.contains_key(&id)) {
-        let tok = if want_vocab > 256 {
-            Tokenizer::from_trained(&r2_tensor::bpe::train(&text, want_vocab))
-        } else {
-            Tokenizer::byte_level()
-        };
-        // The LEARNED vocabulary can be smaller than the one requested: a
-        // corpus only contains so many useful merges, and a short one runs
-        // out early (0.33 MB of prose caps out near 14,500 however much you
-        // ask for). Resize the model to match rather than leaving it with a
-        // wider output layer than the tokenizer has tokens — that costs
-        // `dim * unused` per token forever, and lets the model emit ids the
-        // tokenizer cannot decode, which drops characters silently.
-        //
-        // Safe here and only here: this is the first train call, so the
-        // model has seen no data and nothing is discarded.
-        let actual = tok.vocab_size();
-        if actual != want_vocab {
-            let mut cfg = with_registry(|r| r.get(&id).map(|s| s.config()))
-                .ok_or_else(|| R2Err { msg: format!("llm.train: unknown model handle {}", id),
-                                       kind: ErrKind::Runtime })?;
-            cfg.vocab = actual;
-            let lr = num_arg(a, "lr", 0.003) as f32;
-            let rebuilt = Trainer::new(cfg, lr, num_arg(a, "seed", 42.0) as u64)
-                .map_err(|e| R2Err { msg: format!("llm.train: {}", e),
-                                     kind: ErrKind::Runtime })?;
-            with_registry(|r| { r.insert(id, Slot::Training(Box::new(rebuilt))); });
-        }
-        with_tokenizers(|t| t.insert(id, tok));
-    }
-    let tok = tokenizer_for(id);
-    let ids: Vec<u32> = tok.encode(&text)
-        .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?;
-    drop(text);
-    if ids.len() < seq + 2 {
-        return err!(Runtime,
-            "llm.train: text is too short — needs more than {} tokens for seq={}",
-            seq + 1, seq);
-    }
-    // Each step takes the next windows of the text; the target is the window
-    // shifted by one, which is what "predict the next token" means. The
-    // position comes from the trainer's step count, so a second llm.train
-    // call continues through the text instead of starting it over.
-    let order = if bool_arg(a, "shuffle", false) {
-        Order::Shuffled(num_arg(a, "seed", 42.0) as u64)
-    } else {
-        Order::Sequential
-    };
-    let batcher = Batcher { batch: max_batch.min(ids.len() - seq - 1).max(1), seq, order };
-
-    // checkpoint = dir: save every `every` steps and at the end, keeping the
-    // newest `keep`, with the tokenizer beside them for llm.resume.
-    let ckpt = gn(a, "checkpoint").map(|v| str_arg(&v)).transpose()?;
-    let every = num_arg(a, "every", (steps / 10).max(1) as f64) as usize;
-    let keep = num_arg(a, "keep", 3.0) as usize;
-    if let Some(dir) = &ckpt {
-        std::fs::create_dir_all(dir)
-            .and_then(|_| std::fs::write(std::path::Path::new(dir).join(TOKENIZER_FILE), tok.to_tokenizer_json()))
-            .map_err(|e| R2Err { msg: format!("llm.train: checkpoint: {}", e), kind: ErrKind::Runtime })?;
-    }
-
-    with_registry(|r| {
-        let slot = match r.get_mut(&id) {
-            Some(s) => s,
-            None => return err!(Runtime, "llm.train: unknown model handle {}", id),
-        };
-        let t = match slot {
-            Slot::Training(t) => t,
-            Slot::Serving(_) => return err!(Runtime,
-                "llm.train: this handle is a loaded model (serving only). \
-                 Use llm.load(dir, train = TRUE) to fine-tune it."),
-        };
-        let mut last = 0.0f32;
-        for s in 1..=steps {
-            last = t.train_step(&batcher.at(&ids[..], t.step as usize))
-                .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?;
-            if report > 0 && (s % report == 0 || s == 1) {
-                r2_types::out::rout(&format!("step {:>5}  loss {:.4}\n", s, last));
-            }
-            if let Some(dir) = ckpt.as_ref().filter(|_| s % every.max(1) == 0 || s == steps) {
-                t.save_checkpoint(dir, keep)
-                    .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?;
-            }
-        }
-        Ok(as_num(last as f64))
-    })
 }
 
 /// `llm.generate(model, prompt, n=, temperature=, top.k=, seed=)`.
@@ -360,7 +246,9 @@ pub(crate) fn bi_llm_load(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 pub(crate) fn bi_llm_resume(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let dir = str_arg(&gv(a, 0))?;
     let fail = |e: String| R2Err { msg: format!("llm.resume: {}", e), kind: ErrKind::Runtime };
-    let t = Trainer::resume_latest(&dir).map_err(fail)?
+    let base = gn(a, "base").map(|v| str_arg(&v)).transpose()?
+        .map(|b| Model::load_dir(&b).map_err(fail)).transpose()?;
+    let t = Trainer::resume_latest(&dir, base).map_err(fail)?
         .ok_or_else(|| fail(format!("no checkpoint in '{}'", dir)))?;
     let tok = load_tokenizer(&dir, &t.cfg).map_err(fail)?;
     let id = insert(Slot::Training(Box::new(t)));

@@ -563,11 +563,15 @@ impl Tape {
     /// Rows are independent and write disjoint slices of the gradient, so
     /// they split across cores with no coordination.
     fn bwd_softmax_ce(&mut self, li: usize, d: usize, targets: &[usize], lse: &[f32], g: &[f32]) {
-        let inv = g[0] / targets.len() as f32;
+        let inv = g[0] / targets.iter().filter(|&&t| t != IGNORE).count().max(1) as f32;
         let Tape { vals, grads, gwritten, .. } = self;
         let acc = !first_write(gwritten, li);
         let xs = &vals[li];
         let work = |r: usize, grow: &mut [f32]| {
+            if targets[r] == IGNORE {
+                if !acc { grow.fill(0.0); }
+                return;
+            }
             r2_tensor::ops::softmax_ce_grad_acc(
                 &xs[r * d..r * d + d], lse[r], targets[r], inv, grow, acc);
         };

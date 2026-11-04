@@ -10,7 +10,7 @@
 //! The proof that this holds is a test, not a comment: after training,
 //! the tape's logits and the served model's logits must agree.
 
-use r2_autograd::{Tape, Var};
+use r2_autograd::{Tape, Var, IGNORE};
 use r2_tensor::model::{Config, Layer, Model};
 
 use crate::optim::{Adam, LrSchedule};
@@ -33,6 +33,10 @@ pub struct Trainer {
     /// The global gradient norm of the last step, before clipping. Only
     /// measured when `clip` is set (it costs a pass over every gradient).
     pub last_grad_norm: Option<f32>,
+    /// Blocks that do not train (`set_frozen`); empty when none are.
+    pub(crate) frozen: Vec<bool>,
+    /// `fingerprint_frozen`, computed once: frozen weights do not change.
+    pub(crate) frozen_fp: u64,
 }
 
 /// Σ g² over every gradient block, in f64.
@@ -96,7 +100,7 @@ impl Trainer {
         let total: usize = shapes.iter().sum();
         let opt = Adam::new(total, lr);
         Ok(Trainer { cfg, params, opt, step: 0, pool: r2_autograd::BufPool::new(),
-                     sched: None, clip: None, last_grad_norm: None })
+                     sched: None, clip: None, last_grad_norm: None, frozen: Vec::new(), frozen_fp: 0 })
     }
 
     /// The shell a checkpoint or a saved model fills in: no weights, no
@@ -105,7 +109,7 @@ impl Trainer {
         cfg.validate()?;
         let params = vec![Vec::new(); Self::block_shapes(&cfg).len()];
         Ok(Trainer { cfg, params, opt: Adam::new(0, 0.0), step: 0, pool: r2_autograd::BufPool::new(),
-                     sched: None, clip: None, last_grad_norm: None })
+                     sched: None, clip: None, last_grad_norm: None, frozen: Vec::new(), frozen_fp: 0 })
     }
 
     /// Total trainable parameters — equals `Config::n_params`.
@@ -237,9 +241,78 @@ impl Trainer {
         // The tape draws its value buffers from the previous step's pool
         // and hands them back at the end (`into_pool`), so a step neither
         // frees ~143 MB of activations nor page-faults them in again.
+        let (mut tape, leaves, total, scale) = self.pass(batch);
+
+        // The gradients stay where `backward()` left them and the weights
+        // stay where the model keeps them. Flattening both into contiguous
+        // buffers to reach `Adam::step`, then copying the result back, cost
+        // ~116 MB of traffic and 7.24M divisions per step at the shipping
+        // shape — for an API shape, not for arithmetic.
+        //
+        // The weights come back off the tape before the gradients are
+        // borrowed from it — taking them needs `&mut tape`, reading the
+        // gradients needs `&tape`, and the borrow checker will not hold
+        // both. `take_value` leaves each node's GRADIENT intact, which is
+        // exactly what the update below reads.
+        for (i, &lv) in leaves.iter().enumerate() {
+            self.params[i] = tape.take_value(lv);
+        }
+        let grads: Vec<&[f32]> = leaves.iter().enumerate()
+            .map(|(i, &lv)| if self.is_frozen(i) { &[][..] } else { tape.grad(lv) }).collect();
+        self.apply(&grads, scale)?;
+        drop(grads);
+        // Value buffers back to the pool for the next step; gradient
+        // buffers freed off the training thread (a reused gradient buffer
+        // would need the memset `differentiated` removed). Freeing all of
+        // it on this thread measured 38 ms — 7.7% of a step.
+        self.pool = tape.into_pool();
+        Ok(total / batch.len() as f32)
+    }
+
+    /// One optimizer step over `parts`, processed one after another: the
+    /// memory of one part, the update of all of them at once (the gradient
+    /// of a sum is the sum of the gradients; see `crate::accumulate`). Each
+    /// part must hold equal-length sequences. Returns the mean loss per
+    /// target token.
+    pub fn train_step_parts(&mut self, parts: &[&[(Vec<usize>, Vec<usize>)]]) -> Result<f32, String> {
+        let sizes: Vec<usize> = self.params.iter().enumerate()
+            .map(|(i, p)| if self.is_frozen(i) { 0 } else { p.len() }).collect();
+        let mut acc = crate::accumulate::GradAccumulator::new(&sizes);
+        let mut loss = 0.0f64;
+        for part in parts {
+            if part.is_empty() { return Err("train_step_parts: empty part".into()); }
+            let seq = part[0].0.len();
+            if !part.iter().all(|(i, t)| i.len() == seq && t.len() == seq) {
+                return Err("train_step_parts: a part must hold equal-length sequences".into());
+            }
+            // weighted by the targets that count, which is what its mean is over
+            let kept = part.iter().flat_map(|(_, t)| t).filter(|&&t| t != IGNORE).count();
+            let (mut tape, leaves, total, _) = self.pass(part);
+            for (i, &lv) in leaves.iter().enumerate() {
+                self.params[i] = tape.take_value(lv);
+            }
+            let grads: Vec<&[f32]> = leaves.iter().enumerate()
+                .map(|(i, &lv)| if self.is_frozen(i) { &[][..] } else { tape.grad(lv) }).collect();
+            if kept > 0 { acc.add(&grads, kept)?; }
+            loss += total as f64 / part.len() as f64 * kept as f64;
+            drop(grads);
+            self.pool = tape.into_pool();
+        }
+        if acc.is_empty() { return Err("train_step_parts: no target in any part".into()); }
+        let grads: Vec<&[f32]> = acc.sums().iter().map(Vec::as_slice).collect();
+        self.apply(&grads, acc.samples() as f32)?;
+        Ok((loss / acc.samples() as f64) as f32)
+    }
+
+    /// Forward and backward over a batch: the tape holding the gradients and
+    /// (still) the weights, the leaves, the summed loss, and the scale the
+    /// gradients are divided by.
+    fn pass(&mut self, batch: &[(Vec<usize>, Vec<usize>)]) -> (Tape, Vec<Var>, f32, f32) {
         let mut tape = Tape::with_pool(std::mem::take(&mut self.pool));
-        let leaves: Vec<Var> = self.params.iter_mut()
-            .map(|p| tape.leaf(std::mem::take(p), true)).collect();
+        let frozen = std::mem::take(&mut self.frozen);
+        let leaves: Vec<Var> = self.params.iter_mut().enumerate()
+            .map(|(i, p)| tape.leaf(std::mem::take(p), !frozen.get(i).copied().unwrap_or(false))).collect();
+        self.frozen = frozen;
 
         // Equal-length sequences fuse into ONE forward pass, turning every
         // projection from a `seq`-row matmul into a `batch*seq`-row one.
@@ -275,29 +348,18 @@ impl Trainer {
             total = acc;
             tape.backward(sum_loss.expect("batch is non-empty"));
         }
+        (tape, leaves, total, if uniform { 1.0 } else { n })
+    }
 
-        // The gradients stay where `backward()` left them and the weights
-        // stay where the model keeps them. Flattening both into contiguous
-        // buffers to reach `Adam::step`, then copying the result back, cost
-        // ~116 MB of traffic and 7.24M divisions per step at the shipping
-        // shape — for an API shape, not for arithmetic.
-        let scale = if uniform { 1.0 } else { n };
-        // The weights come back off the tape before the gradients are
-        // borrowed from it — taking them needs `&mut tape`, reading the
-        // gradients needs `&tape`, and the borrow checker will not hold
-        // both. `take_value` leaves each node's GRADIENT intact, which is
-        // exactly what the update below reads.
-        for (i, &lv) in leaves.iter().enumerate() {
-            self.params[i] = tape.take_value(lv);
-        }
-        let grads: Vec<&[f32]> = leaves.iter().map(|&lv| tape.grad(lv)).collect();
+    /// Clip, schedule and take the Adam step on gradients `grads / scale`.
+    fn apply(&mut self, grads: &[&[f32]], scale: f32) -> Result<(), String> {
         // Clipping folds into the scale Adam already divides by: the
         // gradient it uses is `g / scale`, so multiplying that by
         // `max / norm` is dividing by `scale * norm / max`.
         let mut scale = scale;
         self.last_grad_norm = None;
         if let Some(max) = self.clip {
-            let norm = (global_sq_norm(&grads).sqrt() / scale as f64) as f32;
+            let norm = (global_sq_norm(grads).sqrt() / scale as f64) as f32;
             self.last_grad_norm = Some(norm);
             // torch's coefficient: max / (norm + 1e-6), applied when < 1
             let coef = max / (norm + 1e-6);
@@ -305,16 +367,77 @@ impl Trainer {
         }
         if let Some(sch) = self.sched { self.opt.lr = sch.at(self.step); }
         let mask = (self.opt.weight_decay != 0.0).then(|| self.decay_mask());
-        let Trainer { params, opt, .. } = self;
-        opt.step_blocks_masked(params, &grads, scale, mask.as_deref())?;
-        drop(grads);
-        // Value buffers back to the pool for the next step; gradient
-        // buffers freed off the training thread (a reused gradient buffer
-        // would need the memset `differentiated` removed). Freeing all of
-        // it on this thread measured 38 ms — 7.7% of a step.
-        self.pool = tape.into_pool();
+        let Trainer { params, opt, frozen, .. } = self;
+        opt.step_blocks_frozen(params, grads, scale, mask.as_deref(), frozen)?;
         self.step += 1;
-        Ok(total / n)
+        Ok(())
+    }
+
+    /// Is block `i` frozen?
+    pub fn is_frozen(&self, i: usize) -> bool {
+        self.frozen.get(i).copied().unwrap_or(false)
+    }
+
+    /// Freeze exactly the blocks in `mask`: they keep their values, take no
+    /// gradient and hold no optimizer state. A block's Adam state survives
+    /// while it stays trainable; one thawed here restarts at zero.
+    pub fn set_frozen(&mut self, mask: Vec<bool>) -> Result<(), String> {
+        if mask.len() != self.params.len() {
+            return Err(format!("set_frozen: {} flags for {} blocks", mask.len(), self.params.len()));
+        }
+        let total: usize = self.params.iter().zip(&mask).filter(|(_, &f)| !f).map(|(p, _)| p.len()).sum();
+        let (mut m, mut v) = (Vec::with_capacity(total), Vec::with_capacity(total));
+        let mut off = 0;
+        for (i, p) in self.params.iter().enumerate() {
+            let n = p.len();
+            let had = !self.is_frozen(i);
+            if !mask[i] {
+                if had {
+                    m.extend_from_slice(&self.opt.m[off..off + n]);
+                    v.extend_from_slice(&self.opt.v[off..off + n]);
+                } else {
+                    m.resize(m.len() + n, 0.0);
+                    v.resize(v.len() + n, 0.0);
+                }
+            }
+            if had { off += n; }
+        }
+        self.opt.m = m;
+        self.opt.v = v;
+        self.frozen = if mask.iter().any(|&f| f) { mask } else { Vec::new() };
+        self.frozen_fp = self.fingerprint_frozen();
+        Ok(())
+    }
+
+    /// Freeze every block whose name starts with one of `prefixes`
+    /// (`"tok_embed"`, `"layer.0."`, `"layer.1.wq"`), on top of what is
+    /// already frozen. Returns how many blocks that froze in total. A prefix
+    /// matching nothing is an error: a typo must not leave a layer training.
+    pub fn freeze(&mut self, prefixes: &[&str]) -> Result<usize, String> {
+        let names = self.block_names();
+        for p in prefixes {
+            if !names.iter().any(|n| n.starts_with(p)) {
+                return Err(format!("freeze: no block starts with '{p}'"));
+            }
+        }
+        let mask: Vec<bool> = names.iter().enumerate()
+            .map(|(i, n)| self.is_frozen(i) || prefixes.iter().any(|p| n.starts_with(p))).collect();
+        let count = mask.iter().filter(|&&f| f).count();
+        self.set_frozen(mask)?;
+        Ok(count)
+    }
+
+    /// Identity of the frozen weights, so a checkpoint (which leaves them
+    /// out) cannot be resumed on top of different ones.
+    pub(crate) fn fingerprint_frozen(&self) -> u64 {
+        if self.frozen.is_empty() { return 0; }
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for (i, p) in self.params.iter().enumerate() {
+            if self.is_frozen(i) {
+                for x in p { h = (h ^ x.to_bits() as u64).wrapping_mul(0x0000_0100_0000_01B3); }
+            }
+        }
+        h
     }
 
     /// One forward and backward WITHOUT the optimizer step: the loss, the

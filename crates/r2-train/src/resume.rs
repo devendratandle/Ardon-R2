@@ -39,17 +39,25 @@ fn config_from(ck: &Checkpoint) -> Result<Config, String> {
 impl Trainer {
     /// Everything needed to continue, as `dir/step-<n>.ckpt`, keeping the
     /// newest `keep` (0 keeps all). Writes the tensors from where they live.
+    /// Frozen weights are left out: they cannot have changed, and storing
+    /// them would cost a full model per checkpoint of a small adapter. Their
+    /// fingerprint is kept, and resuming needs the same weights as `base`.
     pub fn save_checkpoint(&self, dir: impl AsRef<Path>, keep: usize) -> Result<PathBuf, String> {
         let names: Vec<String> = self.block_names().iter().map(|n| format!("p.{n}")).collect();
-        let mut tensors: Vec<(&str, &[f32])> = names.iter().map(String::as_str)
-            .zip(self.params.iter().map(Vec::as_slice)).collect();
+        let mut tensors: Vec<(&str, &[f32])> = names.iter().enumerate()
+            .filter(|(i, _)| !self.is_frozen(*i))
+            .map(|(i, n)| (n.as_str(), self.params[i].as_slice())).collect();
         tensors.push(("adam.m", &self.opt.m));
         tensors.push(("adam.v", &self.opt.v));
+        let frozen: Vec<f32> = (0..self.params.len()).map(|i| self.is_frozen(i) as u8 as f32).collect();
+        tensors.push(("frozen", &frozen));
         let o = &self.opt;
         let mut scalars: Vec<(&str, f64)> = config_scalars(&self.cfg).to_vec();
         scalars.extend([("adam.t", o.t as f64), ("adam.lr", o.lr as f64), ("adam.beta1", o.beta1 as f64),
                         ("adam.beta2", o.beta2 as f64), ("adam.eps", o.eps as f64),
-                        ("adam.weight_decay", o.weight_decay as f64)]);
+                        ("adam.weight_decay", o.weight_decay as f64),
+                        ("frozen.fp_hi", (self.frozen_fp >> 32) as f64),
+                        ("frozen.fp_lo", (self.frozen_fp & 0xFFFF_FFFF) as f64)]);
         if let Some(c) = self.clip { scalars.push(("clip", c as f64)); }
         if let Some(s) = self.sched {
             scalars.extend([("sched.base", s.base as f64), ("sched.min", s.min as f64),
@@ -59,20 +67,43 @@ impl Trainer {
     }
 
     /// Rebuild the trainer a checkpoint was taken from, moving its tensors
-    /// rather than copying them.
-    pub fn from_checkpoint(mut ck: Checkpoint) -> Result<Trainer, String> {
+    /// rather than copying them. `base` supplies the frozen weights, if any
+    /// blocks were frozen; other weights are refused by fingerprint.
+    pub fn from_checkpoint(mut ck: Checkpoint, base: Option<Model>) -> Result<Trainer, String> {
         let cfg = config_from(&ck)?;
         let mut t = Trainer::empty(cfg)?;
         let sizes = Trainer::block_shapes(&cfg);
+        let frozen: Vec<bool> = ck.take_tensor("frozen")?.iter().map(|&x| x != 0.0).collect();
+        if frozen.len() != sizes.len() {
+            return Err(format!("checkpoint: {} frozen flags for {} blocks", frozen.len(), sizes.len()));
+        }
+        let mut base_params = if frozen.iter().any(|&f| f) {
+            let m = base.ok_or("checkpoint: frozen weights are not stored in a checkpoint; \
+                                pass the model it was fine-tuned from as the base")?;
+            Trainer::from_model(m, 0.0)?.params
+        } else {
+            Vec::new()
+        };
         for (i, name) in t.block_names().into_iter().enumerate() {
-            let p = ck.take_tensor(&format!("p.{name}"))?;
+            let p = if frozen[i] {
+                std::mem::take(base_params.get_mut(i).ok_or_else(|| format!("checkpoint: the base has no '{name}'"))?)
+            } else {
+                ck.take_tensor(&format!("p.{name}"))?
+            };
             if p.len() != sizes[i] {
                 return Err(format!("checkpoint: '{name}' holds {} values, the config says {}", p.len(), sizes[i]));
             }
             t.params[i] = p;
         }
+        t.frozen = if frozen.iter().any(|&f| f) { frozen } else { Vec::new() };
+        t.frozen_fp = t.fingerprint_frozen();
+        let fp = ((ck.scalar("frozen.fp_hi")? as u64) << 32) | ck.scalar("frozen.fp_lo")? as u64;
+        if t.frozen_fp != fp {
+            return Err("checkpoint: the base is not the model this run was fine-tuned from \
+                        (the frozen weights differ)".into());
+        }
         let (m, v) = (ck.take_tensor("adam.m")?, ck.take_tensor("adam.v")?);
-        let total: usize = sizes.iter().sum();
+        let total: usize = sizes.iter().enumerate().filter(|(i, _)| !t.is_frozen(*i)).map(|(_, n)| n).sum();
         if m.len() != total || v.len() != total {
             return Err(format!("checkpoint: Adam state holds {}/{} values for {total} parameters", m.len(), v.len()));
         }
@@ -94,8 +125,8 @@ impl Trainer {
     }
 
     /// The trainer from the newest checkpoint in `dir`; `None` if there is none.
-    pub fn resume_latest(dir: impl AsRef<Path>) -> Result<Option<Trainer>, String> {
-        load_latest(dir)?.map(Trainer::from_checkpoint).transpose()
+    pub fn resume_latest(dir: impl AsRef<Path>, base: Option<Model>) -> Result<Option<Trainer>, String> {
+        load_latest(dir)?.map(|ck| Trainer::from_checkpoint(ck, base)).transpose()
     }
 
     /// Start a NEW run from saved weights: the weights move in, the optimizer
@@ -197,7 +228,7 @@ mod tests {
         run(&mut first, 5);
         first.save_checkpoint(&dir, 2).unwrap();
         drop(first);
-        let mut second = Trainer::resume_latest(&dir).unwrap().unwrap();
+        let mut second = Trainer::resume_latest(&dir, None).unwrap().unwrap();
         assert_eq!(second.step, 5);
         run(&mut second, 7);
 
@@ -227,7 +258,7 @@ mod tests {
         let path = t.save_checkpoint(&dir, 0).unwrap();
         let mut ck = Checkpoint::load(&path).unwrap();
         ck.put_scalar("cfg.ffn_hidden", 48.0);
-        assert!(Trainer::from_checkpoint(ck).err().unwrap().contains("holds"));
+        assert!(Trainer::from_checkpoint(ck, None).err().unwrap().contains("holds"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -244,6 +275,102 @@ mod tests {
         assert_eq!(t.opt.lr, 0.001);
         assert!(t.opt.m.iter().all(|&x| x == 0.0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn frozen_blocks_keep_their_bits_hold_no_state_and_stay_out_of_checkpoints() {
+        let mut base = trainer();
+        run(&mut base, 2);
+        let model_dir = tmp("frozen-base");
+        base.save_dir(&model_dir).unwrap();
+
+        let start = || {
+            let mut t = Trainer::from_model(Model::load_dir(&model_dir).unwrap(), 0.01).unwrap();
+            t.freeze(&["tok_embed", "layer.0."]).unwrap();
+            t
+        };
+        let frozen_of = |t: &Trainer| -> Vec<Vec<f32>> {
+            (0..t.params.len()).filter(|&i| t.is_frozen(i)).map(|i| t.params[i].clone()).collect()
+        };
+        let mut whole = start();
+        let frozen_before = frozen_of(&whole);
+        let trainable: usize = (0..whole.params.len()).filter(|&i| !whole.is_frozen(i))
+            .map(|i| whole.params[i].len()).sum();
+        assert_eq!(whole.opt.m.len(), trainable, "no Adam state for frozen blocks");
+        let output_before = whole.params[2].clone();
+        run(&mut whole, 6);
+        assert_eq!(frozen_before, frozen_of(&whole), "frozen weights moved");
+        assert_ne!(output_before, whole.params[2], "the rest must still train");
+
+        // resume: a smaller file, which needs the base and refuses another one
+        let dir = tmp("frozen-ck");
+        let mut first = start();
+        run(&mut first, 3);
+        let path = first.save_checkpoint(&dir, 0).unwrap();
+        drop(first);
+        let size = std::fs::metadata(&path).unwrap().len() as usize;
+        assert!(size < (trainable * 3 + 2000) * 4, "a frozen block was stored: {size} bytes");
+        assert!(Trainer::resume_latest(&dir, None).err().unwrap().contains("base"));
+        let mut wrong = Model::load_dir(&model_dir).unwrap();
+        wrong.tok_embed[0] += 1.0;
+        assert!(Trainer::resume_latest(&dir, Some(wrong)).err().unwrap().contains("frozen weights differ"));
+        let right = Model::load_dir(&model_dir).unwrap();
+        let mut second = Trainer::resume_latest(&dir, Some(right)).unwrap().unwrap();
+        run(&mut second, 3);
+        assert_eq!(bits(&whole), bits(&second), "a resumed fine-tune must be the same run");
+        for d in [&model_dir, &dir] { let _ = std::fs::remove_dir_all(d); }
+    }
+
+    #[test]
+    fn padding_changes_neither_loss_nor_gradient() {
+        let t = trainer();
+        let pairs = [(vec![1u32, 2, 3], vec![4u32, 5]), (vec![6], vec![7, 8, 9, 10, 11, 12])];
+        let with = |pad: u32| {
+            let b = crate::data::PairSet::new(&pairs, 16, pad).unwrap().at(2, 0, Order::Sequential);
+            t.loss_logits_grads(&b).unwrap()
+        };
+        let (l0, _, g0) = with(0);
+        let (l1, _, g1) = with(39);
+        assert_eq!(l0.to_bits(), l1.to_bits(), "the pad token reached the loss");
+        assert!(g0 == g1, "the pad token reached a gradient");
+    }
+
+    #[test]
+    fn a_batch_of_examples_trains_toward_its_completions() {
+        let mut t = Trainer::new(cfg(), 0.01, 3).unwrap();
+        let pairs: Vec<_> = (0..12u32).map(|i| (vec![i + 1, i + 2], vec![(i * 3) % 40, (i * 5) % 40])).collect();
+        let s = crate::data::PairSet::new(&pairs, 8, 0).unwrap();
+        let first = t.train_step(&s.at(4, 0, Order::Shuffled(1))).unwrap();
+        let mut last = first;
+        for step in 1..80 { last = t.train_step(&s.at(4, step, Order::Shuffled(1))).unwrap(); }
+        assert!(last < first / 2.0, "loss {first} -> {last}");
+    }
+
+    #[test]
+    fn a_misspelt_freeze_is_an_error() {
+        let mut t = trainer();
+        assert!(t.freeze(&["layr.0."]).unwrap_err().contains("layr.0."));
+        assert_eq!(t.freeze(&["layer.1.wq"]).unwrap(), 1);
+        assert_eq!(t.freeze(&["output"]).unwrap(), 2, "freezing adds to what is frozen");
+    }
+
+    #[test]
+    fn parts_give_the_update_of_the_whole_batch() {
+        let s = corpus();
+        let b = Batcher { batch: 8, seq: 8, order: Order::Sequential };
+        let mut whole = trainer();
+        let mut parts = trainer();
+        for step in 0..4 {
+            let batch = b.at(&s[..], step);
+            let l_w = whole.train_step(&batch).unwrap();
+            let (x, y) = batch.split_at(3);
+            let l_p = parts.train_step_parts(&[x, y]).unwrap();
+            assert!((l_w - l_p).abs() < 1e-4, "step {step}: {l_w} vs {l_p}");
+        }
+        let d = whole.params.iter().flatten().zip(parts.params.iter().flatten())
+            .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(d < 2e-4, "parts drifted {d} from the whole batch");
+        assert_eq!(parts.step, 4);
     }
 
     #[test]

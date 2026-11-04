@@ -200,6 +200,17 @@ impl Adam {
     pub fn step_blocks_masked(&mut self, params: &mut [Vec<f32>], grads: &[&[f32]], scale: f32,
                               decay: Option<&[bool]>) -> Result<(), String>
     {
+        self.step_blocks_frozen(params, grads, scale, decay, &[])
+    }
+
+    /// [`Adam::step_blocks_masked`] leaving the blocks where `frozen[i]` is
+    /// true untouched. They hold no state here: `m` and `v` cover only the
+    /// blocks that train, which is most of what makes an adapter cheap.
+    /// An empty `frozen` freezes nothing.
+    pub fn step_blocks_frozen(&mut self, params: &mut [Vec<f32>], grads: &[&[f32]], scale: f32,
+                              decay: Option<&[bool]>, frozen: &[bool]) -> Result<(), String>
+    {
+        let is_frozen = |i: usize| frozen.get(i).copied().unwrap_or(false);
         if let Some(d) = decay {
             if d.len() != params.len() {
                 return Err(format!("Adam::step_blocks: {} parameter blocks, {} decay flags",
@@ -210,7 +221,7 @@ impl Adam {
             return Err(format!("Adam::step_blocks: {} parameter blocks, {} gradient blocks",
                                params.len(), grads.len()));
         }
-        let total: usize = params.iter().map(|p| p.len()).sum();
+        let total: usize = params.iter().enumerate().filter(|(i, _)| !is_frozen(*i)).map(|(_, p)| p.len()).sum();
         if total != self.m.len() {
             return Err(format!("Adam::step_blocks: sized for {} params, blocks total {total}",
                                self.m.len()));
@@ -222,6 +233,7 @@ impl Adam {
         let shrink = self.lr * self.weight_decay;
         let mut off = 0usize;
         for (bi, (p, g)) in params.iter_mut().zip(grads).enumerate() {
+            if is_frozen(bi) { continue; }
             let c = if self.weight_decay != 0.0 && decay.is_none_or(|d| d[bi]) { shrink } else { 0.0 };
             if p.len() != g.len() {
                 return Err(format!("Adam::step_blocks: block is {} params, {} gradients",

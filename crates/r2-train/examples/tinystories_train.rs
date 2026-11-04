@@ -308,7 +308,7 @@ fn main() {
     let ckpt_every: usize = env("R2_CKPT_EVERY", 0usize);
     let ckpt_keep: usize = env("R2_CKPT_KEEP", 3usize);
     if let Some(d) = &ckpt_dir {
-        if let Some(t) = Trainer::resume_latest(d).unwrap_or_else(|e| die("resume", e)) {
+        if let Some(t) = Trainer::resume_latest(d, None).unwrap_or_else(|e| die("resume", e)) {
             println!("  resumed    step {} from {d}", t.step);
             tr = t;
         }

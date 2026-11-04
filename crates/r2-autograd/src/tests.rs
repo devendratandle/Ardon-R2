@@ -428,3 +428,52 @@ fn rope_preserves_norm_and_matches_the_inference_kernel() {
     }
     assert_eq!(out, want, "training RoPE must equal the inference RoPE exactly");
 }
+
+/// An ignored row must contribute nothing: the loss and gradient are those of
+/// the other rows alone, the mean is over them, and the row's gradient is 0.
+#[test]
+fn softmax_ce_ignores_rows_marked_ignore() {
+    let x = vec![0.5f32, -1.0, 2.0, 0.25, 3.0, 1.0, -2.0, 0.5, -0.75, 1.5, 0.0, 2.5];
+    let kept: Vec<f32> = x[..4].iter().chain(&x[8..]).cloned().collect();
+
+    let mut a = Tape::new();
+    let lv = a.leaf(x.clone(), true);
+    let l = a.softmax_ce(lv, 4, vec![1, IGNORE, 2]);
+    a.backward(l);
+
+    let mut b = Tape::new();
+    let kv = b.leaf(kept, true);
+    let k = b.softmax_ce(kv, 4, vec![1, 2]);
+    b.backward(k);
+
+    assert_eq!(a.value(l)[0], b.value(k)[0], "the mean is over the rows kept");
+    assert_eq!(&a.grad(lv)[..4], &b.grad(kv)[..4]);
+    assert_eq!(&a.grad(lv)[4..8], &[0.0; 4], "an ignored row has no gradient");
+    assert_eq!(&a.grad(lv)[8..], &b.grad(kv)[4..]);
+}
+
+/// PyTorch's `F.cross_entropy(x, [1, -100, 2])` on the same logits.
+#[test]
+fn softmax_ce_ignore_matches_pytorch() {
+    let x = vec![0.5f32, -1.0, 2.0, 0.25, 3.0, 1.0, -2.0, 0.5, -0.75, 1.5, 0.0, 2.5];
+    let mut t = Tape::new();
+    let lv = t.leaf(x, true);
+    let l = t.softmax_ce(lv, 4, vec![1, IGNORE, 2]);
+    t.backward(l);
+    assert!((t.value(l)[0] - 3.133_604).abs() < 1e-6);
+    for (g, want) in t.grad(lv).iter().zip([0.077_117_4f32, -0.482_792_8, 0.345_616_2, 0.060_059_09]) {
+        assert!((g - want).abs() < 1e-6, "{g} vs {want}");
+    }
+}
+
+/// Every row ignored is a batch with nothing to learn: 0, not NaN, so one
+/// such batch cannot poison the weights.
+#[test]
+fn softmax_ce_with_every_row_ignored_is_zero() {
+    let mut t = Tape::new();
+    let lv = t.leaf(vec![1.0, 2.0, 3.0, 4.0], true);
+    let l = t.softmax_ce(lv, 2, vec![IGNORE, IGNORE]);
+    t.backward(l);
+    assert_eq!(t.value(l)[0], 0.0);
+    assert!(t.grad(lv).iter().all(|&g| g == 0.0));
+}

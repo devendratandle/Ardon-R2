@@ -337,6 +337,7 @@ impl Tape {
         let mut term = vec![0.0f32; rows];
         let row_lse = |r: usize, l: &mut f32, tm: &mut f32| {
             let (row, t) = (&x[r * d..r * d + d], targets[r]);
+            if t == IGNORE { *l = 0.0; *tm = 0.0; return; }
             debug_assert!(t < d, "softmax_ce: target {t} out of range for d={d}");
             let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             *l = m + r2_tensor::ops::exp_shift_sum_only(row, m).ln();
@@ -351,7 +352,7 @@ impl Tape {
         }
         let mut loss = 0.0f32;
         for tm in &term { loss += tm; }
-        loss /= rows as f32;
+        loss /= targets.iter().filter(|&&t| t != IGNORE).count().max(1) as f32;
         let req = self.requires[logits.0];
         self.push(vec![loss], Op::SoftmaxCE { logits, d, targets, lse }, req)
     }

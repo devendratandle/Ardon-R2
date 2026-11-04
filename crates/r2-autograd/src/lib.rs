@@ -28,6 +28,11 @@ mod kernels;
 #[cfg(test)]
 mod tests;
 
+/// A target that takes no part in the loss, in [`Tape::softmax_ce`]: its row
+/// has no loss and no gradient, and the mean is over the other rows, as
+/// PyTorch's `ignore_index`. Prompt and padding positions in fine-tuning.
+pub const IGNORE: usize = usize::MAX;
+
 /// Index of a value node on the tape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Var(pub usize);

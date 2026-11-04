@@ -46,12 +46,14 @@ impl GradAccumulator {
     /// Micro-batches accumulated so far.
     #[inline] pub fn parts(&self) -> usize { self.parts }
     #[inline] pub fn is_empty(&self) -> bool { self.total == 0 }
+    /// The running sums, each the gradient times its samples.
+    #[inline] pub fn sums(&self) -> &[Vec<f32>] { &self.sums }
 
     /// Add one micro-batch's **mean** gradient, weighted by how many
     /// samples produced it. Errors on a shape mismatch rather than
     /// accumulating a prefix — a silently wrong gradient is the worst
     /// possible failure mode, since training still "works".
-    pub fn add(&mut self, grads: &[Vec<f32>], n_samples: usize) -> Result<(), String> {
+    pub fn add<G: AsRef<[f32]>>(&mut self, grads: &[G], n_samples: usize) -> Result<(), String> {
         if n_samples == 0 {
             return Err("GradAccumulator::add: micro-batch has no samples".into());
         }
@@ -61,6 +63,7 @@ impl GradAccumulator {
                 self.sums.len(), grads.len()));
         }
         for (i, (acc, g)) in self.sums.iter_mut().zip(grads).enumerate() {
+            let g = g.as_ref();
             if acc.len() != g.len() {
                 return Err(format!(
                     "GradAccumulator::add: tensor {} expected {} values, got {}",
@@ -69,7 +72,7 @@ impl GradAccumulator {
         }
         let w = n_samples as f32;
         for (acc, g) in self.sums.iter_mut().zip(grads) {
-            for (a, &x) in acc.iter_mut().zip(g) { *a += x * w; }
+            for (a, &x) in acc.iter_mut().zip(g.as_ref()) { *a += x * w; }
         }
         self.total += n_samples;
         self.parts += 1;
