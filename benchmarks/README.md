@@ -3,8 +3,8 @@
 Reproducible head-to-head of the same operations in R and Ardon-R2.
 
 ```sh
-Rscript benchmarks/bench_r.R            # R side
-r2 benchmarks/bench_r2.R                # R2 side (release build)
+Rscript benchmarks/v038/bench_r.R       # R side
+r2 benchmarks/v038/bench_r2.r2          # R2 side (release build)
 ```
 
 ## Results
