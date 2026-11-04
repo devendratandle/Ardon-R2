@@ -74,12 +74,7 @@ fn write_f32(path: &str, v: &[f32]) {
 /// Reads through the memory map, so the resident cost is O(batch x seq)
 /// rather than O(corpus) — the whole point of the token store.
 fn batch_at(ids: &TokenStore, s: usize, bn: usize, seq: usize) -> Vec<(Vec<usize>, Vec<usize>)> {
-    let span = ids.len() - seq - 1;
-    (0..bn).map(|b| {
-        let o = ((s * bn + b) * seq) % span;
-        let w = ids.window(o, seq + 1).expect("window inside the stream");
-        (w[..seq].to_vec(), w[1..].to_vec())
-    }).collect()
+    r2_train::data::Batcher { batch: bn, seq, order: r2_train::data::Order::Sequential }.at(ids, s)
 }
 
 /// Read bytes `[from, to)` of a file as text.

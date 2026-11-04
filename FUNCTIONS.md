@@ -532,8 +532,8 @@ readline(prompt)    Block until stdin line is entered; returns character.
 ```
 llm.new(dim=128, layers=4, heads=4, kv.heads=heads, ffn=3*dim, vocab=8000, ctx=64, lr=0.003, seed=42)
                     Create a transformer model; returns an integer handle
-llm.train(m, text, steps=50, batch=8, seq=16, report=0)
-                    Train handle m on a text (string or file path); report= prints every n steps
+llm.train(m, text, steps=50, batch=8, seq=16, report=0, shuffle=FALSE)
+                    Train handle m on a text (string or file path), walking through all of it; report= prints every n steps
 llm.generate(m, prompt, n=32, temperature=0, top.k=0, seed=1)
                     Generate n tokens from a prompt (temperature 0 = greedy)
 llm.save(m, dir)    Write weights + tokenizer (safetensors + HuggingFace tokenizer.json)

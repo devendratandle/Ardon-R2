@@ -11,6 +11,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Version 0.4.1 was never released; everything listed here since v0.4.0
 ships in 0.4.2.
 
+### LLM: `llm.train` learns from the whole text; `llm.save` keeps the tokenizer — 2026-11-04
+
+- **`llm.train` only ever saw the first `batch + seq` tokens**: it built one
+  batch and trained on it for every step, so a byte after those tokens could
+  not change the result. It now walks through the whole text, and a second
+  call continues where the first stopped. **Results on any text longer than
+  one batch change, because the data does**; the forward, backward and Adam
+  arithmetic did not (`grad_fingerprint` and the trained model's SHA-256 are
+  unchanged). `shuffle = TRUE` visits windows in a new seeded order per epoch.
+- **`llm.train(m, "file.txt")` reads the file**, as `?llm.train` always said;
+  it trained on the path's own characters.
+- **`llm.save` writes `tokenizer.json` and `llm.load` reads it.** A reloaded
+  model with a learned vocabulary decoded its ids against the byte table and
+  generated nonsense. A directory without the tokenizer is now refused, unless
+  the model is pure byte-level.
+- New `r2_train::data` (`Batcher`, `Order`): a batch is a function of the step
+  index, so a resumed run sees the same data and shuffling stores nothing.
+
 ### `r2 --ide`: R2 as the engine of a separate IDE — 2026-11-01
 
 - **`r2 --ide`** runs R2 as the engine of a separate IDE program, the way

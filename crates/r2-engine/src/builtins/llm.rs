@@ -22,10 +22,13 @@ use std::sync::Mutex;
 use r2_tensor::infer::{Sampler, SamplerConfig};
 use r2_tensor::model::{Config, Model};
 use r2_tensor::tokenizer::Tokenizer;
+use r2_train::data::{Batcher, Order};
 use r2_train::llm::Trainer;
 use r2_types::*;
 
 use crate::{err, gn, gv, Engine};
+
+const TOKENIZER_FILE: &str = "tokenizer.json";
 
 /// What a handle refers to: a model being trained, or one loaded purely
 /// for serving (no optimizer state, so it costs a third of the memory).
@@ -105,6 +108,19 @@ fn str_arg(v: &RVal) -> Result<String, R2Err> {
     }
 }
 
+fn bool_arg(a: &[EvalArg], name: &str, default: bool) -> bool {
+    gn(a, name).and_then(|v| v.as_logicals().ok()?.first().copied().flatten()).unwrap_or(default)
+}
+
+/// Training text: the text itself, or the path of a file holding it.
+fn corpus_text(s: String) -> Result<String, R2Err> {
+    if s.len() < 4096 && !s.contains('\n') && std::path::Path::new(&s).is_file() {
+        return std::fs::read_to_string(&s).map_err(|e| R2Err {
+            msg: format!("llm.train: cannot read '{}': {}", s, e), kind: ErrKind::Runtime });
+    }
+    Ok(s)
+}
+
 fn as_num(x: f64) -> RVal { RVal::Numeric(vec![Some(x)].into(), Attrs::default()) }
 
 /// `llm.new(dim=, layers=, heads=, kv.heads=, ffn=, ctx=)` — create a
@@ -160,7 +176,7 @@ pub(crate) fn bi_llm_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
 /// Returns the final loss so a script can decide whether to keep going.
 pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let id = handle(&gv(a, 0))?;
-    let text = str_arg(&gv(a, 1))?;
+    let text = corpus_text(str_arg(&gv(a, 1))?)?;
     let steps = num_arg(a, "steps", 50.0) as usize;
     let seq = num_arg(a, "seq", 16.0) as usize;
     let max_batch = num_arg(a, "batch", 8.0) as usize;
@@ -203,20 +219,24 @@ pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
         with_tokenizers(|t| t.insert(id, tok));
     }
     let tok = tokenizer_for(id);
-    let ids: Vec<usize> = tok.encode(&text)
-        .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?
-        .iter().map(|&i| i as usize).collect();
+    let ids: Vec<u32> = tok.encode(&text)
+        .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?;
+    drop(text);
     if ids.len() < seq + 2 {
         return err!(Runtime,
-            "llm.train: text is too short — needs more than {} bytes for seq={}",
+            "llm.train: text is too short — needs more than {} tokens for seq={}",
             seq + 1, seq);
     }
-    // Sliding windows of `seq` tokens; target is the text shifted by one,
-    // which is what "predict the next token" means concretely.
-    let mut batch = Vec::new();
-    for s in 0..(ids.len() - seq - 1).min(max_batch) {
-        batch.push((ids[s..s + seq].to_vec(), ids[s + 1..s + seq + 1].to_vec()));
-    }
+    // Each step takes the next windows of the text; the target is the window
+    // shifted by one, which is what "predict the next token" means. The
+    // position comes from the trainer's step count, so a second llm.train
+    // call continues through the text instead of starting it over.
+    let order = if bool_arg(a, "shuffle", false) {
+        Order::Shuffled(num_arg(a, "seed", 42.0) as u64)
+    } else {
+        Order::Sequential
+    };
+    let batcher = Batcher { batch: max_batch.min(ids.len() - seq - 1).max(1), seq, order };
 
     with_registry(|r| {
         let slot = match r.get_mut(&id) {
@@ -231,7 +251,7 @@ pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
         };
         let mut last = 0.0f32;
         for s in 1..=steps {
-            last = t.train_step(&batch)
+            last = t.train_step(&batcher.at(&ids[..], t.step as usize))
                 .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?;
             if report > 0 && (s % report == 0 || s == 1) {
                 r2_types::out::rout(&format!("step {:>5}  loss {:.4}\n", s, last));
@@ -285,7 +305,23 @@ pub(crate) fn bi_llm_save(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     })?;
     model.save_dir(&dir)
         .map_err(|e| R2Err { msg: format!("llm.save: {}", e), kind: ErrKind::Runtime })?;
+    // The ids mean nothing without their tokenizer: a model saved alone
+    // would decode against the wrong table and generate nonsense.
+    std::fs::write(std::path::Path::new(&dir).join(TOKENIZER_FILE), tokenizer_for(id).to_tokenizer_json())
+        .map_err(|e| R2Err { msg: format!("llm.save: {}", e), kind: ErrKind::Runtime })?;
     Ok(RVal::Character(vec![Some(std::sync::Arc::from(dir.as_str()))], Attrs::default()))
+}
+
+/// The tokenizer saved beside a model. Only a pure byte-level model can do
+/// without one; any other would decode its ids against the wrong table.
+fn load_tokenizer(dir: &str, cfg: &Config) -> Result<Tokenizer, String> {
+    let path = std::path::Path::new(dir).join(TOKENIZER_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(src) => Tokenizer::from_tokenizer_json(&src),
+        Err(_) if cfg.vocab <= 256 => Ok(Tokenizer::byte_level()),
+        Err(e) => Err(format!("{}: {} (a model with a learned vocabulary needs its tokenizer)",
+                              path.display(), e)),
+    }
 }
 
 /// `llm.load(dir)` — load a saved model for serving.
@@ -293,7 +329,11 @@ pub(crate) fn bi_llm_load(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     let dir = str_arg(&gv(a, 0))?;
     let m = Model::load_dir(&dir)
         .map_err(|e| R2Err { msg: format!("llm.load: {}", e), kind: ErrKind::Runtime })?;
-    Ok(as_num(insert(Slot::Serving(Box::new(m))) as f64))
+    let tok = load_tokenizer(&dir, &m.cfg)
+        .map_err(|e| R2Err { msg: format!("llm.load: {}", e), kind: ErrKind::Runtime })?;
+    let id = insert(Slot::Serving(Box::new(m)));
+    with_tokenizers(|t| t.insert(id, tok));
+    Ok(as_num(id as f64))
 }
 
 /// `llm.info(model)` — a named list of the model's shape and size.
