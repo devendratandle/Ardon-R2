@@ -16,6 +16,7 @@ use r2_tensor::model::{Config, Layer, Model};
 
 use crate::checkpoint::{load_latest, save_parts_rotating, Checkpoint};
 use crate::llm::Trainer;
+use crate::lora::{adapter_sizes, lora_from, lora_scalars};
 use crate::optim::{Adam, LrSchedule};
 
 /// `Config` as scalars. Each value is an integer or an f32, so f64 holds it
@@ -44,8 +45,9 @@ impl Trainer {
     /// fingerprint is kept, and resuming needs the same weights as `base`.
     pub fn save_checkpoint(&self, dir: impl AsRef<Path>, keep: usize) -> Result<PathBuf, String> {
         let names: Vec<String> = self.block_names().iter().map(|n| format!("p.{n}")).collect();
+        let base_blocks = Trainer::block_shapes(&self.cfg).len();
         let mut tensors: Vec<(&str, &[f32])> = names.iter().enumerate()
-            .filter(|(i, _)| !self.is_frozen(*i))
+            .filter(|(i, _)| !self.is_frozen(*i) || *i >= base_blocks)
             .map(|(i, n)| (n.as_str(), self.params[i].as_slice())).collect();
         tensors.push(("adam.m", &self.opt.m));
         tensors.push(("adam.v", &self.opt.v));
@@ -58,6 +60,7 @@ impl Trainer {
                         ("adam.weight_decay", o.weight_decay as f64),
                         ("frozen.fp_hi", (self.frozen_fp >> 32) as f64),
                         ("frozen.fp_lo", (self.frozen_fp & 0xFFFF_FFFF) as f64)]);
+        if let Some(l) = &self.lora { scalars.extend(lora_scalars(l)); }
         if let Some(c) = self.clip { scalars.push(("clip", c as f64)); }
         if let Some(s) = self.sched {
             scalars.extend([("sched.base", s.base as f64), ("sched.min", s.min as f64),
@@ -72,7 +75,13 @@ impl Trainer {
     pub fn from_checkpoint(mut ck: Checkpoint, base: Option<Model>) -> Result<Trainer, String> {
         let cfg = config_from(&ck)?;
         let mut t = Trainer::empty(cfg)?;
-        let sizes = Trainer::block_shapes(&cfg);
+        let mut sizes = Trainer::block_shapes(&cfg);
+        let base_blocks = sizes.len();
+        t.lora = lora_from(&ck)?;
+        if let Some(l) = &t.lora {
+            sizes.extend(adapter_sizes(l, &cfg));
+            t.params.resize(sizes.len(), Vec::new());
+        }
         let frozen: Vec<bool> = ck.take_tensor("frozen")?.iter().map(|&x| x != 0.0).collect();
         if frozen.len() != sizes.len() {
             return Err(format!("checkpoint: {} frozen flags for {} blocks", frozen.len(), sizes.len()));
@@ -85,7 +94,7 @@ impl Trainer {
             Vec::new()
         };
         for (i, name) in t.block_names().into_iter().enumerate() {
-            let p = if frozen[i] {
+            let p = if frozen[i] && i < base_blocks {
                 std::mem::take(base_params.get_mut(i).ok_or_else(|| format!("checkpoint: the base has no '{name}'"))?)
             } else {
                 ck.take_tensor(&format!("p.{name}"))?
@@ -149,8 +158,20 @@ impl Trainer {
 
     /// Lend the weights to code that needs a [`Model`], without copying them:
     /// they move into a `Model` for the call and back afterwards.
+    ///
+    /// With adapters, the model holds the merged weights of the blocks they
+    /// wrap (a copy of those blocks alone); the originals come back after.
     pub fn with_model<R>(&mut self, f: impl FnOnce(&Model) -> R) -> R {
         let c = self.cfg;
+        let mut originals = Vec::new();
+        if let Some(parts) = self.lora.as_ref().map(|l| l.parts.clone()) {
+            for l in 0..c.n_layers {
+                for &p in &parts {
+                    let merged = self.merged_block(l, p).expect("the adapter wraps this block");
+                    originals.push((3 + l * 9 + p, std::mem::replace(&mut self.params[3 + l * 9 + p], merged)));
+                }
+            }
+        }
         let mut take = |i: usize| std::mem::take(&mut self.params[i]);
         let m = Model {
             cfg: c,
@@ -171,6 +192,7 @@ impl Trainer {
                 self.params[3 + l * 9 + p] = data;
             }
         }
+        for (i, w) in originals { self.params[i] = w; }
         out
     }
 

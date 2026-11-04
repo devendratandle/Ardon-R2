@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 468 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 471 Built-in Functions and Operators
 
 ## Core (84)
 ```
@@ -528,7 +528,7 @@ readline(prompt)    Block until stdin line is entered; returns character.
                       invisible(readline("Press Enter to continue..."))
 ```
 
-## LLM training & serving (10)
+## LLM training & serving (13)
 ```
 llm.new(dim=128, layers=4, heads=4, kv.heads=heads, ffn=3*dim, vocab=8000, ctx=64, lr=0.003, seed=42)
                     Create a transformer model; returns an integer handle
@@ -538,6 +538,12 @@ llm.finetune(m, prompts, completions, steps=100, batch=4, seq=64, shuffle=TRUE, 
                     Teach what follows each prompt: only completion tokens count in the loss, batches pad to their longest example; takes llm.train's settings
 llm.freeze(m, blocks)
                     Stop training every block whose name starts with one of blocks ("tok_embed", "layer.0.", "layer.1.wq"); returns how many are frozen
+llm.lora(m, rank=8, alpha=2*rank, targets=c("wq","wk","wv","wo"), seed=42)
+                    Freeze the model and add low-rank adapters (LoRA) on those projections; returns how many values now train
+llm.save.adapter(m, dir)
+                    Write only the adapters: a small file that applies to the model they were trained on
+llm.load.adapter(base, adapter, lr=3e-4)
+                    The model saved in base with the adapters saved in adapter, as a handle to generate from or keep training; refuses another base
 llm.generate(m, prompt, n=32, temperature=0, top.k=0, seed=1)
                     Generate n tokens from a prompt (temperature 0 = greedy)
 llm.save(m, dir)    Write weights + tokenizer (safetensors + HuggingFace tokenizer.json)

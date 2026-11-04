@@ -452,6 +452,24 @@ fn softmax_ce_ignores_rows_marked_ignore() {
     assert_eq!(&a.grad(lv)[8..], &b.grad(kv)[4..]);
 }
 
+/// `scale` against finite differences, reached twice so its adjoint both
+/// assigns and accumulates.
+#[test]
+fn scale_gradient_matches_finite_differences() {
+    let x0 = vec![0.5f32, -1.25, 2.0];
+    let f = |p: &[f32]| -> f32 { p.iter().map(|v| (v * 3.0).powi(2) + (v * -0.5).powi(2)).sum::<f32>() / 3.0 };
+    let mut t = Tape::new();
+    let x = t.leaf(x0.clone(), true);
+    let (a, b) = (t.scale(x, 3.0), t.scale(x, -0.5));
+    let (la, lb) = (t.mse(a, vec![0.0; 3]), t.mse(b, vec![0.0; 3]));
+    let l = t.add(la, lb);
+    assert!((t.value(l)[0] - f(&x0)).abs() < 1e-5);
+    t.backward(l);
+    for (g, n) in t.grad(x).iter().zip(finite_diff(&x0, f)) {
+        assert!((g - n).abs() < 0.02, "tape {g}, numeric {n}");
+    }
+}
+
 /// PyTorch's `F.cross_entropy(x, [1, -100, 2])` on the same logits.
 #[test]
 fn softmax_ce_ignore_matches_pytorch() {

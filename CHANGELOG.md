@@ -53,6 +53,16 @@ ships in 0.4.2.
   `warmup`, `min.lr` and `accum` (gradient accumulation, on
   `Trainer::train_step_parts`) in `llm.train` and `llm.finetune`. `llm.train`
   on a BPE model also stopped ignoring `llm.new(lr =)` on its first call.
+- **LoRA, written natively** (`r2_train::lora`; no PEFT, no Python).
+  `llm.lora(m, rank =, alpha =, targets =)` freezes the model and adds low-rank
+  adapters; `B` starts at zero, so training begins exactly at the base. Only the
+  adapters take gradients and Adam state, and checkpoints hold only them.
+  `llm.save.adapter` writes a small file that applies to its own base
+  (`llm.load.adapter` refuses another by fingerprint); `llm.save` writes a whole
+  model with them merged, which the serving code runs unchanged. Adapter
+  gradients are checked against finite differences; served logits against the
+  tape's. Fine-tuning starts from R2's own models: there is no importer for
+  other projects' weights. `samples/llm/finetune.r2` is the whole recipe.
 
 ### `r2 --ide`: R2 as the engine of a separate IDE — 2026-11-01
 

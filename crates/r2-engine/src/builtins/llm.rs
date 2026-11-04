@@ -81,7 +81,7 @@ pub(super) fn with_registry<R>(f: impl FnOnce(&mut HashMap<u32, Slot>) -> R) -> 
     f(g.get_or_insert_with(HashMap::new))
 }
 
-fn insert(slot: Slot) -> u32 {
+pub(super) fn insert(slot: Slot) -> u32 {
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     with_registry(|r| r.insert(id, slot));
     id
@@ -211,7 +211,7 @@ pub(crate) fn bi_llm_save(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 
 /// The tokenizer saved beside a model. Only a pure byte-level model can do
 /// without one; any other would decode its ids against the wrong table.
-fn load_tokenizer(dir: &str, cfg: &Config) -> Result<Tokenizer, String> {
+pub(super) fn load_tokenizer(dir: &str, cfg: &Config) -> Result<Tokenizer, String> {
     let path = std::path::Path::new(dir).join(TOKENIZER_FILE);
     match std::fs::read_to_string(&path) {
         Ok(src) => Tokenizer::from_tokenizer_json(&src),

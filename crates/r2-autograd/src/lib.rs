@@ -42,6 +42,8 @@ pub struct Var(pub usize);
 enum Op {
     Leaf,
     Add(Var, Var),
+    /// `x * s` for a constant `s`.
+    Scale(Var, f32),
     Mul(Var, Var),
     MatMul { a: Var, b: Var, m: usize, k: usize, n: usize },
     /// Token embedding: row `tokens[i]` of a `vocab x d` table becomes row
@@ -257,7 +259,7 @@ impl Op {
     /// Short kind name, for the in-situ backward census.
     fn kind(&self) -> &'static str {
         match self {
-            Op::Leaf => "leaf", Op::Add(..) => "add", Op::Mul(..) => "mul",
+            Op::Leaf => "leaf", Op::Add(..) => "add", Op::Scale(..) => "scale", Op::Mul(..) => "mul",
             Op::Embed { .. } => "embed", Op::MatMul { .. } => "matmul", Op::Silu(..) => "silu",
             Op::Rmsnorm { .. } => "rmsnorm", Op::Transpose { .. } => "transpose", Op::Rope { .. } => "rope",
             Op::SliceRows { .. } | Op::ConcatRows { .. } | Op::SliceCols { .. } | Op::ConcatCols { .. } => "slice/concat",

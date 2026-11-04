@@ -90,6 +90,39 @@ fn a_frozen_block_does_not_train() {
 }
 
 #[test]
+fn lora_trains_small_adapters_and_they_travel_two_ways() {
+    let dir = std::env::temp_dir().join(format!("r2_llm_lora_{}", std::process::id()));
+    let d = dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    let script = format!(
+        "{MODEL}{EXAMPLES}invisible(llm.save(m, \"{d}/base\"))\n\
+         a <- llm.load(\"{d}/base\", train = TRUE, lr = 0.01)\n\
+         n <- llm.lora(a, rank = 4, alpha = 8)\n\
+         invisible(llm.finetune(a, p, q, steps = 250, batch = 2, seq = 16))\n\
+         x <- llm.generate(a, \"japan:\", n = 6)\n\
+         invisible(llm.save.adapter(a, \"{d}/adapter\"))\n\
+         invisible(llm.save(a, \"{d}/merged\"))\n\
+         y <- llm.generate(llm.load.adapter(\"{d}/base\", \"{d}/adapter\"), \"japan:\", n = 6)\n\
+         z <- llm.generate(llm.load(\"{d}/merged\"), \"japan:\", n = 6)\n\
+         paste0(n, \"|\", x, \"|\", y, \"|\", z)\n");
+    let out = text(&run(&script));
+    let v: Vec<&str> = out.split('|').collect();
+    assert!(v[0].parse::<f64>().unwrap() > 0.0, "{out}");
+    assert_eq!(v[1], " tokyo", "adapters must teach the completion: {out}");
+    assert_eq!(v[1], v[2], "base + adapter file must generate the same");
+    assert_eq!(v[1], v[3], "and so must the merged model");
+
+    // the base is untouched, and the adapter file is much smaller than it
+    let size = |sub: &str, f: &str| std::fs::metadata(dir.join(sub).join(f)).unwrap().len();
+    assert!(size("adapter", "adapter.safetensors") * 3 < size("base", "model.safetensors"));
+
+    // another base is refused by name
+    let other = format!("{MODEL}invisible(llm.train(m, \"changing the weights of this model now\", steps = 2, seq = 8, batch = 2))\n\
+                         invisible(llm.save(m, \"{d}/other\"))\nllm.load.adapter(\"{d}/other\", \"{d}/adapter\")\n");
+    assert!(run_err(&other).contains("different base"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn bad_examples_are_refused_by_name() {
     assert!(run_err(&format!("{MODEL}llm.finetune(m, c(\"a\", \"b\"), \"c\")")).contains("2 prompts but 1"));
     assert!(run_err(&format!("{MODEL}llm.finetune(m, \"\", \"c\")")).contains("example 1: empty prompt"));

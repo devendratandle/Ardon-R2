@@ -108,6 +108,13 @@ impl Tape {
     fn adjoint(&mut self, i: usize, op: &Op, g: &[f32]) {
         match op {
             Op::Leaf => {}
+            Op::Scale(x, s) => {
+                let (xi, s) = (x.0, *s);
+                let assign = first_write(&mut self.gwritten, xi);
+                for (d, gi) in self.grads[xi].iter_mut().zip(g) {
+                    if assign { *d = gi * s; } else { *d += gi * s; }
+                }
+            }
             Op::Add(a, b) => self.bwd_add(a.0, b.0, g),
             Op::Mul(a, b) => self.bwd_mul(a.0, b.0, g),
             Op::Embed { table, tokens, d } => self.bwd_embed(table.0, tokens, *d, g),

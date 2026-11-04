@@ -19,6 +19,15 @@ impl Tape {
     // splitting changes the summation order — which is why those need the
     // fixed-chain treatment in `r2_tensor::ops` instead.
 
+    /// `x * s` for a constant `s`.
+    pub fn scale(&mut self, x: Var, s: f32) -> Var {
+        let n = self.vals[x.0].len();
+        let mut val = self.alloc(n);
+        for (d, v) in val.iter_mut().zip(&self.vals[x.0]) { *d = v * s; }
+        let req = self.requires[x.0];
+        self.push(val, Op::Scale(x, s), req)
+    }
+
     pub fn add(&mut self, a: Var, b: Var) -> Var {
         let n = self.vals[a.0].len();
         let mut val = self.alloc(n);

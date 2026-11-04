@@ -136,6 +136,9 @@ impl GpuTrainer {
         // The device Adam has no decay pass and the step no norm
         // reduction yet. Refuse rather than train a different recipe
         // than the CPU half would.
+        if !tr.frozen.is_empty() || tr.lora.is_some() {
+            return Err("frozen blocks and LoRA adapters are not implemented on the GPU path yet (CPU only)".into());
+        }
         if tr.opt.weight_decay != 0.0 {
             return Err("weight decay is not implemented on the GPU path yet (CPU only)".into());
         }

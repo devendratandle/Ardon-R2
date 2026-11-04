@@ -30,6 +30,7 @@ pub mod checkpoint;
 pub mod tokens;
 pub mod data;
 pub mod resume;
+pub mod lora;
 pub mod transformer;
 pub mod distributed;
 

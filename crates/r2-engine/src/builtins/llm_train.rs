@@ -14,8 +14,8 @@ use r2_train::llm::Trainer;
 use r2_train::optim::LrSchedule;
 use r2_types::*;
 
-use super::llm::{as_num, bool_arg, handle, num_arg, str_arg, tokenizer_for, with_registry,
-                 with_tokenizers, Slot, TOKENIZER_FILE};
+use super::llm::{as_num, bool_arg, handle, insert, load_tokenizer, num_arg, str_arg, tokenizer_for,
+                 with_registry, with_tokenizers, Slot, TOKENIZER_FILE};
 use crate::{err, gn, gv, Engine};
 
 fn fail(ctx: &str, e: impl std::fmt::Display) -> R2Err {
@@ -213,6 +213,54 @@ pub(crate) fn bi_llm_finetune(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
     let set = PairSet::new(&pairs, seq + 1, 0).map_err(|e| fail(ctx, e))?;
     let order = order_arg(a, true);
     run_steps(ctx, id, &settings, &tok, |step| set.at(batch, step, order))
+}
+
+/// `llm.lora(model, rank=8, alpha=2*rank, targets=)` — freeze the model and
+/// add low-rank adapters. Returns how many values now train.
+pub(crate) fn bi_llm_lora(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let ctx = "llm.lora";
+    let id = handle(&gv(a, 0))?;
+    let rank = num_arg(a, "rank", 8.0) as usize;
+    let alpha = num_arg(a, "alpha", 2.0 * rank as f64) as f32;
+    let names = gn(a, "targets").map(|v| strings(ctx, &v)).transpose()?;
+    let refs: Option<Vec<&str>> = names.as_ref().map(|n| n.iter().map(String::as_str).collect());
+    let seed = num_arg(a, "seed", 42.0) as u64;
+    with_registry(|r| match r.get_mut(&id) {
+        Some(Slot::Training(t)) => t.enable_lora(rank, alpha, refs.as_deref(), seed)
+            .map(|n| as_num(n as f64)).map_err(|e| fail(ctx, e)),
+        Some(Slot::Serving(_)) => err!(Runtime, "{}: this handle is serving only; \
+                                                 use llm.load(dir, train = TRUE)", ctx),
+        None => err!(Runtime, "{}: unknown model handle {}", ctx, id),
+    })
+}
+
+/// `llm.save.adapter(model, dir)` — write only the adapters. A small file
+/// that applies to the model they were trained on. `llm.save` writes the
+/// whole model with them merged in.
+pub(crate) fn bi_llm_save_adapter(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let ctx = "llm.save.adapter";
+    let id = handle(&gv(a, 0))?;
+    let dir = str_arg(&gv(a, 1))?;
+    with_registry(|r| match r.get(&id) {
+        Some(Slot::Training(t)) => t.save_adapter(&dir).map_err(|e| fail(ctx, e)),
+        Some(Slot::Serving(_)) => err!(Runtime, "{}: this handle has no adapters", ctx),
+        None => err!(Runtime, "{}: unknown model handle {}", ctx, id),
+    })?;
+    Ok(RVal::Character(vec![Some(std::sync::Arc::from(dir.as_str()))], Attrs::default()))
+}
+
+/// `llm.load.adapter(base, adapter, lr=)` — the model saved in `base` with the
+/// adapters saved in `adapter`, as a handle to generate from or keep training.
+/// Refuses a base the adapters were not trained on.
+pub(crate) fn bi_llm_load_adapter(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let ctx = "llm.load.adapter";
+    let (base, adapter) = (str_arg(&gv(a, 0))?, str_arg(&gv(a, 1))?);
+    let m = r2_tensor::model::Model::load_dir(&base).map_err(|e| fail(ctx, e))?;
+    let tok = load_tokenizer(&base, &m.cfg).map_err(|e| fail(ctx, e))?;
+    let t = Trainer::with_adapter(m, num_arg(a, "lr", 3e-4) as f32, &adapter).map_err(|e| fail(ctx, e))?;
+    let id = insert(Slot::Training(Box::new(t)));
+    with_tokenizers(|m| m.insert(id, tok));
+    Ok(as_num(id as f64))
 }
 
 /// `llm.freeze(model, blocks)` — stop training every block whose name starts

@@ -37,6 +37,8 @@ pub struct Trainer {
     pub(crate) frozen: Vec<bool>,
     /// `fingerprint_frozen`, computed once: frozen weights do not change.
     pub(crate) frozen_fp: u64,
+    /// Low-rank adapters, stored as blocks after the base ones (`crate::lora`).
+    pub lora: Option<crate::lora::Lora>,
 }
 
 /// Σ g² over every gradient block, in f64.
@@ -58,7 +60,7 @@ fn global_sq_norm(grads: &[&[f32]]) -> f64 {
 }
 
 /// Per-layer parameter blocks, in the order they are stored.
-const PER_LAYER: [&str; 9] =
+pub(crate) const PER_LAYER: [&str; 9] =
     ["attn_norm", "wq", "wk", "wv", "wo", "ffn_norm", "w1", "w2", "w3"];
 
 impl Trainer {
@@ -100,7 +102,7 @@ impl Trainer {
         let total: usize = shapes.iter().sum();
         let opt = Adam::new(total, lr);
         Ok(Trainer { cfg, params, opt, step: 0, pool: r2_autograd::BufPool::new(),
-                     sched: None, clip: None, last_grad_norm: None, frozen: Vec::new(), frozen_fp: 0 })
+                     sched: None, clip: None, last_grad_norm: None, frozen: Vec::new(), frozen_fp: 0, lora: None })
     }
 
     /// The shell a checkpoint or a saved model fills in: no weights, no
@@ -109,7 +111,7 @@ impl Trainer {
         cfg.validate()?;
         let params = vec![Vec::new(); Self::block_shapes(&cfg).len()];
         Ok(Trainer { cfg, params, opt: Adam::new(0, 0.0), step: 0, pool: r2_autograd::BufPool::new(),
-                     sched: None, clip: None, last_grad_norm: None, frozen: Vec::new(), frozen_fp: 0 })
+                     sched: None, clip: None, last_grad_norm: None, frozen: Vec::new(), frozen_fp: 0, lora: None })
     }
 
     /// Total trainable parameters — equals `Config::n_params`.
@@ -125,7 +127,8 @@ impl Trainer {
     /// Which blocks AdamW decays: every matrix (embeddings and output head
     /// included, as GPT-2 and nanoGPT do), never a norm gain.
     pub fn decay_mask(&self) -> Vec<bool> {
-        (0..self.params.len()).map(|i| !Self::is_norm_block(i)).collect()
+        let base = Self::block_shapes(&self.cfg).len();
+        (0..self.params.len()).map(|i| i >= base || !Self::is_norm_block(i)).collect()
     }
 
     /// Forward one sequence through the tape, returning the logits var.
@@ -168,9 +171,9 @@ impl Trainer {
 
             // ── Attention ──
             let h = tape.rmsnorm(x, b(0), d, c.eps);
-            let q = tape.matmul(h, b(1), t, d, d);
-            let k = tape.matmul(h, b(2), t, d, kv);
-            let v = tape.matmul(h, b(3), t, d, kv);
+            let q = self.project(tape, leaves, h, l, 1, t, d, d);
+            let k = self.project(tape, leaves, h, l, 2, t, d, kv);
+            let v = self.project(tape, leaves, h, l, 3, t, d, kv);
             // Positions restart at each sequence boundary.
             let q = tape.rope_seq(q, t, seq, c.n_heads, hd, c.rope_base);
             let k = tape.rope_seq(k, t, seq, c.n_kv_heads, hd, c.rope_base);
@@ -191,21 +194,35 @@ impl Trainer {
             let seq_eff = if seq == 0 { t } else { seq };
             let ctx = tape.attention(q, k, v, nseq, seq_eff, c.n_heads, c.n_kv_heads,
                                      hd, 1.0 / (hd as f32).sqrt());
-            let o = tape.matmul(ctx, b(4), t, d, d);
+            let o = self.project(tape, leaves, ctx, l, 4, t, d, d);
             x = tape.add(x, o);
 
             // ── SwiGLU FFN ──
             let h2 = tape.rmsnorm(x, b(5), d, c.eps);
-            let gate = tape.matmul(h2, b(6), t, d, c.ffn_hidden);
-            let up = tape.matmul(h2, b(8), t, d, c.ffn_hidden);
+            let gate = self.project(tape, leaves, h2, l, 6, t, d, c.ffn_hidden);
+            let up = self.project(tape, leaves, h2, l, 8, t, d, c.ffn_hidden);
             let act = tape.silu(gate);
             let gated = tape.mul(act, up);
-            let down = tape.matmul(gated, b(7), t, c.ffn_hidden, d);
+            let down = self.project(tape, leaves, gated, l, 7, t, c.ffn_hidden, d);
             x = tape.add(x, down);
         }
 
         let xn = tape.rmsnorm(x, leaves[1], d, c.eps);
         tape.matmul(xn, leaves[2], t, d, c.vocab)
+    }
+
+    /// `x W` for per-layer block `part`, plus the adapter's low-rank term
+    /// when the block has one. Without adapters this is the plain matmul.
+    #[allow(clippy::too_many_arguments)]
+    fn project(&self, tape: &mut Tape, leaves: &[Var], x: Var, l: usize, part: usize,
+               rows: usize, k: usize, n: usize) -> Var {
+        let y = tape.matmul(x, leaves[self.layer_block(l, part)], rows, k, n);
+        let Some(lora) = &self.lora else { return y };
+        let Some((a, b)) = lora.blocks(&self.cfg, l, part) else { return y };
+        let low = tape.matmul(x, leaves[a], rows, k, lora.rank);
+        let delta = tape.matmul(low, leaves[b], rows, lora.rank, n);
+        let delta = tape.scale(delta, lora.scale());
+        tape.add(y, delta)
     }
 
     /// Census hook: the fused forward, so `--example step_census` can build
@@ -515,7 +532,7 @@ impl Trainer {
         m.final_norm = self.params[1].clone();
         m.output = self.params[2].clone();
         for l in 0..c.n_layers {
-            let g = |p: usize| self.params[self.layer_block(l, p)].clone();
+            let g = |p: usize| self.merged_block(l, p).unwrap_or_else(|| self.params[self.layer_block(l, p)].clone());
             m.layers[l] = Layer {
                 attn_norm: g(0), wq: g(1), wk: g(2), wv: g(3), wo: g(4),
                 ffn_norm: g(5), w1: g(6), w2: g(7), w3: g(8),
@@ -531,6 +548,7 @@ impl Trainer {
         for l in 0..self.cfg.n_layers {
             for p in PER_LAYER { v.push(format!("layer.{l}.{p}")); }
         }
+        if let Some(lora) = &self.lora { v.extend(crate::lora::adapter_names(lora, &self.cfg)); }
         v
     }
 }
