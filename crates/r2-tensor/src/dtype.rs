@@ -7,6 +7,38 @@
 //! compute path. f32 is the compute/accuracy reference for the whole
 //! neural path (statistics stay f64 elsewhere — never mixed).
 
+/// `v` as the little-endian bytes every R2 file holds. No copy on a
+/// little-endian CPU, so writing a tensor costs one memory pass, not a
+/// conversion per element.
+pub fn f32_le_bytes(v: &[f32]) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(target_endian = "little")]
+    // SAFETY: any f32 is valid to read as 4 bytes; u8 has no alignment needs.
+    return std::borrow::Cow::Borrowed(unsafe {
+        std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v))
+    });
+    #[cfg(target_endian = "big")]
+    std::borrow::Cow::Owned(v.iter().flat_map(|x| x.to_le_bytes()).collect())
+}
+
+/// Little-endian bytes back to f32s, at any alignment (a trailing partial
+/// value is ignored). One bulk copy on a little-endian CPU.
+pub fn f32s_from_le(b: &[u8]) -> Vec<f32> {
+    let n = b.len() / 4;
+    #[cfg(target_endian = "little")]
+    {
+        let mut v = Vec::<f32>::with_capacity(n);
+        // SAFETY: the capacity holds `n * 4` bytes, the regions are distinct
+        // allocations, and every bit pattern is a valid f32.
+        unsafe {
+            std::ptr::copy_nonoverlapping(b.as_ptr(), v.as_mut_ptr() as *mut u8, n * 4);
+            v.set_len(n);
+        }
+        v
+    }
+    #[cfg(target_endian = "big")]
+    b.chunks_exact(4).take(n).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+}
+
 /// bf16 → f32: bf16 is just the top 16 bits of an f32, so widening is a
 /// bit-shift. Exact (bf16 values are a subset of f32).
 #[inline]

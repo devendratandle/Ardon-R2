@@ -301,6 +301,18 @@ fn main() {
     let clip: f32 = env("R2_CLIP", 0.0f32);
     if clip > 0.0 { tr.clip = Some(clip); }
     tr.opt.weight_decay = env("R2_WD", 0.0f32);
+    // R2_CKPT_DIR=dir: continue from the newest checkpoint there (its own
+    // settings win), and save one every R2_CKPT_EVERY steps, keeping the
+    // newest R2_CKPT_KEEP (default 3). Off by default.
+    let ckpt_dir = std::env::var("R2_CKPT_DIR").ok();
+    let ckpt_every: usize = env("R2_CKPT_EVERY", 0usize);
+    let ckpt_keep: usize = env("R2_CKPT_KEEP", 3usize);
+    if let Some(d) = &ckpt_dir {
+        if let Some(t) = Trainer::resume_latest(d).unwrap_or_else(|e| die("resume", e)) {
+            println!("  resumed    step {} from {d}", t.step);
+            tr = t;
+        }
+    }
     assert_eq!(tr.n_params(), cfg.n_params(), "trainer and config disagree on size");
     println!("  model      {:.2}M parameters, dim {} x {} layers, ffn {}, {} q / {} kv heads",
              cfg.n_params() as f64 / 1e6, cfg.dim, cfg.n_layers, cfg.ffn_hidden,
@@ -336,9 +348,9 @@ fn main() {
     // The initial weights, so the other side starts from this exact point
     // rather than from its own RNG.
     let names = tr.block_names();
-    for (i, p) in tr.params.iter().enumerate() {
+    if tr.step == 0 { for (i, p) in tr.params.iter().enumerate() {
         write_f32(&format!("{OUT}/init_{i}.bin"), p);
-    }
+    } }
 
     // ── held-out set: fixed, and never trained on ───────────────────────
     let val: Vec<(Vec<usize>, Vec<usize>)> =
@@ -374,7 +386,7 @@ fn main() {
     let t0 = std::time::Instant::now();
     let mut first = 0.0f32;
     let mut last = 0.0f32;
-    for s in 0..steps {
+    for s in tr.step as usize..steps {
         let batch = batch_at(&train, s, bn, seq);
         #[cfg(feature = "gpu")]
         let loss = match gpu_tr.as_mut() {
@@ -383,7 +395,16 @@ fn main() {
         };
         #[cfg(not(feature = "gpu"))]
         let loss = tr.train_step(&batch).unwrap_or_else(|e| die("train_step", e));
-        if s == 0 { first = loss; }
+        if first == 0.0 { first = loss; }
+        if ckpt_every > 0 && (s + 1) % ckpt_every == 0 {
+            if let Some(d) = &ckpt_dir {
+                #[cfg(feature = "gpu")]
+                if let Some(g) = &gpu_tr { g.download_into(&mut tr); }
+                let t = std::time::Instant::now();
+                let p = tr.save_checkpoint(d, ckpt_keep).unwrap_or_else(|e| die("checkpoint", e));
+                println!("  checkpoint {} in {:.0} ms", p.display(), t.elapsed().as_secs_f64() * 1e3);
+            }
+        }
         last = loss;
         if s == 0 || (s + 1) % every == 0 {
             curve.push((s + 1, loss));

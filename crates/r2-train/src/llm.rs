@@ -99,6 +99,15 @@ impl Trainer {
                      sched: None, clip: None, last_grad_norm: None })
     }
 
+    /// The shell a checkpoint or a saved model fills in: no weights, no
+    /// random draws to discard.
+    pub(crate) fn empty(cfg: Config) -> Result<Trainer, String> {
+        cfg.validate()?;
+        let params = vec![Vec::new(); Self::block_shapes(&cfg).len()];
+        Ok(Trainer { cfg, params, opt: Adam::new(0, 0.0), step: 0, pool: r2_autograd::BufPool::new(),
+                     sched: None, clip: None, last_grad_norm: None })
+    }
+
     /// Total trainable parameters — equals `Config::n_params`.
     pub fn n_params(&self) -> usize { self.params.iter().map(|p| p.len()).sum() }
 

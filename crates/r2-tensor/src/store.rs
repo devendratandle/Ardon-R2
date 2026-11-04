@@ -84,21 +84,21 @@ impl Model {
 
         let c = &self.cfg;
         let (d, kv, h) = (c.dim, c.kv_dim(), c.ffn_hidden);
-        let mut tensors: Vec<(String, Vec<usize>, Vec<f32>)> = vec![
-            ("tok_embed".into(), vec![c.vocab, d], self.tok_embed.clone()),
-            ("final_norm".into(), vec![d], self.final_norm.clone()),
-            ("output".into(), vec![d, c.vocab], self.output.clone()),
+        let mut tensors: Vec<(String, Vec<usize>, &[f32])> = vec![
+            ("tok_embed".into(), vec![c.vocab, d], &self.tok_embed),
+            ("final_norm".into(), vec![d], &self.final_norm),
+            ("output".into(), vec![d, c.vocab], &self.output),
         ];
         for (i, l) in self.layers.iter().enumerate() {
-            tensors.push((layer_key(i, "attn_norm"), vec![d], l.attn_norm.clone()));
-            tensors.push((layer_key(i, "ffn_norm"), vec![d], l.ffn_norm.clone()));
-            tensors.push((layer_key(i, "wq"), vec![d, d], l.wq.clone()));
-            tensors.push((layer_key(i, "wk"), vec![d, kv], l.wk.clone()));
-            tensors.push((layer_key(i, "wv"), vec![d, kv], l.wv.clone()));
-            tensors.push((layer_key(i, "wo"), vec![d, d], l.wo.clone()));
-            tensors.push((layer_key(i, "w1"), vec![d, h], l.w1.clone()));
-            tensors.push((layer_key(i, "w2"), vec![h, d], l.w2.clone()));
-            tensors.push((layer_key(i, "w3"), vec![d, h], l.w3.clone()));
+            tensors.push((layer_key(i, "attn_norm"), vec![d], &l.attn_norm));
+            tensors.push((layer_key(i, "ffn_norm"), vec![d], &l.ffn_norm));
+            tensors.push((layer_key(i, "wq"), vec![d, d], &l.wq));
+            tensors.push((layer_key(i, "wk"), vec![d, kv], &l.wk));
+            tensors.push((layer_key(i, "wv"), vec![d, kv], &l.wv));
+            tensors.push((layer_key(i, "wo"), vec![d, d], &l.wo));
+            tensors.push((layer_key(i, "w1"), vec![d, h], &l.w1));
+            tensors.push((layer_key(i, "w2"), vec![h, d], &l.w2));
+            tensors.push((layer_key(i, "w3"), vec![d, h], &l.w3));
         }
 
         safetensors::save(dir.join(WEIGHTS_FILE), &tensors)?;

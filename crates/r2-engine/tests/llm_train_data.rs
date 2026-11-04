@@ -105,3 +105,45 @@ fn a_saved_model_generates_the_same_text_after_loading() {
     assert!(err.msg.contains("tokenizer"), "{}", err.msg);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const SMALL: &str = "vocab = 256, dim = 16, layers = 1, heads = 2, ffn = 32, ctx = 16, seed = 42";
+
+#[test]
+fn a_resumed_script_run_is_the_run_it_continues() {
+    let t = "the quick brown fox jumps over the lazy dog and runs away. ".repeat(5);
+    let dir = std::env::temp_dir().join(format!("r2_llm_resume_{}", std::process::id()));
+    let d = dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    let whole = scalar(&run(&format!(
+        "m <- llm.new({SMALL})\nllm.train(m, \"{t}\", steps = 10, seq = 8, batch = 2)\n")));
+    run(&format!("m <- llm.new({SMALL})\ninvisible(llm.train(m, \"{t}\", steps = 4, seq = 8, batch = 2, \
+                  checkpoint = \"{d}\", every = 2, keep = 1))\n"));
+    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(files.iter().filter(|f| f.to_string_lossy().ends_with(".ckpt")).count(), 1, "keep = 1: {files:?}");
+    let resumed = scalar(&run(&format!(
+        "m <- llm.resume(\"{d}\")\nllm.train(m, \"{t}\", steps = 6, seq = 8, batch = 2)\n")));
+    assert_eq!(whole, resumed, "4 steps + a process boundary + 6 steps must be 10 steps");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_saved_model_can_be_fine_tuned_and_a_serving_handle_says_how() {
+    let t = "the quick brown fox jumps over the lazy dog and runs away. ".repeat(5);
+    let dir = std::env::temp_dir().join(format!("r2_llm_tune_{}", std::process::id()));
+    let d = dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    let script = format!(
+        "m <- llm.new({SMALL})\na <- llm.train(m, \"{t}\", steps = 30, seq = 8, batch = 4)\n\
+         invisible(llm.save(m, \"{d}\"))\n\
+         s <- llm.load(\"{d}\", train = TRUE, lr = 0.001)\n\
+         b <- llm.train(s, \"{t}\", steps = 1, seq = 8, batch = 4)\n\
+         c(a, b)\n");
+    let v = run(&script);
+    let RVal::Numeric(x, _) = &v else { panic!("{v:?}") };
+    let (a, b) = (x[0].unwrap(), x[1].unwrap());
+    // starting from the trained weights, not from random ones (ln 256 = 5.5)
+    assert!(b < 4.0, "fine-tuning restarted from scratch: {a} then {b}");
+    let mut e = Engine::new();
+    for ex in Parser::parse(&format!("s <- llm.load(\"{d}\")")).unwrap() { e.eval(&ex).unwrap(); }
+    let call = Parser::parse(&format!("llm.train(s, \"{t}\", steps = 1, seq = 8, batch = 4)")).unwrap();
+    assert!(e.eval(&call[0]).unwrap_err().msg.contains("train = TRUE"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -20,13 +20,13 @@
 //! even a corrupted newest one is recoverable.
 //!
 //! **Cost.** Weights are the small part: Adam adds two f32s per
-//! parameter, so a resumable checkpoint is ~3× the weight size. Written
-//! on a background thread it need not stall compute at all — there is no
-//! GC and no stop-the-world pause to schedule around.
+//! parameter, so a resumable checkpoint is ~3× the weight size on disk. In
+//! memory it costs a 64 KB write buffer: tensors are written from where they
+//! already live ([`save_parts`]) and read through a memory map.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::optim::Adam;
@@ -113,23 +113,21 @@ impl Checkpoint {
     /// between machines unchanged.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(self.size_bytes() + 256);
-        b.extend_from_slice(MAGIC);
-        b.extend_from_slice(&VERSION.to_le_bytes());
-        b.extend_from_slice(&self.step.to_le_bytes());
-        b.extend_from_slice(&(self.tensors.len() as u32).to_le_bytes());
-        for (name, data) in &self.tensors {
-            b.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            b.extend_from_slice(name.as_bytes());
-            b.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            for x in data { b.extend_from_slice(&x.to_le_bytes()); }
-        }
-        b.extend_from_slice(&(self.scalars.len() as u32).to_le_bytes());
-        for (name, v) in &self.scalars {
-            b.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            b.extend_from_slice(name.as_bytes());
-            b.extend_from_slice(&v.to_le_bytes());
-        }
+        let (t, s) = self.parts();
+        write_parts(&mut b, self.step, &t, &s).expect("writing to memory cannot fail");
         b
+    }
+
+    /// Borrowed views of the contents, for [`write_parts`].
+    fn parts(&self) -> (Vec<(&str, &[f32])>, Vec<(&str, f64)>) {
+        (self.tensors.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect(),
+         self.scalars.iter().map(|(n, v)| (n.as_str(), *v)).collect())
+    }
+
+    /// Take a tensor out, for rebuilding a trainer without copying it.
+    pub fn take_tensor(&mut self, name: &str) -> Result<Vec<f32>, String> {
+        self.tensors.remove(name)
+            .ok_or_else(|| format!("checkpoint: missing tensor '{}'", name))
     }
 
     /// Parse bytes. Every length is checked against what remains, so a
@@ -150,9 +148,10 @@ impl Checkpoint {
         for _ in 0..n_t {
             let name = r.string()?;
             let len = r.u64()? as usize;
-            let mut data = Vec::with_capacity(len.min(1 << 20));
-            for _ in 0..len { data.push(r.f32()?); }
-            c.tensors.insert(name, data);
+            // Checked against the bytes present before anything is
+            // allocated, so a corrupt length cannot ask for terabytes.
+            let bytes = len.checked_mul(4).ok_or("checkpoint: tensor length overflows")?;
+            c.tensors.insert(name, r2_tensor::dtype::f32s_from_le(r.take(bytes)?));
         }
         let n_s = r.u32()? as usize;
         for _ in 0..n_s {
@@ -169,46 +168,100 @@ impl Checkpoint {
     /// write cannot damage the previous checkpoint, because the rename is
     /// the only moment the new one becomes visible.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let path = path.as_ref();
-        if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() {
-                fs::create_dir_all(dir).map_err(|e| format!("checkpoint: {}", e))?;
-            }
-        }
-        let tmp = path.with_extension("tmp");
-        {
-            let mut f = fs::File::create(&tmp)
-                .map_err(|e| format!("checkpoint: create {}: {}", tmp.display(), e))?;
-            f.write_all(&self.to_bytes()).map_err(|e| format!("checkpoint: write: {}", e))?;
-            f.sync_all().map_err(|e| format!("checkpoint: sync: {}", e))?;
-        }
-        fs::rename(&tmp, path).map_err(|e| format!("checkpoint: commit: {}", e))
+        let (t, s) = self.parts();
+        save_parts(path, self.step, &t, &s)
     }
 
+    /// Read a checkpoint through a memory map: the tensors are the only copy
+    /// on the heap, where reading the file first would hold two.
     pub fn load(path: impl AsRef<Path>) -> Result<Checkpoint, String> {
-        let mut f = fs::File::open(path.as_ref())
+        let f = fs::File::open(path.as_ref())
             .map_err(|e| format!("checkpoint: open {}: {}", path.as_ref().display(), e))?;
-        let mut b = Vec::new();
-        f.read_to_end(&mut b).map_err(|e| format!("checkpoint: read: {}", e))?;
-        Checkpoint::from_bytes(&b)
+        // SAFETY: mapped read-only and parsed before this function returns;
+        // a checkpoint file is written once, by rename, and never truncated.
+        let map = unsafe { memmap2::Mmap::map(&f) }
+            .map_err(|e| format!("checkpoint: map: {}", e))?;
+        Checkpoint::from_bytes(&map)
     }
 
     /// Save as `dir/step-<n>.ckpt`, keeping only the newest `keep`.
-    /// Rotation matters: if only one checkpoint existed and it were
-    /// corrupted by a bad disk, the run would be unrecoverable.
     pub fn save_rotating(&self, dir: impl AsRef<Path>, keep: usize) -> Result<PathBuf, String> {
-        let dir = dir.as_ref();
-        let path = dir.join(format!("step-{:09}.ckpt", self.step));
-        self.save(&path)?;
-        if keep > 0 {
-            let mut found = list_checkpoints(dir)?;
-            while found.len() > keep {
-                let (_, oldest) = found.remove(0);
-                let _ = fs::remove_file(oldest); // best effort; never fatal
-            }
-        }
-        Ok(path)
+        let (t, s) = self.parts();
+        save_parts_rotating(dir, self.step, keep, &t, &s)
     }
+}
+
+/// The file format, from borrowed tensors: a resumable checkpoint of a live
+/// trainer costs no memory beyond a write buffer, where building a
+/// [`Checkpoint`] and its bytes first held the model three times over. Sorted
+/// by name, so the same contents always make the same bytes.
+fn write_parts(w: &mut impl Write, step: u64, tensors: &[(&str, &[f32])], scalars: &[(&str, f64)])
+    -> std::io::Result<()>
+{
+    let mut t: Vec<_> = tensors.iter().collect();
+    t.sort_by_key(|(n, _)| *n);
+    let mut s: Vec<_> = scalars.iter().collect();
+    s.sort_by_key(|(n, _)| *n);
+    w.write_all(MAGIC)?;
+    w.write_all(&VERSION.to_le_bytes())?;
+    w.write_all(&step.to_le_bytes())?;
+    w.write_all(&(t.len() as u32).to_le_bytes())?;
+    for (name, data) in t {
+        w.write_all(&(name.len() as u32).to_le_bytes())?;
+        w.write_all(name.as_bytes())?;
+        w.write_all(&(data.len() as u64).to_le_bytes())?;
+        w.write_all(&r2_tensor::dtype::f32_le_bytes(data))?;
+    }
+    w.write_all(&(s.len() as u32).to_le_bytes())?;
+    for (name, v) in s {
+        w.write_all(&(name.len() as u32).to_le_bytes())?;
+        w.write_all(name.as_bytes())?;
+        w.write_all(&v.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// Write a checkpoint atomically from borrowed tensors: temp file → flush →
+/// rename. See [`Checkpoint::save`].
+pub fn save_parts(path: impl AsRef<Path>, step: u64, tensors: &[(&str, &[f32])], scalars: &[(&str, f64)])
+    -> Result<(), String>
+{
+    let path = path.as_ref();
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            fs::create_dir_all(dir).map_err(|e| format!("checkpoint: {}", e))?;
+        }
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        let f = fs::File::create(&tmp)
+            .map_err(|e| format!("checkpoint: create {}: {}", tmp.display(), e))?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 16, f);
+        write_parts(&mut w, step, tensors, scalars).map_err(|e| format!("checkpoint: write: {}", e))?;
+        let f = w.into_inner().map_err(|e| format!("checkpoint: write: {}", e))?;
+        f.sync_all().map_err(|e| format!("checkpoint: sync: {}", e))?;
+    }
+    fs::rename(&tmp, path).map_err(|e| format!("checkpoint: commit: {}", e))
+}
+
+/// [`save_parts`] as `dir/step-<n>.ckpt`, keeping only the newest `keep`.
+/// Rotation matters: if only one checkpoint existed and it were corrupted by
+/// a bad disk, the run would be unrecoverable.
+pub fn save_parts_rotating(dir: impl AsRef<Path>, step: u64, keep: usize,
+                           tensors: &[(&str, &[f32])], scalars: &[(&str, f64)])
+    -> Result<PathBuf, String>
+{
+    let dir = dir.as_ref();
+    let path = dir.join(format!("step-{:09}.ckpt", step));
+    save_parts(&path, step, tensors, scalars)?;
+    if keep > 0 {
+        let mut found = list_checkpoints(dir)?;
+        while found.len() > keep {
+            let (_, oldest) = found.remove(0);
+            let _ = fs::remove_file(oldest); // best effort; never fatal
+        }
+    }
+    Ok(path)
 }
 
 /// Checkpoints in `dir` as (step, path), oldest first.
@@ -257,9 +310,6 @@ impl<'a> Reader<'a> {
     }
     fn u64(&mut self) -> Result<u64, String> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-    }
-    fn f32(&mut self) -> Result<f32, String> {
-        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
     fn f64(&mut self) -> Result<f64, String> {
         Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))

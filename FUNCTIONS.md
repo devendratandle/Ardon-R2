@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 465 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 466 Built-in Functions and Operators
 
 ## Core (84)
 ```
@@ -528,16 +528,18 @@ readline(prompt)    Block until stdin line is entered; returns character.
                       invisible(readline("Press Enter to continue..."))
 ```
 
-## LLM training & serving (7)
+## LLM training & serving (8)
 ```
 llm.new(dim=128, layers=4, heads=4, kv.heads=heads, ffn=3*dim, vocab=8000, ctx=64, lr=0.003, seed=42)
                     Create a transformer model; returns an integer handle
-llm.train(m, text, steps=50, batch=8, seq=16, report=0, shuffle=FALSE)
+llm.train(m, text, steps=50, batch=8, seq=16, report=0, shuffle=FALSE, checkpoint=NULL, every=steps/10, keep=3)
                     Train handle m on a text (string or file path), walking through all of it; report= prints every n steps
 llm.generate(m, prompt, n=32, temperature=0, top.k=0, seed=1)
                     Generate n tokens from a prompt (temperature 0 = greedy)
 llm.save(m, dir)    Write weights + tokenizer (safetensors + HuggingFace tokenizer.json)
-llm.load(dir)       Load a saved model for serving (no optimizer state); returns a handle
+llm.load(dir, train=FALSE, lr=3e-4)
+                    Load a saved model; returns a handle. train=TRUE starts a new run from its weights (fine-tuning), else serving only
+llm.resume(dir)     Continue a run from the newest llm.train(checkpoint=dir) checkpoint, exactly; returns a handle
 llm.info(m)         Configuration and parameter count of a handle
 llm.free(m)         Release a handle's memory
 ```

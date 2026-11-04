@@ -28,6 +28,18 @@ ships in 0.4.2.
   the model is pure byte-level.
 - New `r2_train::data` (`Batcher`, `Order`): a batch is a function of the step
   index, so a resumed run sees the same data and shuffling stores nothing.
+- **Runs can stop and continue.** `llm.train(..., checkpoint = dir, every =,
+  keep =)` and the new `llm.resume(dir)`; `R2_CKPT_DIR`, `R2_CKPT_EVERY` and
+  `R2_CKPT_KEEP` in `tinystories_train`. Nothing used `r2_train::checkpoint`
+  before. Stopping the 7.24M model at step 50 and resuming to 100 writes the
+  same file as 100 uninterrupted steps (same SHA-256).
+- **`llm.load(dir, train = TRUE, lr =)`** starts a new run from saved weights
+  (`Trainer::from_model`): the starting point of fine-tuning.
+- **Fewer copies, same bytes.** A checkpoint is written from where the tensors
+  live and read through a memory map; it held the model three times over while
+  saving and twice while loading. Tensors are written and read in bulk.
+  `llm.generate` copied the whole model per call and `llm.save` twice; neither
+  copies now (`Trainer::with_model` lends the weights). Files are unchanged.
 
 ### `r2 --ide`: R2 as the engine of a separate IDE — 2026-11-01
 

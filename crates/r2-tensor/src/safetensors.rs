@@ -180,9 +180,7 @@ impl SafeTensors {
         let n = t.numel();
         let mut out = Vec::with_capacity(n);
         match t.dtype {
-            Dtype::F32 => for c in b.chunks_exact(4) {
-                out.push(f32::from_le_bytes(c.try_into().unwrap()));
-            },
+            Dtype::F32 => return Ok(crate::dtype::f32s_from_le(b)),
             Dtype::F16 => for c in b.chunks_exact(2) {
                 out.push(f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())));
             },
@@ -329,7 +327,7 @@ mod tests {
 ///
 /// Writes atomically (temp file → fsync → rename), so an interrupted save
 /// cannot leave a half-written model that loads as garbage.
-pub fn save(path: impl AsRef<Path>, tensors: &[(String, Vec<usize>, Vec<f32>)])
+pub fn save<D: AsRef<[f32]>>(path: impl AsRef<Path>, tensors: &[(String, Vec<usize>, D)])
     -> Result<(), String>
 {
     use std::io::Write;
@@ -337,6 +335,7 @@ pub fn save(path: impl AsRef<Path>, tensors: &[(String, Vec<usize>, Vec<f32>)])
     let mut header = String::from("{");
     let mut offset = 0usize;
     for (i, (name, shape, data)) in tensors.iter().enumerate() {
+        let data = data.as_ref();
         let n: usize = shape.iter().product();
         if n != data.len() {
             return Err(format!(
@@ -367,10 +366,8 @@ pub fn save(path: impl AsRef<Path>, tensors: &[(String, Vec<usize>, Vec<f32>)])
             .and_then(|_| w.write_all(header.as_bytes()))
             .map_err(|e| format!("safetensors::save: header: {}", e))?;
         for (_, _, data) in tensors {
-            for x in data {
-                w.write_all(&x.to_le_bytes())
-                    .map_err(|e| format!("safetensors::save: data: {}", e))?;
-            }
+            w.write_all(&crate::dtype::f32_le_bytes(data.as_ref()))
+                .map_err(|e| format!("safetensors::save: data: {}", e))?;
         }
         let f = w.into_inner().map_err(|e| format!("safetensors::save: flush: {}", e))?;
         f.sync_all().map_err(|e| format!("safetensors::save: sync: {}", e))?;

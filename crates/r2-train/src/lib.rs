@@ -29,6 +29,7 @@ pub mod llm;
 pub mod checkpoint;
 pub mod tokens;
 pub mod data;
+pub mod resume;
 pub mod transformer;
 pub mod distributed;
 

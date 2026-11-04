@@ -64,11 +64,12 @@ impl Slot {
             Slot::Serving(m) => m.cfg,
         }
     }
-    /// A servable model — exported from the trainer if needed.
-    fn model(&self) -> Result<Model, String> {
+    /// Run `f` on a servable model. Nothing is copied: a serving handle
+    /// already is one, and a trainer lends its weights for the call.
+    fn with_model<R>(&mut self, f: impl FnOnce(&Model) -> R) -> R {
         match self {
-            Slot::Training(t) => t.to_model(),
-            Slot::Serving(m) => Ok((**m).clone()),
+            Slot::Training(t) => t.with_model(f),
+            Slot::Serving(m) => f(m),
         }
     }
 }
@@ -238,6 +239,17 @@ pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     };
     let batcher = Batcher { batch: max_batch.min(ids.len() - seq - 1).max(1), seq, order };
 
+    // checkpoint = dir: save every `every` steps and at the end, keeping the
+    // newest `keep`, with the tokenizer beside them for llm.resume.
+    let ckpt = gn(a, "checkpoint").map(|v| str_arg(&v)).transpose()?;
+    let every = num_arg(a, "every", (steps / 10).max(1) as f64) as usize;
+    let keep = num_arg(a, "keep", 3.0) as usize;
+    if let Some(dir) = &ckpt {
+        std::fs::create_dir_all(dir)
+            .and_then(|_| std::fs::write(std::path::Path::new(dir).join(TOKENIZER_FILE), tok.to_tokenizer_json()))
+            .map_err(|e| R2Err { msg: format!("llm.train: checkpoint: {}", e), kind: ErrKind::Runtime })?;
+    }
+
     with_registry(|r| {
         let slot = match r.get_mut(&id) {
             Some(s) => s,
@@ -247,7 +259,7 @@ pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
             Slot::Training(t) => t,
             Slot::Serving(_) => return err!(Runtime,
                 "llm.train: this handle is a loaded model (serving only). \
-                 Create one with llm.new() to train."),
+                 Use llm.load(dir, train = TRUE) to fine-tune it."),
         };
         let mut last = 0.0f32;
         for s in 1..=steps {
@@ -255,6 +267,10 @@ pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
                 .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?;
             if report > 0 && (s % report == 0 || s == 1) {
                 r2_types::out::rout(&format!("step {:>5}  loss {:.4}\n", s, last));
+            }
+            if let Some(dir) = ckpt.as_ref().filter(|_| s % every.max(1) == 0 || s == steps) {
+                t.save_checkpoint(dir, keep)
+                    .map_err(|e| R2Err { msg: format!("llm.train: {}", e), kind: ErrKind::Runtime })?;
             }
         }
         Ok(as_num(last as f64))
@@ -272,11 +288,6 @@ pub(crate) fn bi_llm_generate(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
     let top_k = num_arg(a, "top.k", 0.0) as usize;
     let seed = num_arg(a, "seed", 1.0) as u64;
 
-    let model = with_registry(|r| match r.get(&id) {
-        Some(s) => s.model().map_err(|e| R2Err { msg: format!("llm.generate: {}", e), kind: ErrKind::Runtime }),
-        None => Err(R2Err { msg: format!("llm.generate: unknown model handle {}", id), kind: ErrKind::Runtime }),
-    })?;
-
     // The handle's own tokenizer — see `Toks`. Rebuilding a byte-level one
     // here would decode a BPE model's ids against the wrong table.
     let tok = tokenizer_for(id);
@@ -289,8 +300,10 @@ pub(crate) fn bi_llm_generate(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
     let mut sampler = Sampler::new(seed, SamplerConfig {
         temperature, top_k, ..Default::default()
     });
-    let out = model.generate(&ids, n, &mut sampler, None)
-        .map_err(|e| R2Err { msg: format!("llm.generate: {}", e), kind: ErrKind::Runtime })?;
+    let out = with_registry(|r| match r.get_mut(&id) {
+        Some(s) => s.with_model(|m| m.generate(&ids, n, &mut sampler, None)),
+        None => Err(format!("unknown model handle {}", id)),
+    }).map_err(|e| R2Err { msg: format!("llm.generate: {}", e), kind: ErrKind::Runtime })?;
     let text = tok.decode(&out.iter().map(|&i| i as u32).collect::<Vec<_>>());
     Ok(RVal::Character(vec![Some(std::sync::Arc::from(text.as_str()))], Attrs::default()))
 }
@@ -299,12 +312,10 @@ pub(crate) fn bi_llm_generate(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
 pub(crate) fn bi_llm_save(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let id = handle(&gv(a, 0))?;
     let dir = str_arg(&gv(a, 1))?;
-    let model = with_registry(|r| match r.get(&id) {
-        Some(s) => s.model().map_err(|e| R2Err { msg: format!("llm.save: {}", e), kind: ErrKind::Runtime }),
-        None => Err(R2Err { msg: format!("llm.save: unknown model handle {}", id), kind: ErrKind::Runtime }),
-    })?;
-    model.save_dir(&dir)
-        .map_err(|e| R2Err { msg: format!("llm.save: {}", e), kind: ErrKind::Runtime })?;
+    with_registry(|r| match r.get_mut(&id) {
+        Some(s) => s.with_model(|m| m.save_dir(&dir)),
+        None => Err(format!("unknown model handle {}", id)),
+    }).map_err(|e| R2Err { msg: format!("llm.save: {}", e), kind: ErrKind::Runtime })?;
     // The ids mean nothing without their tokenizer: a model saved alone
     // would decode against the wrong table and generate nonsense.
     std::fs::write(std::path::Path::new(&dir).join(TOKENIZER_FILE), tokenizer_for(id).to_tokenizer_json())
@@ -331,8 +342,29 @@ pub(crate) fn bi_llm_load(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
         .map_err(|e| R2Err { msg: format!("llm.load: {}", e), kind: ErrKind::Runtime })?;
     let tok = load_tokenizer(&dir, &m.cfg)
         .map_err(|e| R2Err { msg: format!("llm.load: {}", e), kind: ErrKind::Runtime })?;
-    let id = insert(Slot::Serving(Box::new(m)));
+    // train = TRUE starts a new run from these weights: fine-tuning.
+    let slot = if bool_arg(a, "train", false) {
+        let t = Trainer::from_model(m, num_arg(a, "lr", 3e-4) as f32)
+            .map_err(|e| R2Err { msg: format!("llm.load: {}", e), kind: ErrKind::Runtime })?;
+        Slot::Training(Box::new(t))
+    } else {
+        Slot::Serving(Box::new(m))
+    };
+    let id = insert(slot);
     with_tokenizers(|t| t.insert(id, tok));
+    Ok(as_num(id as f64))
+}
+
+/// `llm.resume(dir)` — the newest checkpoint `llm.train(checkpoint = dir)`
+/// wrote there, as a handle that continues the run exactly.
+pub(crate) fn bi_llm_resume(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let dir = str_arg(&gv(a, 0))?;
+    let fail = |e: String| R2Err { msg: format!("llm.resume: {}", e), kind: ErrKind::Runtime };
+    let t = Trainer::resume_latest(&dir).map_err(fail)?
+        .ok_or_else(|| fail(format!("no checkpoint in '{}'", dir)))?;
+    let tok = load_tokenizer(&dir, &t.cfg).map_err(fail)?;
+    let id = insert(Slot::Training(Box::new(t)));
+    with_tokenizers(|m| m.insert(id, tok));
     Ok(as_num(id as f64))
 }
 
