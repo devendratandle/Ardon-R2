@@ -1,0 +1,10 @@
+{
+  "id": "neostatisticalconsultancy/r2-gpu-test",
+  "title": "r2-gpu-test",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true
+}
