@@ -33,9 +33,8 @@ test("-p r2-engine --features cuda --test cuda_wiring", env="CUDA_VISIBLE_DEVICE
 
 # ── R2 on CUDA against PyTorch on CUDA, same card, interleaved ──────────────
 # Both sides read the same token files and start from the same weights. The
-# corpus is not in the repository, so this fetches TinyStories: not byte for
-# byte the corpus behind benchmarks/llm/REPORT.md, so these losses are compared
-# only with each other.
+# corpus is not in the repository; these bytes of TinyStories are the corpus.txt
+# behind benchmarks/llm/REPORT.md (sha256 94e43181...).
 sh("cd /tmp/r2 && curl -sSfL -r 0-19447281 -o corpus.txt https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt; ls -la corpus.txt; sha256sum corpus.txt")
 sh("python3 -c 'import numpy, tokenizers, torch; print(torch.__version__, torch.cuda.get_device_name(0))' || pip install -q numpy tokenizers")
 sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-train --features cuda --example tinystories_train 2>&1 | tail -1")
@@ -51,5 +50,8 @@ def pairs(name, env, steps, n):
 
 pairs("small 7.2M", "R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32", 300, 3)
 pairs("medium 39.8M", "R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8", 100, 3)
-pairs("large 125M", "R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8", 30, 2)
+# one held-out batch: the harness evaluates on the CPU tape, and the default eight
+# in one tape (32,768 tokens through 12 layers) get the process killed for memory
+sh("free -g | head -2")
+pairs("large 125M", "R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8", 30, 2)
 sh("nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0")
