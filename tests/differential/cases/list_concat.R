@@ -1,0 +1,25 @@
+# c() with a list among its arguments gives a list, as in R. It used to give a
+# numeric vector, drop the names, and refuse a string outright.
+s <- function(k, x) cat(k, ".class=", class(x), " len=", length(x), " names=", paste(names(x), collapse = ","), "\n", sep = "")
+v <- function(k, x) for (i in seq_along(x)) cat(k, ".", i, "=", class(x[[i]]), ":", format(x[[i]]), "\n", sep = "")
+a <- c(list(1), list(2)); s("two", a); v("two", a)
+b <- c(list(x = 1), list(log = TRUE)); s("named", b); v("named", b)
+d <- c(list(1), list()); s("empty", d)
+e <- c(list(1), 2, "z"); s("mixed", e); v("mixed", e)
+g <- c(1, list(2)); s("first", g)
+h <- c(1:2, list("a")); s("vector", h); v("vector", h)
+i <- c(list(1), NULL, list(2)); s("null", i)
+j <- c(a = list(1), b = list(2, 3)); s("argnames", j)
+k <- c(a = list(p = 1, 2)); s("prefix", k)
+m <- c(list(1), c(u = 2, w = 3)); s("vecnames", m)
+n <- c(list(1, list(2, 3))); s("nested", n)
+o <- c(list(1, list(2, 3)), recursive = TRUE); s("recursive", o); cat("recursive=", paste(o, collapse = ","), "\n", sep = "")
+q <- c(list(a = 1, b = 2), use.names = FALSE); s("nonames", q)
+r <- c(list(), list()); s("bothempty", r)
+t <- c(data.frame(u = 1:2, w = 3:4), list(9)); s("frame", t)
+f <- function(x, y = 2) x * y
+cat("docall=", do.call(f, c(list(3), list(y = 4))), "\n", sep = "")
+cat("docall2=", do.call("sum", c(list(1, 2), list(3))), "\n", sep = "")
+cat("docall3=", do.call(paste, c(list("a", "b"), list(sep = "-"))), "\n", sep = "")
+# still vectors when there is no list
+cat("plain=", class(c(1, 2)), class(c(1L, 2L)), class(c(TRUE)), class(c("a", 1)), "\n")

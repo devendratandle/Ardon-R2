@@ -17,7 +17,7 @@
 //! `parallel_random(seed)` form which takes a thread-local seed instead
 //! of touching the global atomic).
 
-use r2_types::{Attrs, ErrKind, EvalArg, Integer, R2Err, RVal, Real};
+use r2_types::{Attrs, ErrKind, EvalArg, R2Err, RVal, Real};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[inline]
@@ -28,59 +28,9 @@ fn arg_named(a: &[EvalArg], name: &str) -> Option<RVal> {
     a.iter().find(|x| x.name.as_ref().map(|n| n.as_ref()) == Some(name)).map(|x| x.value.clone())
 }
 
-/// R-style positional/named argument matcher for the distribution
-/// builtins. Formals are resolved in declaration order: a formal takes its
-/// named argument if one was supplied, otherwise the next not-yet-consumed
-/// unnamed (positional) argument. This matches R for both
-/// `rnorm(100, 10, 3)` and `rnorm(n = 100, sd = 3)` call styles — the old
-/// code read `mean`/`sd`/`min`/`max`/etc. by name only, silently dropping
-/// positionally-passed values (`rnorm(n, 10, 3)` came out standard-normal).
-struct ArgMatcher<'a> {
-    args: &'a [EvalArg],
-    /// How many unnamed (positional) args have been consumed so far.
-    pos: usize,
-}
-
-impl<'a> ArgMatcher<'a> {
-    fn new(args: &'a [EvalArg]) -> Self {
-        Self { args, pos: 0 }
-    }
-
-    /// Resolve formal `name`: a matching named argument wins; otherwise the
-    /// next unconsumed positional argument is taken (and the cursor advances).
-    fn get(&mut self, name: &str) -> Option<RVal> {
-        if let Some(v) = arg_named(self.args, name) {
-            return Some(v);
-        }
-        let mut seen = 0usize;
-        let mut found = None;
-        for x in self.args {
-            if x.name.is_none() {
-                if seen == self.pos {
-                    found = Some(x.value.clone());
-                    break;
-                }
-                seen += 1;
-            }
-        }
-        self.pos += 1;
-        found
-    }
-
-    fn get_f64(&mut self, name: &str, default: f64) -> f64 {
-        self.get(name).and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(default)
-    }
-
-    fn get_usize(&mut self, name: &str, default: usize) -> usize {
-        self.get(name)
-            .and_then(|v| v.scalar_f64().ok().flatten())
-            .map(|x| x as usize)
-            .unwrap_or(default)
-    }
-}
 
 const MAX_ALLOC_BYTES: usize = 500_000_000;
-fn check_alloc(elements: usize, elem_size: usize) -> Result<(), R2Err> {
+pub(crate) fn check_alloc(elements: usize, elem_size: usize) -> Result<(), R2Err> {
     let bytes = elements.saturating_mul(elem_size);
     if bytes > MAX_ALLOC_BYTES {
         return Err(R2Err {
@@ -142,116 +92,6 @@ pub fn parallel_random(seed: &mut u64) -> f64 {
 
 // ── Random-variate builtins ─────────────────────────────────────────
 
-pub fn bi_rnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let mut m = ArgMatcher::new(a);
-    let n = m.get_usize("n", 1);
-    let mean = m.get_f64("mean", 0.0);
-    let sd = m.get_f64("sd", 1.0);
-    check_alloc(n, 8)?;
-    // F.3 native-columnar path: rnorm produces no NAs, so build the
-    // dense `Vec<f64>` directly and wrap via `Reals::from_dense_f64`.
-    // This skips the `Option<f64>` allocation and the from_option_slice
-    // re-pack that would happen on the first `.columnar()` call.
-    let mut results: Vec<f64> = Vec::with_capacity(n);
-    for _ in 0..n {
-        // Box–Muller transform.
-        let u1 = next_random().max(1e-15);
-        let u2 = next_random();
-        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        results.push(mean + sd * z);
-    }
-    Ok(RVal::Numeric(r2_types::Reals::from_dense_f64(results), Attrs::default()))
-}
-
-pub fn bi_runif(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let mut m = ArgMatcher::new(a);
-    let n = m.get_usize("n", 1);
-    let min = m.get_f64("min", 0.0);
-    let max = m.get_f64("max", 1.0);
-    check_alloc(n, 8)?;
-    // F.3 native-columnar path: see bi_rnorm.
-    let mut results: Vec<f64> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let u = next_random();
-        results.push(min + (max - min) * u);
-    }
-    Ok(RVal::Numeric(r2_types::Reals::from_dense_f64(results), Attrs::default()))
-}
-
-/// `ln G` for `G ~ Gamma(shape, 1)`: Marsaglia and Tsang's squeeze method, with
-/// `G(a) = G(a + 1) U^(1/a)` below shape 1. On the log scale because a small
-/// shape's variates underflow, and `rbeta` needs their ratio all the same.
-fn ln_rgamma(shape: f64) -> f64 {
-    if shape < 1.0 {
-        return ln_rgamma(shape + 1.0) + next_random().max(1e-300).ln() / shape;
-    }
-    let d = shape - 1.0 / 3.0;
-    let c = 1.0 / (9.0 * d).sqrt();
-    loop {
-        let u1 = next_random().max(1e-15);
-        let u2 = next_random();
-        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        let v = 1.0 + c * z;
-        if v <= 0.0 { continue; }
-        let v3 = v * v * v;
-        if next_random().max(1e-300).ln() < 0.5 * z * z + d - d * v3 + d * v3.ln() {
-            return d.ln() + v3.ln();
-        }
-    }
-}
-
-fn r_param_err(f: &str, what: &str) -> R2Err {
-    R2Err { msg: format!("{f}: {what}"), kind: r2_types::ErrKind::Runtime }
-}
-
-/// `rgamma(n, shape, rate = 1, scale = 1/rate)`. R's stream differs by design;
-/// the distribution is what is promised.
-pub fn bi_rgamma(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let mut m = ArgMatcher::new(a);
-    let n = m.get_usize("n", 1);
-    let shape = m.get_f64("shape", f64::NAN);
-    let rate = m.get_f64("rate", f64::NAN);
-    let scale = m.get_f64("scale", f64::NAN);
-    if shape.is_nan() { return Err(r_param_err("rgamma", "argument \"shape\" is missing, with no default")); }
-    if !rate.is_nan() && !scale.is_nan() && (rate * scale - 1.0).abs() >= 1e-15 {
-        return Err(r_param_err("rgamma", "specify 'rate' or 'scale' but not both"));
-    }
-    let scale = if !scale.is_nan() { scale } else if !rate.is_nan() { 1.0 / rate } else { 1.0 };
-    if shape < 0.0 || scale <= 0.0 { return Err(r_param_err("rgamma", "invalid arguments")); }
-    check_alloc(n, 8)?;
-    let results: Vec<f64> = (0..n).map(|_| if shape == 0.0 { 0.0 } else { ln_rgamma(shape).exp() * scale }).collect();
-    Ok(RVal::Numeric(r2_types::Reals::from_dense_f64(results), Attrs::default()))
-}
-
-/// `rbeta(n, shape1, shape2)`, as the ratio of two gammas taken on the log
-/// scale, so small shapes (mass near 0 and 1) do not divide 0 by 0.
-pub fn bi_rbeta(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let mut m = ArgMatcher::new(a);
-    let n = m.get_usize("n", 1);
-    let s1 = m.get_f64("shape1", f64::NAN);
-    let s2 = m.get_f64("shape2", f64::NAN);
-    if s1.is_nan() { return Err(r_param_err("rbeta", "argument \"shape1\" is missing, with no default")); }
-    if s2.is_nan() { return Err(r_param_err("rbeta", "argument \"shape2\" is missing, with no default")); }
-    if s1 <= 0.0 || s2 <= 0.0 { return Err(r_param_err("rbeta", "invalid arguments")); }
-    check_alloc(n, 8)?;
-    let results: Vec<f64> = (0..n).map(|_| 1.0 / (1.0 + (ln_rgamma(s2) - ln_rgamma(s1)).exp())).collect();
-    Ok(RVal::Numeric(r2_types::Reals::from_dense_f64(results), Attrs::default()))
-}
-
-pub fn bi_rexp(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let mut m = ArgMatcher::new(a);
-    let n = m.get_usize("n", 1);
-    let rate = m.get_f64("rate", 1.0);
-    check_alloc(n, 8)?;
-    let mut results: Vec<f64> = Vec::with_capacity(n);
-    for _ in 0..n {
-        // Inverse-CDF: X = -ln(U)/rate.
-        let u = next_random().max(1e-15);
-        results.push(-u.ln() / rate);
-    }
-    Ok(RVal::Numeric(r2_types::Reals::from_dense_f64(results), Attrs::default()))
-}
-
 pub fn bi_sample(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let nth = a.get(1).map(|x| x.value.clone()).unwrap_or(RVal::Null);
@@ -273,42 +113,7 @@ pub fn bi_sample(a: &[EvalArg]) -> Result<RVal, R2Err> {
     Ok(RVal::Numeric(result.into(), Attrs::default()))
 }
 
-pub fn bi_rbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let mut m = ArgMatcher::new(a);
-    let n = m.get_usize("n", 1);
-    let size = m.get_usize("size", 1);
-    let prob = m.get_f64("prob", 0.5);
-    let mut results: Vec<Integer> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let mut successes = 0i32;
-        for _ in 0..size {
-            if next_random() < prob { successes += 1; }
-        }
-        results.push(Some(successes));
-    }
-    Ok(RVal::Integer(results.into(), Attrs::default()))
-}
-
-pub fn bi_rpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let mut m = ArgMatcher::new(a);
-    let n = m.get_usize("n", 1);
-    let lambda = m.get_f64("lambda", 1.0);
-    let mut results: Vec<Integer> = Vec::with_capacity(n);
-    for _ in 0..n {
-        // Knuth's algorithm. Acceptable for small-to-moderate lambda
-        // (≤ 30); a normal approximation would be tighter for large lambda.
-        let l = (-lambda).exp();
-        let mut k = 0i32;
-        let mut p = 1.0f64;
-        loop {
-            k += 1;
-            p *= next_random();
-            if p <= l { break; }
-        }
-        results.push(Some(k - 1));
-    }
-    Ok(RVal::Integer(results.into(), Attrs::default()))
-}
+pub use crate::rfamilies::{bi_rbinom, bi_rexp, bi_rnorm, bi_rpois, bi_runif};
 
 pub fn bi_set_seed(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let seed = first(a).scalar_f64()?.unwrap_or(42.0) as u64;

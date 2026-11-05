@@ -72,3 +72,28 @@ fn the_generators_take_r_arguments() {
     let a = run("set.seed(9); rgamma(4, 2)");
     assert_eq!(a, run("set.seed(9); rgamma(4, 2)"), "the seed decides the draws");
 }
+
+/// `rf` is both R's F generator and R2's random forest; the arguments decide.
+#[test]
+fn rf_is_the_f_generator_for_numbers_and_the_forest_for_a_formula() {
+    assert_eq!(run("rf(10, 3, 4)").len(), 10);
+    assert_eq!(run("rf(n = 3, df1 = 2, df2 = 5)").len(), 3);
+    let mut e = Engine::new();
+    let script = "d <- data.frame(y = c(1, 2, 3, 4, 5, 6, 7, 8), x = c(2, 1, 4, 3, 6, 5, 8, 7))\nf <- rf(y ~ x, data = d, ntrees = 3)\nclass(f)";
+    let mut last = RVal::Null;
+    for ex in Parser::parse(script).unwrap() { last = e.eval(&ex).expect("the forest must still fit"); }
+    assert!(!matches!(last, RVal::Null));
+}
+
+/// `log = TRUE` was ignored by the older density functions, which returned the
+/// density itself.
+#[test]
+fn every_density_honours_log() {
+    for call in ["dnorm(1, 2, 3)", "dexp(1, 2)", "dbinom(2, 5, 0.3)", "dpois(2, 3)", "dt(1, 3)", "dchisq(1, 3)",
+                 "dgamma(1, 2)", "dbeta(0.3, 2, 3)", "dunif(0.5)", "dweibull(1, 2)", "dlnorm(1.5)", "dcauchy(1)",
+                 "dlogis(1)", "dgeom(2, 0.3)", "dnbinom(2, 3, 0.4)", "dhyper(1, 3, 2, 2)", "df(1, 3, 4)"] {
+        let plain = run(call)[0];
+        let logged = run(&format!("{}, log = TRUE)", call.trim_end_matches(')')))[0];
+        assert!((logged - plain.ln()).abs() < 1e-12, "{call}: log form {logged}, ln of plain {}", plain.ln());
+    }
+}

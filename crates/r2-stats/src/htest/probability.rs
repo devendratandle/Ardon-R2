@@ -232,7 +232,7 @@ pub(crate) fn bd0(x: f64, np: f64) -> f64 {
 /// `x ln(lambda) - lambda - ln Gamma(x + 1)`, in Loader's saddle-point
 /// form. Also `ln(lambda^x e^-lambda / Gamma(x+1))`, the prefactor of both
 /// incomplete-gamma tails.
-fn ln_dpois_raw(x: f64, lambda: f64) -> f64 {
+pub(crate) fn ln_dpois_raw(x: f64, lambda: f64) -> f64 {
     if lambda == 0.0 { return if x == 0.0 { 0.0 } else { f64::NEG_INFINITY }; }
     if !lambda.is_finite() || x < 0.0 { return f64::NEG_INFINITY; }
     if x <= lambda * f64::MIN_POSITIVE { return -lambda; }

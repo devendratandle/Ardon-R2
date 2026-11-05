@@ -75,19 +75,24 @@ to be worse than documented and was fixed here rather than scheduled.
   the printed rows match R.
 - `sapply` simplifies length-1 results to a vector; equal-length longer
   results stay a list where R builds a matrix.
-- **Where R2's beta differs from R, on purpose.** At extreme shapes R is wrong
-  and R2 is not, checked against a 340-digit reference:
+- **Where R2's distributions differ from R, on purpose.** In extreme cases R is
+  wrong and R2 is not, checked against a 340-digit reference or exact fractions:
   `pbeta(0.75, 1e4, 25, log.p = TRUE)` is -Inf in R and -2743.79 here;
   `qbeta(1e-300, 10, 1e5, lower.tail = FALSE)` is 1 in R and 0.00735 here;
-  `qbeta(1e-300, 1e4, 25)` is 1.1e-308 in R and 0.92354 here. A quantile below
-  the smallest double is 0 here, where R can return a nonzero value that misses
-  its target (`qbeta(0.01, 0.001, 0.01)`, truly about e^-4500).
-- **Missing distributions**: the F density `df`, the generators `rchisq`, `rt`
-  and `rf`, the non-central beta, and uniform, Weibull, lognormal, Cauchy,
-  logistic, geometric, negative binomial, hypergeometric.
-  `rgamma` and `rbeta` take scalar parameters, where R recycles them. The
-  implemented ones match R to 1e-13 on the
-  `distribution_grid` case except `qf` (bisection, ~1e-11).
+  `qbeta(1e-300, 1e4, 25)` is 1.1e-308 in R and 0.92354 here;
+  `qf(1e-20, 3, 12)` is 1.9% off in R, and `qf(1e-20, 1, 1)` is 0 in R and
+  2.47e-40 here; `qhyper(1e-20, 100, 900, 50, lower.tail = FALSE)` is 24 in R and
+  30 here. A quantile below the smallest double is 0 here, where R can return a
+  nonzero value that misses its target (`qbeta(0.01, 0.001, 0.01)`, truly about
+  e^-4500). In the other direction, `qt` at very large `df` is good to about 1e-12
+  here, where R reaches 1e-16.
+- **Missing distributions**: the non-central forms (`ncp != 0` stops with an
+  error), `ptukey`, the Wilcoxon and signed-rank families, and `rmultinom`.
+  R's generators draw different streams from R2's by design, so a seeded script
+  gets the right distribution but not R's numbers.
+- **`rf` is two functions.** `rf(n, df1, df2)` with single numbers is R's F
+  generator; with a formula or vectors it is R2's random forest. A forest needs
+  more than one row, so the two never collide.
 - Taking a column of a matrix (`m[, 4]`) drops the row names R keeps.
 - **No user-level `qr()`** (nor `qr.Q`, `qr.R`, `qr.solve`): the blocked
   Householder QR exists and serves `lm()` and least squares, but there is
@@ -113,13 +118,8 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Statistics
 
-- **Non-central chi-squared** (`ncp != 0` in `dchisq`/`pchisq`/`qchisq`) is
-  not implemented and says so with an error. Parameter recycling
-  (`pchisq(3, c(1, 2, 5))`) is implemented for the chi-squared family;
-  the other d/p/q functions still take their parameters as scalars. In
-  `pt`, `pf`, `pbinom` and `ppois`, `log.p = TRUE` is the log of the
-  computed tail, so a tail below ~1e-308 gives -Inf where R's log-scale
-  arithmetic continues (`pnorm` and `pchisq` do continue).
+- **Non-central distributions** (`ncp != 0` in the chi-squared, t, F and beta
+  functions) are not implemented and say so with an error.
 - **`manova()` eigenvalues** of E⁻¹H drift ~1–3% from R's values on some
   designs (R2 routes through a symmetric solver; an exact non-symmetric
   eigensolver would close it). The four test statistics and their ordering

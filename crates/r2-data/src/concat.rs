@@ -14,11 +14,24 @@ use std::sync::Arc;
 
 pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
     // `recursive =` / `use.names =` are c()'s own options, not elements.
+    let recursive = args.iter().find(|a| a.name.as_deref() == Some("recursive"))
+        .and_then(|a| a.value.as_logicals().ok()?.first().copied().flatten()).unwrap_or(false);
+    let use_names = args.iter().find(|a| a.name.as_deref() == Some("use.names"))
+        .and_then(|a| a.value.as_logicals().ok()?.first().copied().flatten()).unwrap_or(true);
     let owned: Vec<EvalArg>;
     let args = if args.iter().any(|a| matches!(a.name.as_deref(), Some("recursive" | "use.names"))) {
         owned = args.iter().filter(|a| !matches!(a.name.as_deref(), Some("recursive" | "use.names"))).cloned().collect();
         &owned[..]
     } else { args };
+    if args.iter().any(|a| is_list_like(&a.value)) {
+        let spliced = list_items(args);
+        if recursive {
+            let leaves = flatten(spliced);
+            return bi_c(&leaves);
+        }
+        let items = spliced.into_iter().map(|e| (e.name.filter(|_| use_names), e.value)).collect();
+        return Ok(RVal::List(items));
+    }
     let has_str = args.iter().any(|a| matches!(&a.value, RVal::Character(..)));
     if has_str {
         // Character coercion path
@@ -83,6 +96,66 @@ pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
         }
     };
     Ok(RVal::Numeric(nums.into(), Attrs { class: shared_class, ..names_of(args) }))
+}
+
+/// What makes `c()` return a list: a list, or something a vector cannot hold.
+fn is_list_like(v: &RVal) -> bool {
+    !matches!(v, RVal::Numeric(..) | RVal::Single(..) | RVal::Integer(..) | RVal::Logical(..)
+        | RVal::Character(..) | RVal::Factor(..) | RVal::Matrix(..) | RVal::Null)
+}
+
+/// The elements of `c(...)` when its result is a list: a list contributes its
+/// items, a vector one item per element, NULL nothing, and anything else (a
+/// function, say) itself. Named by the rule `c()` uses for vectors.
+fn list_items(args: &[EvalArg]) -> Vec<EvalArg> {
+    let mut out = Vec::new();
+    for a in args {
+        let parts: Vec<(Option<Arc<str>>, RVal)> = match &a.value {
+            RVal::Null => Vec::new(),
+            RVal::List(items) => items.clone(),
+            RVal::DataFrame(df) => df.columns.iter().map(|(n, c)| (Some(n.clone()), c.clone())).collect(),
+            v @ (RVal::Numeric(..) | RVal::Single(..) | RVal::Integer(..) | RVal::Logical(..)
+                | RVal::Character(..) | RVal::Factor(..) | RVal::Matrix(..)) => {
+                let own = match v {
+                    RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) => at.names.clone(),
+                    _ => None,
+                };
+                (0..rval_length(v)).map(|i| {
+                    let mut e = take(v, &[i]);
+                    if let RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) = &mut e {
+                        at.names = None;
+                    }
+                    (own.as_ref().and_then(|n| n.get(i).cloned()), e)
+                }).collect()
+            }
+            other => vec![(None, other.clone())],
+        };
+        let n = parts.len();
+        for (i, (inner, value)) in parts.into_iter().enumerate() {
+            let inner = inner.filter(|s| !s.is_empty());
+            let name = match (&a.name, inner) {
+                (Some(p), Some(e)) => Some(Arc::from(format!("{p}.{e}").as_str())),
+                (Some(p), None) if n == 1 => Some(p.clone()),
+                (Some(p), None) => Some(Arc::from(format!("{}{}", p, i + 1).as_str())),
+                (None, e) => e,
+            };
+            out.push(EvalArg { name, value });
+        }
+    }
+    out
+}
+
+/// `recursive = TRUE`: lists opened all the way down, leaving plain vectors.
+fn flatten(items: Vec<EvalArg>) -> Vec<EvalArg> {
+    let mut out = Vec::new();
+    for e in items {
+        if is_list_like(&e.value) && matches!(e.value, RVal::List(_) | RVal::DataFrame(_)) {
+            out.extend(flatten(list_items(std::slice::from_ref(&e))));
+        } else {
+            out.push(e);
+        }
+    }
+    out
 }
 
 /// The names of `c(...)`'s result: an argument's name for a length-1

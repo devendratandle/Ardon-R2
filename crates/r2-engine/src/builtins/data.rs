@@ -54,6 +54,16 @@ pub(crate) fn bi_complete_cases(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Re
     r2_data::clean::bi_complete_cases(a)
 }
 pub(crate) fn bi_do_call(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    // `do.call("sum", args)`: a function by name, as R allows
+    if let Some(RVal::Character(v, _)) = a.first().map(|x| &x.value) {
+        if let Some(Some(name)) = v.first() {
+            let f = env.lookup(name).filter(|f| matches!(f, RVal::Closure(_) | RVal::BuiltinFn(_)))
+                .unwrap_or_else(|| RVal::BuiltinFn(name.clone()));
+            let mut args = a.to_vec();
+            args[0].value = f;
+            return r2_data::apply::bi_do_call(e, &args, env);
+        }
+    }
     r2_data::apply::bi_do_call(e, a, env)
 }
 pub(crate) fn bi_duplicated(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

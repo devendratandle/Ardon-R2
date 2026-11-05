@@ -46,6 +46,9 @@ pub fn __rerr(s: &str) { r2_types::out::rerr(s); }
 
 pub mod dist;
 pub mod betagamma;
+pub mod classics;
+pub mod families;
+pub mod rfamilies;
 pub mod moments;
 pub mod summary;
 pub mod htest;

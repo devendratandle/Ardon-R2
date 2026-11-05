@@ -178,9 +178,10 @@ extreme tail** — `pnorm(-8)` is now correct to ~1e-13 relative (it was
 ~2% wrong when routed through erf). `erf`/`erfc` themselves use Cody's 1969
 approximation (~1e-16). `qnorm`, the inverse CDF, is bit-identical
 (Wichura's AS241). The t, F, binomial, Poisson and exponential d/p/q
-functions agree with R to 1e-13 on 543 of 555 grid values (far tails and
-`log.p` included); the known exceptions are listed in
-`docs/KNOWN_LIMITATIONS.md` — `qf` is a bisection good to ~1e-11. The beta and
+functions agree with R to 1e-13 on 551 of 555 grid values (far tails and
+`log.p` included), and on the other four, all `qf`, a 60-digit reference sides with
+R2. Uniform, Weibull, lognormal, Cauchy, logistic, geometric, negative binomial
+and hypergeometric were compared on 4,462 values. The beta and
 gamma families were compared with R on 16,730 values, shapes from 1e-3 to 1e5:
 where the two differed by more than 1e-11, a 340-digit reference sided with R2,
 apart from two quantiles below the smallest double, where R2 gives 0 and R's

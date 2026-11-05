@@ -70,7 +70,7 @@ fn fmt_n(n: f64) -> String { r2_types::fmt_num(n) }
 mod probability;
 mod tests_impl;
 pub use probability::*;
-pub(crate) use probability::{bd0, stirlerr};
+pub(crate) use probability::{bd0, ln_dpois_raw, stirlerr};
 pub use tests_impl::*;
 
 #[cfg(test)]

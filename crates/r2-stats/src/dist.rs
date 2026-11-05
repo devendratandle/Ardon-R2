@@ -234,53 +234,16 @@ pub fn qnorm_approx(p: f64) -> f64 {
 // Builtins
 // ─────────────────────────────────────────────────────────────────────
 
-fn mean_sd(a: &[EvalArg]) -> (f64, f64) {
-    let mean = arg_named(a, "mean").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(0.0);
-    let sd = arg_named(a, "sd").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(1.0);
-    (mean, sd)
+/// `(ln P(Z <= z), ln P(Z > z))`: the Mills-ratio series where a tail itself
+/// underflows, `ln(1 - small)` for the large one.
+pub(crate) fn pnorm_log_tails(z: f64) -> (f64, f64) {
+    if z > 0.0 { ((-phi_upper(z)).ln_1p(), ln_phi_upper(z)) }
+    else { (ln_phi_upper(-z), (-phi_upper(-z)).ln_1p()) }
 }
 
-pub fn bi_dnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let x = first(a).as_reals()?;
-    let (mean, sd) = mean_sd(a);
-    let result: Vec<Real> = x.iter().map(|v| v.map(|x| {
-        let z = (x - mean) / sd;
-        (1.0 / (sd * (2.0 * std::f64::consts::PI).sqrt())) * (-0.5 * z * z).exp()
-    })).collect();
-    Ok(RVal::Numeric(result.into(), Attrs::default()))
-}
-
-pub fn bi_pnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let x = first(a).as_reals()?;
-    let (mean, sd) = mean_sd(a);
-    // Use the full-precision direct CDF (`phi` = Cody SPECFUN pnorm_both),
-    // NOT `0.5*(1+erf(z/√2))` — the erf route loses ~1 ULP to the ÷√2 and
-    // mishandles the tail split-exp.
-    let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
-    let result: Vec<Real> = x.iter().map(|v| v.map(|x| {
-        let z = (x - mean) / sd;
-        if !logp { return tail_out(phi(z), phi_upper(z), lower, false); }
-        // ln of the requested tail = ln P(Z > t), t = z (upper) or -z (lower):
-        // the Mills-ratio series where the tail itself underflows, and
-        // ln1p(-small) for the big tail so ln(1 - 1e-24) is not 0
-        let t = if lower { -z } else { z };
-        if t > 0.0 { ln_phi_upper(t) } else { (-phi_upper(-t)).ln_1p() }
-    })).collect();
-    Ok(RVal::Numeric(result.into(), Attrs::default()))
-}
-
-pub fn bi_qnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let p = first(a).as_reals()?;
-    let (mean, sd) = mean_sd(a);
-    let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
-    // the normal is symmetric: an upper-tail p is the negated lower-tail
-    // quantile of the SAME p, with no 1 - p to lose precision in
-    let result: Vec<Real> = p.iter().map(|v| v.map(|p| {
-        let p = if logp { p.exp() } else { p };
-        let z = qnorm_approx(p);
-        mean + sd * if lower { z } else { -z }
-    })).collect();
-    Ok(RVal::Numeric(result.into(), Attrs::default()))
+/// A parameter that can only be given by name.
+pub(crate) fn named_vec(a: &[EvalArg], name: &str) -> Result<Option<Vec<Real>>, R2Err> {
+    match arg_named(a, name) { Some(v) => Ok(Some(v.as_reals()?.iter().copied().collect())), None => Ok(None) }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -289,30 +252,13 @@ pub fn bi_qnorm(a: &[EvalArg]) -> Result<RVal, R2Err> {
 // special functions in `crate::htest`.
 // ─────────────────────────────────────────────────────────────────────
 
-use crate::htest::{t_cdf, incomplete_beta, ln_gamma, qt};
-
-/// `x * ln(y)` with the convention `0 * ln(0) = 0` (avoids NaN in pmf logs).
-#[inline]
-fn xlogy(x: f64, y: f64) -> f64 { if x == 0.0 { 0.0 } else { x * y.ln() } }
-
-/// A scalar parameter by `name=`, else the `pos`-th unnamed argument, else default.
-fn param(a: &[EvalArg], name: &str, pos: usize, dflt: f64) -> f64 {
-    arg_named(a, name).and_then(|v| v.scalar_f64().ok().flatten())
-        .or_else(|| a.iter().filter(|x| x.name.is_none()).nth(pos)
-            .and_then(|x| x.value.scalar_f64().ok().flatten()))
-        .unwrap_or(dflt)
-}
-/// Map the first argument's vector element-wise through `f`.
-fn map_x(a: &[EvalArg], f: impl Fn(f64) -> f64) -> Result<RVal, R2Err> {
-    let x = first(a).as_reals()?;
-    Ok(RVal::Numeric(x.iter().map(|v| v.map(&f)).collect::<Vec<Real>>().into(), Attrs::default()))
-}
+pub use crate::classics::{bi_dbinom, bi_dexp, bi_dnorm, bi_dpois, bi_dt, bi_pbinom, bi_pexp, bi_pf, bi_pnorm, bi_ppois, bi_pt, bi_qbinom, bi_qexp, bi_qnorm, bi_qpois, bi_qt};
 
 /// `ln P(Z > x)` for x > 0, past where `P(Z > x)` itself underflows
 /// (~x = 38): the Mills-ratio asymptotic `ln phi(x) - ln x + ln(1 - 1/x^2
 /// + 3/x^4 - 15/x^6 ...)`. From x = 30 on, eleven terms leave an error
 /// below 1e-24; under 30 the tail is representable and its log is exact.
-fn ln_phi_upper(x: f64) -> f64 {
+pub(crate) fn ln_phi_upper(x: f64) -> f64 {
     if x < 30.0 { return phi_upper(x).ln(); }
     let x2 = x * x;
     let (mut term, mut s) = (1.0f64, 1.0f64);
@@ -327,67 +273,6 @@ fn ln_phi_upper(x: f64) -> f64 {
 pub(crate) fn flag(a: &[EvalArg], name: &str, pos: usize, dflt: bool) -> bool {
     arg_named(a, name).or_else(|| a.iter().filter(|x| x.name.is_none()).nth(pos).map(|x| x.value.clone()))
         .and_then(|v| v.scalar_f64().ok().flatten()).map(|v| v != 0.0).unwrap_or(dflt)
-}
-
-/// A p-function's answer from its two tails, as R's `lower.tail` / `log.p`
-/// ask: the chosen tail, on the log scale if requested. Callers pass
-/// tails computed so that neither is `1 - other` where that cancels.
-#[inline]
-fn tail_out(lower_v: f64, upper_v: f64, lower: bool, logp: bool) -> f64 {
-    let (v, other) = if lower { (lower_v, upper_v) } else { (upper_v, lower_v) };
-    // log of a value near 1 from its small complement: ln(1 - 1e-10) as
-    // ln_1p(-1e-10) keeps every digit; v.ln() would keep six.
-    if logp { if v > 0.5 { (-other).ln_1p() } else { v.ln() } } else { v }
-}
-
-/// ln(1 − e^x) for x ≤ 0 without cancellation (R's `R_Log1_Exp`).
-fn log1mexp(x: f64) -> f64 {
-    if x > -std::f64::consts::LN_2 { (-x.exp_m1()).ln() } else { (-x.exp()).ln_1p() }
-}
-
-/// Both tails of a discrete distribution at `k`, as logs: P(X ≤ k) and
-/// P(X > k). The SMALL tail is summed directly in log space (no `1 − s`
-/// cancellation, no underflow of a tail far below 1e-308), the other is
-/// ln(1 − small). `log_term(i)` is ln P(X = i) on the support [0, `hi`];
-/// `mode` picks which side is small.
-fn discrete_log_tails(k: f64, hi: f64, mode: f64, log_term: impl Fn(f64) -> f64) -> (f64, f64) {
-    if k < 0.0 { return (f64::NEG_INFINITY, 0.0); }
-    if k >= hi { return (0.0, f64::NEG_INFINITY); }
-    // log-sum-exp over i in the range, stopping once terms stop mattering
-    let log_sum = |from: f64, to: f64, down: bool| -> f64 {
-        let (mut m, mut s) = (f64::NEG_INFINITY, 0.0);
-        let mut i = if down { to } else { from };
-        loop {
-            let t = log_term(i);
-            if t > m { s = s * (m - t).exp() + 1.0; m = t; } else { s += (t - m).exp(); }
-            // past the peak, a term 40 orders below the running sum is noise
-            if m.is_finite() && t < m - 92.0 { break; }
-            i = if down { i - 1.0 } else { i + 1.0 };
-            if (down && i < from) || (!down && i > to) { break; }
-        }
-        m + s.ln()
-    };
-    if k < mode {
-        let lo = log_sum(0.0, k.floor(), true);
-        (lo, log1mexp(lo))
-    } else {
-        let up = log_sum(k.floor() + 1.0, hi, false);
-        (log1mexp(up), up)
-    }
-}
-
-/// A (log) tail pair from `discrete_log_tails` as the p-function's value.
-fn tail_out_log(lo: f64, up: f64, lower: bool, logp: bool) -> f64 {
-    let v = if lower { lo } else { up };
-    if logp { v } else { v.exp() }
-}
-
-/// A q-function's `p` as a LOWER-tail probability, honouring `lower.tail`
-/// and `log.p`.
-#[inline]
-fn p_lower(p: f64, lower: bool, logp: bool) -> f64 {
-    let p = if logp { p.exp() } else { p };
-    if lower { p } else { 1.0 - p }
 }
 
 /// A distribution parameter as a VECTOR (by name, or at its position
@@ -421,63 +306,7 @@ fn no_ncp(a: &[EvalArg], f: &str, pos: usize) -> Result<(), R2Err> {
         _ => Ok(()),
     }
 }
-fn ln_binom(n: f64, x: f64, p: f64) -> f64 {
-    // ln(1 - p) as ln_1p(-p): `1.0 - p` alone loses digits of a small p
-    let n_x = n - x;
-    ln_gamma(n + 1.0) - ln_gamma(x + 1.0) - ln_gamma(n_x + 1.0) + xlogy(x, p) + if n_x == 0.0 { 0.0 } else { n_x * (-p).ln_1p() }
-}
 
-pub fn bi_dexp(a: &[EvalArg]) -> Result<RVal, R2Err> { let r = param(a,"rate",1,1.0); map_x(a, move |x| if x < 0.0 { 0.0 } else { r * (-r * x).exp() }) }
-pub fn bi_pexp(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let r = param(a,"rate",1,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 2, true), flag(a, "log.p", 3, false));
-    map_x(a, move |x| if x < 0.0 { tail_out(0.0, 1.0, lower, logp) }
-        else { tail_out(-(-r * x).exp_m1(), (-r * x).exp(), lower, logp) })
-}
-pub fn bi_qexp(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let r = param(a,"rate",1,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 2, true), flag(a, "log.p", 3, false));
-    map_x(a, move |p| {
-        let p = if logp { p.exp() } else { p };
-        if lower { -(-p).ln_1p() / r } else { -p.ln() / r }
-    })
-}
-
-pub fn bi_dbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let n = param(a,"size",1,0.0); let p = param(a,"prob",2,0.5);
-    map_x(a, move |x| { let xi = x.round(); if xi < 0.0 || xi > n { 0.0 } else { ln_binom(n, xi, p).exp() } })
-}
-pub fn bi_pbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let n = param(a,"size",1,0.0); let p = param(a,"prob",2,0.5);
-    let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
-    map_x(a, move |q| {
-        let (lo, up) = discrete_log_tails(q.floor(), n, n * p, |i| ln_binom(n, i, p));
-        tail_out_log(lo, up, lower, logp)
-    })
-}
-pub fn bi_dpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let lam = param(a,"lambda",1,1.0);
-    map_x(a, move |x| { let xi = x.round(); if xi < 0.0 { 0.0 } else { (xlogy(xi, lam) - lam - ln_gamma(xi + 1.0)).exp() } })
-}
-pub fn bi_ppois(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let lam = param(a,"lambda",1,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 2, true), flag(a, "log.p", 3, false));
-    map_x(a, move |q| {
-        let (lo, up) = discrete_log_tails(q.floor(), f64::INFINITY, lam, |i| xlogy(i, lam) - lam - ln_gamma(i + 1.0));
-        tail_out_log(lo, up, lower, logp)
-    })
-}
-pub fn bi_dt(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let df = param(a,"df",1,1.0);
-    let c = (ln_gamma((df + 1.0) / 2.0) - ln_gamma(df / 2.0)).exp() / (df * std::f64::consts::PI).sqrt();
-    map_x(a, move |x| c * (1.0 + x * x / df).powf(-(df + 1.0) / 2.0))
-}
-pub fn bi_pt(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let df = param(a,"df",1,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
-    // symmetric: the upper tail at t is the lower tail at -t, directly
-    map_x(a, move |x| tail_out(t_cdf(x, df), t_cdf(-x, df), lower, logp))
-}
 /// The χ² family's `df`, which R requires: a missing `df` is an error,
 /// not a silent df = 1.
 fn chisq_df(a: &[EvalArg], f: &str) -> Result<Vec<Real>, R2Err> {
@@ -506,37 +335,7 @@ pub fn bi_pchisq(a: &[EvalArg]) -> Result<RVal, R2Err> {
         if logp { l } else { l.exp() }
     })
 }
-pub fn bi_pf(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let d1 = param(a,"df1",1,1.0); let d2 = param(a,"df2",2,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 4, true), flag(a, "log.p", 5, false));
-    // the upper tail by the beta symmetry I_x(a, b) = 1 - I_{1-x}(b, a),
-    // with 1 - x formed directly as d2 / (d1 x + d2)
-    map_x(a, move |x| if x <= 0.0 { tail_out(0.0, 1.0, lower, logp) } else {
-        let den = d1 * x + d2;
-        tail_out(incomplete_beta(d1 / 2.0, d2 / 2.0, d1 * x / den),
-                 incomplete_beta(d2 / 2.0, d1 / 2.0, d2 / den), lower, logp)
-    })
-}
 
-/// Invert a monotone CDF on `[lo, hi]` by bisection (continuous quantiles).
-fn quantile_bisect(p: f64, mut lo: f64, mut hi: f64, cdf: impl Fn(f64) -> f64) -> f64 {
-    if p <= 0.0 { return lo; }
-    if p >= 1.0 { return hi; }
-    for _ in 0..200 {
-        let m = 0.5 * (lo + hi);
-        if cdf(m) < p { lo = m; } else { hi = m; }
-    }
-    0.5 * (lo + hi)
-}
-pub fn bi_qt(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let df = param(a,"df",1,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
-    map_x(a, move |p| {
-        let p = if logp { p.exp() } else { p };
-        let q = qt(p, df);
-        if lower { q } else { -q }                   // symmetric
-    })
-}
 /// `qchisq(p, df, ncp = 0, lower.tail = TRUE, log.p = FALSE)`.
 pub fn bi_qchisq(a: &[EvalArg]) -> Result<RVal, R2Err> {
     no_ncp(a, "qchisq", 2)?;
@@ -545,35 +344,6 @@ pub fn bi_qchisq(a: &[EvalArg]) -> Result<RVal, R2Err> {
     map_x_p(a, df, move |p, df| {
         let lp = if logp { p } else if p < 0.0 || p > 1.0 { return f64::NAN } else { p.ln() };
         crate::htest::chi_sq_quantile(lp, df, lower)
-    })
-}
-pub fn bi_qf(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let d1 = param(a,"df1",1,1.0); let d2 = param(a,"df2",2,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 4, true), flag(a, "log.p", 5, false));
-    map_x(a, move |p| quantile_bisect(p_lower(p, lower, logp), 0.0, 1.0e7, |x|
-        if x <= 0.0 { 0.0 } else { incomplete_beta(d1 / 2.0, d2 / 2.0, d1 * x / (d1 * x + d2)) }))
-}
-pub fn bi_qbinom(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let size = param(a,"size",1,0.0); let pb = param(a,"prob",2,0.5);
-    let (lower, logp) = (flag(a, "lower.tail", 3, true), flag(a, "log.p", 4, false));
-    map_x(a, move |q| {
-        let q = p_lower(q, lower, logp);
-        if q <= 0.0 { return 0.0; }
-        if q >= 1.0 { return size; }
-        let (mut cum, mut k) = (0.0, 0.0);
-        while k <= size { cum += ln_binom(size, k, pb).exp(); if cum >= q { return k; } k += 1.0; }
-        size
-    })
-}
-pub fn bi_qpois(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let lam = param(a,"lambda",1,1.0);
-    let (lower, logp) = (flag(a, "lower.tail", 2, true), flag(a, "log.p", 3, false));
-    map_x(a, move |q| {
-        let q = p_lower(q, lower, logp);
-        if q <= 0.0 { return 0.0; }
-        let (mut cum, mut k) = (0.0, 0.0);
-        while k < 1.0e7 { cum += (xlogy(k, lam) - lam - ln_gamma(k + 1.0)).exp(); if cum >= q { return k; } k += 1.0; }
-        k
     })
 }
 

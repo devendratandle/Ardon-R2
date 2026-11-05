@@ -23,6 +23,8 @@ pub(crate) fn bi_rpart(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     r2_ml::dispatch::bi_rpart(a)
 }
 pub(crate) fn bi_rf(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    // `rf(n, df1, df2)` is R's F generator; `rf(y ~ x, data)` is the forest
+    if r2_stats::rfamilies::rf_is_f_generator(a) { return r2_stats::rfamilies::bi_rf_dist(a); }
     r2_ml::dispatch::bi_rf(a)
 }
 pub(crate) fn bi_gbm(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

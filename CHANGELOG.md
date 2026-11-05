@@ -11,11 +11,42 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### The standard distribution families, and R's arguments everywhere — 2026-11-05
+
+- **New: uniform, Weibull, lognormal, Cauchy, logistic, geometric, negative
+  binomial (`size` with `prob` or `mu`) and hypergeometric**, each with `d`, `p`,
+  `q` and `r`; the F density `df`; the generators `rchisq`, `rt` and `rf`.
+  513 built-in functions.
+- **`rf` is both things now.** `rf(n, df1, df2)` with single numbers draws from F;
+  with a formula or vectors it is still the random forest.
+- **The older functions take R's arguments.** `dnorm`, `pnorm`, `qnorm`, `dexp`,
+  `pexp`, `qexp`, `dbinom`, `pbinom`, `qbinom`, `dpois`, `ppois`, `qpois`, `dt`,
+  `pt`, `qt` and `pf` read `log`, recycle every parameter and accept names in any
+  order. Before this, `log = TRUE` was ignored, so `dnorm(1, log = TRUE)` returned
+  the density itself, and a vector parameter kept its first value, both silently.
+  `pnorm(1, 2, 3)` ignored its positional mean and sd.
+- **Log tails no longer underflow.** `pt`, `pf`, `pbinom` and `ppois` with
+  `log.p = TRUE` continue on the log scale where they used to reach -Inf.
+- **`qf` goes through the beta quantile instead of a bisection.** The 555-value
+  `distribution_grid` went from 543 values within 1e-13 of R to 551. The
+  four left are all `qf`, with `qf(0.01, 1, 200)` the worst, and a 60-digit reference
+  sides with R2 on them.
+- **The generators recycle their parameters.** `rpois` is right at large means
+  (PTRS above 30), and `rbinom` no longer loops over `size` trials above size 1000.
+- **Compared with R on 4,462 more values** (`tests/differential/cases/families.R`).
+  Sixteen differ by more than 1e-11, and a high-precision reference or exact
+  fractions side with R2 on all of them apart from one difference that should be
+  zero. `qt` at `df = 1e5` is the one place R is measurably closer: 2.3e-13 here
+  against 4e-17. Non-central forms still stop with an error
+  (`docs/KNOWN_LIMITATIONS.md`).
+- **`c()` of lists returns a list**, flattening nested data with `recursive =` and
+  honouring `use.names =`. **`do.call("name", args)`** takes a function name.
+
 ### The beta and gamma distributions — 2026-11-05
 
 - **`dbeta`, `pbeta`, `qbeta`, `rbeta`, `dgamma`, `pgamma`, `qgamma`, `rgamma`**,
   with R's arguments: `rate` or `scale`, `lower.tail`, `log.p` and `log`, and
-  every `d/p/q` parameter recycled. 479 built-in functions.
+  every `d/p/q` parameter recycled.
 - **Compared with R on 16,730 values**, shapes from 1e-3 to 1e5, tails down to
   1e-300. Where the two differ by more than 1e-11, a 340-digit reference sides
   with R2, apart from two quantiles below the smallest double. R itself returns

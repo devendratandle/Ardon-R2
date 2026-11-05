@@ -18,7 +18,7 @@ const LN_2PI: f64 = 1.837_877_066_409_345_483_56;
 const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_741_78;
 
 /// `ln(1 - e^l)` for `l <= 0`, without cancellation.
-fn ln1mexp(l: f64) -> f64 {
+pub(crate) fn ln1mexp(l: f64) -> f64 {
     if l > -std::f64::consts::LN_2 { (-l.exp_m1()).ln() } else { (-l.exp()).ln_1p() }
 }
 
@@ -41,7 +41,7 @@ pub fn lbeta(a: f64, b: f64) -> f64 {
 /// `p + q = 1`, in Loader's saddle-point form. Takes `x` and `rest` rather than
 /// `x` and `n`: forming `rest` as `n - x` loses it when it is tiny beside `x`
 /// (10000.001 - 10000 keeps nine digits), which cost `pbeta` 2e-10.
-fn ln_dbinom_raw(x: f64, rest: f64, p: f64, q: f64) -> f64 {
+pub(crate) fn ln_dbinom_raw(x: f64, rest: f64, p: f64, q: f64) -> f64 {
     let n = x + rest;
     let lc = stirlerr(n) - stirlerr(x) - stirlerr(rest) - bd0(x, n * p) - bd0(rest, n * q);
     lc - 0.5 * (LN_2PI + x.ln() + (rest / n).ln())
@@ -232,15 +232,28 @@ pub fn qbeta_log(lp: f64, a: f64, b: f64, lower: bool) -> f64 {
     if lower == small_is_given { qbeta_small_tail(lt, a, b).0 } else { qbeta_small_tail(lt, b, a).1 }
 }
 
+/// The pair `(x, 1 - x)` of the quantile with log tail `lp`, for a caller that
+/// divides by one of them.
+pub(crate) fn qbeta_xy(lp: f64, a: f64, b: f64, lower: bool) -> (f64, f64) {
+    let small_is_given = lp < -std::f64::consts::LN_2;
+    let lt = if small_is_given { lp } else { ln1mexp(lp) };
+    if lower == small_is_given {
+        qbeta_small_tail(lt, a, b)
+    } else {
+        let (u, v) = qbeta_small_tail(lt, b, a);
+        (v, u)
+    }
+}
+
 // ── the builtins ────────────────────────────────────────────────────────
 
-fn missing(f: &str, name: &str) -> R2Err {
+pub(crate) fn missing(f: &str, name: &str) -> R2Err {
     R2Err { msg: format!("{f}: argument \"{name}\" is missing, with no default"), kind: ErrKind::Runtime }
 }
 
 /// Map the first argument and the parameters together, every one recycled to
 /// the longest, as R does; NA in any of them gives NA.
-fn map_recycled(a: &[EvalArg], params: &[Vec<Real>], f: impl Fn(f64, &[f64]) -> f64) -> Result<RVal, R2Err> {
+pub(crate) fn map_recycled(a: &[EvalArg], params: &[Vec<Real>], f: impl Fn(f64, &[f64]) -> f64) -> Result<RVal, R2Err> {
     let x: Vec<Real> = first(a).as_reals()?.iter().copied().collect();
     if x.is_empty() || params.iter().any(Vec::is_empty) {
         return Ok(RVal::Numeric(Vec::<Real>::new().into(), Attrs::default()));
@@ -492,39 +505,6 @@ mod tests {
         assert_eq!(qbeta_log(0.99f64.ln(), 0.001, 0.01, false), 0.0);
         // and the same quantile seen from the other end is exactly 1
         assert_eq!(qbeta_log(0.01f64.ln(), 0.01, 0.001, false), 1.0);
-    }
-
-    fn arg(v: f64) -> EvalArg { EvalArg { name: None, value: RVal::Numeric(vec![Some(v)].into(), Attrs::default()) } }
-    fn reals(v: &RVal) -> Vec<f64> { v.as_reals().unwrap().iter().map(|x| x.unwrap()).collect() }
-
-    /// Kolmogorov-Smirnov against the exact CDF, at a level no correct
-    /// generator should reach by chance.
-    fn ks(mut xs: Vec<f64>, cdf: impl Fn(f64) -> f64) -> f64 {
-        xs.sort_by(f64::total_cmp);
-        let n = xs.len() as f64;
-        xs.iter().enumerate().map(|(i, &x)| {
-            let f = cdf(x);
-            (f - i as f64 / n).abs().max(((i + 1) as f64 / n - f).abs())
-        }).fold(0.0, f64::max)
-    }
-
-    #[test]
-    fn the_generators_draw_from_these_distributions() {
-        let n = 50_000.0;
-        let limit = 2.5 / f64::sqrt(n);
-        for shape in [0.1, 0.5, 1.0, 2.5, 30.0] {
-            let v = reals(&crate::rng::bi_rgamma(&[arg(n), arg(shape), arg(2.0)]).unwrap());
-            let d = ks(v, |x| pgamma_log_tails(shape, x * 2.0).0.exp());
-            assert!(d < limit, "rgamma shape {shape}: KS distance {d}");
-        }
-        // Not 0.1, 0.1: 1.3% of its mass is within 1e-16 of 1, so those draws
-        // round to exactly 1 and the distance measures rounding.
-        for (a, b) in [(0.3, 0.3), (0.5, 3.0), (2.0, 2.0), (30.0, 4.0)] {
-            let v = reals(&crate::rng::bi_rbeta(&[arg(n), arg(a), arg(b)]).unwrap());
-            assert!(v.iter().all(|x| (0.0..=1.0).contains(x)));
-            let d = ks(v, |x| pbeta_log_tails(x, 1.0 - x, a, b).0.exp());
-            assert!(d < limit, "rbeta {a}, {b}: KS distance {d}");
-        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 479 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 513 Built-in Functions and Operators
 
 ## Core (84)
 ```
@@ -124,7 +124,7 @@ integrate(f,lower,upper) Numerical integral of f (Simpson) (→ $value)
 optimize(f,lower,upper)  Golden-section minimize/maximize (→ $minimum)
 ```
 
-## Statistics (57)
+## Statistics (91)
 ```
 cov(x,y)    Sample covariance (errors on unequal lengths, as R)
 dbinom(x,size,prob) / pbinom(q,size,prob)   Binomial density / CDF
@@ -135,6 +135,23 @@ dgamma(x,shape,rate,scale) / pgamma(q,shape,rate,scale) / qgamma(p,shape,rate,sc
 rgamma(n,shape,rate,scale)   Random gamma variates
 dbeta(x,shape1,shape2) / pbeta(q,shape1,shape2) / qbeta(p,shape1,shape2)  Beta density / CDF / quantile
 rbeta(n,shape1,shape2)       Random beta variates
+df(x,df1,df2)                 F density
+rchisq(n,df) / rt(n,df)       Random chi-squared / Student-t variates
+dunif(x,min,max) / punif(q,min,max) / qunif(p,min,max)  Uniform density / CDF / quantile
+dweibull(x,shape,scale) / pweibull(q,shape,scale) / qweibull(p,shape,scale)  Weibull density / CDF / quantile
+rweibull(n,shape,scale)       Random Weibull variates
+dlnorm(x,meanlog,sdlog) / plnorm(q,meanlog,sdlog) / qlnorm(p,meanlog,sdlog)  Lognormal density / CDF / quantile
+rlnorm(n,meanlog,sdlog)       Random lognormal variates
+dcauchy(x,location,scale) / pcauchy(q,location,scale) / qcauchy(p,location,scale)  Cauchy density / CDF / quantile
+rcauchy(n,location,scale)     Random Cauchy variates
+dlogis(x,location,scale) / plogis(q,location,scale) / qlogis(p,location,scale)  Logistic density / CDF / quantile
+rlogis(n,location,scale)      Random logistic variates
+dgeom(x,prob) / pgeom(q,prob) / qgeom(p,prob)  Geometric density / CDF / quantile
+rgeom(n,prob)                 Random geometric variates
+dnbinom(x,size,prob,mu) / pnbinom(q,size,prob,mu) / qnbinom(p,size,prob,mu)  Negative binomial density / CDF / quantile
+rnbinom(n,size,prob,mu)       Random negative binomial variates
+dhyper(x,m,n,k) / phyper(q,m,n,k) / qhyper(p,m,n,k)  Hypergeometric density / CDF / quantile
+rhyper(nn,m,n,k)              Random hypergeometric variates
 dt(x,df) / pt(q,df) / qt(p,df)              Student-t density / CDF / quantile
 binomial() / poisson() / gaussian()         glm family objects (family= argument)
 mean(x)         Arithmetic mean
@@ -264,7 +281,7 @@ hnc.date(date)     Hindu National Calendar form SSSS-MM-P-TT (Saka year, month, 
 ## Machine Learning (23)
 ```
 rpart(y~.,data)         Decision tree (CART)
-rf(y~.,data,ntrees)     Random forest
+rf(y~.,data,ntrees)     Random forest (rf(n,df1,df2) with single numbers draws F variates, as in R)
 gbm(y~.,data,ntrees)    Gradient boosted trees
 kmeans(x,centers)       K-means clustering
 knn(train,test,labels,k) K-nearest neighbors

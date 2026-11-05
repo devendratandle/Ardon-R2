@@ -20,9 +20,9 @@ Modern data science wastes enormous computational resources:
 **One language. Minimal glue. Direct to hardware.**
 
 ### V0.4.1 — Current Release (2026-11)
-- **479 built-in functions and operators** across 29 crates — no packages
+- **513 built-in functions and operators** across 29 crates — no packages
   to install; every one has `?help`, enforced by a test
-- Accuracy **matches CRAN R on 36/36 differential cases**, now including a
+- Accuracy **matches CRAN R on 38/38 differential cases**, now including a
   555-value grid of distribution functions (far tails, `log.p`), SVD
   accuracy, R's printing, sorting, factors and element assignment; R2's
   LLM gradients match an independent float64 implementation to f32
@@ -113,7 +113,7 @@ NOW        V0.4.1  →  R semantics made exact (printing, NA, assignment,
                        sorting, factors, distributions, SVD), linear
                        algebra on the GEMM kernel, GPU training step,
                        fine-tuning and LoRA, runs that resume exactly.
-                       479 builtins, 772 tests, 36/36 differential.
+                       513 builtins, 780 tests, 38/38 differential.
 Next       V0.5.0  →  Out-of-core training data (Arrow/Parquet + memmap),
                        so a corpus larger than RAM trains without a
                        preprocessing step. Closing the remaining sgemm
