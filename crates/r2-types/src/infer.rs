@@ -142,7 +142,7 @@ fn builtin_return_type(name: &str, arg_types: &[IrType]) -> IrType {
         // Matrix-producing
         "matrix" | "cbind" | "rbind" | "t" => IrType::matrix(IrElem::Real, None, None),
         "%*%" => IrType::matrix(IrElem::Real, None, None),
-        "solve" | "chol" | "qr" => IrType::matrix(IrElem::Real, None, None),
+        "solve" | "chol" => IrType::matrix(IrElem::Real, None, None),
         "diag" => IrType::matrix(IrElem::Real, None, None),
         // Element-wise math (preserves shape of first arg)
         "sqrt" | "exp" | "log" | "log2" | "log10" | "abs" | "sin" | "cos" | "tan"

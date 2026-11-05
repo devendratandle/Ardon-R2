@@ -57,6 +57,7 @@ use builtins::core::*;
 use builtins::data_apply::*;
 use builtins::sys_models::*;
 use builtins::ml_data::*;
+use builtins::qr::*;
 use builtins::help::*;
 use builtins::session::*;
 use builtins::internal::*;

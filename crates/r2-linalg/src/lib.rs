@@ -28,6 +28,7 @@ pub mod eigen;
 pub mod symeig;
 mod simd;
 pub mod solve;
+pub mod linpack;
 
 pub use level1::*;
 pub use level2::*;

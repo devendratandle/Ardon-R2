@@ -11,6 +11,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### `qr()` and its accessors; `cbind` and `rbind` recycle — 2026-11-05
+
+- **`qr(x, tol, LAPACK)`, `qr.Q`, `qr.R`, `qr.X`, `qr.coef`, `qr.qy`, `qr.qty`,
+  `qr.resid`, `qr.fitted`, `qr.solve`, `is.qr`, and `solve()` of a `qr` object.**
+  524 built-in functions. The object is R's own compact form, because R documents
+  it: `$qr`, `$rank`, `$qraux`, `$pivot`, from LINPACK's `dqrdc2` with its limited
+  pivoting, so a negligible column moves right and the others keep their order.
+  `dgeqrf`, which `lm` uses, stays as it was.
+- **Compared with R on 3,038 values** (`tests/differential/cases/qr.R`): full-rank,
+  wide, rank-deficient and zero matrices, the Hilbert matrix of order 6, `tol`,
+  matrix responses and names. All agree to 1e-9 and 3,035 to 1e-13; the other three
+  are Hilbert values at about 4e-12. A 2000 x 500 `qr()` took 0.34 s against R's
+  0.32 s, one run each. Differences from R are in `docs/KNOWN_LIMITATIONS.md`.
+- **`cbind(1, x)` and `rbind(1, x)` work.** Both refused any vector shorter than
+  the others. They now follow R: matrices fix the shared side, otherwise the longest
+  vector does, shorter vectors recycle with R's warning when they do not divide
+  evenly, and empty vectors and `NULL` drop out.
+
 ### The standard distribution families, and R's arguments everywhere — 2026-11-05
 
 - **New: uniform, Weibull, lognormal, Cauchy, logistic, geometric, negative

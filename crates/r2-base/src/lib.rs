@@ -12,6 +12,7 @@
 // R2Err>`, thin wrappers over r2-linalg kernels.
 
 pub mod linalg_ops;
+pub mod qr_ops;
 pub mod r2d;
 
 use r2_types::*;

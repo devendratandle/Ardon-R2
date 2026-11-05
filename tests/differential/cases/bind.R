@@ -1,0 +1,21 @@
+# cbind and rbind share R's shape rule: matrices fix the shared side, otherwise
+# the longest vector does, and shorter vectors recycle.
+p <- function(k, m) { cat(k, ".dim=", dim(m)[1], "x", dim(m)[2], "\n", sep = ""); for (i in seq_along(m)) cat(k, ".", i, "=", m[i], "\n", sep = "") }
+p("c.scalar", cbind(1, 1:3))
+p("c.scalar2", cbind(1:3, 1))
+p("c.short", cbind(1:2, 1:4))
+p("c.named", cbind(a = 1, b = 1:3))
+p("c.matrix", cbind(matrix(1:4, 2), 9))
+p("c.matrix2", cbind(9, matrix(1:6, 3), 1:3))
+p("c.empty", cbind(1:2, integer(0)))
+p("c.null", cbind(NULL, 1:2))
+p("c.logical", cbind(TRUE, 1:2))
+p("r.scalar", rbind(1, 1:3))
+p("r.scalar2", rbind(1:3, 1))
+p("r.short", rbind(1:2, 1:4))
+p("r.matrix", rbind(matrix(1:4, 2), 9))
+p("r.matrix2", rbind(9, matrix(1:6, 2), 1:3))
+p("r.empty", rbind(1:2, integer(0)))
+p("r.null", rbind(NULL, 1:2))
+cat("names=", colnames(cbind(a = 1, b = 1:3)), "\n")
+cat("null=", is.null(cbind(NULL)), is.null(rbind(NULL)), "\n")

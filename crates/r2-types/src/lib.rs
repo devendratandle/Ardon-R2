@@ -668,6 +668,12 @@ impl fmt::Display for RVal {
                 Ok(())
             }
             RVal::TypeInstance(inst) => {
+                if inst.type_name.as_ref() == "qr" {
+                    for name in ["qr", "rank", "qraux", "pivot"] {
+                        if let Some(v) = inst.fields.get(name) { write!(f, "${}\n{}\n\n", name, v)?; }
+                    }
+                    return write!(f, "attr(,\"class\")\n[1] \"qr\"");
+                }
                 // A result that carries its report (a hypothesis test: the
                 // engine keeps the text the test produced on the result
                 // instead of printing it when the test RUNS) displays as

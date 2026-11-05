@@ -55,6 +55,9 @@ pub(crate) fn bi_det(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
 // ── solve() — matrix inverse, or solve a·x = b ───────────────────────
 
 pub(crate) fn bi_solve(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if matches!(a.first().map(|x| &x.value), Some(RVal::TypeInstance(i)) if i.type_name.as_ref() == "qr") {
+        return r2_base::qr_ops::solve_qr(a);
+    }
     let m = match &gv(a, 0) {
         RVal::Matrix(m) => m.clone(),
         _ => return err!(Runtime, "solve: 'a' must be a matrix"),

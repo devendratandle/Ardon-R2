@@ -733,6 +733,8 @@ pub(crate) fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 }
 pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     match &gv(a,0) {
+        RVal::TypeInstance(i) if i.type_name.as_ref() == "qr" =>
+            Ok(RVal::Character(["qr", "rank", "qraux", "pivot"].iter().map(|s| Some(Arc::from(*s))).collect(), Attrs::default())),
         RVal::DataFrame(df) => Ok(RVal::Character(df.columns.iter().map(|(n,_)| Some(n.clone())).collect(), Attrs::default())),
         // Named list: R returns the names, with "" for any unnamed element,
         // or NULL if the list has no names at all.

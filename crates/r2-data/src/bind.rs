@@ -42,6 +42,39 @@ fn all_dataframes(a: &[EvalArg]) -> bool {
     !a.is_empty() && a.iter().all(|x| matches!(x.value, RVal::DataFrame(_)))
 }
 
+/// The extent `cbind` and `rbind` share. Matrices fix it and must agree on it;
+/// with none, the longest vector does.
+fn shared_extent(a: &[EvalArg], side: &str, of: fn(&Matrix) -> usize) -> Result<usize, R2Err> {
+    let (mut fixed, mut longest) = (None, 0);
+    for (i, arg) in a.iter().enumerate() {
+        match &arg.value {
+            RVal::Null => {}
+            RVal::Matrix(m) => match fixed {
+                None => fixed = Some(of(m)),
+                Some(e) if e != of(m) => return Err(R2Err {
+                    msg: format!("number of {side} of matrices must match (see arg {})", i + 1),
+                    kind: ErrKind::Runtime,
+                }),
+                _ => {}
+            },
+            other => longest = longest.max(coerce_to_columns(other)?.1),
+        }
+    }
+    Ok(fixed.unwrap_or(longest))
+}
+
+/// A vector recycled or cut to `extent`, warning as R does when it does not
+/// divide evenly. An empty vector drops out unless everything is empty.
+fn recycled(v: &RVal, extent: usize, call: &str, side: &str, arg: usize) -> Result<Option<Vec<f64>>, R2Err> {
+    let (d, n, _) = coerce_to_columns(v)?;
+    if n == 0 { return Ok(if extent == 0 { Some(d) } else { None }); }
+    if extent % n != 0 {
+        r2_types::out::rerr(&format!("Warning: {call}: number of {side} of result is not a multiple of vector length (arg {})
+", arg + 1));
+    }
+    Ok(Some((0..extent).map(|i| d[i % n]).collect()))
+}
+
 /// rbind — stack rows. data.frame path stacks per-column with type checks;
 /// matrix path stacks blocks (vectors become 1-row 1-col-per-element matrices).
 pub fn bi_rbind(a: &[EvalArg]) -> Result<RVal, R2Err> {
@@ -87,21 +120,16 @@ pub fn bi_rbind(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 
     // Matrix path
+    let ncol = shared_extent(a, "columns", |m| m.ncol)?;
     let mut blocks: Vec<(Vec<f64>, usize, usize)> = Vec::with_capacity(a.len());
-    for arg in a {
-        let (data, nrow, ncol) = match &arg.value {
-            RVal::Matrix(m) => (m.data.clone(), m.nrow, m.ncol),
-            other => {
-                let (d, n, _) = coerce_to_columns(other)?;
-                (d, 1, n)
-            }
-        };
-        blocks.push((data, nrow, ncol));
+    for (i, arg) in a.iter().enumerate() {
+        match &arg.value {
+            RVal::Null => {}
+            RVal::Matrix(m) => blocks.push((m.data.clone(), m.nrow, m.ncol)),
+            other => if let Some(d) = recycled(other, ncol, "rbind", "columns", i)? { blocks.push((d, 1, ncol)); },
+        }
     }
-    let ncol = blocks[0].2;
-    if !blocks.iter().all(|(_, _, c)| *c == ncol) {
-        return Err(R2Err { msg: "rbind: column count mismatch across inputs".into(), kind: ErrKind::Runtime });
-    }
+    if blocks.is_empty() { return Ok(RVal::Null); }
     let total_rows: usize = blocks.iter().map(|(_, r, _)| *r).sum();
     let mut data = vec![0.0; total_rows * ncol];
     for j in 0..ncol {
@@ -153,21 +181,23 @@ pub fn bi_cbind(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 
     // Matrix path
+    let nrow = shared_extent(a, "rows", |m| m.nrow)?;
     let mut blocks: Vec<(Vec<f64>, usize, usize, Option<Vec<Arc<str>>>)> = Vec::with_capacity(a.len());
     let mut any_names = false;
-    for arg in a {
-        let (data, nrow, ncol) = coerce_to_columns(&arg.value)?;
+    for (i, arg) in a.iter().enumerate() {
         let names: Option<Vec<Arc<str>>> = match &arg.value {
             RVal::Matrix(m) => m.col_names.clone(),
             _ => arg.name.as_ref().map(|n| vec![n.clone()]),
         };
+        let (data, ncol) = match &arg.value {
+            RVal::Null => continue,
+            RVal::Matrix(m) => (m.data.clone(), m.ncol),
+            other => match recycled(other, nrow, "cbind", "rows", i)? { Some(d) => (d, 1), None => continue },
+        };
         if names.is_some() { any_names = true; }
         blocks.push((data, nrow, ncol, names));
     }
-    let nrow = blocks[0].1;
-    if !blocks.iter().all(|(_, r, _, _)| *r == nrow) {
-        return Err(R2Err { msg: "cbind: row count mismatch across inputs".into(), kind: ErrKind::Runtime });
-    }
+    if blocks.is_empty() { return Ok(RVal::Null); }
     let total_cols: usize = blocks.iter().map(|(_, _, c, _)| *c).sum();
     let mut data = Vec::with_capacity(nrow * total_cols);
     let mut col_names: Vec<Arc<str>> = Vec::with_capacity(total_cols);
@@ -214,13 +244,19 @@ mod tests {
     }
 
     #[test]
-    fn rbind_row_count_mismatch_errs() {
-        let a = vec![
-            EvalArg { name: None, value: RVal::Numeric(vec![Some(1.0), Some(2.0)].into(), Attrs::default()) },
-            EvalArg { name: None, value: RVal::Numeric(vec![Some(3.0), Some(4.0), Some(5.0)].into(), Attrs::default()) }.into(),
-        ];
-        let r = bi_rbind(&a);
-        assert!(r.is_err(), "expected error on mismatched column count");
+    fn rbind_matrices_must_agree_and_vectors_recycle() {
+        let matrix = |ncol| EvalArg { name: None, value: RVal::Matrix(Matrix::new(vec![1.0; 2 * ncol], 2, ncol)) };
+        let e = bi_rbind(&[matrix(2), matrix(3)]).unwrap_err();
+        assert!(e.msg.contains("number of columns of matrices must match (see arg 2)"), "{}", e.msg);
+
+        let vector = |v: &[f64]| EvalArg { name: None, value: RVal::Numeric(v.iter().map(|x| Some(*x)).collect(), Attrs::default()) };
+        match bi_rbind(&[vector(&[1.0, 2.0]), vector(&[3.0, 4.0, 5.0])]).unwrap() {
+            RVal::Matrix(m) => {
+                assert_eq!((m.nrow, m.ncol), (2, 3));
+                assert_eq!(m.data, vec![1.0, 3.0, 2.0, 4.0, 1.0, 5.0]);
+            }
+            other => panic!("expected a matrix, got {}", other.type_name()),
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 513 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 524 Built-in Functions and Operators
 
 ## Core (84)
 ```
@@ -278,7 +278,7 @@ hindu.date(date)   Hindu calendar breakdown of a Date (lunar month, paksha, tith
 hnc.date(date)     Hindu National Calendar form SSSS-MM-P-TT (Saka year, month, paksha, tithi; "A" marks Adhik Maas)
 ```
 
-## Machine Learning (23)
+## Machine Learning (34)
 ```
 rpart(y~.,data)         Decision tree (CART)
 rf(y~.,data,ntrees)     Random forest (rf(n,df1,df2) with single numbers draws F variates, as in R)
@@ -289,6 +289,17 @@ naive.bayes(x,y)        Gaussian naive Bayes
 prcomp(x)               Principal component analysis
 svd(x)                  Singular value decomposition (nu = 0, nv = 0: values only)
 chol(x)                 Upper Cholesky factor R, t(R) %*% R == x
+qr(x, tol, LAPACK)      QR decomposition, R's compact form: $qr, $rank, $qraux, $pivot
+is.qr(x)                TRUE for the result of qr()
+qr.Q(qr, complete, Dvec) The orthogonal factor Q
+qr.R(qr, complete)      The upper-triangular factor R
+qr.X(qr, complete, ncol) The original matrix back from a decomposition
+qr.coef(qr, y)          Least-squares coefficients, NA for columns left out
+qr.qy(qr, y)            Q %*% y
+qr.qty(qr, y)           t(Q) %*% y
+qr.resid(qr, y)         Residuals of y on the columns
+qr.fitted(qr, y, k)     Fitted values of y on the first k columns
+qr.solve(a, b, tol)     Solve or least squares by QR; the inverse without b
 eigen(x)                Eigenvalue decomposition (symmetric -> dsyev with
                         vectors; non-symmetric -> dgeev; complex spectra
                         expose $imaginary, $vectors = NULL)

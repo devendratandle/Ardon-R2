@@ -94,9 +94,15 @@ to be worse than documented and was fixed here rather than scheduled.
   generator; with a formula or vectors it is R2's random forest. A forest needs
   more than one row, so the two never collide.
 - Taking a column of a matrix (`m[, 4]`) drops the row names R keeps.
-- **No user-level `qr()`** (nor `qr.Q`, `qr.R`, `qr.solve`): the blocked
-  Householder QR exists and serves `lm()` and least squares, but there is
-  no R-style `qr` object yet.
+- **`qr()` differs from R in four places.** `LAPACK = TRUE` stops with an error, and
+  so does `qr()` of a model fit, where R returns the fit's `$qr`. The object is not a
+  plain list: like every classed result in R2, `is.list(q)` is FALSE and `length(q)`
+  is 1, though `names(q)`, `q$rank` and printing match R. At rank 0, `qr.fitted`
+  returns 0, where R returns `y` as the fitted values and also as the residuals.
+  On an ill-conditioned matrix the last `qraux` is a repeatedly downdated norm and
+  differs from R's: for the Hilbert matrix of order 6 the truth is 3.98624e-07, R
+  has 3.98600e-07 and this has 3.98607e-07. Below the rank, the columns moved aside
+  hold rounding noise, in R as here, and the two differ there.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
 - **String collation follows R on Windows / English locales** (letters
   case- and accent-blind first, then accents, then lowercase first;
