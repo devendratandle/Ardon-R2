@@ -11,6 +11,25 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### The beta and gamma distributions — 2026-11-05
+
+- **`dbeta`, `pbeta`, `qbeta`, `rbeta`, `dgamma`, `pgamma`, `qgamma`, `rgamma`**,
+  with R's arguments: `rate` or `scale`, `lower.tail`, `log.p` and `log`, and
+  every `d/p/q` parameter recycled. 479 built-in functions.
+- **Compared with R on 16,730 values**, shapes from 1e-3 to 1e5, tails down to
+  1e-300. Where the two differ by more than 1e-11, a 340-digit reference sides
+  with R2, apart from two quantiles below the smallest double. R itself returns
+  -Inf for `pbeta(0.75, 1e4, 25, log.p = TRUE)` and 1 for
+  `qbeta(1e-300, 10, 1e5, lower.tail = FALSE)`
+  (`docs/KNOWN_LIMITATIONS.md`). `tests/differential/cases/beta_gamma.R` keeps
+  about 12,000 of them where R is right.
+- **`pt` and `pf` now share the new incomplete beta**, whose prefactor is in
+  Loader's saddle-point form rather than from `lgamma`, and whose smaller tail
+  is the one computed. They still pass the 555-value `distribution_grid` case.
+- **`qchisq` stopped early on very small answers**: `qchisq(0.5, 0.002)` came out
+  near 1e-61, where the answer is about 1e-301. A bracket that started at 0 was
+  being halved, and 200 halvings cannot get there.
+
 ### LLM: `llm.train` learns from the whole text; `llm.save` keeps the tokenizer — 2026-11-04
 
 - **`llm.train` only ever saw the first `batch + seq` tokens**: it built one

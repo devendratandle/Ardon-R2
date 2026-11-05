@@ -133,7 +133,7 @@ pub(crate) fn stats_table() -> Vec<(&'static str, BuiltinFn)> {
         ("sum",bi_sum),("mean",bi_mean),("sd",bi_sd),("var",bi_var),("cor",bi_cor),("cov",bi_cov),
         ("lm",bi_lm),("summary",bi_summary),("plssem",bi_plssem),("csem",bi_plssem),
         ("rnorm",bi_rnorm),("dnorm",bi_dnorm),("runif",bi_runif),("sample",bi_sample),
-        ("dexp",bi_dexp),("pexp",bi_pexp),("qexp",bi_qexp),("dbinom",bi_dbinom),("pbinom",bi_pbinom),("dpois",bi_dpois),("ppois",bi_ppois),("dt",bi_dt),("pt",bi_pt),("dchisq",bi_dchisq),("pchisq",bi_pchisq),("pf",bi_pf),("rexp",bi_rexp),("qt",bi_qt),("qchisq",bi_qchisq),("qf",bi_qf),("qbinom",bi_qbinom),("qpois",bi_qpois),("density",bi_density),
+        ("dexp",bi_dexp),("pexp",bi_pexp),("qexp",bi_qexp),("dbinom",bi_dbinom),("pbinom",bi_pbinom),("dpois",bi_dpois),("ppois",bi_ppois),("dt",bi_dt),("pt",bi_pt),("dchisq",bi_dchisq),("pchisq",bi_pchisq),("pf",bi_pf),("rexp",bi_rexp),("dgamma",bi_dgamma),("pgamma",bi_pgamma),("qgamma",bi_qgamma),("rgamma",bi_rgamma),("dbeta",bi_dbeta),("pbeta",bi_pbeta),("qbeta",bi_qbeta),("rbeta",bi_rbeta),("qt",bi_qt),("qchisq",bi_qchisq),("qf",bi_qf),("qbinom",bi_qbinom),("qpois",bi_qpois),("density",bi_density),
         // more distributions
         ("pnorm",bi_pnorm),("qnorm",bi_qnorm),("rbinom",bi_rbinom),("rpois",bi_rpois),
         // more stats

@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 471 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 479 Built-in Functions and Operators
 
 ## Core (84)
 ```
@@ -124,13 +124,17 @@ integrate(f,lower,upper) Numerical integral of f (Simpson) (→ $value)
 optimize(f,lower,upper)  Golden-section minimize/maximize (→ $minimum)
 ```
 
-## Statistics (49)
+## Statistics (57)
 ```
 cov(x,y)    Sample covariance (errors on unequal lengths, as R)
 dbinom(x,size,prob) / pbinom(q,size,prob)   Binomial density / CDF
 dpois(x,lambda) / ppois(q,lambda)           Poisson density / CDF
 dexp(x,rate) / pexp(q,rate) / qexp(p,rate)  Exponential density / CDF / quantile
 dchisq(x,df) / pchisq(q,df) / qchisq(p,df)  Chi-squared density / CDF / quantile
+dgamma(x,shape,rate,scale) / pgamma(q,shape,rate,scale) / qgamma(p,shape,rate,scale)  Gamma density / CDF / quantile
+rgamma(n,shape,rate,scale)   Random gamma variates
+dbeta(x,shape1,shape2) / pbeta(q,shape1,shape2) / qbeta(p,shape1,shape2)  Beta density / CDF / quantile
+rbeta(n,shape1,shape2)       Random beta variates
 dt(x,df) / pt(q,df) / qt(p,df)              Student-t density / CDF / quantile
 binomial() / poisson() / gaussian()         glm family objects (family= argument)
 mean(x)         Arithmetic mean

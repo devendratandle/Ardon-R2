@@ -12,7 +12,7 @@
 use r2_types::{Attrs, ErrKind, EvalArg, R2Err, RVal, Real};
 
 #[inline]
-fn first(a: &[EvalArg]) -> RVal { a.first().map(|x| x.value.clone()).unwrap_or(RVal::Null) }
+pub(crate) fn first(a: &[EvalArg]) -> RVal { a.first().map(|x| x.value.clone()).unwrap_or(RVal::Null) }
 
 #[inline]
 fn arg_named(a: &[EvalArg], name: &str) -> Option<RVal> {
@@ -324,7 +324,7 @@ fn ln_phi_upper(x: f64) -> f64 {
 /// R position among the unnamed arguments. These were read by NOBODY
 /// before: `pnorm(10, lower.tail = FALSE)` returned the LOWER tail (1),
 /// silently, in every p-function.
-fn flag(a: &[EvalArg], name: &str, pos: usize, dflt: bool) -> bool {
+pub(crate) fn flag(a: &[EvalArg], name: &str, pos: usize, dflt: bool) -> bool {
     arg_named(a, name).or_else(|| a.iter().filter(|x| x.name.is_none()).nth(pos).map(|x| x.value.clone()))
         .and_then(|v| v.scalar_f64().ok().flatten()).map(|v| v != 0.0).unwrap_or(dflt)
 }
@@ -393,7 +393,7 @@ fn p_lower(p: f64, lower: bool, logp: bool) -> f64 {
 /// A distribution parameter as a VECTOR (by name, or at its position
 /// among the unnamed arguments), for R's recycling: `pchisq(3, c(1, 2,
 /// 5))` is three values. `None` when absent.
-fn param_vec(a: &[EvalArg], name: &str, pos: usize) -> Result<Option<Vec<Real>>, R2Err> {
+pub(crate) fn param_vec(a: &[EvalArg], name: &str, pos: usize) -> Result<Option<Vec<Real>>, R2Err> {
     let v = arg_named(a, name).or_else(|| a.iter().filter(|x| x.name.is_none()).nth(pos).map(|x| x.value.clone()));
     match v { Some(v) => Ok(Some(v.as_reals()?.iter().copied().collect())), None => Ok(None) }
 }

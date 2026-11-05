@@ -180,9 +180,12 @@ approximation (~1e-16). `qnorm`, the inverse CDF, is bit-identical
 (Wichura's AS241). The t, F, binomial, Poisson and exponential d/p/q
 functions agree with R to 1e-13 on 543 of 555 grid values (far tails and
 `log.p` included); the known exceptions are listed in
-`docs/KNOWN_LIMITATIONS.md` — `qf` is a bisection good to ~1e-11, and the
-beta/gamma families are not implemented yet. Accuracy is the release gate,
-not an afterthought.
+`docs/KNOWN_LIMITATIONS.md` — `qf` is a bisection good to ~1e-11. The beta and
+gamma families were compared with R on 16,730 values, shapes from 1e-3 to 1e5:
+where the two differed by more than 1e-11, a 340-digit reference sided with R2,
+apart from two quantiles below the smallest double, where R2 gives 0 and R's
+nonzero value misses its target. Accuracy is the release gate, not an
+afterthought.
 
 ## Build
 

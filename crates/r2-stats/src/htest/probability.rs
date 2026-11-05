@@ -75,55 +75,7 @@ pub fn incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
     if x <= 0.0 { return 0.0; }
     if x >= 1.0 { return 1.0; }
     if a <= 0.0 || b <= 0.0 { return f64::NAN; }
-
-    // Leading factor  x^a (1-x)^b / B(a, b), in log space.
-    let ln_bt = ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b)
-        + a * x.ln() + b * (1.0 - x).ln();
-    let bt = ln_bt.exp();
-
-    if x < (a + 1.0) / (a + b + 2.0) {
-        bt * betacf(a, b, x) / a
-    } else {
-        1.0 - bt * betacf(b, a, 1.0 - x) / b
-    }
-}
-
-/// Lentz's modified continued fraction for the incomplete beta
-/// (Numerical Recipes §6.4, `betacf`). Caller guarantees `x` is in the
-/// fast-converging region via the symmetry swap in `incomplete_beta`.
-fn betacf(a: f64, b: f64, x: f64) -> f64 {
-    const MAXIT: usize = 300;
-    const EPS: f64 = 1e-15;
-    const FPMIN: f64 = 1e-300;
-
-    let qab = a + b;
-    let qap = a + 1.0;
-    let qam = a - 1.0;
-    let mut c = 1.0;
-    let mut d = 1.0 - qab * x / qap;
-    if d.abs() < FPMIN { d = FPMIN; }
-    d = 1.0 / d;
-    let mut h = d;
-
-    for m in 1..=MAXIT {
-        let m = m as f64;
-        let m2 = 2.0 * m;
-        // Even step.
-        let mut aa = m * (b - m) * x / ((qam + m2) * (a + m2));
-        d = 1.0 + aa * d; if d.abs() < FPMIN { d = FPMIN; }
-        c = 1.0 + aa / c; if c.abs() < FPMIN { c = FPMIN; }
-        d = 1.0 / d;
-        h *= d * c;
-        // Odd step.
-        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
-        d = 1.0 + aa * d; if d.abs() < FPMIN { d = FPMIN; }
-        c = 1.0 + aa / c; if c.abs() < FPMIN { c = FPMIN; }
-        d = 1.0 / d;
-        let del = d * c;
-        h *= del;
-        if (del - 1.0).abs() < EPS { break; }
-    }
-    h
+    crate::betagamma::pbeta_log_tails(x, 1.0 - x, a, b).0.exp()
 }
 
 /// Upper-tail probability of the F distribution: `P(F > f)` for
@@ -227,7 +179,7 @@ pub fn t_cdf(t: f64, df: f64) -> f64 {
 /// density be computed as a difference of SMALL numbers instead of the
 /// large, nearly cancelling ones `lgamma` gives (at shape 5000, `x ln x`,
 /// `x` and `lgamma` are each ~4e4, and their difference ~1e-2).
-fn stirlerr(n: f64) -> f64 {
+pub(crate) fn stirlerr(n: f64) -> f64 {
     const S0: f64 = 0.083333333333333333333;         // 1/12
     const S1: f64 = 0.00277777777777777777778;       // 1/360
     const S2: f64 = 0.00079365079365079365079365;    // 1/1260
@@ -259,7 +211,7 @@ fn stirlerr(n: f64) -> f64 {
 
 /// `bd0(x, np) = x ln(x/np) + np - x`, computed without the cancellation
 /// of that formula when `x` is near `np` (Loader's series).
-fn bd0(x: f64, np: f64) -> f64 {
+pub(crate) fn bd0(x: f64, np: f64) -> f64 {
     if (x - np).abs() < 0.1 * (x + np) {
         let mut v = (x - np) / (x + np);
         let mut s = (x - np) * v;
@@ -403,7 +355,10 @@ pub fn chi_sq_quantile(lp: f64, df: f64, lower: bool) -> f64 {
     // bisection from the bracket could never get there (200 halvings of 1
     // reach 1e-60; qchisq(1e-300, 0.5) is ~1e-1200) and would stop on a
     // wrong nonzero value. Otherwise it is the starting point.
-    let small = if use_lower { 2.0 * ((lt + ln_gamma(a + 1.0)) / a).exp() } else { f64::INFINITY };
+    // An upper-tail target reaches the same place from the other side: at
+    // df = 0.002 the median is below 1e-300.
+    let lower_tail = if use_lower { lt } else if lt > -std::f64::consts::LN_2 { (-lt.exp_m1()).ln() } else { (-lt.exp()).ln_1p() };
+    let small = 2.0 * ((lower_tail + ln_gamma(a + 1.0)) / a).exp();
     if small == 0.0 { return 0.0; }
     // else start from Wilson–Hilferty, clamped into the bracket
     let z = crate::dist::qnorm_approx(if use_lower { lt.exp() } else { -lt.exp_m1() });
@@ -419,8 +374,9 @@ pub fn chi_sq_quantile(lp: f64, df: f64, lower: bool) -> f64 {
         let step = if use_lower { f / ld.exp() } else { -f / ld.exp() };
         let mut xn = x - step;
         if !(xn > lo && xn < hi) || !xn.is_finite() {
-            // bisect — geometrically when the bracket spans decades
-            xn = if lo > 0.0 && hi > 4.0 * lo { (lo * hi).sqrt() } else { 0.5 * (lo + hi) };
+            // bisect — geometrically when the bracket spans decades, and by
+            // a large jump from a bracket that still starts at 0
+            xn = if lo == 0.0 { hi * 1e-6 } else if hi > 4.0 * lo { (lo * hi).sqrt() } else { 0.5 * (lo + hi) };
         }
         if (xn - x).abs() <= 4.0 * f64::EPSILON * x.abs() { x = xn; break; }
         x = xn;
