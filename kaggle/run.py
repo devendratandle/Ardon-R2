@@ -55,3 +55,10 @@ pairs("medium 39.8M", "R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2
 sh("free -g | head -2")
 pairs("large 125M", "R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8", 30, 2)
 sh("nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0")
+
+# Where the step goes now, per kernel (the queue is drained after each launch, so
+# the distribution is the information, not the total).
+for name, env in [("medium", "R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8"),
+                  ("large", "R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8")]:
+    print(f"\n=== census {name}", flush=True)
+    sh(f"cd /tmp/r2 && {env} R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 ./target/release/examples/tinystories_train 2>&1 | grep -A16 'GPU step census'; true")
