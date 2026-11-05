@@ -139,7 +139,20 @@ fn adam() {
     let (tm, tv) = (Tensor::zeros(n).unwrap(), Tensor::zeros(n).unwrap());
     let mut t = 0u32;
     let s = timed(5, || { t += 1; adam_step(&tw, &tg, &tm, &tv, n, 3e-4, 0.9, 0.999, 1e-8, t, 1.0, 0.0) });
-    println!("CUDA: {}", s.map_or("failed".to_string(), |s| format!("{:.2} ms", s * 1e3)));
+    println!("CUDA, closed by the fence: {}", s.map_or("failed".to_string(), |s| format!("{:.2} ms", s * 1e3)));
+    // The same steps closed by reading the weights back, which cannot return
+    // before the kernels finish: a check that the fence really waits.
+    let read = median((0..5).map(|_| { let s = Instant::now(); std::hint::black_box(tw.download()); s.elapsed().as_secs_f64() }).collect());
+    let closed = median((0..5).map(|_| {
+        let s = Instant::now();
+        for _ in 0..20 { t += 1; adam_step(&tw, &tg, &tm, &tv, n, 3e-4, 0.9, 0.999, 1e-8, t, 1.0, 0.0); }
+        std::hint::black_box(tw.download());
+        s.elapsed().as_secs_f64()
+    }).collect());
+    println!("CUDA, closed by a download: {:.2} ms per step ({:.0} ms for 20 steps + read, read alone {:.0} ms)",
+             (closed - read) / 20.0 * 1e3, closed * 1e3, read * 1e3);
+    let w = tw.download();
+    println!("weights after all steps: {} of {n} finite", w.iter().filter(|x| x.is_finite()).count());
 }
 
 fn main() {

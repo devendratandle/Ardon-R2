@@ -3,9 +3,9 @@
 //! [`gemm_tiled`] is `kernels/gemm.cu`, the structure of the wgpu kernel in
 //! `src/gemm.rs`: every element of C is one thread's fixed-order sum, so the
 //! same inputs give the same bits on every run. [`gemm_cublas`] calls cuBLAS
-//! if `libcublas.so.13` is on the machine. [`gemm`] picks one and falls back
-//! to the other; `R2_CUDA_GEMM=tiled|cublas` overrides the choice per call,
-//! which is how `cuda_gemm_bench` interleaves them in one process.
+//! if `libcublas.so.13` is on the machine, and is the faster of the two on a
+//! Tesla T4. [`gemm`] takes cuBLAS and falls back to tiled when it is missing;
+//! `R2_CUDA_GEMM=tiled|cublas` overrides the choice per call.
 
 use super::ffi::{blas, Arg, Kernel};
 use super::{loaded, Loaded, Tensor};
@@ -116,9 +116,12 @@ pub fn gemm_cublas(a: &Tensor, ta: bool, b: &Tensor, tb: bool, m: usize, k: usiz
     blas.sgemm(tb, ta, n, m, k, b, ldb, a, lda, if accumulate { 1.0 } else { 0.0 }, c, n).is_ok()
 }
 
-/// The default path, chosen by measurement on the Tesla T4
-/// (`--example cuda_gemm_bench`).
-const DEFAULT_PATH: Path = Path::Tiled;
+/// The default path, by measurement on the Tesla T4 (`--example cuda_bench`,
+/// 33 shape and transpose cases interleaved): cuBLAS 2.9-5.1 TFLOP/s, tiled
+/// 1.4-3.6, cuBLAS ahead in every case by 1.2-3.2x. Its bits repeated across
+/// two runs in all 33, but cuBLAS does not promise that, so a run that needs
+/// the guarantee sets `R2_CUDA_GEMM=tiled`.
+const DEFAULT_PATH: Path = Path::Cublas;
 
 fn wanted() -> Path {
     // read per call, not cached: a benchmark alternates inside one window,
@@ -266,6 +269,9 @@ mod tests {
         let (a, b) = (mk(m * k, 0.4), mk(k * n, 0.9));
         let r = upload(&b, k, n).unwrap();
         assert_eq!((r.rows, r.cols), (k, n));
-        assert_eq!(matmul_resident(&a, &r, m).unwrap(), try_matmul(&a, &b, m, k, n).unwrap());
+        let (got, want) = (matmul_resident(&a, &r, m).unwrap(), try_matmul(&a, &b, m, k, n).unwrap());
+        assert_eq!(got.len(), want.len());
+        // not bit equality: this may be cuBLAS, which does not promise it
+        assert!(got.iter().zip(&want).all(|(x, y)| (x - y).abs() <= 1e-5));
     }
 }
