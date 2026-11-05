@@ -950,8 +950,8 @@ An earlier run the same night, same code but for the committed PTX, gave R2
 1.01-1.04x, PyTorch 1.05-1.09x and PyTorch 1.44x, so the medium figure moves
 with the machine and only the large one is clearly a gap.
 
-GEMM is not the difference. Kernel to kernel R2's cuBLAS path matches or beats
-PyTorch's on these shapes (2.9-5.1 TFLOP/s against 2.5-4.5 through `a @ b`, which
+GEMM is not the difference. Kernel to kernel R2's cuBLAS path is ahead on most
+of these shapes, though not all (2.9-5.1 TFLOP/s against 2.5-4.5 through `a @ b`, which
 also allocates its result), and R2's own tiled kernel reaches 1.4-3.6.
 
 **Attention is what is left.** At 8 x 256, 12/4 heads, hd 64, in ms per call:
