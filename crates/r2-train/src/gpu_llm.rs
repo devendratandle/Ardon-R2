@@ -39,11 +39,14 @@
 //! reproducible as f32: the same run gives the same bits.
 
 use crate::llm::Trainer;
-use r2_gpu::attention::{self, Shape};
-use r2_gpu::device::{Dtype, Tensor};
-use r2_gpu::elementwise as ew;
-use r2_gpu::gemm::gemm;
-use r2_gpu::optim::adam_step;
+// One trainer, two backends with the same kernel API. CUDA is chosen when it is
+// compiled; with no CUDA device `from_trainer` then says so, as wgpu's does.
+#[cfg(feature = "cuda")]
+use r2_gpu::cuda::{attention, elementwise as ew, gemm::gemm, optim, sync, Dtype, Tensor};
+#[cfg(not(feature = "cuda"))]
+use r2_gpu::{attention, device::{sync, Dtype, Tensor}, elementwise as ew, gemm::gemm, optim};
+use attention::Shape;
+use optim::adam_step;
 use r2_tensor::model::Config;
 
 /// A layer's activations past its input: what the backward needs, or
@@ -158,7 +161,7 @@ impl GpuTrainer {
             off += n;
         }
         let w16 = (0..w.len()).map(|_| None).collect();
-        let norm_scratch = tz(r2_gpu::optim::norm_scratch_len(&sizes))?;
+        let norm_scratch = tz(optim::norm_scratch_len(&sizes))?;
         Ok(GpuTrainer { cfg: tr.cfg, w, w16, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
                         beta2: tr.opt.beta2, eps: tr.opt.eps, sched: tr.sched, t: tr.opt.t, step: tr.step,
                         weight_decay: tr.opt.weight_decay, decay: tr.decay_mask(), clip: tr.clip,
@@ -194,9 +197,15 @@ impl GpuTrainer {
     pub fn download_into(&self, tr: &mut Trainer) {
         let mut off = 0;
         for (i, n) in self.sizes.iter().enumerate() {
-            tr.params[i] = self.w[i].download();
-            tr.opt.m[off..off + n].copy_from_slice(&self.m[i].download());
-            tr.opt.v[off..off + n].copy_from_slice(&self.v[i].download());
+            let (w, m, v) = (self.w[i].download(), self.m[i].download(), self.v[i].download());
+            // a device that faulted reads back nothing: keep what the CPU has
+            if w.len() != *n || m.len() != *n || v.len() != *n {
+                eprintln!("GpuTrainer: the device stopped responding, block {i} not brought back");
+                return;
+            }
+            tr.params[i] = w;
+            tr.opt.m[off..off + n].copy_from_slice(&m);
+            tr.opt.v[off..off + n].copy_from_slice(&v);
             off += n;
         }
         tr.opt.t = self.t;
@@ -255,7 +264,7 @@ impl GpuTrainer {
         let mut scale = self.loss_scale;
         self.last_grad_norm = None;
         if let Some(max) = self.clip {
-            let sq = r2_gpu::optim::grad_sq_norm(&self.g, &self.sizes, &self.norm_scratch)
+            let sq = optim::grad_sq_norm(&self.g, &self.sizes, &self.norm_scratch)
                 .ok_or("GPU kernel failed: gradient norm")?;
             let norm = (sq.sqrt() / scale as f64) as f32;
             self.last_grad_norm = Some(norm);
@@ -338,7 +347,7 @@ impl GpuTrainer {
             // an overflow check outside mixed precision launches nothing,
             // so it is not a row of the census either
             if census && (mixed || what != "overflow check") {
-                r2_gpu::device::sync();
+                sync();
                 let dt = mark.get().elapsed().as_secs_f64() * 1e3;
                 let mut tb = table.borrow_mut();
                 match tb.iter_mut().find(|r| r.0 == what) {
@@ -466,6 +475,8 @@ impl GpuTrainer {
 
         // t per-token losses and the overflow flag come back; nothing else does
         let rows = a.loss_rows.download();
+        // a device that faulted reads back nothing
+        if rows.len() != t + 1 { return Err("GPU kernel failed: the device stopped responding".into()); }
         if census {
             let mut tb = table.into_inner();
             tb.sort_by(|x, y| y.2.partial_cmp(&x.2).unwrap());
@@ -484,7 +495,41 @@ impl GpuTrainer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2_gpu::device::gpu;
+
+    /// A device is here, or the run did not ask for one (`R2_REQUIRE_CUDA`,
+    /// set on the Kaggle run, turns its absence into a failure).
+    #[cfg(feature = "cuda")]
+    fn have_device() -> bool {
+        match r2_gpu::cuda::ffi::device() {
+            Ok(_) => true,
+            Err(why) => {
+                assert!(std::env::var_os("R2_REQUIRE_CUDA").is_none(), "R2_REQUIRE_CUDA is set but: {why}");
+                false
+            }
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    fn have_device() -> bool { r2_gpu::device::gpu().is_some() }
+    /// CUDA stores f32 only; `set_precision(Mixed)` is refused there.
+    #[cfg(feature = "cuda")]
+    fn have_f16() -> bool { false }
+    #[cfg(not(feature = "cuda"))]
+    fn have_f16() -> bool { r2_gpu::device::gpu().map(|g| g.f16) == Some(true) }
+    /// An adapter without a fused fma (llvmpipe) promises less, as it says.
+    #[cfg(feature = "cuda")]
+    fn fma_exact() -> bool { true }
+    #[cfg(not(feature = "cuda"))]
+    fn fma_exact() -> bool { r2_gpu::numerics::fma_exact() != Some(false) }
+
+    /// On CUDA, asking for f16 is an error that says what is missing.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn mixed_precision_is_refused_on_cuda() {
+        if !have_device() { return; }
+        let tr = Trainer::new(cfg(), 1e-3, 7).unwrap();
+        let mut gt = GpuTrainer::from_trainer(&tr).unwrap();
+        assert!(gt.set_precision(Precision::Mixed).is_err());
+    }
 
     fn cfg() -> Config {
         Config { dim: 32, n_heads: 4, n_kv_heads: 2, n_layers: 2, vocab: 40,
@@ -510,7 +555,7 @@ mod tests {
     /// block, so a wrong kernel names itself.
     #[test]
     fn gpu_loss_and_gradients_match_the_tape_block_by_block() {
-        if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        if !have_device() { eprintln!("no GPU adapter; skipped"); return; }
         let c = cfg();
         let tr = Trainer::new(c, 1e-3, 7).unwrap();
         let b = batch(3, 12, c.vocab);
@@ -547,7 +592,7 @@ mod tests {
     /// and three steps track the f32 trainer's losses.
     #[test]
     fn mixed_precision_tracks_f32_and_reproduces_itself() {
-        if gpu().map(|g| g.f16) != Some(true) { eprintln!("no f16 on this adapter; skipped"); return; }
+        if !have_f16() { eprintln!("no f16 on this adapter; skipped"); return; }
         let c = cfg();
         let tr = Trainer::new(c, 1e-3, 7).unwrap();
         let b = batch(3, 12, c.vocab);
@@ -602,7 +647,7 @@ mod tests {
     /// is the CPU's.
     #[test]
     fn gpu_adamw_clipping_and_schedule_track_the_cpu_trainer() {
-        if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        if !have_device() { eprintln!("no GPU adapter; skipped"); return; }
         let c = cfg();
         let mut cpu = Trainer::new(c, 1e-3, 21).unwrap();
         cpu.opt.weight_decay = 0.1;
@@ -619,8 +664,7 @@ mod tests {
         }
         let mut back = Trainer::new(c, 1e-3, 21).unwrap();
         gt.download_into(&mut back);
-        // an adapter without a fused fma (llvmpipe) promises less, as it says
-        let tol = if r2_gpu::numerics::fma_exact() == Some(false) { 1e-3 } else { 1e-4 };
+        let tol = if fma_exact() { 1e-4 } else { 1e-3 };
         for i in 0..cpu.params.len() {
             let e = max_rel(&back.params[i], &cpu.params[i]);
             assert!(e < tol, "block {i}: weights differ by {e} after six steps");
@@ -631,7 +675,7 @@ mod tests {
     /// padding give the tape's loss and gradients, at a new shape every step.
     #[test]
     fn gpu_ignores_prompts_and_padding_as_the_tape_does() {
-        if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        if !have_device() { eprintln!("no GPU adapter; skipped"); return; }
         let c = cfg();
         let tr = Trainer::new(c, 1e-3, 5).unwrap();
         let pairs: Vec<_> = (0..6u32).map(|i| {
@@ -656,7 +700,7 @@ mod tests {
 
     #[test]
     fn gpu_steps_track_the_cpu_trainer_and_round_trip_the_state() {
-        if gpu().is_none() { eprintln!("no GPU adapter; skipped"); return; }
+        if !have_device() { eprintln!("no GPU adapter; skipped"); return; }
         let c = cfg();
         let mut cpu = Trainer::new(c, 1e-3, 11).unwrap();
         let mut back = Trainer::new(c, 1e-3, 11).unwrap();

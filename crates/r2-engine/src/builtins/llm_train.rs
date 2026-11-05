@@ -101,21 +101,21 @@ fn run_steps(ctx: &str, id: u32, s: &Settings, tok: &Tokenizer, batch_at: impl F
         };
         s.apply(t);
         let first_step = t.step as usize;
-        #[cfg(feature = "gpu")]
+        #[cfg(any(feature = "gpu", feature = "cuda"))]
         let mut device = if s.gpu {
             if s.accum > 1 { return err!(Runtime, "{}: accum is CPU only so far", ctx); }
             Some(r2_train::gpu_llm::GpuTrainer::from_trainer(t).map_err(|e| fail(ctx, e))?)
         } else { None };
-        #[cfg(not(feature = "gpu"))]
+        #[cfg(not(any(feature = "gpu", feature = "cuda")))]
         if s.gpu {
-            return err!(Runtime, "{}: this build has no GPU support (build with --features gpu)", ctx);
+            return err!(Runtime, "{}: this build has no GPU support (build with --features gpu or cuda)", ctx);
         }
         let mut last = 0.0f32;
         for n in 1..=s.steps {
             let batch = batch_at(first_step + n - 1);
-            #[cfg(feature = "gpu")]
+            #[cfg(any(feature = "gpu", feature = "cuda"))]
             let on_device = device.as_mut().map(|g| g.train_step(&batch));
-            #[cfg(not(feature = "gpu"))]
+            #[cfg(not(any(feature = "gpu", feature = "cuda")))]
             let on_device: Option<Result<f32, String>> = None;
             last = match on_device {
                 Some(r) => r,
@@ -129,13 +129,13 @@ fn run_steps(ctx: &str, id: u32, s: &Settings, tok: &Tokenizer, batch_at: impl F
                 r2_types::out::rout(&format!("step {:>5}  loss {:.4}\n", n, last));
             }
             if let Some(dir) = s.checkpoint.as_ref().filter(|_| n % s.every == 0 || n == s.steps) {
-                #[cfg(feature = "gpu")]
+                #[cfg(any(feature = "gpu", feature = "cuda"))]
                 if let Some(g) = &device { g.download_into(t); }
                 t.save_checkpoint(dir, s.keep).map_err(|e| fail(ctx, e))?;
             }
         }
         // the weights live on the device until here
-        #[cfg(feature = "gpu")]
+        #[cfg(any(feature = "gpu", feature = "cuda"))]
         if let Some(g) = &device { g.download_into(t); }
         Ok(as_num(last as f64))
     })

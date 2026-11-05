@@ -22,3 +22,4 @@ r2-gpu    = { path = "../r2-gpu" }
 # Pass the GPU switch down to r2-gpu. Off by default: a normal build
 # compiles no wgpu at all.
 gpu = ["r2-gpu/gpu"]
+cuda = ["r2-gpu/cuda"]

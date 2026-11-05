@@ -124,7 +124,7 @@ fn lora_trains_small_adapters_and_they_travel_two_ways() {
 
 /// The device runs the same recipe: same losses to within f32 rounding, and
 /// the weights come back, so generating and saving work as after a CPU run.
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "cuda"))]
 #[test]
 fn the_gpu_runs_the_same_recipe() {
     if r2_gpu::adapter_info().contains("no GPU") { eprintln!("no GPU adapter; skipped"); return; }
@@ -142,7 +142,7 @@ fn the_gpu_runs_the_same_recipe() {
 }
 
 /// Adapters are CPU only so far: an error that says so, not a wrong run.
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "cuda"))]
 #[test]
 fn lora_on_the_gpu_is_refused_by_name() {
     if r2_gpu::adapter_info().contains("no GPU") { return; }
@@ -151,7 +151,7 @@ fn lora_on_the_gpu_is_refused_by_name() {
     assert!(e.contains("CPU only"), "{e}");
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "cuda")))]
 #[test]
 fn a_build_without_gpu_support_says_so() {
     assert!(run_err(&format!("{MODEL}{EXAMPLES}llm.finetune(m, p, q, steps = 1, device = \"gpu\")")).contains("--features gpu"));

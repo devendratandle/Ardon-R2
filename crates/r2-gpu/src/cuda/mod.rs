@@ -8,15 +8,16 @@
 //! committed and embedded with `include_str!`, so building this crate needs
 //! no `nvcc`, and the driver compiles the PTX for the GPU it finds.
 //!
-//! Storage is f32 only. The wgpu path's f16 storage exists for the bandwidth
-//! of an integrated GPU and is not ported. Of two or more GPUs, the first is
-//! used.
+//! Storage is f32 only: the wgpu path's f16 storage exists for the bandwidth of
+//! an integrated GPU and is not ported, so `R2_GPU_PREC=mixed` is refused here.
+//! Of two or more GPUs, the first is used.
 
 #![deny(unsafe_code)]
 
 #[allow(unsafe_code)]
 pub mod ffi;
 pub mod attention;
+pub mod elementwise;
 pub mod gemm;
 pub mod optim;
 
@@ -27,6 +28,10 @@ use std::sync::OnceLock;
 /// A buffer of f32 on the device, as `device::Tensor` is for wgpu.
 pub type Tensor = DeviceBuffer<f32>;
 
+/// Storage types, as `device::Dtype`. Only f32 is served here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dtype { F32, F16 }
+
 impl DeviceBuffer<f32> {
     /// Upload host data. `None` without a device or on allocation failure.
     pub fn upload(data: &[f32]) -> Option<Tensor> {
@@ -36,6 +41,12 @@ impl DeviceBuffer<f32> {
     /// `len` zeroed elements.
     pub fn zeros(len: usize) -> Option<Tensor> {
         Tensor::zeroed(device().ok()?, len).ok()
+    }
+
+    /// `len` zeroed elements of `dtype`. `None` for f16, which this backend
+    /// does not store: that is how a request for mixed precision is refused.
+    pub fn zeros_as(len: usize, dtype: Dtype) -> Option<Tensor> {
+        if dtype == Dtype::F32 { Tensor::zeros(len) } else { None }
     }
 
     /// Overwrite the buffer's start from the host; `false` if it failed.
@@ -60,7 +71,7 @@ pub fn device_line() -> String {
     match device() {
         Ok(d) => format!("{} (CUDA, driver API {}.{}, {} MB, device 0 of {})",
                          d.name, d.driver / 1000, d.driver % 1000 / 10, d.memory >> 20, d.count),
-        Err(why) => format!("no CUDA device ({why}): CPU fallback active"),
+        Err(why) => format!("no GPU: no CUDA device ({why}), CPU fallback active"),
     }
 }
 
@@ -92,6 +103,7 @@ pub fn module_status() -> Vec<(&'static str, Result<(), String>)> {
     let st = |r: Result<(), &str>| r.map_err(str::to_string);
     vec![("map", st(map_kernel().map(|_| ()))),
          ("gemm", st(gemm::loads())),
+         ("elementwise", st(elementwise::loads())),
          ("attention", st(attention::loads())),
          ("optim", st(optim::loads()))]
 }

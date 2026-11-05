@@ -332,6 +332,6 @@ mod tests {
     }
 }
 
-/// The training step with everything resident on the GPU (`--features gpu`).
-#[cfg(feature = "gpu")]
+/// The training step with everything resident on the GPU (`--features gpu` or `cuda`).
+#[cfg(any(feature = "gpu", feature = "cuda"))]
 pub mod gpu_llm;

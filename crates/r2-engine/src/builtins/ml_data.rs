@@ -1134,6 +1134,9 @@ pub(crate) fn bi_gpu_status(_e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Resu
         mk("enabled", rbool(r2_gpu::gpu_enabled())),
         mk("min.elems", RVal::Numeric(vec![Some(r2_gpu::GPU_MIN_ELEMS as f64)].into(), Attrs::default())),
         mk("report", rstr_(&r2_gpu::backend_report(r2_gpu::GPU_MIN_ELEMS, r2_gpu::Op::Relu))),
+        mk("device", rstr_(&r2_gpu::adapter_info())),
+        // where the last gpu.map really ran: a CPU fallback says so here
+        mk("last.backend", rstr_(&r2_gpu::last_backend().to_string())),
     ]))
 }
 

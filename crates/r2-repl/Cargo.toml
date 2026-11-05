@@ -35,3 +35,4 @@ winresource = "0.1"
 [features]
 # llm.train(device = "gpu"). Off by default: a normal build compiles no wgpu.
 gpu = ["r2-engine/gpu"]
+cuda = ["r2-engine/cuda"]

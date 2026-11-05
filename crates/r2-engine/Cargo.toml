@@ -32,3 +32,5 @@ rayon = "1.10"
 [features]
 # llm.train(device = "gpu"). Off by default: a normal build compiles no wgpu.
 gpu = ["r2-train/gpu"]
+# The same on CUDA; libcuda.so.1 is opened at run time, nothing is linked.
+cuda = ["r2-train/cuda"]

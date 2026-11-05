@@ -363,7 +363,7 @@ fn main() {
     // CPU trainer gets the state back at the end for the held-out
     // evaluation, the save and the generation below.
     let on_gpu = std::env::var("R2_GPU").map(|v| v == "1").unwrap_or(false);
-    #[cfg(feature = "gpu")]
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
     let mut gpu_tr = if on_gpu {
         let mut g = r2_train::gpu_llm::GpuTrainer::from_trainer(&tr).unwrap_or_else(|e| die("gpu", e));
         // R2_GPU_CKPT=1: keep one layer's activations instead of every layer's
@@ -378,8 +378,8 @@ fn main() {
                  if g.precision == r2_train::gpu_llm::Precision::Mixed { ", mixed precision" } else { "" });
         Some(g)
     } else { None };
-    #[cfg(not(feature = "gpu"))]
-    if on_gpu { die("gpu", "this binary was built without `--features gpu`"); }
+    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    if on_gpu { die("gpu", "this binary was built without `--features gpu` or `cuda`"); }
 
     let mut curve: Vec<(usize, f32)> = Vec::new();
     let every = (steps / 10).max(1);
@@ -391,17 +391,17 @@ fn main() {
     let mut last = 0.0f32;
     for s in tr.step as usize..steps {
         let batch = batch_at(&train, s, bn, seq);
-        #[cfg(feature = "gpu")]
+        #[cfg(any(feature = "gpu", feature = "cuda"))]
         let loss = match gpu_tr.as_mut() {
             Some(g) => g.train_step(&batch).unwrap_or_else(|e| die("train_step (gpu)", e)),
             None => tr.train_step(&batch).unwrap_or_else(|e| die("train_step", e)),
         };
-        #[cfg(not(feature = "gpu"))]
+        #[cfg(not(any(feature = "gpu", feature = "cuda")))]
         let loss = tr.train_step(&batch).unwrap_or_else(|e| die("train_step", e));
         if first == 0.0 { first = loss; }
         if ckpt_every > 0 && (s + 1) % ckpt_every == 0 {
             if let Some(d) = &ckpt_dir {
-                #[cfg(feature = "gpu")]
+                #[cfg(any(feature = "gpu", feature = "cuda"))]
                 if let Some(g) = &gpu_tr { g.download_into(&mut tr); }
                 let t = std::time::Instant::now();
                 let p = tr.save_checkpoint(d, ckpt_keep).unwrap_or_else(|e| die("checkpoint", e));
@@ -418,7 +418,7 @@ fn main() {
         // run shows it has stopped learning. Off the training clock.
         if eval_every > 0 && (s + 1) % eval_every == 0 {
             let t = std::time::Instant::now();
-            #[cfg(feature = "gpu")]
+            #[cfg(any(feature = "gpu", feature = "cuda"))]
             if let Some(g) = &gpu_tr { g.download_into(&mut tr); }
             let v = tr.eval_loss(&val).unwrap_or_else(|e| die("eval", e));
             eval_s += t.elapsed().as_secs_f64();
@@ -426,7 +426,7 @@ fn main() {
             println!("  held-out  step {:>6}  loss {v:.4}", s + 1);
         }
     }
-    #[cfg(feature = "gpu")]
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
     if let Some(g) = &gpu_tr {
         g.download_into(&mut tr);
         if g.precision == r2_train::gpu_llm::Precision::Mixed {

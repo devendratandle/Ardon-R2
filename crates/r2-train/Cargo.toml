@@ -19,3 +19,9 @@ memmap2 = "0.9"
 
 [features]
 gpu = ["r2-tensor/gpu", "r2-gpu/gpu"]
+# The same trainer on CUDA. With both on, the trainer uses CUDA.
+cuda = ["r2-tensor/cuda", "r2-gpu/cuda"]
+
+[[example]]
+name = "device_step"
+required-features = ["cuda"]
