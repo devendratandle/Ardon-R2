@@ -31,5 +31,17 @@ fn gpu_map_runs_on_the_device_and_status_reports_it() {
     assert_eq!(backend, if have { "CUDA" } else { "CPU" });
     let device = text(&run("gpu.status()$device"));
     assert_eq!(device.contains("no GPU"), !have, "{device}");
+
+    // the tape's f32 matmul: gpu.enable reaches the Oracle, so a big enough one
+    // goes to the device, and gives the CPU kernel's answer either way
+    let (m, k, n) = (401usize, 402usize, 403usize);
+    let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.031).sin()).collect();
+    let b: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.017).cos()).collect();
+    let got = r2_tensor::ops::matmul(&a, &b, m, k, n);
+    assert_eq!(r2_gpu::last_backend().to_string(), if have { "CUDA" } else { "CPU" });
     run("gpu.enable(FALSE)");
+    let cpu = r2_tensor::ops::matmul(&a, &b, m, k, n);
+    assert!(!r2_oracle::gpu_enabled(), "gpu.enable(FALSE) must route back");
+    let scale = cpu.iter().fold(1.0f32, |s, x| s.max(x.abs()));
+    assert!(got.iter().zip(&cpu).all(|(x, y)| (x - y).abs() <= 1e-5 * scale));
 }

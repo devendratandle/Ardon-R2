@@ -26,16 +26,30 @@ sh("nvidia-smi -L; nvcc --version | tail -2")
 sh(f"cd /tmp/r2/{KERNELS} && sh build.sh && mkdir -p /kaggle/working/ptx && cp *.ptx /kaggle/working/ptx/")
 sh(f"cd /tmp/r2 && git add -N {KERNELS} && if git diff --quiet -- {KERNELS}; then echo PTX up to date; else echo STALE; git diff --stat -- {KERNELS}; fi")
 
-sh(f"cd /tmp/r2 && {CARGO} run --release -p r2-gpu --features cuda --example cuda_probe 2>&1 | tail -12")
-
 test("-p r2-gpu --features cuda")
 test("-p r2-train --features cuda --lib gpu_llm")
 test("-p r2-engine --features cuda --test cuda_wiring")
-test("-p r2-engine --features cuda --test llm_finetune")
-# No visible device: the same wiring falls back, and says so.
 test("-p r2-engine --features cuda --test cuda_wiring", env="CUDA_VISIBLE_DEVICES=")
-sh(f"cd /tmp/r2 && {CARGO} check --release -p r2-repl --features cuda 2>&1 | tail -2")
 
-# A real training step, at both report models, device against CPU.
-sh(f"cd /tmp/r2 && R2_GPU_STATS=10 {CARGO} run --release -p r2-train --features cuda --example device_step 2>&1 | grep -vE '^ +(Compiling|Downloaded|Downloading|Finished|Running)'", tail=12000)
-sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES= {CARGO} run --release -p r2-train --features cuda --example device_step 2>&1 | tail -3")
+# ── R2 on CUDA against PyTorch on CUDA, same card, interleaved ──────────────
+# Both sides read the same token files and start from the same weights. The
+# corpus is not in the repository, so this fetches TinyStories: not byte for
+# byte the corpus behind benchmarks/llm/REPORT.md, so these losses are compared
+# only with each other.
+sh("cd /tmp/r2 && curl -sSfL -r 0-19447281 -o corpus.txt https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt; ls -la corpus.txt; sha256sum corpus.txt")
+sh("python3 -c 'import numpy, tokenizers, torch; print(torch.__version__, torch.cuda.get_device_name(0))' || pip install -q numpy tokenizers")
+sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-train --features cuda --example tinystories_train 2>&1 | tail -1")
+sh(f"cd /tmp/r2 && {CARGO} run --release -p r2-gpu --features cuda --example cuda_bench 2>&1 | grep -vE '^ +(Compiling|Finished|Running)'", tail=12000)
+sh("cd /tmp/r2 && python3 kaggle/torch_kernels.py 2>&1", tail=6000)
+
+PICK = "grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |FAIL|panicked|rror'"
+def pairs(name, env, steps, n):
+    for i in range(n):
+        print(f"\n=== {name} pair {i + 1} of {n}: {env}, {steps} steps", flush=True)
+        sh(f"cd /tmp/r2 && nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0; {env} R2_STEPS={steps} R2_GPU=1 ./target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|HELD-OUT|rror|panicked'")
+        sh(f"cd /tmp/r2 && {env} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | {PICK}")
+
+pairs("small 7.2M", "R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32", 300, 3)
+pairs("medium 39.8M", "R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8", 100, 3)
+pairs("large 125M", "R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8", 30, 2)
+sh("nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0")

@@ -1125,6 +1125,7 @@ pub(crate) fn bi_gpu_enable(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
         other => e.scalar_f64(other)?.unwrap_or(0.0) != 0.0,
     };
     r2_gpu::set_gpu_enabled(on);
+    r2_oracle::set_gpu_enabled(on);      // the tape's f32 matmul asks the Oracle
     Ok(rbool(r2_gpu::gpu_enabled()))
 }
 
