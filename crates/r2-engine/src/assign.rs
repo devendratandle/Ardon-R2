@@ -112,7 +112,7 @@ impl Engine {
                 for (k, &p) in pos.iter().enumerate() {
                     let col = match val {
                         RVal::DataFrame(src) => src.columns[k % src.columns.len().max(1)].1.clone(),
-                        RVal::List(items) => items[k % items.len().max(1)].1.clone(),
+                        RVal::List(items, _) => items[k % items.len().max(1)].1.clone(),
                         other => recycle(other, nrow),
                     };
                     if p < df.columns.len() { df.columns[p].1 = col; }
@@ -191,11 +191,11 @@ impl Engine {
     /// selects (or adds) the element and `NULL` removes it.
     pub(crate) fn assign_dbl_index(&mut self, obj: &mut RVal, idx: &RVal, val: &RVal) -> Result<(), R2Err> {
         match (&*obj, idx) {
-            (RVal::List(_) | RVal::DataFrame(_), RVal::Character(k, _)) => {
+            (RVal::List(_, _) | RVal::DataFrame(_), RVal::Character(k, _)) => {
                 let Some(field) = k.first().cloned().flatten() else { return err!(Runtime, "[[ ]] with a missing name"); };
                 self.assign_dollar(obj, &field, val)
             }
-            (RVal::List(items), _) => {
+            (RVal::List(items, _), _) => {
                 let i = self.scalar_f64(idx)?.unwrap_or(1.0) as usize;
                 if i == 0 { return err!(Runtime, "index 0 is not valid"); }
                 let mut items = items.clone();
@@ -205,7 +205,7 @@ impl Engine {
                     while items.len() < i { items.push((None, RVal::Null)); }
                     items[i - 1].1 = val.clone();
                 }
-                *obj = RVal::List(items);
+                *obj = RVal::list(items);
                 Ok(())
             }
             (RVal::DataFrame(df), _) => {
@@ -239,7 +239,7 @@ impl Engine {
                 }
                 Ok(())
             }
-            RVal::List(items) => {
+            RVal::List(items, _) => {
                 let pos = items.iter().position(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some(field));
                 match (pos, val) {
                     (Some(p), RVal::Null) => { items.remove(p); }

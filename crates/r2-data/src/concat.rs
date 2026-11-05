@@ -30,7 +30,7 @@ pub fn bi_c(args: &[EvalArg]) -> Result<RVal, R2Err> {
             return bi_c(&leaves);
         }
         let items = spliced.into_iter().map(|e| (e.name.filter(|_| use_names), e.value)).collect();
-        return Ok(RVal::List(items));
+        return Ok(RVal::list(items));
     }
     let has_str = args.iter().any(|a| matches!(&a.value, RVal::Character(..)));
     if has_str {
@@ -112,7 +112,7 @@ fn list_items(args: &[EvalArg]) -> Vec<EvalArg> {
     for a in args {
         let parts: Vec<(Option<Arc<str>>, RVal)> = match &a.value {
             RVal::Null => Vec::new(),
-            RVal::List(items) => items.clone(),
+            RVal::List(items, _) => items.clone(),
             RVal::DataFrame(df) => df.columns.iter().map(|(n, c)| (Some(n.clone()), c.clone())).collect(),
             v @ (RVal::Numeric(..) | RVal::Single(..) | RVal::Integer(..) | RVal::Logical(..)
                 | RVal::Character(..) | RVal::Factor(..) | RVal::Matrix(..)) => {
@@ -149,7 +149,7 @@ fn list_items(args: &[EvalArg]) -> Vec<EvalArg> {
 fn flatten(items: Vec<EvalArg>) -> Vec<EvalArg> {
     let mut out = Vec::new();
     for e in items {
-        if is_list_like(&e.value) && matches!(e.value, RVal::List(_) | RVal::DataFrame(_)) {
+        if is_list_like(&e.value) && matches!(e.value, RVal::List(_, _) | RVal::DataFrame(_)) {
             out.extend(flatten(list_items(std::slice::from_ref(&e))));
         } else {
             out.push(e);

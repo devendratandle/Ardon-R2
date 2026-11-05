@@ -85,7 +85,7 @@ mod test_suite {
     }
 
     fn formula(lhs: RVal, rhs: RVal) -> RVal {
-        RVal::List(vec![
+        RVal::list(vec![
             (Some(Arc::from("~lhs")), lhs),
             (Some(Arc::from("~rhs")), rhs),
             (Some(Arc::from("~class")), RVal::Character(vec![Some(Arc::from("formula"))], Attrs::default())),

@@ -80,7 +80,7 @@ impl Engine {
     /// position) or a single atomic element.
     pub(crate) fn dbl_index(&self, obj: &RVal, idx: &RVal) -> Result<RVal, R2Err> {
         match obj {
-            RVal::List(items) => {
+            RVal::List(items, _) => {
                 if let RVal::Character(cv, _) = idx {
                     if let Some(Some(name)) = cv.first() {
                         for (n, v) in items { if n.as_deref() == Some(name.as_ref()) { return Ok(v.clone()); } }
@@ -256,7 +256,7 @@ impl Engine {
             |RVal::TypeDef(..)|RVal::TypeInstance(..)|RVal::Null|RVal::Env(..) => col.clone(),
         }
     }
-    pub(crate) fn dollar(&self, obj: &RVal, field: &str) -> Result<RVal, R2Err> { match obj { RVal::DataFrame(df) => df.get_col(field).cloned().ok_or(R2Err{msg:format!("column '{}' not found",field),kind:ErrKind::Runtime}), RVal::List(items) => { for (n,v) in items { if n.as_ref().map(|s| s.as_ref())==Some(field) { return Ok(v.clone()); } } err!(Runtime,"'{}' not in list",field) } RVal::TypeInstance(inst) => inst.fields.get(field).cloned().ok_or(R2Err{msg:format!("field '{}' not found",field),kind:ErrKind::Runtime}), _ => err!(Runtime,"$ applied to {}",obj.type_name()), } }
+    pub(crate) fn dollar(&self, obj: &RVal, field: &str) -> Result<RVal, R2Err> { match obj { RVal::DataFrame(df) => df.get_col(field).cloned().ok_or(R2Err{msg:format!("column '{}' not found",field),kind:ErrKind::Runtime}), RVal::List(items, _) => { for (n,v) in items { if n.as_ref().map(|s| s.as_ref())==Some(field) { return Ok(v.clone()); } } err!(Runtime,"'{}' not in list",field) } RVal::TypeInstance(inst) => inst.fields.get(field).cloned().ok_or(R2Err{msg:format!("field '{}' not found",field),kind:ErrKind::Runtime}), _ => err!(Runtime,"$ applied to {}",obj.type_name()), } }
     // Phase R.1 step 2: coercion methods extracted to RVal methods in
     // r2-types. Engine wrappers retained so existing call sites
     // (`e.as_reals(arg)`, `e.scalar_f64(arg)`) keep working unchanged.

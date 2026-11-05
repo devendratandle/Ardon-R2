@@ -116,7 +116,7 @@ fn cat_elems(v: &RVal) -> Vec<String> {
         RVal::Null => Vec::new(),
         RVal::Matrix(m) => m.data.iter().map(|x| if x.is_nan() { "NA".into() } else { fmt_num(*x) }).collect(),
         RVal::Factor(f) => f.codes.iter().map(|c| c.map_or("NA".into(), |c| (c + 1).to_string())).collect(),
-        RVal::List(items) => items.iter().flat_map(|(_, x)| cat_elems(x)).collect(),
+        RVal::List(items, _) => items.iter().flat_map(|(_, x)| cat_elems(x)).collect(),
         RVal::Numeric(..) | RVal::Single(..) | RVal::Integer(..) | RVal::Character(..) | RVal::Logical(..) =>
             (0..rval_length(v)).map(|i| val_to_str(&take(v, &[i]))).collect(),
         other => vec![val_to_str(other)],
@@ -315,7 +315,7 @@ pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     RVal::Integer(v,_)   => Ok(RVal::Integer(v.iter().rev().cloned().collect(), Attrs::default())),
     RVal::Character(v,_) => Ok(RVal::Character(v.iter().rev().cloned().collect(), Attrs::default())),
     RVal::Logical(v,_)   => Ok(RVal::Logical(v.iter().rev().cloned().collect(), Attrs::default())),
-    RVal::List(items)    => Ok(RVal::List(items.iter().rev().cloned().collect())),
+    RVal::List(items, _)    => Ok(RVal::list(items.iter().rev().cloned().collect())),
     other => err!(Runtime, "rev() not supported for {}", other.type_name()),
 } }
 // ── Tier-1 base-R usability builtins ───────────────────────────────
@@ -392,7 +392,7 @@ pub(crate) fn bi_set_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     match &mut v {
         RVal::Numeric(_, at) | RVal::Integer(_, at)
         | RVal::Character(_, at) | RVal::Logical(_, at) => at.names = Some(names),
-        RVal::List(items) => for (i, (n, _)) in items.iter_mut().enumerate() { *n = names.get(i).cloned(); },
+        RVal::List(items, _) => for (i, (n, _)) in items.iter_mut().enumerate() { *n = names.get(i).cloned(); },
         _ => {}
     }
     Ok(v)
@@ -494,7 +494,7 @@ pub(crate) fn bi_append(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 }
 
 pub(crate) fn collect_leaves<'a>(v: &'a RVal, out: &mut Vec<&'a RVal>) {
-    if let RVal::List(items) = v { for (_, x) in items { collect_leaves(x, out); } } else { out.push(v); }
+    if let RVal::List(items, _) = v { for (_, x) in items { collect_leaves(x, out); } } else { out.push(v); }
 }
 pub(crate) fn bi_unlist(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let v = gv(a,0);
@@ -531,7 +531,7 @@ pub(crate) fn bi_cut(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 /// scalars of an atomic vector).
 pub(crate) fn elements(v: &RVal) -> Vec<RVal> {
     match v {
-        RVal::List(items) => items.iter().map(|(_, x)| x.clone()).collect(),
+        RVal::List(items, _) => items.iter().map(|(_, x)| x.clone()).collect(),
         RVal::Numeric(nv, _) => nv.iter().copied().map(|o| RVal::Numeric(vec![o].into(), Attrs::default())).collect(),
         RVal::Integer(iv, _) => iv.iter().copied().map(|o| RVal::Integer(vec![o].into(), Attrs::default())).collect(),
         RVal::Character(cv, _) => cv.iter().cloned().map(|o| RVal::Character(vec![o], Attrs::default())).collect(),
@@ -570,7 +570,7 @@ pub(crate) fn bi_filter_fp(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Resul
         if is_truthy(e, &r) { keep.push(el.clone()); }
     }
     match x {
-        RVal::List(_) => Ok(RVal::List(keep.into_iter().map(|v| (None, v)).collect())),
+        RVal::List(_, _) => Ok(RVal::list(keep.into_iter().map(|v| (None, v)).collect())),
         _ => { let mut out = Vec::new(); for k in &keep { out.extend(e.as_reals(k)?); } Ok(RVal::Numeric(out.into(), Attrs::default())) }
     }
 }
@@ -587,7 +587,7 @@ pub(crate) fn bi_map(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal
             .collect();
         out.push((None, e.call_fn(&f, &call_args, env)?));
     }
-    Ok(RVal::List(out))
+    Ok(RVal::list(out))
 }
 pub(crate) fn bi_split(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     // One group per level of as.factor(f), in level order and including
@@ -600,7 +600,7 @@ pub(crate) fn bi_split(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
     for (i, xv) in xr.iter().enumerate() {
         if let Some(c) = f.codes[i % f.codes.len()] { groups[c as usize].push(*xv); }
     }
-    Ok(RVal::List(f.levels.into_iter().zip(groups)
+    Ok(RVal::list(f.levels.into_iter().zip(groups)
         .map(|(k, v)| (Some(k), RVal::Numeric(v.into(), Attrs::default()))).collect()))
 }
 pub(crate) fn bi_stopifnot(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
@@ -728,7 +728,7 @@ pub(crate) fn bi_uniroot(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<
     }
     let root = 0.5 * (lo + hi);
     let froot = eval_fn1(e, &f, root, env);
-    Ok(RVal::List(vec![(Some(Arc::from("root")), rnum(root)), (Some(Arc::from("f.root")), rnum(froot))]))
+    Ok(RVal::list(vec![(Some(Arc::from("root")), rnum(root)), (Some(Arc::from("f.root")), rnum(froot))]))
 }
 pub(crate) fn bi_integrate(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let f = gv(a,0);
@@ -742,7 +742,7 @@ pub(crate) fn bi_integrate(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Resul
         let w = if i == 0 || i == nseg { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
         s += w * fx;
     }
-    Ok(RVal::List(vec![(Some(Arc::from("value")), rnum(s * h / 3.0))]))
+    Ok(RVal::list(vec![(Some(Arc::from("value")), rnum(s * h / 3.0))]))
 }
 pub(crate) fn bi_optimize(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let f = gv(a,0);
@@ -765,7 +765,7 @@ pub(crate) fn bi_optimize(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result
     let xstar = 0.5 * (lo + hi);
     let obj = eval_fn1(e, &f, xstar, env);
     let key = if maximum { "maximum" } else { "minimum" };
-    Ok(RVal::List(vec![(Some(Arc::from(key)), rnum(xstar)), (Some(Arc::from("objective")), rnum(obj))]))
+    Ok(RVal::list(vec![(Some(Arc::from(key)), rnum(xstar)), (Some(Arc::from("objective")), rnum(obj))]))
 }
 
 // ── Tier-3 string / I/O ────────────────────────────────────────────

@@ -168,7 +168,7 @@ pub fn bi_svd(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let (want_u, want_v) = (count("nu") != Some(0.0), count("nv") != Some(0.0));
     if !want_u && !want_v {
         let sigma = r2_linalg::dgesvd(m, n, &mat.data).map_err(fail)?;
-        return Ok(RVal::List(vec![(Some(Arc::from("d")), rnums(&sigma))]));
+        return Ok(RVal::list(vec![(Some(Arc::from("d")), rnums(&sigma))]));
     }
     let (sigma, u_data, vt_data) = dgesvd_full(m, n, &mat.data).map_err(fail)?;
 
@@ -184,7 +184,7 @@ pub fn bi_svd(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let mut fields = vec![(Some(Arc::from("d")), rnums(&sigma))];
     if want_u { fields.push((Some(Arc::from("u")), RVal::Matrix(Matrix::new(u_data, m, n)))); }
     if want_v { fields.push((Some(Arc::from("v")), RVal::Matrix(Matrix::new(v_data, n, n)))); }
-    Ok(RVal::List(fields))
+    Ok(RVal::list(fields))
 }
 
 /// `chol(x)` — R's upper-triangular Cholesky factor R, `t(R) %*% R == x`,
@@ -244,7 +244,7 @@ pub fn bi_eigen(a: &[EvalArg]) -> Result<RVal, R2Err> {
             .map_err(|e| R2Err { msg: format!("eigen failed: {}", e), kind: ErrKind::Runtime })?;
         fields.insert(Arc::from("values"), rnums(&eigenvalues));
         fields.insert(Arc::from("vectors"), RVal::Matrix(Matrix::new(vectors, n, n)));
-        return Ok(RVal::List(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()));
+        return Ok(RVal::list(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()));
     }
 
     // Non-symmetric → general real eigenvalues.
@@ -289,7 +289,7 @@ pub fn bi_eigen(a: &[EvalArg]) -> Result<RVal, R2Err> {
             fields.insert(Arc::from("vectors"), RVal::Null);
         }
     }
-    Ok(RVal::List(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()))
+    Ok(RVal::list(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -350,7 +350,7 @@ mod tests {
         let m = Matrix::new(vec![3.0, 0.0, 0.0, 7.0], 2, 2);
         let r = bi_eigen(&[evarg(RVal::Matrix(m))]).unwrap();
         match r {
-            RVal::List(items) => {
+            RVal::List(items, _) => {
                 let (_, vals) = items.iter().find(|(k, _)| k.as_deref().map(|s| s.as_ref()) == Some("values")).unwrap();
                 let v = vals.as_reals().unwrap();
                 let mut sorted: Vec<f64> = v.iter().filter_map(|x| *x).collect();
@@ -370,7 +370,7 @@ mod tests {
         let m_in = Matrix::new(data.clone(), 3, 2);
         let r = bi_svd(&[evarg(RVal::Matrix(m_in))]).unwrap();
         match r {
-            RVal::List(items) => {
+            RVal::List(items, _) => {
                 let by_name: HashMap<&str, &RVal> = items.iter()
                     .filter_map(|(k, v)| k.as_deref().map(|s| (s.as_ref(), v)))
                     .collect();

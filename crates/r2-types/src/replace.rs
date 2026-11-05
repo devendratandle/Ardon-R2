@@ -123,7 +123,7 @@ pub fn replace_elems(obj: &RVal, idx: &RVal, val: &RVal) -> Result<RVal, R2Err> 
     let n = rval_length(obj);
     let names: Option<Vec<Arc<str>>> = match obj {
         RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) => at.names.clone(),
-        RVal::List(items) if items.iter().any(|(k, _)| k.is_some()) =>
+        RVal::List(items, _) if items.iter().any(|(k, _)| k.is_some()) =>
             Some(items.iter().map(|(k, _)| k.clone().unwrap_or_else(|| Arc::from(""))).collect()),
         _ => None,
     };
@@ -132,24 +132,24 @@ pub fn replace_elems(obj: &RVal, idx: &RVal, val: &RVal) -> Result<RVal, R2Err> 
     if pos.is_empty() { return Ok(obj.clone()); }
 
     match obj {
-        RVal::List(items) => {
+        RVal::List(items, _) => {
             let mut items = items.clone();
             if matches!(val, RVal::Null) {
                 // `l[i] <- NULL` removes those elements.
                 let drop: std::collections::HashSet<usize> = pos.into_iter().collect();
-                return Ok(RVal::List(items.into_iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, e)| e).collect()));
+                return Ok(RVal::list(items.into_iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, e)| e).collect()));
             }
             if vlen == 0 { return Err(rerr("replacement has length zero")); }
             let top = pos.iter().map(|p| p + 1).max().unwrap_or(0);
             while items.len() < top { items.push((None, RVal::Null)); }
             for (k, &p) in pos.iter().enumerate() {
                 items[p].1 = match val {
-                    RVal::List(vs) => vs[k % vs.len()].1.clone(),
+                    RVal::List(vs, _) => vs[k % vs.len()].1.clone(),
                     other => crate::take(other, &[k % vlen]),
                 };
             }
             for (p, nm) in new_names { items[p].0 = Some(nm); }
-            return Ok(RVal::List(items));
+            return Ok(RVal::list(items));
         }
         RVal::Factor(f) => {
             if vlen == 0 { return Err(rerr("replacement has length zero")); }

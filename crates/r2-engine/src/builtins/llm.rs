@@ -276,7 +276,7 @@ pub(crate) fn bi_llm_info(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
             vec![Some(std::sync::Arc::from(if serving { "serving" } else { "training" }))],
             Attrs::default())),
     ];
-    Ok(RVal::List(items))
+    Ok(RVal::list(items))
 }
 
 /// `llm.free(model)` — drop a model and release its memory. Explicit

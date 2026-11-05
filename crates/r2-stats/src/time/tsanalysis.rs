@@ -58,7 +58,7 @@ pub fn bi_acf(a: &[EvalArg]) -> Result<RVal, R2Err> {
         other => return Err(R2Err { msg: format!("acf(): unknown type '{}'. Use 'correlation' or 'covariance'.", other), kind: ErrKind::Runtime }),
     };
     let lags: Vec<Option<f64>> = (0..=lag_max).map(|k| Some(k as f64)).collect();
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("acf")),    RVal::Numeric(out.into(),  Attrs::default())),
         (Some(Arc::from("lag")),    RVal::Numeric(lags.into(), Attrs::default())),
         (Some(Arc::from("n.used")), RVal::Numeric(vec![Some(n as f64)].into(), Attrs::default())),
@@ -102,7 +102,7 @@ pub fn bi_pacf(a: &[EvalArg]) -> Result<RVal, R2Err> {
         pacf_vals.push(pkk);
     }
     let lags: Vec<f64> = (1..=lag_max).map(|k| k as f64).collect();
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("acf")),    RVal::Numeric(Reals::from_dense_f64(pacf_vals), Attrs::default())),
         (Some(Arc::from("lag")),    RVal::Numeric(Reals::from_dense_f64(lags), Attrs::default())),
         (Some(Arc::from("n.used")), RVal::Numeric(vec![Some(n as f64)].into(), Attrs::default())),
@@ -199,7 +199,7 @@ pub fn bi_decompose(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     let observed = match v { RVal::Numeric(xs, _) => RVal::Numeric(xs.clone(), attrs_ts(s, e, fr)), _ => unreachable!() };
 
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("x")),        observed),
         (Some(Arc::from("seasonal")), to_ts(seasonal)),
         (Some(Arc::from("trend")),    to_ts(trend)),
@@ -257,7 +257,7 @@ pub fn bi_periodicity(a: &[EvalArg]) -> Result<RVal, R2Err> {
         x if x < 366.0 * 86_400.0 => "quarterly",
         _                      => "yearly",
     };
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("scale")),   RVal::Character(vec![Some(Arc::from(label))], Attrs::default())),
         (Some(Arc::from("frequency")), RVal::Numeric(vec![Some(median)].into(), Attrs::default())),
         (Some(Arc::from("units")),   RVal::Character(vec![Some(Arc::from(if idx_class == "Date" { "days" } else { "secs" }))], Attrs::default())),

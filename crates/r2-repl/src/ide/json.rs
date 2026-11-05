@@ -73,7 +73,7 @@ pub fn value(v: &RVal) -> String {
             format!("{{\"type\":\"factor\",\"length\":{},\"levels\":{},\"codes\":{codes}{}}}", f.codes.len(),
                     array(&f.levels, |l| string(l)).0, if cut { ",\"truncated\":true" } else { "" })
         }
-        RVal::List(items) => {
+        RVal::List(items, _) => {
             let body: Vec<String> = items.iter().take(MAX_ELEMS)
                 .map(|(n, x)| format!("{{\"name\":{},\"value\":{}}}", opt_str(n.as_deref()), value(x))).collect();
             format!("{{\"type\":\"list\",\"length\":{},\"items\":[{}]}}", items.len(), body.join(","))
@@ -119,7 +119,7 @@ mod tests {
     fn strings_are_escaped_and_lists_nest() {
         let s = RVal::Character(vec![Some("a\"b\n".into()), None], Attrs::default());
         assert_eq!(value(&s), "{\"type\":\"character\",\"length\":2,\"values\":[\"a\\\"b\\n\",null]}");
-        let l = RVal::List(vec![(Some("x".into()), RVal::Null), (None, RVal::Null)]);
+        let l = RVal::list(vec![(Some("x".into()), RVal::Null), (None, RVal::Null)]);
         assert_eq!(value(&l), "{\"type\":\"list\",\"length\":2,\"items\":[{\"name\":\"x\",\"value\":{\"type\":\"NULL\"}},{\"name\":null,\"value\":{\"type\":\"NULL\"}}]}");
     }
 

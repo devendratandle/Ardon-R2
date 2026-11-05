@@ -178,7 +178,7 @@ impl Engine {
 
         let f = self.eval_in(func, env)?;
         if matches!(fname, "lm" | "glm") {
-            let formula = RVal::List(vec![
+            let formula = RVal::list(vec![
                 (Some(Arc::from("~lhs")), y_col.clone()),
                 (Some(Arc::from("~rhs")), x_mat),
                 (Some(Arc::from("~class")), rstr("formula")),
@@ -229,7 +229,7 @@ impl Engine {
             let group_val = self.resolve_formula_term(group_expr, df, env)?;
             formula_items.push((Some(Arc::from("~random_intercept")), group_val));
         }
-        let formula = RVal::List(formula_items);
+        let formula = RVal::list(formula_items);
         let f = self.eval_in(func, env)?;
         let mut ea = vec![EvalArg { name: None, value: formula }];
         for a in args.iter().skip(1) {

@@ -64,7 +64,7 @@ fn row(name: &str, v: &RVal) -> EnvRow {
             f.levels.iter().take(3).map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(","),
             f.codes.iter().take(HEAD).map(|c| c.map(|c| (c + 1).to_string()).unwrap_or("NA".into()))
                 .collect::<Vec<_>>().join(" ")), true),
-        RVal::List(items) => (Group::Values, format!("List of {}", items.len()), false),
+        RVal::List(items, _) => (Group::Values, format!("List of {}", items.len()), false),
         RVal::Character(s, _) => (Group::Values, vector("chr", s.len(), &s.iter().take(HEAD)
             .map(|x| x.as_ref().map(|s| format!("\"{s}\"")).unwrap_or("NA".into())).collect::<Vec<_>>()), true),
         RVal::Logical(..) => {

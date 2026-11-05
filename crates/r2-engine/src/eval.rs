@@ -70,7 +70,7 @@ impl Engine {
                 else if self.registry.resolve(name.as_ref()).is_some() { Ok(RVal::BuiltinFn(name.clone())) }
                 // ..1, ..2, … — the N-th element of the captured `...`.
                 else if let Some(v) = name.strip_prefix("..").and_then(|s| s.parse::<usize>().ok())
-                    .and_then(|n| match self.lookup_dots(env) { Some(RVal::List(d)) => d.get(n.wrapping_sub(1)).map(|(_, v)| v.clone()), _ => None }) { Ok(v) }
+                    .and_then(|n| match self.lookup_dots(env) { Some(RVal::List(d, _)) => d.get(n.wrapping_sub(1)).map(|(_, v)| v.clone()), _ => None }) { Ok(v) }
                 // T / F default to TRUE / FALSE when not bound (R semantics).
                 else if name.as_ref() == "T" { Ok(rbool(true)) }
                 else if name.as_ref() == "F" { Ok(rbool(false)) }
@@ -101,7 +101,7 @@ impl Engine {
                     let no_frame = DataFrame { columns: Vec::new(), row_names: None };
                     let l = self.resolve_formula_term(lhs, &no_frame, env)?;
                     let r = self.resolve_formula_term(rhs, &no_frame, env)?;
-                    return Ok(RVal::List(vec![
+                    return Ok(RVal::list(vec![
                         (Some(Arc::from("~lhs")), l),
                         (Some(Arc::from("~rhs")), r),
                         (Some(Arc::from("~class")), rstr("formula")),
@@ -231,7 +231,7 @@ impl Engine {
             RVal::Integer(v, _) => v.len(),
             RVal::Numeric(v, _) => v.len(),
             RVal::Character(v, _) => v.len(),
-            RVal::List(v) => v.len(),
+            RVal::List(v, _) => v.len(),
             RVal::DataFrame(df) => df.columns.len(),
             other => return err!(Runtime, "cannot iterate over {}", other.type_name()),
         };
@@ -240,7 +240,7 @@ impl Engine {
                 RVal::Integer(v, _) => RVal::Integer(vec![v[k]].into(), Attrs::default()),
                 RVal::Numeric(v, _) => RVal::Numeric(vec![v[k]].into(), Attrs::default()),
                 RVal::Character(v, _) => RVal::Character(vec![v[k].clone()], Attrs::default()),
-                RVal::List(v) => v[k].1.clone(),
+                RVal::List(v, _) => v[k].1.clone(),
                 RVal::DataFrame(df) => df.columns[k].1.clone(),
                 _ => unreachable!(),
             };
@@ -265,7 +265,7 @@ impl Engine {
                         let mut ea = Vec::new();
                         for a in args {
                             if matches!(a.value, Expr::Dots) {
-                                if let Some(RVal::List(dots)) = self.lookup_dots(env) {
+                                if let Some(RVal::List(dots, _)) = self.lookup_dots(env) {
                                     for (nm, val) in dots { ea.push(EvalArg { name: nm, value: val }); }
                                 }
                             } else {
@@ -296,7 +296,7 @@ impl Engine {
         let mut ea = Vec::new();
         for a in args {
             if matches!(a.value, Expr::Dots) {
-                if let Some(RVal::List(dots)) = self.lookup_dots(env) {
+                if let Some(RVal::List(dots, _)) = self.lookup_dots(env) {
                     for (nm, val) in dots { ea.push(EvalArg { name: nm, value: val }); }
                 }
             } else {

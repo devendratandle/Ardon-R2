@@ -83,7 +83,7 @@ pub(crate) fn bi_internal(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
             fields.insert(Arc::from("d"), rnums(&sigma));
             fields.insert(Arc::from("u"), RVal::Matrix(Matrix::new(u_data, m.nrow, n)));
             fields.insert(Arc::from("v"), RVal::Matrix(Matrix::new(v_data, n, n)));
-            Ok(RVal::List(fields.into_iter().map(|(k,v)| (Some(k), v)).collect()))
+            Ok(RVal::list(fields.into_iter().map(|(k,v)| (Some(k), v)).collect()))
         }
         // Random numbers
         "rnorm_vec" => {

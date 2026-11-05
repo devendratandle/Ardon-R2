@@ -502,7 +502,7 @@ fn extract_columns(a: &[EvalArg]) -> (Vec<Vec<f64>>, Vec<String>) {
         return (cols, names);
     }
     // Plain list of named numeric columns.
-    if let Some(RVal::List(items)) = first {
+    if let Some(RVal::List(items, _)) = first {
         let mut cols = Vec::new();
         let mut names = Vec::new();
         for (idx, (nm, v)) in items.iter().enumerate() {

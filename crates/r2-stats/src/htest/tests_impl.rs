@@ -14,7 +14,7 @@ use crate::dist::{phi_upper, qnorm_approx};
 // ── helpers for the four t.test paths ────────────────────────────────
 
 fn extract_formula(v: &RVal) -> Option<(RVal, RVal)> {
-    if let RVal::List(items) = v {
+    if let RVal::List(items, _) = v {
         let is_formula = items.iter().any(|(n, val)| {
             n.as_ref().map(|s| s.as_ref()) == Some("~class")
                 && matches!(val, RVal::Character(c, _)
@@ -33,7 +33,7 @@ fn extract_formula(v: &RVal) -> Option<(RVal, RVal)> {
 /// Used by t.test to enable `t.test(y ~ x + Error(subject), paired=T)`
 /// as a formula-shaped alias for `t.test(y ~ x, id=subject, paired=T)`.
 fn extract_error_stratum(v: &RVal) -> Option<RVal> {
-    if let RVal::List(items) = v {
+    if let RVal::List(items, _) = v {
         items.iter()
             .find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~error"))
             .map(|(_, val)| val.clone())
@@ -96,7 +96,7 @@ fn pair_by_subject_order(
 /// the column being a direct RVal::Character/Factor/Numeric as well.
 fn unwrap_stratum_column(v: &RVal) -> RVal {
     match v {
-        RVal::List(items) if !items.is_empty() => items[0].1.clone(),
+        RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
         other => other.clone(),
     }
 }

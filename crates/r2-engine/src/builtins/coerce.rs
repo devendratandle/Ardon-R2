@@ -67,9 +67,9 @@ pub(crate) fn bi_as_vector(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 }
 pub(crate) fn bi_as_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(match gv(a,0) {
-        RVal::List(items) => RVal::List(items),
-        RVal::DataFrame(df) => RVal::List(df.columns.iter().map(|(n, v)| (Some(n.clone()), v.clone())).collect()),
-        other => RVal::List(elements(&other).into_iter().map(|v| (None, v)).collect()),
+        RVal::List(items, _) => RVal::list(items),
+        RVal::DataFrame(df) => RVal::list(df.columns.iter().map(|(n, v)| (Some(n.clone()), v.clone())).collect()),
+        other => RVal::list(elements(&other).into_iter().map(|v| (None, v)).collect()),
     })
 }
 pub(crate) fn bi_is_function(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Closure(_)))) }
@@ -105,7 +105,7 @@ pub(crate) fn bi_names_set(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     let names = setter_names(a);
     Ok(match gv(a, 0) {
         RVal::DataFrame(mut df) => { for (i, c) in df.columns.iter_mut().enumerate() { if let Some(nm) = names.get(i) { c.0 = nm.clone(); } } RVal::DataFrame(df) }
-        RVal::List(mut items) => { for (i, it) in items.iter_mut().enumerate() { it.0 = names.get(i).cloned(); } RVal::List(items) }
+        RVal::List(mut items, _) => { for (i, it) in items.iter_mut().enumerate() { it.0 = names.get(i).cloned(); } RVal::list(items) }
         RVal::Numeric(v, mut at)   => { at.names = Some(names); RVal::Numeric(v, at) }
         RVal::Integer(v, mut at)   => { at.names = Some(names); RVal::Integer(v, at) }
         RVal::Character(v, mut at) => { at.names = Some(names); RVal::Character(v, at) }
@@ -177,7 +177,7 @@ pub(crate) fn rval_identical(a: &RVal, b: &RVal) -> bool {
         (RVal::Character(x,_), RVal::Character(y,_)) => x == y,
         (RVal::Logical(x,_),   RVal::Logical(y,_))   => x.as_vec() == y.as_vec(),
         (RVal::Null,           RVal::Null)           => true,
-        (RVal::List(x),        RVal::List(y))        =>
+        (RVal::List(x, _),        RVal::List(y, _))        =>
             x.len()==y.len() && x.iter().zip(y).all(|((n1,v1),(n2,v2))| n1==n2 && rval_identical(v1,v2)),
         _ => false,
     }
@@ -211,7 +211,7 @@ pub(crate) fn bi_all_equal(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     }
     Ok(if rval_identical(&x, &y) { rbool(true) } else { rstr("objects differ") })
 }
-pub(crate) fn bi_is_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::List(_)))) }
+pub(crate) fn bi_is_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::List(_, _)))) }
 pub(crate) fn bi_is_vector(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(rbool(matches!(gv(a,0), RVal::Numeric(..) | RVal::Integer(..) | RVal::Character(..) | RVal::Logical(..))))
 }
@@ -349,7 +349,7 @@ pub(crate) fn bi_attributes(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     if let Some(c) = &at.class { items.push((Some(Arc::from("class")), rstr(c))); }
     if let Some(d) = &at.dim   { items.push((Some(Arc::from("dim")), dim_to_rval(d))); }
     for (k, val) in &at.custom { items.push((Some(k.clone()), val.clone())); }
-    if items.is_empty() { Ok(RVal::Null) } else { Ok(RVal::List(items)) }
+    if items.is_empty() { Ok(RVal::Null) } else { Ok(RVal::list(items)) }
 }
 pub(crate) fn set_one_attr(v: &mut RVal, name: &str, val: &RVal) {
     let at = match v {
@@ -566,7 +566,7 @@ fn recycle_col(col: &RVal, n: usize) -> RVal {
         _ => col.clone(),
     }
 }
-pub(crate) fn bi_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(RVal::List(a.iter().map(|x| (x.name.clone(), x.value.clone())).collect())) }
+pub(crate) fn bi_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(RVal::list(a.iter().map(|x| (x.name.clone(), x.value.clone())).collect())) }
 
 /// `list.meta(lst)` — introspect a list's per-component shape.
 ///
@@ -586,7 +586,7 @@ pub(crate) fn bi_list_meta(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
         kind: ErrKind::Runtime,
     })?;
     let items = match lst {
-        RVal::List(items) => items.clone(),
+        RVal::List(items, _) => items.clone(),
         _ => return Err(R2Err {
             msg: format!("list.meta: not a list (got {})", lst.type_name()),
             kind: ErrKind::Type,
@@ -606,7 +606,7 @@ pub(crate) fn bi_list_meta(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     fields.insert(Arc::from("lens"),        RVal::Integer(lens.into(), Attrs::default()));
     fields.insert(Arc::from("total_work"),  RVal::Integer(vec![Some(meta.total_work as i32)].into(), Attrs::default()));
     fields.insert(Arc::from("homogeneous"), RVal::Character(vec![Some(homog)], Attrs::default()));
-    Ok(RVal::List(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()))
+    Ok(RVal::list(fields.into_iter().map(|(k, v)| (Some(k), v)).collect()))
 }
 
 /// GLM family constructors. R's `glm(..., family = binomial())` calls
@@ -615,7 +615,7 @@ pub(crate) fn bi_list_meta(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 /// `"binomial"` / `"gaussian"` / `"poisson"`. Returning a tagged list
 /// keeps the call path R-compatible.
 pub(crate) fn make_family(name: &'static str, link: &'static str) -> RVal {
-    RVal::List(vec![
+    RVal::list(vec![
         (Some(Arc::from("family")), rstr(name)),
         (Some(Arc::from("link")), rstr(link)),
         (Some(Arc::from("~class")), rstr("family")),
@@ -738,7 +738,7 @@ pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
         RVal::DataFrame(df) => Ok(RVal::Character(df.columns.iter().map(|(n,_)| Some(n.clone())).collect(), Attrs::default())),
         // Named list: R returns the names, with "" for any unnamed element,
         // or NULL if the list has no names at all.
-        RVal::List(items) => {
+        RVal::List(items, _) => {
             if items.iter().all(|(n,_)| n.is_none()) { return Ok(RVal::Null); }
             Ok(RVal::Character(
                 items.iter().map(|(n,_)| Some(n.clone().unwrap_or_else(|| std::sync::Arc::from("")))).collect(),
@@ -790,7 +790,7 @@ pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
         RVal::Numeric(v, _) => { let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect(); soutln!(" num [1:{}] {}", v.len(), vals.join(" ")); }
         RVal::Integer(v, _) => { let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).collect(); soutln!(" int [1:{}] {}", v.len(), vals.join(" ")); }
         RVal::Character(v, _) => { let vals: Vec<String> = v.iter().take(5).map(|x| match x { Some(s) => format!("\"{}\"", s), None => "NA".into() }).collect(); soutln!(" chr [1:{}] {}", v.len(), vals.join(" ")); }
-        RVal::List(items) => { soutln!("List of {}", items.len()); for (i, (n, v)) in items.iter().enumerate().take(10) { let label = n.as_ref().map(|s| format!("${}", s)).unwrap_or(format!("[[{}]]", i+1)); soutln!(" {} : {} [1:{}]", label, v.type_name(), rval_length(v)); } }
+        RVal::List(items, _) => { soutln!("List of {}", items.len()); for (i, (n, v)) in items.iter().enumerate().take(10) { let label = n.as_ref().map(|s| format!("${}", s)).unwrap_or(format!("[[{}]]", i+1)); soutln!(" {} : {} [1:{}]", label, v.type_name(), rval_length(v)); } }
         _ => soutln!(" {} [1:{}]", v.type_name(), rval_length(&v)),
     }
     Ok(RVal::Null)

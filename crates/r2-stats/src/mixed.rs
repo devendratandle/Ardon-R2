@@ -45,7 +45,7 @@ fn rstr(s: &str) -> RVal { RVal::Character(vec![Some(Arc::from(s))], Attrs::defa
 /// resolve_formula_term output) into the bare value.
 fn unwrap_col(v: &RVal) -> RVal {
     match v {
-        RVal::List(items) if !items.is_empty() => items[0].1.clone(),
+        RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
         other => other.clone(),
     }
 }
@@ -77,11 +77,11 @@ fn design_matrix(rhs: &RVal, n: usize) -> Result<(Vec<f64>, usize, Vec<String>),
 
     match rhs {
         RVal::Null => {}
-        RVal::List(items) => {
+        RVal::List(items, _) => {
             for (cname, cval) in items {
                 if cname.as_ref().map(|s| s.starts_with('~')).unwrap_or(false) { continue; }
                 let (col_name, col_data) = match cval {
-                    RVal::List(inner) if !inner.is_empty() => {
+                    RVal::List(inner, _) if !inner.is_empty() => {
                         let n0 = inner[0].0.as_ref().map(|s| s.to_string())
                             .unwrap_or_else(|| cname.as_ref().map(|s| s.to_string())
                                 .unwrap_or_else(|| format!("x{}", cols.len())));
@@ -333,7 +333,7 @@ fn compute_blups(
 pub fn bi_lmer(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let first = gv(a, 0);
     let items: Vec<(Option<Arc<str>>, RVal)> = match &first {
-        RVal::List(v) => v.clone(),
+        RVal::List(v, _) => v.clone(),
         _ => return Err(R2Err {
             msg: "lmer: first argument must be a formula like 'y ~ x + (1|group)'".into(),
             kind: ErrKind::Runtime,
@@ -465,7 +465,7 @@ pub fn bi_lmer(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     // Group column name (used by both compact and summary displays).
     let group_col_name = match ranef_specs[0] {
-        RVal::List(items) => items.iter()
+        RVal::List(items, _) => items.iter()
             .find(|(n, _)| !n.as_ref().map(|s| s.starts_with('~')).unwrap_or(true))
             .and_then(|(n, _)| n.as_ref().map(|s| s.to_string()))
             .unwrap_or_else(|| "group".into()),
@@ -722,11 +722,11 @@ mod tests {
         RVal::Character(v.iter().map(|s| Some(Arc::from(*s))).collect(), Attrs::default())
     }
     fn formula(y: RVal, x: RVal, group: RVal) -> RVal {
-        RVal::List(vec![
+        RVal::list(vec![
             (Some(Arc::from("~lhs")), y),
-            (Some(Arc::from("~rhs")), RVal::List(vec![(Some(Arc::from("x")), x)])),
+            (Some(Arc::from("~rhs")), RVal::list(vec![(Some(Arc::from("x")), x)])),
             (Some(Arc::from("~class")), RVal::Character(vec![Some(Arc::from("formula"))], Attrs::default())),
-            (Some(Arc::from("~random_intercept")), RVal::List(vec![(Some(Arc::from("g")), group)])),
+            (Some(Arc::from("~random_intercept")), RVal::list(vec![(Some(Arc::from("g")), group)])),
         ])
     }
     fn evarg(v: RVal) -> EvalArg { EvalArg { name: None, value: v } }
@@ -778,9 +778,9 @@ mod tests {
     fn lmer_errors_on_no_random_effect() {
         let y = nums(&[1.0, 2.0, 3.0, 4.0]);
         let x = nums(&[1.0, 2.0, 3.0, 4.0]);
-        let formula_no_re = RVal::List(vec![
+        let formula_no_re = RVal::list(vec![
             (Some(Arc::from("~lhs")), y),
-            (Some(Arc::from("~rhs")), RVal::List(vec![(Some(Arc::from("x")), x)])),
+            (Some(Arc::from("~rhs")), RVal::list(vec![(Some(Arc::from("x")), x)])),
             (Some(Arc::from("~class")), RVal::Character(vec![Some(Arc::from("formula"))], Attrs::default())),
         ]);
         let r = bi_lmer(&[evarg(formula_no_re)]);

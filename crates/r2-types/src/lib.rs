@@ -356,7 +356,7 @@ pub enum RVal {
     Raw(Vec<u8>, Attrs),
 
     // Compound
-    List(Vec<(Option<Arc<str>>, RVal)>),
+    List(Vec<(Option<Arc<str>>, RVal)>, Attrs),
     DataFrame(DataFrame),
     Matrix(Matrix),
     Factor(Factor),
@@ -389,7 +389,7 @@ pub fn rval_length(v: &RVal) -> usize {
         RVal::Character(v, _) => v.len(),
         RVal::Logical(v, _) => v.len(),
         RVal::Raw(v, _) => v.len(),
-        RVal::List(v) => v.len(),
+        RVal::List(v, _) => v.len(),
         RVal::DataFrame(df) => df.nrow(),
         RVal::Factor(f) => f.codes.len(),
         RVal::Matrix(m) => m.nrow * m.ncol,
@@ -703,7 +703,7 @@ impl fmt::Display for RVal {
                     }
                 }
             }
-            RVal::List(items) => {
+            RVal::List(items, _) => {
                 for (i, (name, val)) in items.iter().enumerate() {
                     if let Some(n) = name { writeln!(f, "${}", n)?; } else { writeln!(f, "[[{}]]", i + 1)?; }
                     writeln!(f, "{}", val)?;
@@ -820,6 +820,9 @@ fn fmt_elem(col: &RVal, row: usize) -> String {
 }
 
 impl RVal {
+    /// A list with no attributes.
+    pub fn list(items: Vec<(Option<Arc<str>>, RVal)>) -> RVal { RVal::List(items, Attrs::default()) }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             RVal::Numeric(..) => "numeric", RVal::Single(..) => "single",
@@ -853,7 +856,7 @@ impl RVal {
             RVal::Factor(f)      => Ok(f.codes.iter().map(|c| c.map(|i| i as f64 + 1.0)).collect()),
             // A list of length-1 numerics flattens to a vector (R's
             // `as.numeric(list(1,2,3))`, and `as.numeric(tapply(...))`).
-            RVal::List(items) => {
+            RVal::List(items, _) => {
                 let mut out = Vec::with_capacity(items.len());
                 for (_, v) in items {
                     let r = v.as_reals()?;
@@ -916,7 +919,7 @@ impl RVal {
             RVal::Integer(v, _) => Ok(v.iter().map(|x| RVal::Integer(vec![*x].into(), Attrs::default())).collect()),
             RVal::Numeric(v, _) => Ok(v.iter().map(|x| RVal::Numeric(vec![*x].into(), Attrs::default())).collect()),
             RVal::Character(v, _) => Ok(v.iter().map(|x| RVal::Character(vec![x.clone()], Attrs::default())).collect()),
-            RVal::List(v) => Ok(v.iter().map(|(_, val)| val.clone()).collect()),
+            RVal::List(v, _) => Ok(v.iter().map(|(_, val)| val.clone()).collect()),
             // A data.frame iterates over its COLUMNS (R's list-like semantics),
             // so lapply/sapply/Map fold over columns, not cells.
             RVal::DataFrame(df) => Ok(df.columns.iter().map(|(_, val)| val.clone()).collect()),
@@ -1171,7 +1174,7 @@ pub fn list_meta(items: &[(Option<Arc<str>>, RVal)]) -> ListMeta {
             RVal::Logical(v, _)   => v.len(),
             RVal::Character(v, _) => v.len(),
             RVal::Raw(v, _)       => v.len(),
-            RVal::List(v)         => v.len(),
+            RVal::List(v, _)         => v.len(),
             RVal::Matrix(m)       => m.nrow.saturating_mul(m.ncol),
             RVal::DataFrame(df)   => df.nrow().saturating_mul(df.ncol()),
             _ => 1,

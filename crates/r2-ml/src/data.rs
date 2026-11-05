@@ -30,7 +30,7 @@ pub fn extract_ml_data(a: &[EvalArg]) -> Result<(Vec<f64>, Matrix, Vec<String>),
 
     // Check if first arg is a formula (List with ~class = "formula").
     let is_formula = match &first {
-        RVal::List(items) => items.iter().any(|(n, v)| {
+        RVal::List(items, _) => items.iter().any(|(n, v)| {
             n.as_ref().map(|s| s.as_ref()) == Some("~class")
                 && matches!(v, RVal::Character(sv, _)
                     if sv.first().and_then(|x| x.as_ref()).map(|s| s.as_ref()) == Some("formula"))
@@ -49,7 +49,7 @@ pub fn extract_ml_data(a: &[EvalArg]) -> Result<(Vec<f64>, Matrix, Vec<String>),
         };
 
         let items: Vec<(Option<std::sync::Arc<str>>, RVal)> = match &first {
-            RVal::List(v) => v.clone(),
+            RVal::List(v, _) => v.clone(),
             _ => vec![],
         };
         let lhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~lhs"))
@@ -57,7 +57,7 @@ pub fn extract_ml_data(a: &[EvalArg]) -> Result<(Vec<f64>, Matrix, Vec<String>),
 
         // y from LHS
         let y_col = match &lhs_raw {
-            RVal::List(items) if !items.is_empty() => items[0].1.clone(),
+            RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
             other => other.clone(),
         };
         let y: Vec<f64> = match &y_col {
@@ -84,7 +84,7 @@ pub fn extract_ml_data(a: &[EvalArg]) -> Result<(Vec<f64>, Matrix, Vec<String>),
         let nrow = df.nrow();
 
         let has_rhs_data = match &rhs_raw {
-            RVal::List(items) => items.iter()
+            RVal::List(items, _) => items.iter()
                 .any(|(n, _)| !n.as_ref().map(|s| s.starts_with("~")).unwrap_or(true)),
             RVal::Null => false,
             _ => true,
@@ -92,7 +92,7 @@ pub fn extract_ml_data(a: &[EvalArg]) -> Result<(Vec<f64>, Matrix, Vec<String>),
 
         if !has_rhs_data {
             let y_name = match &lhs_raw {
-                RVal::List(items) if !items.is_empty() => items[0].0.as_ref().map(|s| s.to_string()),
+                RVal::List(items, _) if !items.is_empty() => items[0].0.as_ref().map(|s| s.to_string()),
                 _ => None,
             };
             for (name, col) in &df.columns {
@@ -104,16 +104,16 @@ pub fn extract_ml_data(a: &[EvalArg]) -> Result<(Vec<f64>, Matrix, Vec<String>),
             }
         } else {
             match &rhs_raw {
-                RVal::List(items) => {
+                RVal::List(items, _) => {
                     for (name, val) in items {
                         if name.as_ref().map(|s| s.starts_with("~")).unwrap_or(false) { continue; }
-                        let actual = match val { RVal::List(inner) if !inner.is_empty() => &inner[0].1, v => v };
+                        let actual = match val { RVal::List(inner, _) if !inner.is_empty() => &inner[0].1, v => v };
                         if let Ok(vals) = actual.as_reals() {
                             let nums: Vec<f64> = vals.into_iter().filter_map(|x| x).collect();
                             if nums.len() == nrow {
                                 x_data.extend(&nums);
                                 let cname = match val {
-                                    RVal::List(inner) if !inner.is_empty() => inner[0].0.as_ref().map(|s| s.to_string()),
+                                    RVal::List(inner, _) if !inner.is_empty() => inner[0].0.as_ref().map(|s| s.to_string()),
                                     _ => name.as_ref().map(|s| s.to_string()),
                                 };
                                 col_names.push(cname.unwrap_or(format!("X{}", col_names.len() + 1)));

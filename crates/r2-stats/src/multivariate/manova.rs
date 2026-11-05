@@ -125,7 +125,7 @@ pub fn bi_manova(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     // Extract LHS, RHS from formula list.
     let items: Vec<(Option<Arc<str>>, RVal)> = match &first {
-        RVal::List(v) => v.clone(),
+        RVal::List(v, _) => v.clone(),
         _ => return Err(R2Err {
             msg: "manova: first argument must be a formula 'cbind(y1, y2, ...) ~ group'".into(),
             kind: ErrKind::Runtime,
@@ -144,7 +144,7 @@ pub fn bi_manova(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // Engine wraps single columns in `List([(name, col)])`; manova needs
     // a Matrix on the LHS, so accept Matrix directly or unwrap List.
     let lhs_inner = match &lhs {
-        RVal::List(items) if !items.is_empty() => items[0].1.clone(),
+        RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
         other => other.clone(),
     };
     let (n, p, y) = as_matrix(&lhs_inner)?;
@@ -157,10 +157,10 @@ pub fn bi_manova(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
     // RHS: extract grouping labels.
     let rhs_inner = match &rhs {
-        RVal::List(items) => items.iter()
+        RVal::List(items, _) => items.iter()
             .find(|(name, _)| !name.as_ref().map(|s| s.starts_with('~')).unwrap_or(true))
             .map(|(_, v)| match v {
-                RVal::List(inner) if !inner.is_empty() => inner[0].1.clone(),
+                RVal::List(inner, _) if !inner.is_empty() => inner[0].1.clone(),
                 v => v.clone(),
             })
             .unwrap_or(RVal::Null),

@@ -72,7 +72,7 @@ pub fn pure_apply(name: &str, arg: &RVal) -> Option<Result<RVal, R2Err>> {
             let n = match arg {
                 RVal::Numeric(v, _) => v.len(), RVal::Integer(v, _) => v.len(),
                 RVal::Character(v, _) => v.len(), RVal::Logical(v, _) => v.len(),
-                RVal::List(v) => v.len(), RVal::Matrix(m) => m.data.len(),
+                RVal::List(v, _) => v.len(), RVal::Matrix(m) => m.data.len(),
                 RVal::Null => 0, _ => 1,
             };
             Some(Ok(RVal::Integer(vec![Some(n as i32)].into(), Attrs::default())))
@@ -156,7 +156,7 @@ fn item_work_units(v: &RVal) -> usize {
         RVal::Logical(r, _)   => r.len(),
         RVal::Character(r, _) => r.len(),
         RVal::Raw(r, _)       => r.len(),
-        RVal::List(items)     => items.len(),
+        RVal::List(items, _)     => items.len(),
         RVal::Matrix(m)       => m.nrow.saturating_mul(m.ncol),
         RVal::DataFrame(df)   => df.nrow().saturating_mul(df.ncol()),
         _ => 1,
@@ -170,7 +170,7 @@ pub fn bi_lapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
     let func = nth_arg(a, 1);
     let items = x.to_items()?;
     let results = map_items(ctx, &func, &items, env)?;
-    Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect()))
+    Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect()))
 }
 
 // ── sapply ──────────────────────────────────────────────────────────
@@ -193,7 +193,7 @@ pub fn bi_sapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
             }
             Ok(v)
         }
-        None => Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())),
+        None => Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())),
     }
 }
 
@@ -230,7 +230,7 @@ pub fn bi_mapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
         .map(|i| nth_arg(a, i).to_items().unwrap_or_default())
         .collect();
     let max_len = inputs.iter().map(|v| v.len()).max().unwrap_or(0);
-    if max_len == 0 { return Ok(RVal::List(vec![])); }
+    if max_len == 0 { return Ok(RVal::list(vec![])); }
 
     // Single-input pure-builtin fast path
     if inputs.len() == 1 {
@@ -245,7 +245,7 @@ pub fn bi_mapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
                     }
                 }
                 return if all_num { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-                else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) };
+                else { Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())) };
             }
         }
     }
@@ -267,7 +267,7 @@ pub fn bi_mapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
         }
     }
     if all_num { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-    else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) }
+    else { Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())) }
 }
 
 // ── apply (matrix margin = 1 row / 2 col) ───────────────────────────
@@ -309,7 +309,7 @@ pub fn bi_apply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef)
             attrs.names = Some(df.columns.iter().map(|(n, _)| n.clone()).collect());
             Ok(RVal::Numeric(nums.into(), attrs))
         } else {
-            Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect()))
+            Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect()))
         }
     } else {
         // Per-row inputs
@@ -331,7 +331,7 @@ pub fn bi_apply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef)
             match r { RVal::Numeric(v, _) if v.len() == 1 => nums.push(v[0]), _ => { all_scalar = false; break; } }
         }
         if all_scalar { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-        else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) }
+        else { Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())) }
     }
 }
 
@@ -381,7 +381,7 @@ pub fn bi_tapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
         }
         return Ok(v);
     }
-    Ok(RVal::List(results))
+    Ok(RVal::list(results))
 }
 
 // ── aggregate ───────────────────────────────────────────────────────
@@ -428,7 +428,7 @@ pub fn bi_do_call<C: EngineCtx + ?Sized>(
 ) -> Result<RVal, R2Err> {
     let func = a.first().map(|x| x.value.clone()).unwrap_or(RVal::Null);
     let arg_list = match a.get(1).map(|x| &x.value) {
-        Some(RVal::List(items)) => items.clone(),
+        Some(RVal::List(items, _)) => items.clone(),
         _ => return Err(R2Err {
             msg: "do.call needs list of arguments".into(),
             kind: ErrKind::Type,

@@ -372,7 +372,7 @@ pub fn bi_density(a: &[EvalArg]) -> Result<RVal, R2Err> {
         gx.push(Some(xi));
         gy.push(Some(dens));
     }
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("x")), RVal::Numeric(gx.into(), Attrs::default())),
         (Some(Arc::from("y")), RVal::Numeric(gy.into(), Attrs::default())),
     ]))

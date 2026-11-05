@@ -15,10 +15,10 @@ impl Engine {
                 // keeps its name the same way, so `lm(y ~ x1 + x2)` labels
                 // its coefficients `x1`/`x2` and not `x1`/`x2`-by-position.
                 if let Some(col) = df.get_col(name) {
-                    Ok(RVal::List(vec![(Some(name.clone()), col.clone())]))
+                    Ok(RVal::list(vec![(Some(name.clone()), col.clone())]))
                 } else {
                     let v = self.eval_in(expr, env)?;
-                    Ok(RVal::List(vec![(Some(name.clone()), v)]))
+                    Ok(RVal::list(vec![(Some(name.clone()), v)]))
                 }
             }
             Expr::Binary { op: BinOp::Add, lhs, rhs } => {
@@ -26,14 +26,14 @@ impl Engine {
                 let r = self.resolve_formula_term(rhs, df, env)?;
                 let mut cols = Vec::new();
                 match l {
-                    RVal::List(items) => cols.extend(items),
+                    RVal::List(items, _) => cols.extend(items),
                     other => cols.push((None, other)),
                 }
                 match r {
-                    RVal::List(items) => cols.extend(items),
+                    RVal::List(items, _) => cols.extend(items),
                     other => cols.push((None, other)),
                 }
-                Ok(RVal::List(cols))
+                Ok(RVal::list(cols))
             }
             Expr::NullLit => Ok(RVal::Null),
             // Phase S.1 — data-scope fix. For any non-trivial sub-expression
@@ -110,7 +110,7 @@ impl Engine {
         &mut self, expr: &Expr, df: &DataFrame, env: &EnvRef,
     ) -> Result<(Arc<str>, RVal), R2Err> {
         match self.resolve_formula_term(expr, df, env)? {
-            RVal::List(mut items) if items.len() == 1 => {
+            RVal::List(mut items, _) if items.len() == 1 => {
                 let (n, col) = items.remove(0);
                 let name = n.unwrap_or_else(|| Arc::from(fmt_expr(expr).as_str()));
                 Ok((name, col))

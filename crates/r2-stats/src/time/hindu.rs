@@ -192,7 +192,7 @@ pub fn bi_tithi(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let masa_idx = ((sun / 30.0).floor() as usize).rem_euclid(12);
     let adhik = is_adhik(jd);
     let short = format!("{}-{}", if tithi_idx < 15 { "shu" } else { "kru" }, TITHI_SHORT[tithi_idx]);
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("tithi")),   RVal::Numeric(vec![Some(tithi_idx as f64 + 1.0)].into(), Attrs::default())),
         (Some(Arc::from("name")),    RVal::Character(vec![Some(Arc::from(name))], Attrs::default())),
         (Some(Arc::from("short")),   RVal::Character(vec![Some(Arc::from(short.as_str()))], Attrs::default())),
@@ -266,7 +266,7 @@ pub fn bi_hnc_date(a: &[EvalArg]) -> Result<RVal, R2Err> {
     };
     let formatted = format!("{}-{}-{}-{:02}", saka_year, mm, paksha, tithi_num);
 
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("saka.year")), RVal::Numeric(vec![Some(saka_year as f64)].into(), Attrs::default())),
         (Some(Arc::from("masa")),      RVal::Numeric(vec![Some(masa_num as f64)].into(),  Attrs::default())),
         (Some(Arc::from("masa.name")), RVal::Character(vec![Some(Arc::from(MASA_NAMES[masa_idx]))], Attrs::default())),
@@ -307,7 +307,7 @@ pub fn bi_hindu_date(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let masa = MASA_NAMES[masa_idx];
 
     let formatted = format!("{}-{} ({} Paksha {}) {} Saka", saka_year, masa, paksha, tithi_name, tithi_num);
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         (Some(Arc::from("saka.year")), RVal::Numeric(vec![Some(saka_year as f64)].into(), Attrs::default())),
         (Some(Arc::from("masa")),      RVal::Character(vec![Some(Arc::from(masa))], Attrs::default())),
         (Some(Arc::from("paksha")),    RVal::Character(vec![Some(Arc::from(paksha))], Attrs::default())),

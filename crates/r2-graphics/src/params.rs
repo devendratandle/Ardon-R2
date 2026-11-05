@@ -156,7 +156,7 @@ fn snapshot(p: &PlotParams) -> RVal {
         .iter()
         .map(|n| (Some(Arc::from(*n)), param_value(p, n).unwrap_or(RVal::Null)))
         .collect();
-    RVal::List(items)
+    RVal::list(items)
 }
 
 /// `par(...)` builtin entry point.
@@ -178,7 +178,7 @@ pub fn bi_par(a: &[EvalArg]) -> Result<RVal, R2Err> {
             }
         }
         // Single unnamed arg that's a list → bulk setter (par(oldpar) restore form).
-        if let RVal::List(items) = &a[0].value {
+        if let RVal::List(items, _) = &a[0].value {
             let mut old: Vec<(Option<Arc<str>>, RVal)> = Vec::new();
             with_device(|d| -> Result<(), R2Err> {
                 for (name_opt, val) in items {
@@ -191,7 +191,7 @@ pub fn bi_par(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 }
                 Ok(())
             })?;
-            return Ok(RVal::List(old));
+            return Ok(RVal::list(old));
         }
     }
 
@@ -210,7 +210,7 @@ pub fn bi_par(a: &[EvalArg]) -> Result<RVal, R2Err> {
         }
         Ok(())
     })?;
-    Ok(RVal::List(old))
+    Ok(RVal::list(old))
 }
 
 /// `dev.off(n = current)` — close one open device. Returns the new
@@ -416,7 +416,7 @@ mod tests {
         dev_off();
         let r = bi_par(&[]).unwrap();
         match r {
-            RVal::List(items) => assert!(items.iter().any(|(n, _)| n.as_deref() == Some("mfrow"))),
+            RVal::List(items, _) => assert!(items.iter().any(|(n, _)| n.as_deref() == Some("mfrow"))),
             _ => panic!("expected list"),
         }
         dev_off();
@@ -437,7 +437,7 @@ mod tests {
         let old = bi_par(&[arg(Some("cex"), rnum(2.5))]).unwrap();
         // Returned "old" should contain cex=1.0.
         match old {
-            RVal::List(items) => {
+            RVal::List(items, _) => {
                 let cex_old = items.iter().find(|(n, _)| n.as_deref() == Some("cex"));
                 assert!(cex_old.is_some());
             }

@@ -423,7 +423,7 @@ impl Engine {
     pub(crate) fn scalar_f64(&self, obj: &RVal) -> Result<Real, R2Err> { obj.scalar_f64() }
     pub(crate) fn truthy(&self, obj: &RVal) -> Result<bool, R2Err> { match obj { RVal::Logical(v,_) => v.first().copied().flatten().ok_or(R2Err{msg:"NA where TRUE/FALSE needed".into(),kind:ErrKind::Runtime}), RVal::Numeric(v,_) => v.first().copied().flatten().map(|n| n!=0.0).ok_or(R2Err{msg:"NA where TRUE/FALSE needed".into(),kind:ErrKind::Runtime}), _ => err!(Type,"cannot coerce {} to logical",obj.type_name()) } }
     fn vals_eq(&self, a: &RVal, b: &RVal) -> bool { match (a,b) { (RVal::Numeric(a,_),RVal::Numeric(b,_)) => a==b, (RVal::Character(a,_),RVal::Character(b,_)) => a==b, (RVal::Integer(a,_),RVal::Integer(b,_)) => a==b, _ => false } }
-    pub(crate) fn to_items(&self, obj: &RVal) -> Result<Vec<RVal>, R2Err> { match obj { RVal::Integer(v,_) => Ok(v.iter().map(|x| RVal::Integer(vec![*x].into(),Attrs::default())).collect()), RVal::Numeric(v,_) => Ok(v.iter().map(|x| RVal::Numeric(vec![*x].into(),Attrs::default())).collect()), RVal::Character(v,_) => Ok(v.iter().map(|x| RVal::Character(vec![x.clone()],Attrs::default())).collect()), RVal::List(v) => Ok(v.iter().map(|(_,val)| val.clone()).collect()), RVal::DataFrame(df) => Ok(df.columns.iter().map(|(_,val)| val.clone()).collect()), _ => err!(Runtime,"cannot iterate over {}",obj.type_name()) } }
+    pub(crate) fn to_items(&self, obj: &RVal) -> Result<Vec<RVal>, R2Err> { match obj { RVal::Integer(v,_) => Ok(v.iter().map(|x| RVal::Integer(vec![*x].into(),Attrs::default())).collect()), RVal::Numeric(v,_) => Ok(v.iter().map(|x| RVal::Numeric(vec![*x].into(),Attrs::default())).collect()), RVal::Character(v,_) => Ok(v.iter().map(|x| RVal::Character(vec![x.clone()],Attrs::default())).collect()), RVal::List(v, _) => Ok(v.iter().map(|(_,val)| val.clone()).collect()), RVal::DataFrame(df) => Ok(df.columns.iter().map(|(_,val)| val.clone()).collect()), _ => err!(Runtime,"cannot iterate over {}",obj.type_name()) } }
     pub fn drain_warnings(&mut self) -> Vec<String> { std::mem::take(&mut self.warnings) }
 
     /// Insert into the correct scope: the current call frame (inside a
@@ -629,7 +629,7 @@ pub(crate) fn pure_apply(name: &str, arg: &RVal) -> Option<Result<RVal, R2Err>> 
                 RVal::Integer(v, _) => v.len(),
                 RVal::Character(v, _) => v.len(),
                 RVal::Logical(v, _) => v.len(),
-                RVal::List(v) => v.len(),
+                RVal::List(v, _) => v.len(),
                 RVal::Matrix(m) => m.data.len(),
                 RVal::Null => 0,
                 _ => 1,
@@ -705,7 +705,7 @@ fn bi_sapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err>
         }
     }
     if all_num { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-    else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) }
+    else { Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())) }
     } // end #[allow(unreachable_code)] (Phase R.2 step 6)
 }
 
@@ -734,7 +734,7 @@ fn bi_lapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err>
                 }
                 r
             };
-            return Ok(RVal::List(results));
+            return Ok(RVal::list(results));
         }
     }
 
@@ -744,7 +744,7 @@ fn bi_lapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err>
         let call_args = vec![EvalArg { name: None, value: item }];
         results.push((None, e.call_fn(&func, &call_args, env)?));
     }
-    Ok(RVal::List(results))
+    Ok(RVal::list(results))
     } // end #[allow(unreachable_code)] (Phase R.2 step 6)
 }
 
@@ -814,7 +814,7 @@ fn bi_mapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err>
         .map(|i| e.to_items(&gv(a, i)).unwrap_or_default())
         .collect();
     let max_len = inputs.iter().map(|v| v.len()).max().unwrap_or(0);
-    if max_len == 0 { return Ok(RVal::List(vec![])); }
+    if max_len == 0 { return Ok(RVal::list(vec![])); }
 
     // Single-input pure-builtin fast path.
     if inputs.len() == 1 {
@@ -843,7 +843,7 @@ fn bi_mapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err>
                     }
                 }
                 return if all_num { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-                else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) };
+                else { Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())) };
             }
         }
     }
@@ -865,7 +865,7 @@ fn bi_mapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err>
         }
     }
     if all_num { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-    else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) }
+    else { Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())) }
     } // end #[allow(unreachable_code)] (Phase R.2 step 6)
 }
 
@@ -1049,7 +1049,7 @@ pub(crate) fn bi_explain(_e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
             RVal::Integer(x, _) => (x.len(), format!("integer vector, length {}", x.len()), None),
             RVal::Logical(x, _) => (x.len(), format!("logical vector, length {}", x.len()), None),
             RVal::Character(x, _) => (x.len(), format!("character vector, length {}", x.len()), None),
-            RVal::List(x) => (x.len(), format!("list, {} elements", x.len()), None),
+            RVal::List(x, _) => (x.len(), format!("list, {} elements", x.len()), None),
             other => (1, other.type_name().to_string(), None),
         }
     };
@@ -1116,7 +1116,7 @@ pub(crate) fn bi_mclapply(e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
         RVal::Integer(v, _)   => v.iter().map(|o| RVal::Integer(vec![*o].into(), Attrs::default())).collect(),
         RVal::Character(v, _) => v.iter().map(|o| RVal::Character(vec![o.clone()], Attrs::default())).collect(),
         RVal::Logical(v, _)   => v.iter().map(|o| RVal::Logical(vec![*o].into(), Attrs::default())).collect(),
-        RVal::List(items)     => items.iter().map(|(_, val)| val.clone()).collect(),
+        RVal::List(items, _)     => items.iter().map(|(_, val)| val.clone()).collect(),
         _ => return err!(Runtime, "mclapply: x must be a vector or list"),
     };
 
@@ -1154,7 +1154,7 @@ pub(crate) fn bi_mclapply(e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
 
     let mut out = Vec::with_capacity(results.len());
     for r in results { out.push((None, r?)); }
-    Ok(RVal::List(out))
+    Ok(RVal::list(out))
 }
 
 /// Phase P — `par.sapply(x, FUN)`: like `mclapply` but simplifies the result
@@ -1162,10 +1162,10 @@ pub(crate) fn bi_mclapply(e: &mut Engine, a: &[EvalArg], _env: &EnvRef) -> Resul
 /// one column per element; otherwise the list).
 pub(crate) fn bi_par_sapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let items = match bi_mclapply(e, a, env)? {
-        RVal::List(it) => it,
+        RVal::List(it, _) => it,
         other => return Ok(other),
     };
-    if items.is_empty() { return Ok(RVal::List(items)); }
+    if items.is_empty() { return Ok(RVal::list(items)); }
     // Try to read every result as a dense numeric vector of equal length.
     let cols: Option<Vec<Vec<f64>>> = items.iter()
         .map(|(_, v)| v.as_reals().ok().map(|r| r.into_iter().flatten().collect::<Vec<f64>>()))
@@ -1183,5 +1183,5 @@ pub(crate) fn bi_par_sapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Resu
             return Ok(RVal::Matrix(r2_types::Matrix::new(data, len, cols.len())));
         }
     }
-    Ok(RVal::List(items))
+    Ok(RVal::list(items))
 }

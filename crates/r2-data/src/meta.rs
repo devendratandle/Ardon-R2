@@ -107,7 +107,7 @@ pub fn bi_as_data_frame(a: &[EvalArg]) -> Result<RVal, R2Err> {
             }
             Ok(RVal::DataFrame(DataFrame { columns, row_names: m.row_names.clone() }))
         }
-        RVal::List(items) => {
+        RVal::List(items, _) => {
             let columns: Vec<(Arc<str>, RVal)> = items.iter().enumerate().map(|(i, (n, v))| {
                 let name = n.as_ref().cloned()
                     .unwrap_or_else(|| Arc::from(format!("V{}", i + 1).as_str()));

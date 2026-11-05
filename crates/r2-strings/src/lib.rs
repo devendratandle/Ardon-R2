@@ -340,7 +340,7 @@ pub fn bi_gregexpr(a: &[EvalArg]) -> Result<RVal, R2Err> {
         at.custom.insert(Arc::from("match.length"), RVal::Integer(len.into(), Attrs::default()));
         (None, RVal::Integer(pos.into(), at))
     }).collect();
-    Ok(RVal::List(items))
+    Ok(RVal::list(items))
 }
 
 /// `regmatches(text, m)` — extract the substrings matched by a `gregexpr`
@@ -351,7 +351,7 @@ pub fn bi_regmatches(a: &[EvalArg]) -> Result<RVal, R2Err> {
         _ => return Err(type_err("regmatches() needs character text")),
     };
     match &gv(a, 1) {
-        RVal::List(mlist) => {
+        RVal::List(mlist, _) => {
             let out: Vec<(Option<Arc<str>>, RVal)> = texts.iter().enumerate().map(|(i, t)| {
                 let s = t.as_ref().map(|x| x.to_string()).unwrap_or_default();
                 let parts: Vec<Character> = match mlist.get(i).map(|(_, v)| v) {
@@ -372,7 +372,7 @@ pub fn bi_regmatches(a: &[EvalArg]) -> Result<RVal, R2Err> {
                 };
                 (None, RVal::Character(parts, Attrs::default()))
             }).collect();
-            Ok(RVal::List(out))
+            Ok(RVal::list(out))
         }
         _ => Err(type_err("regmatches(): second argument must be a gregexpr result")),
     }
@@ -397,7 +397,7 @@ pub fn bi_strsplit(a: &[EvalArg]) -> Result<RVal, R2Err> {
         };
         (None, RVal::Character(parts, Attrs::default()))
     }).collect();
-    Ok(RVal::List(items))
+    Ok(RVal::list(items))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -449,7 +449,7 @@ pub fn bi_paste0(a: &[EvalArg]) -> Result<RVal, R2Err> { paste_impl(a, "") }
 /// Flatten any value to element strings (lists/data.frames recurse).
 fn to_string_elems(v: &RVal) -> Vec<String> {
     match v {
-        RVal::List(items)   => items.iter().flat_map(|(_, x)| to_string_elems(x)).collect(),
+        RVal::List(items, _)   => items.iter().flat_map(|(_, x)| to_string_elems(x)).collect(),
         RVal::DataFrame(df) => df.columns.iter().flat_map(|(_, c)| to_string_elems(c)).collect(),
         other               => paste_elems(other),
     }
@@ -891,7 +891,7 @@ mod tests {
         // R's strsplit returns a LIST (one character vector per input string).
         let r = bi_strsplit(&[evarg(ch("a,b,c")), evarg(ch(","))]).unwrap();
         match r {
-            RVal::List(items) => match &items[0].1 {
+            RVal::List(items, _) => match &items[0].1 {
                 RVal::Character(v, _) => {
                     let got: Vec<&str> = v.iter().filter_map(|x| x.as_deref()).collect();
                     assert_eq!(got, vec!["a", "b", "c"]);

@@ -60,7 +60,7 @@ fn as_matrix(v: &RVal) -> Result<(usize, usize, Vec<f64>), R2Err> {
             }
             Ok((n, p, data))
         }
-        RVal::List(cols) => {
+        RVal::List(cols, _) => {
             if cols.is_empty() {
                 return Err(R2Err { msg: "hotelling: empty list".into(), kind: ErrKind::Runtime });
             }

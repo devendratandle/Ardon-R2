@@ -256,7 +256,7 @@ impl Engine {
             bindings: std::sync::RwLock::new(match &data {
                 RVal::DataFrame(df) =>
                     df.columns.iter().map(|(n, v)| (n.clone(), v.clone())).collect(),
-                RVal::List(items) => items.iter()
+                RVal::List(items, _) => items.iter()
                     .filter_map(|(n, v)| n.clone().map(|nm| (nm, v.clone()))).collect(),
                 _ => Default::default(),
             }),

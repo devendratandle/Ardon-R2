@@ -24,7 +24,7 @@ use crate::err;
 pub(crate) fn bi_eval(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     match gv(a, 0) {
         RVal::Lang(expr) => e.eval_in(&expr, env),
-        RVal::List(items) => {
+        RVal::List(items, _) => {
             let mut last = RVal::Null;
             for (_, v) in items {
                 last = match v {
@@ -67,7 +67,7 @@ pub(crate) fn bi_parse(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     match exprs.len() {
         0 => Ok(RVal::Null),
         1 => Ok(RVal::Lang(Arc::new(exprs.into_iter().next().unwrap()))),
-        _ => Ok(RVal::List(exprs.into_iter().map(|e| (None, RVal::Lang(Arc::new(e)))).collect())),
+        _ => Ok(RVal::list(exprs.into_iter().map(|e| (None, RVal::Lang(Arc::new(e)))).collect())),
     }
 }
 
@@ -211,7 +211,7 @@ pub(crate) fn bi_formals(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
                     .unwrap_or(RVal::Null);
                 (Some(name), val)
             }).collect();
-            Ok(RVal::List(items))
+            Ok(RVal::list(items))
         }
         RVal::BuiltinFn(_) => Ok(RVal::Null),
         other => err!(Runtime, "formals(): not a function (got '{}')", other.type_name()),
@@ -272,7 +272,7 @@ pub(crate) fn bi_call(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
 /// function (a name string or a quoted symbol), the rest are arguments.
 pub(crate) fn bi_as_call(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     match gv(a, 0) {
-        RVal::List(items) if !items.is_empty() => {
+        RVal::List(items, _) if !items.is_empty() => {
             let func = match &items[0].1 {
                 RVal::Character(v, _) => Expr::Symbol(
                     v.first().and_then(|s| s.clone()).ok_or_else(|| R2Err {

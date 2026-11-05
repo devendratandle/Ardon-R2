@@ -166,7 +166,7 @@ fn complete_cases(y: &[Option<f64>], cols: &[Vec<f64>]) -> Result<(Vec<f64>, Vec
 
 fn is_formula(v: &RVal) -> bool {
     match v {
-        RVal::List(items) => items.iter().any(|(n, v)| {
+        RVal::List(items, _) => items.iter().any(|(n, v)| {
             n.as_ref().map(|s| s.as_ref()) == Some("~class")
                 && matches!(v, RVal::Character(sv, _)
                     if sv.first().and_then(|x| x.as_ref()).map(|s| s.as_ref()) == Some("formula"))
@@ -183,13 +183,13 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let first = gv(a, 0);
 
     let (y_vec, x_mat, col_names) = if is_formula(&first) {
-        let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v) => v.clone(), _ => vec![] };
+        let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v, _) => v.clone(), _ => vec![] };
         let lhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~lhs"))
             .map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
         let rhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~rhs"))
             .map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
         let lhs = match &lhs_raw {
-            RVal::List(items) if !items.is_empty() => items[0].1.clone(),
+            RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
             other => other.clone(),
         };
         let y_raw = lhs.as_reals()?;
@@ -197,11 +197,11 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
         let mut predictor_cols: Vec<Vec<f64>> = Vec::new();
         let mut names: Vec<String> = vec!["(Intercept)".into()];
         match &rhs_raw {
-            RVal::List(cols) => {
+            RVal::List(cols, _) => {
                 for (col_name, col_val) in cols {
                     if col_name.as_ref().map(|s| s.starts_with("~")).unwrap_or(false) { continue; }
                     let (actual_name, actual_data) = match col_val {
-                        RVal::List(inner) if !inner.is_empty() => {
+                        RVal::List(inner, _) if !inner.is_empty() => {
                             let cname = inner[0].0.as_ref().map(|s| s.to_string())
                                 .unwrap_or_else(|| col_name.as_ref().map(|s| s.to_string())
                                     .unwrap_or(format!("x{}", predictor_cols.len() + 1)));
@@ -382,7 +382,7 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let first = gv(a, 0);
     let family = gn(a, "family")
         .map(|v| match &v {
-            RVal::List(items) => items.iter()
+            RVal::List(items, _) => items.iter()
                 .find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("family"))
                 .map(|(_, val)| val_to_str(val))
                 .unwrap_or_else(|| "gaussian".into()),
@@ -396,20 +396,20 @@ pub fn bi_glm(a: &[EvalArg]) -> Result<RVal, R2Err> {
         return Err(R2Err { msg: "glm() needs a formula (y ~ x)".into(), kind: ErrKind::Runtime });
     }
 
-    let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v) => v.clone(), _ => vec![] };
+    let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v, _) => v.clone(), _ => vec![] };
     let lhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~lhs")).map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
     let rhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~rhs")).map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
-    let lhs = match &lhs_raw { RVal::List(items) if !items.is_empty() => items[0].1.clone(), other => other.clone() };
+    let lhs = match &lhs_raw { RVal::List(items, _) if !items.is_empty() => items[0].1.clone(), other => other.clone() };
     let y_raw = lhs.as_reals()?;
 
     let mut predictor_cols: Vec<Vec<f64>> = Vec::new();
     let mut col_names: Vec<String> = vec!["(Intercept)".into()];
     match &rhs_raw {
-        RVal::List(cols) => {
+        RVal::List(cols, _) => {
             for (col_name, col_val) in cols {
                 if col_name.as_ref().map(|s| s.starts_with("~")).unwrap_or(false) { continue; }
                 let (actual_name, actual_data) = match col_val {
-                    RVal::List(inner) if !inner.is_empty() => {
+                    RVal::List(inner, _) if !inner.is_empty() => {
                         (inner[0].0.as_ref().map(|s| s.to_string()).unwrap_or(format!("x{}", predictor_cols.len() + 1)), inner[0].1.clone())
                     }
                     _ => (col_name.as_ref().map(|s| s.to_string()).unwrap_or(format!("x{}", predictor_cols.len() + 1)), col_val.clone()),
@@ -674,7 +674,7 @@ fn weighted_xtx_inv(x_mat: &Matrix, w: &[f64], n: usize, p: usize) -> Result<Vec
 /// the common patterns from the formula RHS / Error term unwrapping.
 fn extract_labels(v: &RVal) -> Result<Vec<String>, R2Err> {
     let col = match v {
-        RVal::List(items) if !items.is_empty() => items[0].1.clone(),
+        RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
         other => other.clone(),
     };
     Ok(match &col {
@@ -696,24 +696,24 @@ pub fn bi_aov(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // dispatch to the rm-aov computation. The classical one-way / between-
     // subject path below is untouched.
     if let Some(RVal::DataFrame(_)) = &data {
-        let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v) => v.clone(), _ => vec![] };
+        let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v, _) => v.clone(), _ => vec![] };
         if items.iter().any(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~error")) {
             return aov_repeated_measures(&items, a);
         }
     }
 
     let (y_vec, group_vec): (Vec<f64>, Vec<String>) = if let Some(RVal::DataFrame(_)) = &data {
-        let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v) => v.clone(), _ => vec![] };
+        let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v, _) => v.clone(), _ => vec![] };
         let lhs = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~lhs")).map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
         let rhs = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~rhs")).map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
-        let y_col = match &lhs { RVal::List(items) if !items.is_empty() => items[0].1.clone(), v => v.clone() };
+        let y_col = match &lhs { RVal::List(items, _) if !items.is_empty() => items[0].1.clone(), v => v.clone() };
         let y: Vec<f64> = y_col.as_reals()?.into_iter().filter_map(|x| x).collect();
 
         // One-way only. A second term used to be dropped without a word —
         // `aov(y ~ g + b)` returned the one-way table for `g`, with `b`'s
         // variation left in the residual (1.97 where R's two-way table
         // has 1.637). Refuse instead of answering a different question.
-        if let RVal::List(terms) = &rhs {
+        if let RVal::List(terms, _) = &rhs {
             let named: Vec<&str> = terms.iter()
                 .filter_map(|(n, _)| n.as_deref().filter(|s| !s.starts_with('~')))
                 .collect();
@@ -726,8 +726,8 @@ pub fn bi_aov(a: &[EvalArg]) -> Result<RVal, R2Err> {
             }
         }
         let group_col = match &rhs {
-            RVal::List(items) => items.iter().find(|(n, _)| !n.as_ref().map(|s| s.starts_with("~")).unwrap_or(true))
-                .map(|(_, v)| match v { RVal::List(inner) if !inner.is_empty() => inner[0].1.clone(), v => v.clone() })
+            RVal::List(items, _) => items.iter().find(|(n, _)| !n.as_ref().map(|s| s.starts_with("~")).unwrap_or(true))
+                .map(|(_, v)| match v { RVal::List(inner, _) if !inner.is_empty() => inner[0].1.clone(), v => v.clone() })
                 .unwrap_or(RVal::Null),
             v => v.clone(),
         };
@@ -859,16 +859,16 @@ fn aov_repeated_measures(
         .unwrap_or(RVal::Null);
 
     let y_col = match &lhs {
-        RVal::List(items) if !items.is_empty() => items[0].1.clone(),
+        RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
         other => other.clone(),
     };
     let y: Vec<f64> = y_col.as_reals()?.into_iter().filter_map(|x| x).collect();
 
     let treatment_col = match &rhs {
-        RVal::List(items) => items.iter()
+        RVal::List(items, _) => items.iter()
             .find(|(n, _)| !n.as_ref().map(|s| s.starts_with('~')).unwrap_or(true))
             .map(|(_, v)| match v {
-                RVal::List(inner) if !inner.is_empty() => inner[0].1.clone(),
+                RVal::List(inner, _) if !inner.is_empty() => inner[0].1.clone(),
                 v => v.clone(),
             })
             .unwrap_or(RVal::Null),
@@ -994,14 +994,14 @@ fn aov_repeated_measures(
 
     // Treatment column name from the RHS (for the table row label).
     let treat_name = match &rhs {
-        RVal::List(items) => items.iter()
+        RVal::List(items, _) => items.iter()
             .find(|(n, _)| !n.as_ref().map(|s| s.starts_with('~')).unwrap_or(true))
             .and_then(|(n, _)| n.as_ref().map(|s| s.to_string()))
             .unwrap_or_else(|| "treatment".to_string()),
         _ => "treatment".to_string(),
     };
     let subj_name = match &err {
-        RVal::List(items) => items.iter()
+        RVal::List(items, _) => items.iter()
             .find(|(n, _)| !n.as_ref().map(|s| s.starts_with('~')).unwrap_or(true))
             .and_then(|(n, _)| n.as_ref().map(|s| s.to_string()))
             .unwrap_or_else(|| "subject".to_string()),
@@ -1144,15 +1144,15 @@ mod tests {
     /// Build the synthetic formula-list shape that aov_repeated_measures
     /// expects: items contain ~lhs, ~rhs, ~class, and ~error.
     fn rm_formula(y: RVal, treat_name: &str, treat: RVal, subj_name: &str, subj: RVal) -> RVal {
-        RVal::List(vec![
+        RVal::list(vec![
             (Some(Arc::from("~lhs")),
-                RVal::List(vec![(Some(Arc::from("y")), y)])),
+                RVal::list(vec![(Some(Arc::from("y")), y)])),
             (Some(Arc::from("~rhs")),
-                RVal::List(vec![(Some(Arc::from(treat_name)), treat)])),
+                RVal::list(vec![(Some(Arc::from(treat_name)), treat)])),
             (Some(Arc::from("~class")),
                 RVal::Character(vec![Some(Arc::from("formula"))], Attrs::default())),
             (Some(Arc::from("~error")),
-                RVal::List(vec![(Some(Arc::from(subj_name)), subj)])),
+                RVal::list(vec![(Some(Arc::from(subj_name)), subj)])),
         ])
     }
 

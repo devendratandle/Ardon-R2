@@ -301,7 +301,7 @@ pub(crate) fn bi_apply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
             attrs.names = Some(df.columns.iter().map(|(n,_)| n.clone()).collect());
             Ok(RVal::Numeric(nums.into(), attrs))
         } else {
-            Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect()))
+            Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect()))
         }
     } else {
         // Per-row inputs (margin == 1). Pre-extract every row to a Numeric.
@@ -346,7 +346,7 @@ pub(crate) fn bi_apply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RV
             match r { RVal::Numeric(v,_) if v.len() == 1 => nums.push(v[0]), _ => { all_scalar = false; break; } }
         }
         if all_scalar { Ok(RVal::Numeric(nums.into(), Attrs::default())) }
-        else { Ok(RVal::List(results.into_iter().map(|v| (None, v)).collect())) }
+        else { Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())) }
     }
     } // end #[allow(unreachable_code)] (Phase R.2 step 6)
 }
@@ -405,7 +405,7 @@ pub(crate) fn bi_tapply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<R
     let results: Vec<(Option<Arc<str>>, RVal)> = groups.iter().zip(computed.into_iter())
         .map(|((key, _), result)| (Some(Arc::from(key.as_str())), result))
         .collect();
-    Ok(RVal::List(results))
+    Ok(RVal::list(results))
     } // end #[allow(unreachable_code)] (Phase R.2 step 6)
 }
 

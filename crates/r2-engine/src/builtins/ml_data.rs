@@ -403,13 +403,13 @@ pub(crate) fn bi_mmap_csv(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
         }
     }
     if items.is_empty() { return err!(Runtime, "mmap.csv: no numeric columns detected in the first data row"); }
-    Ok(RVal::List(items))
+    Ok(RVal::list(items))
 }
 
 /// Look up an `mmap.col` handle by name in an `mmap.csv` result list and
 /// return its packed-f64 file path.
 fn ooc_col_path(list: &RVal, name: &str) -> Option<String> {
-    if let RVal::List(items) = list {
+    if let RVal::List(items, _) = list {
         for (n, v) in items {
             if n.as_deref() == Some(name) {
                 if let RVal::TypeInstance(i) = v {
@@ -1045,7 +1045,7 @@ pub(crate) fn bi_mem_budget(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
 
 pub(crate) fn bi_mem_status(_e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let mk = |n: &str, v: f64| (Some(Arc::from(n)), RVal::Numeric(vec![Some(v)].into(), Attrs::default()));
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         mk("live.bytes",  crate::membudget::live_bytes() as f64),
         mk("budget.bytes", crate::membudget::budget() as f64),
         mk("spills",       crate::membudget::spill_count() as f64),
@@ -1130,7 +1130,7 @@ pub(crate) fn bi_gpu_enable(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
 
 pub(crate) fn bi_gpu_status(_e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let mk = |n: &str, v: RVal| (Some(Arc::from(n)), v);
-    Ok(RVal::List(vec![
+    Ok(RVal::list(vec![
         mk("enabled", rbool(r2_gpu::gpu_enabled())),
         mk("min.elems", RVal::Numeric(vec![Some(r2_gpu::GPU_MIN_ELEMS as f64)].into(), Attrs::default())),
         mk("report", rstr_(&r2_gpu::backend_report(r2_gpu::GPU_MIN_ELEMS, r2_gpu::Op::Relu))),

@@ -161,7 +161,7 @@ fn bind_args(cl: &Closure, args: &[EvalArg]) -> EnvRef {
                 .filter(|&j| !used[j])
                 .map(|j| (args[j].name.clone(), args[j].value.clone()))
                 .collect();
-            m.insert(Arc::from("..."), RVal::List(dots));
+            m.insert(Arc::from("..."), RVal::list(dots));
         }
         // Record the call's argument count for nargs().
         m.insert(Arc::from(".nargs"), RVal::Integer(vec![Some(args.len() as i32)].into(), Attrs::default()));
