@@ -11,6 +11,21 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Training on NVIDIA GPUs through CUDA — 2026-11-06
+
+- **`--features cuda`**: `llm.train` and `llm.finetune` with `device = "gpu"`, and
+  `gpu.map`, run on an NVIDIA GPU. Nothing is linked and nothing new is depended
+  on: the driver's library is opened at run time, so the build works on any
+  machine, and without a usable GPU `gpu.map` runs on the CPU while training with
+  `device = "gpu"` says there is no device. Linux for now; f32 storage only.
+- **On a Tesla T4 against PyTorch+CUDA:** level at 7M parameters, PyTorch 1.14x
+  faster at 40M and 1.55x at 125M, with the same losses to four decimals
+  (`benchmarks/llm/REPORT.md` §4c).
+- `gpu.status()` now reports the device and where the last `gpu.map` really ran.
+- **Fixed:** `gpu.enable()` never reached the part of R2 that routes the training
+  tape's f32 matrix products, so they stayed on the CPU. They now go to the GPU
+  above 64M operations once it is enabled. `%*%` works in f64 and stays on the CPU.
+
 ### `qr()` and its accessors; `cbind` and `rbind` recycle — 2026-11-05
 
 - **`qr(x, tol, LAPACK)`, `qr.Q`, `qr.R`, `qr.X`, `qr.coef`, `qr.qy`, `qr.qty`,

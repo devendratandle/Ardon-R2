@@ -24,3 +24,7 @@ installer/**            linguist-vendored
 .github/**              linguist-vendored
 *.ps1                   linguist-vendored
 *.sh                    linguist-vendored
+# CUDA kernels and the PTX generated from them: device code, compiled by the
+# driver at run time. Not part of the Rust program, and PTX must keep LF.
+crates/r2-gpu/src/cuda/kernels/** linguist-vendored
+*.ptx text eol=lf

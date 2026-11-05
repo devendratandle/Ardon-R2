@@ -933,6 +933,50 @@ DID pay, above), and splitting attention's reduction axis into partial
 slabs (splits 1/2/4/8/16: 14.8, 16.2, 19.6, 26.1, 40.7 ms —
 monotonically worse).
 
+## 4c. The GPU step on CUDA — R2 vs PyTorch+CUDA on a Tesla T4 (2026-11-06)
+
+`--features cuda`, branch `cuda-backend`. Kaggle, Tesla T4 (one of two used),
+driver 580, CUDA 13.0, torch 2.11.0+cu130. The corpus is the one this report
+uses (same sha256). Same weights, same tokens, interleaved, whole training step.
+
+| Model | Steps x pairs | R2 ms/step | PyTorch ms/step | Faster | Held-out R2 / PyTorch |
+|---|---|---|---|---|---|
+| small, 7.24M | 300 x 3 | 27.9-28.9 | 29.1-29.6 | R2 1.02-1.05x | 4.3113 / 4.3114 |
+| medium, 39.82M | 100 x 3 | 167-172 | 147-151 | PyTorch 1.14x | 5.2064 / 5.2064 |
+| large, 125.55M | 30 x 2 | 1577 | 1014-1016 | PyTorch 1.55x | 6.2250 / 6.2250 |
+
+The small row is under the 10% this report counts as a result: call it level.
+An earlier run the same night, same code but for the committed PTX, gave R2
+1.01-1.04x, PyTorch 1.05-1.09x and PyTorch 1.44x, so the medium figure moves
+with the machine and only the large one is clearly a gap.
+
+GEMM is not the difference. Kernel to kernel R2's cuBLAS path matches or beats
+PyTorch's on these shapes (2.9-5.1 TFLOP/s against 2.5-4.5 through `a @ b`, which
+also allocates its result), and R2's own tiled kernel reaches 1.4-3.6.
+
+**Attention is what is left.** At 8 x 256, 12/4 heads, hd 64, in ms per call:
+
+| | forward | backward |
+|---|---|---|
+| R2, one thread per row (first port) | 10.4 | 66.8 |
+| R2, batched register-tiled GEMMs (now) | 2.2 | 5.8 |
+| `F.scaled_dot_product_attention` | 0.39 | 2.1 |
+
+That rewrite took the medium model from PyTorch 3.3x to the row above and the
+small from PyTorch 1.7x. On this device it stores the `seq x seq` scores, which
+the flash form in §4b avoids on an integrated GPU for want of bandwidth. In the
+per-kernel census attention is still 51% of the large model's step (751 ms of
+1,485 drained) and 24% of the medium's. The obvious next step is
+`cublasSgemmStridedBatched`, which needs the operands packed by (sequence, head).
+
+```
+kaggle/run.py runs all of this; the tables above are in the kernel's log.
+cargo run --release -p r2-train --features cuda --example tinystories_train   # R2_GPU=1
+TS_DEVICE=cuda python benchmarks/llm/tinystories_train.py
+R2_VAL_BATCHES=1 for the large model: the harness evaluates on the CPU tape, and
+the default eight batches in one tape are killed for memory at 31 GB.
+```
+
 ## 5. Open
 
 Ranked by the census above, not by how interesting they are.
