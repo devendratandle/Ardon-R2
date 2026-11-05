@@ -407,8 +407,8 @@ impl Blas {
         }
         let dim = |x: usize| c_int::try_from(x).map_err(|_| "cuBLAS dimension too large".to_string());
         let (mi, ni, ki, ldai, ldbi, ldci) = (dim(m)?, dim(n)?, dim(k)?, dim(lda)?, dim(ldb)?, dim(ldc)?);
-        const NOTRANS: c_int = 111; // CUBLAS_OP_N
-        const TRANS: c_int = 112;   // CUBLAS_OP_T
+        const NOTRANS: c_int = 0; // CUBLAS_OP_N
+        const TRANS: c_int = 1;   // CUBLAS_OP_T
         let alpha = 1.0f32;
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         self.dev.bind()?;

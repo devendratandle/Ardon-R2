@@ -19,7 +19,7 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 fn main() {
-    println!("adapter: {}", r2_gpu::adapter_info());
+    println!("backend: wgpu; adapter: {}", r2_gpu::device::adapter_line());
     println!("{:>18} {:>5} {:>10} {:>10} {:>8}", "t x k x n", "case", "GPU GF/s", "CPU GF/s", "GPU/CPU");
     println!("{}", "-".repeat(56));
     // the small model's shapes first (dim 256, kv 128, ffn 768, vocab 8000), then the medium's

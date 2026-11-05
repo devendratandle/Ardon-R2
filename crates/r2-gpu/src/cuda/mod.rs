@@ -16,7 +16,9 @@
 
 #[allow(unsafe_code)]
 pub mod ffi;
+pub mod attention;
 pub mod gemm;
+pub mod optim;
 
 use crate::Op;
 use ffi::{device, Arg, DeviceBuffer, Kernel};
@@ -47,9 +49,10 @@ impl DeviceBuffer<f32> {
     pub fn download(&self) -> Vec<f32> { self.to_vec().unwrap_or_default() }
 }
 
-/// Block until the device is idle: the fence a benchmark closes on.
-pub fn sync() {
-    if let Ok(d) = device() { let _ = d.sync(); }
+/// Block until the device is idle: the fence a benchmark closes on. `false`
+/// when there is no device or a kernel faulted, so a timing can be thrown out.
+pub fn sync() -> bool {
+    device().is_ok_and(|d| d.sync().is_ok())
 }
 
 /// One line about the device, or why there is none.
@@ -88,7 +91,9 @@ fn map_kernel() -> Result<&'static Kernel, &'static str> {
 pub fn module_status() -> Vec<(&'static str, Result<(), String>)> {
     let st = |r: Result<(), &str>| r.map_err(str::to_string);
     vec![("map", st(map_kernel().map(|_| ()))),
-         ("gemm", st(gemm::loads()))]
+         ("gemm", st(gemm::loads())),
+         ("attention", st(attention::loads())),
+         ("optim", st(optim::loads()))]
 }
 
 fn op_code(op: Op) -> (u32, f32) {

@@ -15,7 +15,7 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 fn main() {
-    println!("adapter: {}", r2_gpu::adapter_info());
+    println!("backend: wgpu; adapter: {}", r2_gpu::device::adapter_line());
     println!("{:<26} {:>9} {:>9} {:>9} {:>9} {:>9}", "shape", "GPU fwd", "CPU fwd", "GPU bwd", "  row bwd", "CPU bwd");
     println!("{}", "-".repeat(76));
     for &(nseq, seq, nh, nkv, hd, reps) in &[(32usize, 64usize, 4usize, 2usize, 64usize, 20usize), (8, 256, 12, 4, 64, 10)] {

@@ -53,3 +53,7 @@ required-features = ["gpu"]
 [[example]]
 name = "cuda_probe"
 required-features = ["cuda"]
+
+[[example]]
+name = "cuda_bench"
+required-features = ["cuda"]

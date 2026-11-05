@@ -33,3 +33,9 @@ sh(f"{TEST} --lib cuda::tests -- --nocapture 2>&1 | grep -vE '^ +(Compiling|Down
 sh(f"{TEST} --test cuda_dispatch 2>&1 | tail -12")
 sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES= {CARGO} test --release -p r2-gpu --features cuda --test cuda_dispatch 2>&1 | tail -12")
 sh(f"{TEST} --lib cuda::gemm 2>&1 | tail -30")
+sh(f"{TEST} --lib cuda::attention 2>&1 | tail -30")
+sh(f"{TEST} --lib cuda::optim 2>&1 | tail -30")
+# The whole crate, CPU reference tests included, then the numbers.
+sh(f"{TEST} 2>&1 | grep -E '^test |test result|panicked|error' | tail -40")
+sh(f"cd /tmp/r2 && {CARGO} run --release -p r2-gpu --features cuda --example cuda_bench 2>&1 | grep -vE '^ +(Compiling|Finished|Running)'", tail=12000)
+sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES= {CARGO} run --release -p r2-gpu --features cuda --example cuda_bench 2>&1 | tail -3")
