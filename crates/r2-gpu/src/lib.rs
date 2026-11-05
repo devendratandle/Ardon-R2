@@ -21,7 +21,9 @@
 //!    enabled+available, else CPU.
 //!
 //! Default build = CPU reference only (no wgpu). `--features gpu` adds the
-//! real device path.
+//! real device path; `--features cuda` adds the CUDA one (`cuda`), which
+//! `dispatch` tries first when both are compiled. `last_backend()` says which
+//! one really ran, so a fallback cannot be mistaken for a GPU run.
 
 /// GPU-eligible element-wise operations. Only ops where f32 precision is
 /// acceptable for their intended (ML) use are listed; statistics stay on
@@ -107,23 +109,53 @@ pub const GPU_MIN_ELEMS: usize = 1 << 16; // 65536
 /// correct CPU result in every fallback case.
 pub fn dispatch(op: Op, xs: &[f32]) -> Vec<f32> {
     if gpu_enabled() && op.is_f32_safe() && xs.len() >= GPU_MIN_ELEMS {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = cuda::try_map(op, xs) {
+                ran(Backend::Cuda);
+                return out;
+            }
+        }
         #[cfg(feature = "gpu")]
         {
             if let Some(out) = gpu::try_map(op, xs) {
+                ran(Backend::Wgpu);
                 return out;
             }
         }
     }
+    ran(Backend::Cpu);
     cpu::map(op, xs)
 }
+
+/// Where a `dispatch` or `matmul` call really ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend { Cpu, Wgpu, Cuda }
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self { Backend::Cpu => "CPU", Backend::Wgpu => "wgpu", Backend::Cuda => "CUDA" })
+    }
+}
+
+thread_local! {
+    static LAST: std::cell::Cell<Backend> = const { std::cell::Cell::new(Backend::Cpu) };
+}
+
+fn ran(b: Backend) { LAST.with(|l| l.set(b)); }
+
+/// The backend this thread's most recent `dispatch` or `matmul` used (a
+/// `matmul` that returned `None` counts as CPU, since the caller's CPU path
+/// runs). Benchmarks print this, so a CPU fallback can't pass as a GPU figure.
+pub fn last_backend() -> Backend { LAST.with(|l| l.get()) }
 
 /// Human-readable backend report for `explain()`-style introspection.
 pub fn backend_report(n: usize, op: Op) -> String {
     let would_gpu = gpu_enabled() && op.is_f32_safe() && n >= GPU_MIN_ELEMS;
-    #[cfg(feature = "gpu")]
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
     let compiled = "compiled";
-    #[cfg(not(feature = "gpu"))]
-    let compiled = "not compiled (build with --features gpu)";
+    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    let compiled = "not compiled (build with --features gpu or cuda)";
     format!(
         "op={:?} n={} f32_safe={} gpu_enabled={} threshold={} → {} (gpu path: {})",
         op, n, op.is_f32_safe(), gpu_enabled(), GPU_MIN_ELEMS,
@@ -136,11 +168,22 @@ pub fn backend_report(n: usize, op: Op) -> String {
 /// wgpu reaches them via Vulkan/DX12/Metal, so machines without discrete
 /// cards still get offload capability (slower, but the job completes).
 pub fn adapter_info() -> String {
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "cuda")]
+    {
+        // wgpu, when compiled too, still serves when there is no CUDA device
+        #[cfg(feature = "gpu")]
+        if cuda::ffi::device().is_err() { return gpu::adapter_info(); }
+        cuda::device_line()
+    }
+    #[cfg(all(feature = "gpu", not(feature = "cuda")))]
     { gpu::adapter_info() }
-    #[cfg(not(feature = "gpu"))]
-    { "gpu feature not compiled (build with --features gpu)".into() }
+    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    { "gpu feature not compiled (build with --features gpu or cuda)".into() }
 }
+
+// ── CUDA path (only under --features cuda) ──────────────────────────────
+#[cfg(feature = "cuda")]
+pub mod cuda;
 
 // ── Real GPU path (only under --features gpu) ───────────────────────────
 #[cfg(feature = "gpu")]
@@ -275,14 +318,26 @@ mod gpu {
 /// Matrix multiply on the GPU when enabled and available, else `None` so
 /// the caller keeps its CPU path. Behind the same opt-in switch as the
 /// element-wise ops: correctness never depends on a device being present.
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "cuda"))]
 pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
+    ran(Backend::Cpu);
     if !gpu_enabled() { return None; }
-    gpu::try_matmul(a, b, m, k, n)
+    #[cfg(feature = "cuda")]
+    if let Some(c) = cuda::gemm::try_matmul(a, b, m, k, n) {
+        ran(Backend::Cuda);
+        return Some(c);
+    }
+    #[cfg(feature = "gpu")]
+    if let Some(c) = gpu::try_matmul(a, b, m, k, n) {
+        ran(Backend::Wgpu);
+        return Some(c);
+    }
+    None
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "cuda")))]
 pub fn matmul(_a: &[f32], _b: &[f32], _m: usize, _k: usize, _n: usize) -> Option<Vec<f32>> {
+    ran(Backend::Cpu);
     None
 }
 
@@ -347,4 +402,18 @@ pub fn upload(data: &[f32], rows: usize, cols: usize) -> Option<gpu::Resident> {
 #[cfg(feature = "gpu")]
 pub fn matmul_resident(a: &[f32], b: &gpu::Resident, m: usize) -> Option<Vec<f32>> {
     gpu::matmul_resident(a, b, m)
+}
+
+/// Upload a matrix to the CUDA device and keep it there across calls. (With
+/// the `gpu` feature also on, `upload` stays the wgpu one and this is
+/// `cuda::gemm::upload`.)
+#[cfg(all(feature = "cuda", not(feature = "gpu")))]
+pub fn upload(data: &[f32], rows: usize, cols: usize) -> Option<cuda::gemm::Resident> {
+    cuda::gemm::upload(data, rows, cols)
+}
+
+/// A(m×k) · B where B already lives on the CUDA device.
+#[cfg(all(feature = "cuda", not(feature = "gpu")))]
+pub fn matmul_resident(a: &[f32], b: &cuda::gemm::Resident, m: usize) -> Option<Vec<f32>> {
+    cuda::gemm::matmul_resident(a, b, m)
 }

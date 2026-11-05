@@ -11,6 +11,9 @@ description = "GPU compute dispatcher for Ardon-R2 (wgpu, opt-in, f32-safe)."
 # stack. `--features gpu` turns on the real device path.
 default = []
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+# The CUDA backend: no dependency at all, libcuda.so.1 is opened at run time,
+# so this builds on a machine with no CUDA and falls back to the CPU there.
+cuda = []
 
 [dependencies]
 wgpu     = { version = "30", optional = true }
@@ -46,3 +49,7 @@ required-features = ["gpu"]
 [[example]]
 name = "precision_probe"
 required-features = ["gpu"]
+
+[[example]]
+name = "cuda_probe"
+required-features = ["cuda"]
