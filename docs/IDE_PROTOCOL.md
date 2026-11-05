@@ -26,7 +26,7 @@ Requests run one at a time, in order. While an `eval` runs, R2 also writes
 ## 2. Operations
 
 ### 2.1 `hello`
-`{"id":1,"op":"hello"}` → `{"id":1,"ok":true,"r2":"0.4.2","protocol":1}`.
+`{"id":1,"op":"hello"}` → `{"id":1,"ok":true,"r2":"0.4.1","protocol":1}`.
 The IDE should send it first and check `protocol` (and `r2` against its minimum).
 
 ### 2.2 `eval` — console input

@@ -6,10 +6,10 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
-## v0.4.2 (October 2026)
+## v0.4.1 (November 2026)
 
-Version 0.4.1 was never released; everything listed here since v0.4.0
-ships in 0.4.2.
+Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
+development; that number was never released.)
 
 ### LLM: `llm.train` learns from the whole text; `llm.save` keeps the tokenizer — 2026-11-04
 

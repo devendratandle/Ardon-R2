@@ -101,7 +101,7 @@ to be worse than documented and was fixed here rather than scheduled.
   `acf(x, 3)` gives 4 values in R and 10 in R2. The **autocorrelations
   themselves are exact** — the overlapping values match R to every digit
   printed (`1, 0.45, 0.5, -0.033333333`) — so this is an argument-handling
-  bug, not a numerical one. Targeted for v0.4.1.
+  bug, not a numerical one. Targeted for the next release.
 
 ## Statistics
 
