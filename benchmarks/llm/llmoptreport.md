@@ -270,3 +270,26 @@ about 1.2x the energy per step.
 - **Energy per FLOP:** operands of 0.5 have an empty mantissa. Test sustained cuBLAS on random data
   with 24, 16, 12 and 8 significant bits. Only if the clock rises does training on fewer bits become
   worth testing, and it would have to pass the gate.
+
+### Run 33 (28a3449 as a patch on 2251683): fused backward scores, launch cost, f16 attempt
+
+All tests pass, including fused scores against the stored form's bits. Weights match between the two at every size.
+
+| 125M, attention backward, ms per call, three rounds | |
+|---|---:|
+| R2 fused scores | 7.18, 6.77, 6.70 |
+| R2 stored form | 7.84, 7.85, 8.07 |
+| PyTorch | 6.42, 6.47, 6.53 |
+
+| Step, ms, fair order | Fused | Stored |
+|---|---:|---:|
+| 7.2M, 300 steps | 23.7, 24.5 | 23.8, 24.3 |
+| 39.8M, 100 steps | 131.7, 135.3 | 133.5, 137.3 |
+| 125M, 30 steps | 966.9, 1,069.0 | 1,004.0, 1,085.3 |
+| 125M, 30 steps, again | 1,066.1, 1,067.0 | 1,076.2, 1,085.2 |
+
+**Verdict:** fused scores stay. The row improves in every round, about 14%, but the step gains 0-2% on most pairs, under the 2.5% rule, so the step gain is unproven.
+
+**Launches at 7.2M:** 161 per step at 2.6 us queued is about 0.4 ms of 24.5 ms, 1.7%. CUDA Graphs could save at most that. Closed unless a later run shows otherwise.
+
+**f16: no answer yet.** `cublasGemmEx` returned status 7 for both f16 and f32-fast-16 with algorithm 160, so there are no f16 rates or accuracy figures. The f32 control ran at 3,491-3,829 GFLOP/s against plain cuBLAS at 3,674-4,018. Next: algorithm -1, cuBLAS logging, and PyTorch's own f16 `matmul` under the same sampler.
