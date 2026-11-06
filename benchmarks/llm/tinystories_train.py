@@ -373,7 +373,9 @@ def main():
     # TS_KINETO=1: every kernel PyTorch and cuBLAS launch in three steps, with its
     # grid and block. Timings are disturbed; what ran and how is the information.
     kineto = None
+    step_ms = []
     for s in range(steps):
+        step_start = time.perf_counter()
         if os.environ.get("TS_KINETO") == "1" and s == 5:
             from torch.profiler import profile as kprofile, ProfilerActivity as PA
             kineto = kprofile(activities=[PA.CPU, PA.CUDA])
@@ -403,6 +405,7 @@ def main():
         mark = tick(3, mark)
         last = loss.item()
         tick(4, mark)
+        step_ms.append((time.perf_counter() - step_start) * 1e3)
         if s == 0:
             first = last
         if s == 0 or (s + 1) % every == 0:
@@ -421,6 +424,8 @@ def main():
             print(f"  held-out  step {s+1:>6}  loss {v:.4f}")
     device_sync()
     train_s = time.perf_counter() - t0 - eval_s
+    later = sorted(step_ms[1:]) or [0.0]
+    print(f"  steptime   first {step_ms[0]:.1f} ms, median after it {later[len(later) // 2]:.1f} ms")
     if profile_start is not None:
         n = steps - PROFILE_FROM
         wall = (time.perf_counter() - profile_start) * 1e3 / n

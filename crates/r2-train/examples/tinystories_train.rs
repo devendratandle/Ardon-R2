@@ -410,6 +410,7 @@ fn main() {
     let eval_every: usize = env("R2_EVAL_EVERY", 0usize);
     let mut held: Vec<(usize, f32)> = Vec::new();
     let mut eval_s = 0.0f64;
+    let mut step_ms: Vec<f64> = Vec::new();
     let t0 = std::time::Instant::now();
     let mut first = 0.0f32;
     let mut last = 0.0f32;
@@ -429,6 +430,7 @@ fn main() {
             profile_start = Some(std::time::Instant::now());
         }
         let td = std::time::Instant::now();
+        let step_start = td;
         // each rank its own windows, as many as one GPU alone would train on
         let batch = batch_at(&train, s * world + rank, bn, seq);
         if profile_start.is_some() { data_ms += td.elapsed().as_secs_f64() * 1e3; }
@@ -439,6 +441,7 @@ fn main() {
         };
         #[cfg(not(any(feature = "gpu", feature = "cuda")))]
         let loss = tr.train_step(&batch).unwrap_or_else(|e| die("train_step", e));
+        step_ms.push(step_start.elapsed().as_secs_f64() * 1e3);
         if first == 0.0 { first = loss; }
         if ckpt_every > 0 && (s + 1) % ckpt_every == 0 {
             if let Some(d) = &ckpt_dir {
@@ -513,6 +516,9 @@ fn main() {
 
     println!("\n  trained    {steps} steps in {train_s:.2} s  ({:.1} tokens/s, {:.1} ms/step)",
              (steps * bn * seq * world) as f64 / train_s, train_s * 1000.0 / steps as f64);
+    let mut later = step_ms[step_ms.len().min(1)..].to_vec();
+    later.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("  steptime   first {:.1} ms, median after it {:.1} ms", step_ms[0], later.get(later.len() / 2).copied().unwrap_or(0.0));
     println!("  train loss {first:.4} -> {last:.4}");
     println!("  HELD-OUT   {val_before:.4} -> {val_after:.4}   ({bpb:.4} bits/byte)");
 

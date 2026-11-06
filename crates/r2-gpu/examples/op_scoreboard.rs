@@ -20,7 +20,11 @@ fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
-fn fill(len: usize, ph: f32) -> Vec<f32> { (0..len).map(|i| ((i as f32) * 0.0007 + ph).sin()).collect() }
+/// `SCORE_STEP` over 0.1 makes neighbours unalike, as training data is.
+fn fill(len: usize, ph: f32) -> Vec<f32> {
+    let step: f32 = env("SCORE_STEP", 0.0007);
+    (0..len).map(|i| ((i as f32) * step + ph).sin()).collect()
+}
 
 fn abs_sum(x: &[f32]) -> f64 { x.iter().map(|v| v.abs() as f64).sum() }
 

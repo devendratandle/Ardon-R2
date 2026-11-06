@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "score", "pairs", "two", "census"}   # also: "tests", "two", "audit", "bench", "pairs", "census", "score"
+STAGES = {"leads"}   # also: "tests", "two", "audit", "bench", "pairs", "census", "score"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -46,9 +46,9 @@ if "bench" in STAGES:
     sh(f"cd /tmp/r2 && {CARGO} run --release -p r2-gpu --features cuda --example cuda_bench 2>&1 | grep -vE '^ +(Compiling|Finished|Running)'", tail=12000)
     sh("cd /tmp/r2 && python3 kaggle/torch_kernels.py 2>&1", tail=6000)
 
-PICK = "grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |FAIL|panicked|rror'"
+PICK = "grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'"
 TRAIN = "/tmp/r2/target/release/examples/tinystories_train"
-R2PICK = "grep -E 'device  |model |trained|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'"
+R2PICK = "grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'"
 
 # ── Two GPUs, one process each ──────────────────────────────────────────────
 # Rank 1 has its own directory, so the two do not write one token file. One GPU
@@ -131,6 +131,42 @@ if "score" in STAGES:
                f"CUDA_VISIBLE_DEVICES=0 R2_WORLD=2 R2_RANK=0 {env} SCORE_LAYER=t4x2 SCORE_SIZE={name} /tmp/score_cuda 2>&1 | {SCORE}; sleep 2; grep -E 'rror|panicked' /tmp/x1.log")
             py = f"{env} SCORE_LAYER=t4x2 SCORE_SIZE={name} TS_DEVICE=cuda TS_WORLD=2 MASTER_ADDR=127.0.0.1 MASTER_PORT=29601 python3 benchmarks/llm/op_scoreboard.py"
             sh(f"cd /tmp/r2 && (TS_RANK=1 {py} > /tmp/x1.log 2>&1 &); TS_RANK=0 {py} 2>&1 | {SCORE}; sleep 2; grep -E 'rror|Traceback' /tmp/x1.log")
+if "leads" in STAGES:
+    # The card's own limits, then the leads from the last run: attention on data unlike
+    # the scoreboard's smooth fill, the first step against the rest, one card against the other.
+    sh(f"cd /tmp/r2 && {CARGO} run --release -p r2-gpu --features cuda --example cuda_ceiling 2>&1 | grep -E '^(CEILING|device:)|rror|panicked'", tail=6000)
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example op_scoreboard 2>&1 | tail -1; cp target/release/examples/op_scoreboard /tmp/score_cuda")
+    SCORE = "grep -E '^(SCORE|device:)|rror|panicked|Traceback'"
+    QUERY = "index,clocks.sm,clocks.mem,temperature.gpu,power.draw,utilization.gpu,clocks_throttle_reasons.active"
+    def sampled(cmd):
+        """Runs cmd with both cards sampled each second; prints each card's readings under load."""
+        s = subprocess.Popen(f"nvidia-smi --query-gpu={QUERY} --format=csv,noheader,nounits -l 1 > /tmp/gpu.csv", shell=True)
+        sh(cmd)
+        s.terminate()
+        subprocess.run("pkill -f 'nvidia-smi --query-gpu' ; true", shell=True)
+        rows = [[x.strip() for x in l.split(",")] for l in open("/tmp/gpu.csv") if l.count(",") == 6]
+        for card in sorted({r[0] for r in rows}):
+            busy = [r for r in rows if r[0] == card and r[5].isdigit() and int(r[5]) > 50]
+            if not busy:
+                print(f"card {card}: idle", flush=True)
+                continue
+            med = lambda i: sorted(float(r[i]) for r in busy)[len(busy) // 2]
+            print(f"card {card}: {len(busy)} s busy, median clock {med(1):.0f} MHz, memory {med(2):.0f} MHz, "
+                  f"{med(3):.0f} C, {med(4):.0f} W, throttle {sorted({r[6] for r in busy})}", flush=True)
+    for round_ in range(2):
+        for name, env in [("small", SMALL), ("medium", MEDIUM), ("large", LARGE)]:
+            for layer, step in [("t4smooth", "0.0007"), ("t4rough", "0.37")]:
+                sh(f"cd /tmp/r2 && {env} SCORE_STEP={step} SCORE_LAYER={layer} SCORE_SIZE={name} CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | {SCORE}", tail=12000)
+                sh(f"cd /tmp/r2 && {env} SCORE_STEP={step} SCORE_LAYER={layer} SCORE_SIZE={name} TS_DEVICE=cuda CUDA_VISIBLE_DEVICES=0 python3 benchmarks/llm/op_scoreboard.py 2>&1 | {SCORE}", tail=12000)
+    for round_ in range(2):
+        for card in (0, 1):
+            print(f"\n=== large card {card} round {round_ + 1}", flush=True)
+            sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES={card} {LARGE} R2_STEPS=30 R2_GPU=1 {TRAIN} 2>&1 | {R2PICK}")
+            sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES={card} {LARGE} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | {PICK}")
+    # a longer run, so the first step weighs little: the steady ratio at 125M
+    print("\n=== large long, 100 steps", flush=True)
+    sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {LARGE} R2_STEPS=100 R2_GPU=1 {TRAIN} 2>&1 | {R2PICK}")
+    sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {LARGE} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | {PICK}")
 sh("nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0")
 
 # Where the step goes now, per kernel (the queue is drained after each launch, so

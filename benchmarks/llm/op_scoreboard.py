@@ -37,7 +37,7 @@ def fence(x=None):
 
 
 def fill(n, ph, grad=False):
-    x = ((torch.arange(n, dtype=torch.float32) * 0.0007 + ph).sin()).to(DEV)
+    x = ((torch.arange(n, dtype=torch.float32) * float(os.environ.get("SCORE_STEP", "0.0007")) + ph).sin()).to(DEV)
     return x.requires_grad_() if grad else x
 
 
