@@ -11,6 +11,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Seeing into LLM training from a script — 2026-11-07
+
+- **`llm.train` and `llm.finetune` take `callback = function(step, loss)`**, called
+  on the steps `report =` names, in place of the printed line. It can read the model
+  (`llm.inspect`, `llm.generate`, `llm.save`) but not change it, and `stop()` in it
+  ends the run with the weights it has reached. With `device = "gpu"` each call first
+  reads the weights and optimizer state back to the CPU.
+- **`llm.inspect(m, text)`** gives the loss on one batch, a data frame of weight and
+  gradient norms per block, and a data frame of activation mean, sd, largest value
+  and non-finite count per stage. It costs one forward and backward pass and that
+  pass's memory per call, changes no weight, and always runs on the CPU.
+- **`llm.new(preset = "tiny")`**: `"tiny"` 1.3M, `"small"` 7.2M, `"medium"` 40M and
+  `"large"` 125M parameters, the shapes R2 has been benchmarked at. A preset sets the
+  shape only, and a named argument overrides it.
+- A run using none of these is unchanged: on a CPU training and a fine-tuning script,
+  the saved weights match the previous build's byte for byte.
+- `samples/llm/inspect.r2` shows all three.
+
 ### Training on NVIDIA GPUs through CUDA — 2026-11-06
 
 - **`--features cuda`**: `llm.train` and `llm.finetune` with `device = "gpu"`, and

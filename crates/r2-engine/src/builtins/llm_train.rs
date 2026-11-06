@@ -7,6 +7,9 @@
 //!              wd = 0.01, clip = 1, schedule = "cosine", warmup = 20,
 //!              checkpoint = "run1", every = 50)
 //! ```
+//!
+//! `callback = function(step, loss)` with `report = n` hands the script control
+//! on the reporting steps; see `run_steps` for what that costs and when.
 
 use r2_tensor::tokenizer::Tokenizer;
 use r2_train::data::{Batch, Batcher, Order, PairSet};

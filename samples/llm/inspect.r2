@@ -39,11 +39,11 @@ print(look$activations)
 
 # 4. INSIDE A RUN. Watch one block's gradient while it trains.
 norms <- c()
-llm.train(m, corpus, steps = 40, seq = 32, batch = 4, shuffle = TRUE, report = 10,
-          callback = function(step, loss) {
-              look <- llm.inspect(m, corpus, seq = 32, batch = 4)
-              norms <<- c(norms, look$blocks$grad.norm[look$blocks$block == "layer.0.wq"])
-          })
+invisible(llm.train(m, corpus, steps = 40, seq = 32, batch = 4, shuffle = TRUE, report = 10,
+                    callback = function(step, loss) {
+                        look <- llm.inspect(m, corpus, seq = 32, batch = 4)
+                        norms <<- c(norms, look$blocks$grad.norm[look$blocks$block == "layer.0.wq"])
+                    }))
 cat("\nlayer.0.wq gradient norm:", round(norms, 4), "\n")
 
 invisible(llm.free(m))

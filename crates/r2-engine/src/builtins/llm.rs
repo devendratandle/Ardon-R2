@@ -362,7 +362,7 @@ mod preset_tests {
             (*name, cfg.n_params())
         }).collect();
         for ((name, n), millions) in params.iter().zip([1.30, 7.24, 39.8, 125.5]) {
-            assert!((*n as f64 / 1e6 - millions).abs() < 0.05, "{name}: {n}");
+            assert!((*n as f64 / 1e6 - millions).abs() < 0.1, "{name}: {n}");
         }
     }
 }

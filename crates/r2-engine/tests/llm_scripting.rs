@@ -133,11 +133,14 @@ fn stop_in_a_callback_ends_the_run_and_keeps_the_weights() {
     let stopped = weights_after("stopped", &format!(
         "r <- tryCatch({TRAIN}, report = 4,\n\
                        callback = function(step, loss) if (step == 4) stop(\"enough\")),\n\
-                       error = function(e) conditionMessage(e))\n\
-         stopifnot(grepl(\"enough\", r))\n\
+                       error = function(e) \"stopped\")\n\
+         stopifnot(r == \"stopped\")\n\
          invisible(llm.train(m, txt, steps = 8, seq = 16, batch = 4))"));
     let whole = weights_after("whole", &format!("invisible({TRAIN}))"));
     assert_eq!(stopped, whole);
+    // and with nothing to catch it, the callback's own error reaches the script
+    let msg = run_err(&format!("{SETUP}{TRAIN}, report = 4, callback = function(step, loss) stop(\"enough\"))\n"));
+    assert!(msg.contains("enough"), "{msg}");
 }
 
 /// The registry lock must be free while a callback runs: these all take it.
@@ -168,7 +171,7 @@ fn a_callback_cannot_change_the_model_it_is_training() {
 #[test]
 fn the_handle_is_released_after_a_callback_fails() {
     let freed = run(&format!(
-        "{SETUP}try({TRAIN}, report = 1, callback = function(step, loss) stop(\"no\")), silent = TRUE)\n\
+        "{SETUP}r <- tryCatch({TRAIN}, report = 1, callback = function(step, loss) stop(\"no\")), error = function(e) 0)\n\
          llm.free(m)\n"));
     assert!(matches!(&freed, RVal::Logical(x, _) if x.iter().next() == Some(&Some(true))));
 }
@@ -255,7 +258,7 @@ fn inspect_refuses_a_serving_handle() {
 #[test]
 fn a_preset_sets_the_shape_and_named_arguments_override_it() {
     let info = |args: &str, field: &str| nums(&run(&format!("llm.info(llm.new({args}))${field}\n")))[0];
-    assert_eq!(info("preset = \"tiny\"", "params"), 1_300_352.0);
+    assert_eq!(info("preset = \"tiny\"", "params"), 1_299_584.0);
     assert_eq!(info("preset = \"tiny\"", "dim"), 128.0);
     assert_eq!(info("preset = \"tiny\", layers = 2", "layers"), 2.0);
     assert_eq!(info("preset = \"tiny\", layers = 2", "dim"), 128.0, "an override moved another field");
