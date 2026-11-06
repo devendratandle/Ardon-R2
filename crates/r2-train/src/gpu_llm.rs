@@ -405,6 +405,9 @@ impl GpuTrainer {
             ok(ew::rope_fwd(&la.q, &la.qr, t, seq, nh, hd, c.rope_base), "rope q")?;
             ok(ew::rope_fwd(&la.k, &la.kr, t, seq, nkv, hd, c.rope_base), "rope k")?;
             ok(attention::forward(&la.qr, &la.kr, &la.v, &la.ctx, &la.lse, &shape), "attention")?;
+            // The census repeats it on the same operands, which writes the same bits:
+            // equal times mean the activations decide its cost, and not just-written memory.
+            if census { ok(attention::forward(&la.qr, &la.kr, &la.v, &la.ctx, &la.lse, &shape), "attention again")?; }
             // x1 = ctx·Wo, then += x (the residual, in place)
             ok(gemm(&la.ctx, false, wg(blk(l, 4)), false, t, d, d, &la.x1, false), "wo")?;
             ok(ew::flat_fwd(ew::Flat::AddInto, x, x, &la.x1, t * d), "residual")?;

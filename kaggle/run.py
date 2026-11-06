@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "energy"}   # also: "tests", "two", "audit", "bench", "pairs", "census", "score"
+STAGES = {"tests", "lossgap"}   # also: "energy", "two", "audit", "bench", "pairs", "census", "score"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -182,6 +182,40 @@ if "energy" in STAGES:
         r2_run(env, steps, card)
     print("\n=== census large", flush=True)
     sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {LARGE} R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 {TRAIN} 2>&1 | grep -A60 'GPU step census'; true")
+if "lossgap" in STAGES:
+    # Tiled products are the same maths as cuBLAS with other rounding, so how far they
+    # move the loss says how far rounding alone can. Held-out every 10 steps shows the
+    # gap's growth; three held-out batches show whether one batch overstates it (eight are killed for memory).
+    R2LOSS = "grep -iE 'device  |trained|steptime|held-out|weights  |rror|panicked'"
+    PTLOSS = "grep -iE 'steptime|ms/step|loss after training|held-out|weights  |FAIL|rror'"
+    def r2_loss(env, extra=""):
+        sh("sleep 45")
+        sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {env} {extra} R2_STEPS=100 R2_GPU=1 {TRAIN} 2>&1 | {R2LOSS}")
+    def torch_loss(env):
+        sh("sleep 45")
+        sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {env} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | {PTLOSS}")
+    curve = f"{LARGE} R2_EVAL_EVERY=10"
+    print("\n=== loss curve, one held-out batch: cuBLAS, PyTorch, PyTorch, tiled", flush=True)
+    r2_loss(curve)
+    torch_loss(curve)
+    torch_loss(curve)
+    r2_loss(curve, "R2_CUDA_GEMM=tiled")
+    wide = LARGE.replace("R2_VAL_BATCHES=1", "R2_VAL_BATCHES=3")
+    print("\n=== three held-out batches: cuBLAS, PyTorch, tiled", flush=True)
+    r2_loss(wide)
+    torch_loss(wide)
+    r2_loss(wide, "R2_CUDA_GEMM=tiled")
+    # What operand data costs in clock, on the shape the sustained test already holds.
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example cuda_ceiling 2>&1 | tail -1; cp target/release/examples/cuda_ceiling /tmp/ceiling")
+    for card in (0, 1):
+        for kind in ("cublas", "cublas_random", "cublas", "cublas_random"):
+            print(f"\n=== sustain {kind} card {card}", flush=True)
+            sh("sleep 45")
+            sampled(f"CUDA_VISIBLE_DEVICES={card} /tmp/ceiling sustain {kind} 2>&1 | grep -E '^CEILING|rror|panicked'")
+    # Forward attention on real activations, then again on the same operands.
+    for i in range(2):
+        print(f"\n=== census large {i + 1} of 2", flush=True)
+        sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {LARGE} R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 {TRAIN} 2>&1 | grep -E 'GPU step census|attention'; true")
 sh("nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0")
 
 # Where the step goes now, per kernel (the queue is drained after each launch, so
