@@ -26,6 +26,10 @@ use std::sync::{Mutex, OnceLock};
 
 type CuResult = c_int;
 type DevPtr = u64;
+/// `CUipcMemHandle`: 64 opaque bytes, passed by value.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IpcHandle([u8; 64]);
 type Handle = *mut c_void;
 
 #[cfg(unix)]
@@ -98,6 +102,12 @@ table!(Cu {
     alloc_host = "cuMemAllocHost_v2": fn(*mut *mut c_void, usize) -> CuResult;
     free_host = "cuMemFreeHost": fn(*mut c_void) -> CuResult;
     h_to_d = "cuMemcpyHtoD_v2": fn(DevPtr, *const c_void, usize) -> CuResult;
+    d_to_d = "cuMemcpyDtoD_v2": fn(DevPtr, DevPtr, usize) -> CuResult;
+    can_access = "cuDeviceCanAccessPeer": fn(*mut c_int, c_int, c_int) -> CuResult;
+    ipc_get = "cuIpcGetMemHandle": fn(*mut IpcHandle, DevPtr) -> CuResult;
+    ipc_open = "cuIpcOpenMemHandle_v2": fn(*mut DevPtr, IpcHandle, c_uint) -> CuResult;
+    ipc_close = "cuIpcCloseMemHandle": fn(DevPtr) -> CuResult;
+    addr_range = "cuMemGetAddressRange_v2": fn(*mut DevPtr, *mut usize, DevPtr) -> CuResult;
     d_to_h = "cuMemcpyDtoH_v2": fn(*mut c_void, DevPtr, usize) -> CuResult;
     set32 = "cuMemsetD32_v2": fn(DevPtr, c_uint, usize) -> CuResult;
     module_load = "cuModuleLoadDataEx": fn(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void) -> CuResult;
@@ -115,6 +125,7 @@ table!(Cb {
 
 /// One GPU with its context: the process-wide CUDA device.
 pub struct Device {
+    pub ordinal: usize,
     cu: Cu,
     ctx: Handle,
     /// `cuDeviceGetName`.
@@ -332,6 +343,15 @@ impl<T: Pod> DeviceBuffer<T> {
         if code == 0 { Ok(out) } else { Err(self.dev.err("cuMemcpyDtoH", code)) }
     }
 
+    /// What another process passes to [`PeerBuffer::open`] to reach this buffer.
+    pub fn ipc_handle(&self) -> Result<[u8; 64], String> {
+        self.dev.bind()?;
+        let mut h = IpcHandle([0; 64]);
+        // SAFETY: `h` is a valid out pointer; `ptr` came from cuMemAlloc.
+        let code = unsafe { (self.dev.cu.ipc_get)(&mut h, self.ptr) };
+        if code == 0 { Ok(h.0) } else { Err(self.dev.err("cuIpcGetMemHandle", code)) }
+    }
+
     /// Read the first `out.len()` elements into `out`, waiting as [`Self::to_vec`]
     /// does. Pinned memory, a [`HostBuffer`], makes this a direct transfer.
     pub fn copy_to(&self, out: &mut [T]) -> Result<(), String> {
@@ -355,6 +375,80 @@ impl<T: Pod> Drop for DeviceBuffer<T> {
             let _ = unsafe { (self.dev.cu.free)(self.ptr) };
         }
     }
+}
+
+/// Another process's device buffer mapped into this device's address space, for
+/// direct copies between the two cards. Unmapped on drop.
+pub struct PeerBuffer { dev: &'static Device, ptr: DevPtr, len: usize }
+// SAFETY: an integer address on the device, as `DeviceBuffer`.
+unsafe impl Send for PeerBuffer {}
+
+impl PeerBuffer {
+    /// Maps what [`DeviceBuffer::ipc_handle`] gave in the other process, which must
+    /// keep its buffer alive for as long as this lives. Its size is the driver's.
+    pub fn open(handle: [u8; 64]) -> Result<PeerBuffer, String> {
+        let dev = device().map_err(str::to_string)?;
+        dev.bind()?;
+        const PEER_MAPPING: c_uint = 1; // CUDA_IPC_HANDLE_PEER_MAPPING
+        let mut ptr: DevPtr = 0;
+        // SAFETY: `ptr` is a valid out pointer; the driver validates the handle.
+        let code = unsafe { (dev.cu.ipc_open)(&mut ptr, IpcHandle(handle), PEER_MAPPING) };
+        if code != 0 { return Err(dev.err("cuIpcOpenMemHandle", code)); }
+        let (mut base, mut bytes): (DevPtr, usize) = (0, 0);
+        // SAFETY: valid out pointers, and `ptr` was just mapped.
+        let code = unsafe { (dev.cu.addr_range)(&mut base, &mut bytes, ptr) };
+        if code != 0 { return Err(dev.err("cuMemGetAddressRange", code)); }
+        Ok(PeerBuffer { dev, ptr, len: bytes.saturating_sub((ptr - base) as usize) / 4 })
+    }
+    /// f32 elements the mapping holds.
+    pub fn len(&self) -> usize { self.len }
+    pub fn is_empty(&self) -> bool { self.len == 0 }
+    fn checked(&self, at: usize, n: usize, mine: &DeviceBuffer<f32>, mine_at: usize) -> Result<(), String> {
+        
+        let fits = |at: usize, len: usize| at.checked_add(n).is_some_and(|e| e <= len);
+        if fits(at, self.len) && fits(mine_at, mine.len) { Ok(()) } else { Err("peer copy out of range".into()) }
+    }
+    /// `n` elements from `src` at `src_at` to here at `at`. Returns when done.
+    pub fn write(&self, at: usize, src: &DeviceBuffer<f32>, src_at: usize, n: usize) -> Result<(), String> {
+        self.checked(at, n, src, src_at)?;
+        self.dev.bind()?;
+        // SAFETY: both ranges were checked against their allocations.
+        let code = unsafe { (self.dev.cu.d_to_d)(self.ptr + at as u64 * 4, src.ptr + src_at as u64 * 4, n * 4) };
+        if code == 0 { Ok(()) } else { Err(self.dev.err("cuMemcpyDtoD", code)) }
+    }
+    /// `n` elements from here at `at` to `dst` at `dst_at`. Returns when done.
+    pub fn read(&self, at: usize, dst: &DeviceBuffer<f32>, dst_at: usize, n: usize) -> Result<(), String> {
+        self.checked(at, n, dst, dst_at)?;
+        self.dev.bind()?;
+        // SAFETY: both ranges were checked against their allocations.
+        let code = unsafe { (self.dev.cu.d_to_d)(dst.ptr + dst_at as u64 * 4, self.ptr + at as u64 * 4, n * 4) };
+        if code == 0 { Ok(()) } else { Err(self.dev.err("cuMemcpyDtoD", code)) }
+    }
+}
+
+impl Drop for PeerBuffer {
+    fn drop(&mut self) {
+        if self.dev.sync().is_ok() {
+            // SAFETY: mapped by cuIpcOpenMemHandle, nothing queued can use it now.
+            let _ = unsafe { (self.dev.cu.ipc_close)(self.ptr) };
+        }
+    }
+}
+
+/// Whether this device can reach device `other` directly, and this device's ordinal.
+pub fn peer_access(other: usize) -> Result<(bool, usize), String> {
+    let dev = device().map_err(str::to_string)?;
+    let (mut a, mut b, mut can): (c_int, c_int, c_int) = (0, 0, 0);
+    // SAFETY: valid out pointers; the ordinals are checked by the driver.
+    unsafe {
+        let code = (dev.cu.device_get)(&mut a, dev.ordinal as c_int);
+        if code != 0 { return Err(dev.err("cuDeviceGet", code)); }
+        let code = (dev.cu.device_get)(&mut b, other as c_int);
+        if code != 0 { return Err(dev.err("cuDeviceGet", code)); }
+        let code = (dev.cu.can_access)(&mut can, a, b);
+        if code != 0 { return Err(dev.err("cuDeviceCanAccessPeer", code)); }
+    }
+    Ok((can != 0, dev.ordinal))
 }
 
 /// `len` f32 of page-locked host memory, zeroed, freed on drop: what the device
@@ -409,7 +503,8 @@ impl Drop for HostBuffer {
 fn open_device() -> Result<Device, String> {
     let lib = open_lib("libcuda.so.1").ok_or("libcuda.so.1 not found")?;
     let cu = Cu::load(lib)?;
-    let mut d = Device { cu, ctx: std::ptr::null_mut(), name: String::new(), count: 0, memory: 0, driver: 0 };
+    let ordinal = std::env::var("R2_CUDA_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0usize);
+    let mut d = Device { cu, ordinal, ctx: std::ptr::null_mut(), name: String::new(), count: 0, memory: 0, driver: 0 };
     // SAFETY: every out pointer below is a valid local; lengths are stated.
     unsafe {
         let code = (d.cu.init)(0);
@@ -420,7 +515,7 @@ fn open_device() -> Result<Device, String> {
         if n < 1 { return Err("no CUDA device".into()); }
         d.count = n as usize;
         let mut dev: c_int = 0;
-        let code = (d.cu.device_get)(&mut dev, 0);
+        let code = (d.cu.device_get)(&mut dev, ordinal as c_int);
         if code != 0 { return Err(d.err("cuDeviceGet", code)); }
         let mut buf = [0 as c_char; 256];
         let code = (d.cu.device_name)(buf.as_mut_ptr(), buf.len() as c_int, dev);

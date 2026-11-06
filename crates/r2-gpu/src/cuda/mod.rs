@@ -70,8 +70,8 @@ pub fn sync() -> bool {
 /// One line about the device, or why there is none.
 pub fn device_line() -> String {
     match device() {
-        Ok(d) => format!("{} (CUDA, driver API {}.{}, {} MB, device 0 of {})",
-                         d.name, d.driver / 1000, d.driver % 1000 / 10, d.memory >> 20, d.count),
+        Ok(d) => format!("{} (CUDA, driver API {}.{}, {} MB, device {} of {})",
+                         d.name, d.driver / 1000, d.driver % 1000 / 10, d.memory >> 20, d.ordinal, d.count),
         Err(why) => format!("no GPU: no CUDA device ({why}), CPU fallback active"),
     }
 }

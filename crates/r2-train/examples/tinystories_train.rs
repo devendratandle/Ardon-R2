@@ -415,8 +415,11 @@ fn main() {
     let mut last = 0.0f32;
     // R2_PROFILE=1: where a step goes, against the same fences on the PyTorch side
     // (TS_PROFILE=1). The first steps allocate, so they are not counted.
+    #[cfg_attr(not(any(feature = "gpu", feature = "cuda")), allow(unused))]
     let profile = std::env::var("R2_PROFILE").is_ok_and(|v| v == "1");
+    #[cfg_attr(not(any(feature = "gpu", feature = "cuda")), allow(unused))]
     const PROFILE_FROM: usize = 5;
+    #[cfg_attr(not(any(feature = "gpu", feature = "cuda")), allow(unused))]
     let (mut data_ms, mut profile_start): (f64, Option<std::time::Instant>) = (0.0, None);
     for s in tr.step as usize..steps {
         #[cfg(any(feature = "gpu", feature = "cuda"))]
@@ -464,6 +467,11 @@ fn main() {
             println!("  held-out  step {:>6}  loss {v:.4}", s + 1);
         }
     }
+    // The clock stops when the device has finished, as on the PyTorch side, and
+    // not after the state has been copied back for the evaluation below.
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    if gpu_tr.is_some() { r2_gpu_sync(); }
+    let train_s = t0.elapsed().as_secs_f64() - eval_s;
     #[cfg(any(feature = "gpu", feature = "cuda"))]
     if let (Some(g), Some(start)) = (&gpu_tr, profile_start) {
         if let Some(p) = g.phase_ms {
@@ -482,7 +490,6 @@ fn main() {
             println!("  loss scale {} at the end, {} overflowed steps skipped", g.loss_scale, g.overflows);
         }
     }
-    let train_s = t0.elapsed().as_secs_f64() - eval_s;
     println!("  weights    fnv {:016x}", fnv(&tr.params));
     #[cfg(feature = "cuda")]
     if let Some(c) = gpu_tr.as_mut().and_then(|g| g.cluster.as_mut()) {

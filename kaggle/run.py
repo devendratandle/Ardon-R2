@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"audit"}   # also: "tests", "two", "bench", "pairs", "census"
+STAGES = {"probe"}   # also: "tests", "two", "audit", "bench", "pairs", "census"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -96,6 +96,12 @@ if "pairs" in STAGES:
     pairs("medium 39.8M", MEDIUM, 100, 3)
     sh("free -g | head -2")
     pairs("large 125M", LARGE, 30, 2)
+if "probe" in STAGES:
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example cuda_peer_probe 2>&1 | tail -1")
+    P = "/tmp/r2/target/release/examples/cuda_peer_probe"
+    sh(f"rm -rf /tmp/probe; (R2_CUDA_DEVICE=0 {P} 0 /tmp/probe > /tmp/probe0.log 2>&1 &); R2_CUDA_DEVICE=1 {P} 1 /tmp/probe 2>&1; sleep 2; cat /tmp/probe0.log")
+    # the host-memory road, for comparison and in case the direct one is closed
+    sh("nvidia-smi topo -m; lspci | grep -i nvidia; df -h /dev/shm | tail -1")
 if "audit" in STAGES:
     sh(f"cd /tmp/r2 && {CARGO} run --release -p r2-gpu --features cuda --example cuda_bench -- layout 2>&1 | grep -vE '^ +(Compiling|Finished|Running)'")
     # what PyTorch really launches, at the sizes where it leads: R2 first, for its manifest
