@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "settle"}   # also: "lossgap", "energy", "two", "audit", "bench", "pairs", "census", "score"
+STAGES = {"tests", "leads"}   # also: "settle", "lossgap", "energy", "two", "audit", "bench", "pairs", "census", "score"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -21,6 +21,14 @@ sh("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
 os.environ["PATH"] += ":/root/.cargo/bin"
 sh("rm -rf /tmp/r2 && git clone --depth 1 --branch cuda-backend https://github.com/devendratandle/Ardon-R2.git /tmp/r2")
 sh("cd /tmp/r2 && git log --oneline -1")
+# Work not yet on GitHub, carried in this script by kaggle/push_unpushed.py: a kernel can
+# then test a branch without anything being pushed. Empty in the repository.
+PATCH = ""
+if PATCH:
+    import base64, gzip
+    with open("/tmp/unpushed.patch", "wb") as f:
+        f.write(gzip.decompress(base64.b64decode(PATCH)))
+    sh("cd /tmp/r2 && git apply --whitespace=nowarn /tmp/unpushed.patch && git status --short | wc -l")
 sh("nvidia-smi -L; nvcc --version | tail -2")
 
 # Regenerate the PTX and hand it back through the kernel's output (only these
@@ -214,6 +222,47 @@ if "settle" in STAGES:
         torch_turn(env, True)
         torch_turn(env, False)
         r2_turn(env, steps)
+if "leads" in STAGES:
+    # Tensor cores under the 70 W cap: f32 through plain cuBLAS and through cublasGemmEx, then
+    # f32 storage with f16 arithmetic, then f16 throughout, on the same random operands.
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example cuda_ceiling --example op_scoreboard 2>&1 | tail -1; "
+       "cp target/release/examples/cuda_ceiling /tmp/ceiling; cp target/release/examples/op_scoreboard /tmp/score_cuda")
+    PICKC = "grep -E '^CEILING|refused|no cuBLAS|rror|panicked'"
+    sh(f"CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | {PICKC}")
+    sh(f"CUDA_VISIBLE_DEVICES=0 /tmp/ceiling launch 2>&1 | {PICKC}")
+    for card in (0, 1):
+        for round_ in range(2):
+            for kind in ("cublas_random", "gemm_ex_f32", "gemm_ex_fast16", "gemm_ex_f16"):
+                print(f"\n=== sustain {kind} card {card} round {round_ + 1}", flush=True)
+                sh("sleep 45")
+                sampled(f"CUDA_VISIBLE_DEVICES={card} /tmp/ceiling sustain {kind} 2>&1 | {PICKC}")
+    # Launches per step at 7.2M: this census's calls times the launch cost above.
+    print("\n=== census small", flush=True)
+    sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {SMALL} R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 {TRAIN} 2>&1 | grep -A60 'GPU step census'; true")
+    # The fused backward scores against the stored form, and PyTorch, in fair order.
+    def turn(label, env, steps, extra=""):
+        print(f"--- {label}", flush=True)
+        sh("sleep 45")
+        sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {env} {extra} R2_STEPS={steps} R2_GPU=1 {TRAIN} 2>&1 | {R2PICK}")
+    def torch_turn(env):
+        print("--- PyTorch", flush=True)
+        sh("sleep 45")
+        sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {env} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | {PICK}")
+    STORED = "R2_CUDA_ATTN_SCORES=0"
+    for name, env, steps in [("small", SMALL, 300), ("medium", MEDIUM, 100), ("large", LARGE, 30), ("large", LARGE, 30)]:
+        print(f"\n=== scores pair {name}, {steps} steps: fused, stored, PyTorch, PyTorch, stored, fused", flush=True)
+        turn("fused", env, steps)
+        turn("stored", env, steps, STORED)
+        torch_turn(env)
+        torch_turn(env)
+        turn("stored", env, steps, STORED)
+        turn("fused", env, steps)
+    # Attention alone, per call, each side's own row.
+    for round_ in range(3):
+        for label, extra in [("fused", ""), ("stored", STORED)]:
+            print(f"\n=== score large {label} round {round_ + 1}", flush=True)
+            sh(f"cd /tmp/r2 && {LARGE} {extra} SCORE_LAYER=t4 SCORE_SIZE=large CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | {SCORE}", tail=12000)
+        sh(f"cd /tmp/r2 && {LARGE} SCORE_LAYER=t4 SCORE_SIZE=large TS_DEVICE=cuda CUDA_VISIBLE_DEVICES=0 python3 benchmarks/llm/op_scoreboard.py 2>&1 | {SCORE}", tail=12000)
 if "lossgap" in STAGES:
     # Tiled products are the same maths as cuBLAS with other rounding, so how far they
     # move the loss says how far rounding alone can. Held-out every 10 steps shows the
