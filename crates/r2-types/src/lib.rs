@@ -65,6 +65,30 @@ pub struct Attrs {
     pub custom: HashMap<Arc<str>, RVal>,
 }
 
+/// Where a class vector longer than one is kept. `class` holds its first element,
+/// which is what R2's own class checks read.
+const ALL_CLASSES: &str = ".class";
+
+impl Attrs {
+    /// The class attribute, in full.
+    pub fn classes(&self) -> Vec<Arc<str>> {
+        if let Some(RVal::Character(all, _)) = self.custom.get(ALL_CLASSES) {
+            return all.iter().flatten().cloned().collect();
+        }
+        self.class.iter().cloned().collect()
+    }
+
+    /// Replace the class attribute; an empty vector removes it.
+    pub fn set_classes(&mut self, classes: Vec<Arc<str>>) {
+        self.class = classes.first().cloned();
+        if classes.len() > 1 {
+            self.custom.insert(Arc::from(ALL_CLASSES), RVal::Character(classes.into_iter().map(Some).collect(), Attrs::default()));
+        } else {
+            self.custom.remove(ALL_CLASSES);
+        }
+    }
+}
+
 // ── Factor (explicit categorical — never auto-created) ───────────────
 
 #[derive(Debug, Clone)]
@@ -520,9 +544,63 @@ pub fn fmt_num(n: f64) -> String {
 
 // ── Display ──────────────────────────────────────────────────────────
 
+/// Attributes the type itself prints or R2 keeps for its own use.
+const QUIET_ATTRS: [&str; 9] = ["dnn", "tsp", "index", "index.class", "units", "match.length", "dimnames", "levels", ALL_CLASSES];
+/// Classes with their own way of printing, so `attr(,"class")` would be noise.
+const PRINTING_CLASSES: [&str; 8] = ["Date", "POSIXct", "difftime", "proc_time", "summaryDefault", "table", "ts", "xts"];
+
+/// A list as R prints it: each element under its tag, then a blank line, with the
+/// elements of a nested list tagged `$a$b`.
+fn list_text(items: &[(Option<Arc<str>>, RVal)], prefix: &str) -> String {
+    let mut out = String::new();
+    for (i, (name, val)) in items.iter().enumerate() {
+        let tag = match name {
+            Some(n) if !n.is_empty() => format!("{}${}", prefix, n),
+            _ => format!("{}[[{}]]", prefix, i + 1),
+        };
+        out.push_str(&tag);
+        out.push('\n');
+        match val {
+            RVal::List(sub, at) if !sub.is_empty() && at.class.is_none() && at.custom.is_empty() => out.push_str(&list_text(sub, &tag)),
+            other => { out.push_str(&other.to_string()); out.push('\n'); }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `attr(,"note")` and `attr(,"class")` after a value, as R prints them.
+fn write_attributes(v: &RVal, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let at = match v {
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Character(_, at) | RVal::Logical(_, at) | RVal::List(_, at) => at,
+        _ => return Ok(()),
+    };
+    let mut keys: Vec<&Arc<str>> = at.custom.keys().filter(|k| !QUIET_ATTRS.contains(&k.as_ref())).collect();
+    keys.sort();
+    for k in keys { write!(f, "\nattr(,\"{}\")\n{}", k, at.custom[k])?; }
+    match &at.class {
+        Some(c) if !PRINTING_CLASSES.contains(&c.as_ref()) => {
+            let classes = RVal::Character(at.classes().into_iter().map(Some).collect(), Attrs::default());
+            write!(f, "\nattr(,\"class\")\n{}", classes)
+        }
+        _ => Ok(()),
+    }
+}
+
 impl fmt::Display for RVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_value(f)?;
+        write_attributes(self, f)
+    }
+}
+
+impl RVal {
+    fn fmt_value(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RVal::Numeric(v, at) if v.is_empty() && at.names.is_some() => write!(f, "named numeric(0)"),
+            RVal::Integer(v, at) if v.is_empty() && at.names.is_some() => write!(f, "named integer(0)"),
+            RVal::Logical(v, at) if v.is_empty() && at.names.is_some() => write!(f, "named logical(0)"),
+            RVal::Character(v, at) if v.is_empty() && at.names.is_some() => write!(f, "named character(0)"),
             RVal::Null => write!(f, "NULL"),
             RVal::Numeric(v, attrs) => {
                 // system.time(): R prints user / system / elapsed only.
@@ -704,11 +782,10 @@ impl fmt::Display for RVal {
                 }
             }
             RVal::List(items, _) => {
-                for (i, (name, val)) in items.iter().enumerate() {
-                    if let Some(n) = name { writeln!(f, "${}", n)?; } else { writeln!(f, "[[{}]]", i + 1)?; }
-                    writeln!(f, "{}", val)?;
-                }
-                Ok(())
+                if items.is_empty() { return write!(f, "list()"); }
+                // The caller ends the line, which makes the last blank one.
+                let text = list_text(items, "");
+                write!(f, "{}", text.strip_suffix('\n').unwrap_or(&text))
             }
             RVal::Factor(fct) => {
                 let display_vals: Vec<String> = fct.codes.iter().map(|c| match c {

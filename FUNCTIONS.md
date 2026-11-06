@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 524 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 531 Built-in Functions and Operators
 
-## Core (84)
+## Core (91)
 ```
 seq(from,to,by=)   Regular sequence; also seq(along=x), seq_len(n)
 rep(x,times=,each=)   Repeat a vector
@@ -12,6 +12,8 @@ which.max(x) / which.min(x)   Index of the first maximum / minimum
 all(x) / any(x)    TRUE if all / any elements are TRUE (na.rm= honoured)
 isTRUE(x) / isFALSE(x)   TRUE only for a length-1, non-NA logical of that value
 nrow(x) / ncol(x)  Row / column count of a matrix or data frame
+row(x)              Matrix of row indices, the shape of x
+col(x)              Matrix of column indices, the shape of x
 rowSums(x) / colSums(x)     Row / column totals of a matrix
 rowMeans(x) / colMeans(x)   Row / column means
 t(x)               Matrix transpose
@@ -35,6 +37,9 @@ clear() / cls()     Clear the console (GUI buffer / terminal)
 View(x, title)      Open a data frame, matrix or vector in the GUI's data viewer (prints x in the CLI)
 typeof(x)           Type name: "numeric", "character", etc.
 class(x)            Class of object
+class(x) <- value   Set the class vector; NULL removes it
+oldClass(x)         The class attribute only, NULL for an implicit class
+unclass(x)          x without its class; a classed result becomes a list
 list(...)           Create named list
 data.frame(...)     Create data frame: data.frame(x=1:3, y=c("a","b","c"))
 matrix(data,nrow,ncol) Create matrix
@@ -48,6 +53,7 @@ is.nan(x)           Test for NaN (FALSE for NA)
 is.infinite(x)      Test for Inf/-Inf
 is.finite(x)        Test for finite values (NA/NaN/Inf are FALSE)
 is.numeric(x)       Test if numeric
+is.integer(x)       Test if integer (a matrix stores doubles, so FALSE for one)
 is.character(x)     Test if character
 is.logical(x)       Test if logical
 is.null(x)          Test if NULL
@@ -70,6 +76,7 @@ switch(expr,...)    Select a branch by name or position
 with(data,expr)     Evaluate expr in data's column/element scope
 stopifnot(...)      Error unless all arguments are TRUE
 attr(x,which)       Get one attribute (names/class/dim/custom)
+attr(x,which) <- value  Set one attribute; NULL removes it
 attributes(x)       Get all attributes as a named list
 structure(x,...)    Return x with attributes set (class=, names=, dim=, …)
 inherits(x,what)    TRUE if `what` is in class(x)

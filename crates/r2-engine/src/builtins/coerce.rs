@@ -105,7 +105,7 @@ pub(crate) fn bi_names_set(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     let names = setter_names(a);
     Ok(match gv(a, 0) {
         RVal::DataFrame(mut df) => { for (i, c) in df.columns.iter_mut().enumerate() { if let Some(nm) = names.get(i) { c.0 = nm.clone(); } } RVal::DataFrame(df) }
-        RVal::List(mut items, _) => { for (i, it) in items.iter_mut().enumerate() { it.0 = names.get(i).cloned(); } RVal::list(items) }
+        RVal::List(mut items, at) => { for (i, it) in items.iter_mut().enumerate() { it.0 = names.get(i).cloned(); } RVal::List(items, at) }
         RVal::Numeric(v, mut at)   => { at.names = Some(names); RVal::Numeric(v, at) }
         RVal::Integer(v, mut at)   => { at.names = Some(names); RVal::Integer(v, at) }
         RVal::Character(v, mut at) => { at.names = Some(names); RVal::Character(v, at) }
@@ -211,7 +211,7 @@ pub(crate) fn bi_all_equal(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     }
     Ok(if rval_identical(&x, &y) { rbool(true) } else { rstr("objects differ") })
 }
-pub(crate) fn bi_is_list(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::List(_, _)))) }
+pub(crate) fn bi_is_list(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { if let RVal::TypeInstance(i) = &gv(a,0) { return Ok(rbool(super::attrs::is_result_object(e, i))); } Ok(rbool(matches!(gv(a,0), RVal::List(_, _)))) }
 pub(crate) fn bi_is_vector(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     Ok(rbool(matches!(gv(a,0), RVal::Numeric(..) | RVal::Integer(..) | RVal::Character(..) | RVal::Logical(..))))
 }
@@ -319,7 +319,7 @@ pub(crate) fn bi_fivenum(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
 pub(crate) fn attrs_of(v: &RVal) -> Option<&Attrs> {
     match v {
         RVal::Numeric(_, at) | RVal::Integer(_, at)
-        | RVal::Character(_, at) | RVal::Logical(_, at) => Some(at),
+        | RVal::Character(_, at) | RVal::Logical(_, at) | RVal::List(_, at) => Some(at),
         _ => None,
     }
 }
@@ -335,8 +335,12 @@ pub(crate) fn bi_attr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     let which = val_to_str(&gv(a,1));
     let at = match attrs_of(&v) { Some(a) => a, None => return Ok(RVal::Null) };
     Ok(match which.as_str() {
-        "names" => at.names.as_ref().map(|n| names_to_rval(n)).unwrap_or(RVal::Null),
-        "class" => at.class.as_ref().map(|c| rstr(c)).unwrap_or(RVal::Null),
+        "names" => match &v {
+            RVal::List(items, _) if items.iter().any(|(n, _)| n.is_some()) =>
+                RVal::Character(items.iter().map(|(n, _)| Some(n.clone().unwrap_or_else(|| Arc::from("")))).collect(), Attrs::default()),
+            _ => at.names.as_ref().map(|n| names_to_rval(n)).unwrap_or(RVal::Null),
+        },
+        "class" => classes_to_rval(at),
         "dim"   => at.dim.as_ref().map(|d| dim_to_rval(d)).unwrap_or(RVal::Null),
         other   => at.custom.get(&Arc::from(other)).cloned().unwrap_or(RVal::Null),
     })
@@ -346,21 +350,45 @@ pub(crate) fn bi_attributes(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     let at = match attrs_of(&v) { Some(a) => a, None => return Ok(RVal::Null) };
     let mut items: Vec<(Option<Arc<str>>, RVal)> = Vec::new();
     if let Some(n) = &at.names { items.push((Some(Arc::from("names")), names_to_rval(n))); }
-    if let Some(c) = &at.class { items.push((Some(Arc::from("class")), rstr(c))); }
+    if let RVal::List(list, _) = &v {
+        if list.iter().any(|(n, _)| n.is_some()) {
+            let names = list.iter().map(|(n, _)| Some(n.clone().unwrap_or_else(|| Arc::from("")))).collect();
+            items.push((Some(Arc::from("names")), RVal::Character(names, Attrs::default())));
+        }
+    }
+    if at.class.is_some() { items.push((Some(Arc::from("class")), classes_to_rval(at))); }
     if let Some(d) = &at.dim   { items.push((Some(Arc::from("dim")), dim_to_rval(d))); }
-    for (k, val) in &at.custom { items.push((Some(k.clone()), val.clone())); }
+    for (k, val) in at.custom.iter().filter(|(k, _)| !k.starts_with('.')) { items.push((Some(k.clone()), val.clone())); }
     if items.is_empty() { Ok(RVal::Null) } else { Ok(RVal::list(items)) }
 }
+fn classes_to_rval(at: &Attrs) -> RVal {
+    if at.class.is_none() { return RVal::Null; }
+    RVal::Character(at.classes().into_iter().map(Some).collect(), Attrs::default())
+}
 pub(crate) fn set_one_attr(v: &mut RVal, name: &str, val: &RVal) {
+    if let (RVal::List(items, _), "names" | ".Names") = (&mut *v, name) {
+        let names = str_vec(val);
+        for (i, it) in items.iter_mut().enumerate() { it.0 = names.get(i).cloned().flatten(); }
+        return;
+    }
     let at = match v {
         RVal::Numeric(_, a) | RVal::Integer(_, a)
-        | RVal::Character(_, a) | RVal::Logical(_, a) => a,
+        | RVal::Character(_, a) | RVal::Logical(_, a) | RVal::List(_, a) => a,
         _ => return,
     };
+    if matches!(val, RVal::Null) {
+        match name {
+            "names" | ".Names" => at.names = None,
+            "class" => at.set_classes(Vec::new()),
+            "dim" => at.dim = None,
+            other => { at.custom.remove(other); }
+        }
+        return;
+    }
     match name {
         "names" | ".Names" =>
             at.names = Some(str_vec(val).into_iter().map(|o| o.unwrap_or_else(|| Arc::from(""))).collect()),
-        "class" => at.class = Some(Arc::from(val_to_str(val).as_str())),
+        "class" => at.set_classes(str_vec(val).into_iter().flatten().collect()),
         "dim" => if let Ok(r) = val.as_reals() {
             at.dim = Some(r.into_iter().flatten().map(|x| x as usize).collect());
         },
@@ -731,10 +759,10 @@ pub(crate) fn bi_factor(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     }
     Ok(RVal::Factor(f))
 }
-pub(crate) fn bi_names(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+pub(crate) fn bi_names(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     match &gv(a,0) {
-        RVal::TypeInstance(i) if i.type_name.as_ref() == "qr" =>
-            Ok(RVal::Character(["qr", "rank", "qraux", "pivot"].iter().map(|s| Some(Arc::from(*s))).collect(), Attrs::default())),
+        RVal::TypeInstance(i) if super::attrs::is_result_object(e, i) =>
+            Ok(RVal::Character(super::attrs::field_names(i).into_iter().map(Some).collect(), Attrs::default())),
         RVal::DataFrame(df) => Ok(RVal::Character(df.columns.iter().map(|(n,_)| Some(n.clone())).collect(), Attrs::default())),
         // Named list: R returns the names, with "" for any unnamed element,
         // or NULL if the list has no names at all.

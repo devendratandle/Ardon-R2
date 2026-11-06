@@ -94,15 +94,29 @@ to be worse than documented and was fixed here rather than scheduled.
   generator; with a formula or vectors it is R2's random forest. A forest needs
   more than one row, so the two never collide.
 - Taking a column of a matrix (`m[, 4]`) drops the row names R keeps.
-- **`qr()` differs from R in four places.** `LAPACK = TRUE` stops with an error, and
-  so does `qr()` of a model fit, where R returns the fit's `$qr`. The object is not a
-  plain list: like every classed result in R2, `is.list(q)` is FALSE and `length(q)`
-  is 1, though `names(q)`, `q$rank` and printing match R. At rank 0, `qr.fitted`
-  returns 0, where R returns `y` as the fitted values and also as the residuals.
-  On an ill-conditioned matrix the last `qraux` is a repeatedly downdated norm and
-  differs from R's: for the Hilbert matrix of order 6 the truth is 3.98624e-07, R
-  has 3.98600e-07 and this has 3.98607e-07. Below the rank, the columns moved aside
-  hold rounding noise, in R as here, and the two differ there.
+- **`qr()` differs from R in three places.** `LAPACK = TRUE` stops with an error, and
+  so does `qr()` of a model fit, where R returns the fit's `$qr`. At rank 0,
+  `qr.fitted` returns 0, where R returns `y` as the fitted values and also as the
+  residuals. On an ill-conditioned matrix the last `qraux` is a repeatedly downdated
+  norm and differs from R's: for the Hilbert matrix of order 6 the truth is
+  3.98624e-07, R has 3.98600e-07 and this has 3.98607e-07. Below the rank, the
+  columns moved aside hold rounding noise, in R as here, and the two differ there.
+- **A class does not dispatch.** `class(x) <- "foo"`, `inherits` and printing work,
+  but there is no `UseMethod` or `NextMethod`, so `print.foo` and `summary.foo` are
+  never called. R2's own `method name(x: Type)` still works for declared types.
+- **Classed results are lists with differences.** `names(fit)` is sorted and lists the
+  fields R2 keeps, which are not R's for `lm` or `htest`; `length` counts the same
+  fields. `qr` is the exception and has R's four fields in R's order. `class(x) <-`
+  stops with an error for a matrix, a data frame or a factor, and for the values
+  "matrix", "array", "function", "data.frame" and "factor".
+- **Several attributes print sorted by name**, where R prints them in the order they
+  were set.
+- **A missing name is the text `<NA>`.** `x[5]` and `x["z"]` print as in R, but
+  `names(x["z"])` is the string "<NA>" where R has `NA`.
+- **A matrix holds doubles and a comparison of one is flat.** `is.integer(matrix(1:4, 2))`
+  is FALSE and `m[0]` is `numeric(0)`, where R says TRUE and `integer(0)`. `m > 2` is a
+  logical vector with no `dim`: `m[m > 2]` works, `dim(m > 2)` is `NULL`.
+- **Arithmetic drops a date's class**: `as.Date("2024-03-15") + 1` is a number.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
 - **String collation follows R on Windows / English locales** (letters
   case- and accent-blind first, then accents, then lowercase first;

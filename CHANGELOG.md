@@ -11,6 +11,34 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Named vectors, list subscripts, and classes on lists — 2026-11-05
+
+- **`x["a"]` works.** A character subscript on a named vector stopped with an error.
+  It now gives the first element of that name, and `NA` named `<NA>` for a name that
+  is not there.
+- **`[` keeps names.** `x[2]`, `x[2:3]`, `x[-1]` and `x[c(TRUE, FALSE)]` dropped them.
+  An empty selection prints `named numeric(0)`.
+- **`[` works on lists**, by position, name, mask and negative position. It stopped
+  with an error for all of them; only `[[` and `$` worked.
+- **Subscripts that R allows no longer stop the script.** `c(1, 2)[5]` is `NA` and
+  `c(1, 2)[0]` is empty; both were errors for numeric vectors in the default mode. A
+  logical mask recycles and an `NA` in it gives `NA`.
+- **`m[m > 2]`, `m[-1]` and `m[0]` work on a matrix.** A logical mask was read as the
+  positions 0 and 1 and stopped with an error at the first 0.
+- **Lists and vectors carry classes and attributes.** `RVal::List` now has the same
+  attributes as the atomic vectors. New: `class<-`, `oldClass`, `unclass`, `attr<-`.
+  `structure(list(...), class = "foo")` used to drop the class silently, and a class
+  vector like `c("foo", "bar")` was flattened into one string; both are kept now.
+  `inherits` reads the whole vector, and `attr(,"class")` prints as in R.
+- **A classed result reads as a list**: `is.list(fit)` is TRUE, and `names` and
+  `length` report its fields. A type declared with `type` is unchanged.
+- **Lists print as R prints them**, with a blank line between elements, `$a$b` tags
+  for nested lists, and `list()` when empty.
+- **New: `is.integer`, `row`, `col`.** 531 built-in functions.
+- Compared with R line by line in `tests/differential/output/names_and_classes.R`.
+  Dispatch on class (`UseMethod`, `print.foo`) does not exist yet
+  (`docs/KNOWN_LIMITATIONS.md`).
+
 ### `qr()` and its accessors; `cbind` and `rbind` recycle — 2026-11-05
 
 - **`qr(x, tol, LAPACK)`, `qr.Q`, `qr.R`, `qr.X`, `qr.coef`, `qr.qy`, `qr.qty`,

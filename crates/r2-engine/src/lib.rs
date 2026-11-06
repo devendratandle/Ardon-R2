@@ -58,6 +58,7 @@ use builtins::data_apply::*;
 use builtins::sys_models::*;
 use builtins::ml_data::*;
 use builtins::qr::*;
+use builtins::attrs::*;
 use builtins::help::*;
 use builtins::session::*;
 use builtins::internal::*;
@@ -242,6 +243,9 @@ impl r2_types::EngineCtx for Engine {
 }
 
 impl Engine {
+    /// A type the script declared with `type`.
+    pub(crate) fn is_user_type(&self, name: &str) -> bool { self.types.contains_key(name) }
+
     /// Phase P — a per-worker engine for parallel `apply`. Shares the
     /// read-only registry / global env / installed packages (cloned; the
     /// heavy inner data is `Arc`), with FRESH per-eval scratch (scopes,

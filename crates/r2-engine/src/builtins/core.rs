@@ -20,7 +20,7 @@ use r2_types::*;
 use crate::{gv, gn, val_to_str, Engine};
 use crate::err;
 
-pub(crate) fn bi_length(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+pub(crate) fn bi_length(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     // Out-of-core column: report its element count from the stored field
     // (no need to open/scan the file).
     if let RVal::TypeInstance(i) = &gv(a,0) {
@@ -29,6 +29,7 @@ pub(crate) fn bi_length(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
                 if let Some(Some(len)) = n.as_vec().first() { return Ok(rint(*len as i32)); }
             }
         }
+        if super::attrs::is_result_object(e, i) { return Ok(rint(super::attrs::field_names(i).len() as i32)); }
     }
     Ok(rint(rval_length(&gv(a,0)) as i32))
 }
@@ -330,9 +331,11 @@ pub(crate) fn fmt_f64(n: f64) -> String {
 pub(crate) fn class_names(v: &RVal) -> Vec<String> {
     match v {
         RVal::Numeric(_, at) | RVal::Integer(_, at)
-        | RVal::Character(_, at) | RVal::Logical(_, at) =>
-            at.class.as_ref().map(|c| vec![c.to_string()])
-                .unwrap_or_else(|| vec![v.type_name().to_string()]),
+        | RVal::Character(_, at) | RVal::Logical(_, at) | RVal::List(_, at) => {
+            let classes = at.classes();
+            if classes.is_empty() { vec![v.type_name().to_string()] }
+            else { classes.iter().map(|c| c.to_string()).collect() }
+        }
         RVal::TypeInstance(i) => vec![i.type_name.to_string()],
         _ => vec![v.type_name().to_string()],
     }
