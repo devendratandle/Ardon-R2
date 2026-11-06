@@ -1,11 +1,15 @@
 //! Fused causal grouped-query attention on CUDA, forward and backward: the
 //! `attention` module's public API over `kernels/attention.cu`, which explains
 //! the form. Scores are stored per (sequence, head), `seq x seq` each, in scratch
-//! held here, and the products are batched register-tiled GEMMs.
+//! held here, and the products are batched GEMMs: cuBLAS's by default, the
+//! register-tiled kernel without it or with `R2_CUDA_GEMM=tiled`.
 
-use super::ffi::{Arg, Kernel};
-use super::{loaded, Loaded, Tensor};
+use super::ffi::{blas, Arg, Kernel, Strided};
+use super::gemm::{note_path, wanted, Path};
+use super::{loaded, sync, Loaded, Tensor};
+use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 /// Attention problem dimensions, as `attention::Shape`.
 #[derive(Clone, Copy, Debug)]
@@ -76,10 +80,49 @@ impl Layout {
     fn t(self) -> Layout { Layout { first: self.second, second: self.first, ..self } }
 }
 
-/// `C(i, j) = alpha sum_k A(i, k) B(k, j)` for every (sequence, head).
+/// `C(i, j) = alpha sum_k A(i, k) B(k, j)` for every (sequence, head): cuBLAS's
+/// batched GEMM when it is wanted and there, else the tiled kernel.
 #[allow(clippy::too_many_arguments)]
 fn product(ks: &Kernels, sh: &Shape, tri: bool, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
            m: usize, k: usize, n: usize, alpha: f32) -> Option<()> {
+    let path = if wanted() == Path::Cublas && batched(sh, a, b, c, m, k, n, alpha).is_some() {
+        Path::Cublas
+    } else {
+        tiled(ks, sh, tri, a, b, c, m, k, n, alpha)?;
+        Path::Tiled
+    };
+    note_path(path);
+    mark(0);
+    Some(())
+}
+
+/// One operand of head `h` in cuBLAS's column-major terms, whose rows are this
+/// layout's second index when that is contiguous, and its first otherwise.
+fn strided<'a>((t, l): (&'a Tensor, Layout), h: usize, group: usize) -> Strided<'a> {
+    let head = if l.kv { h / group } else { h };
+    let packed = l.second == 1;
+    Strided { buf: t, offset: head * l.hs as usize, trans: !packed, ld: (if packed { l.first } else { l.second }) as usize, stride: l.ss as usize }
+}
+
+/// All outputs here are contiguous along `j`, so cuBLAS holds `C` as its
+/// transpose and computes `C^T = B^T A^T`. A batch has one stride, and heads and
+/// sequences have different ones, so it is one batch of sequences per head, with
+/// no copy. Above the diagonal the scores are computed and then thrown away by
+/// the softmax, as `tri` only saves work in the tiled kernel.
+#[allow(clippy::too_many_arguments)]
+fn batched(sh: &Shape, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
+           m: usize, k: usize, n: usize, alpha: f32) -> Option<()> {
+    let blas = blas().ok()?;
+    let group = sh.nh / sh.nkv;
+    for h in 0..sh.nh {
+        blas.sgemm_strided(n, m, k, alpha, strided(b, h, group), strided(a, h, group), strided(c, h, group), sh.nseq).ok()?;
+    }
+    Some(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tiled(ks: &Kernels, sh: &Shape, tri: bool, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
+         m: usize, k: usize, n: usize, alpha: f32) -> Option<()> {
     let int = Arg::Int;
     let (la, lb, lc) = (a.1, b.1, c.1);
     ks.gemm.launch([(n as u32).div_ceil(TILE), (m as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32], GEMM_BLOCK, &[
@@ -92,7 +135,27 @@ fn product(ks: &Kernels, sh: &Shape, tri: bool, a: (&Tensor, Layout), b: (&Tenso
 }
 
 fn rows_launch(k: &Kernel, threads: usize, block: u32, args: &[Arg]) -> Option<()> {
-    k.launch([(threads as u32).div_ceil(block), 1, 1], [block, 1, 1], args).ok()
+    k.launch([(threads as u32).div_ceil(block), 1, 1], [block, 1, 1], args).ok()?;
+    mark(1);
+    Some(())
+}
+
+thread_local! { static PROFILE: Cell<Option<(Instant, [f64; 2])>> = const { Cell::new(None) }; }
+
+/// Starts this thread's split of attention into its products and row kernels.
+/// It drains the queue after every launch, so it says where the time goes and
+/// not how long a call takes.
+pub fn profile_start() { PROFILE.with(|p| p.set(Some((Instant::now(), [0.0; 2])))); }
+
+/// Ends the split: milliseconds in the products and in the row kernels.
+pub fn profile_take() -> Option<[f64; 2]> { PROFILE.with(|p| p.take()).map(|(_, ms)| ms) }
+
+fn mark(slot: usize) {
+    PROFILE.with(|p| if let Some((t, mut ms)) = p.get() {
+        sync();
+        ms[slot] += t.elapsed().as_secs_f64() * 1e3;
+        p.set(Some((Instant::now(), ms)));
+    });
 }
 
 /// Score matrices and gradient partials, grown on demand. The lock is held
@@ -189,8 +252,19 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cuda::gemm::{force_path, last_path};
     use crate::cuda::have_device;
     use r2_autograd::Tape;
+
+    /// Runs `f` on the tiled kernel and, where cuBLAS loads, on its batched GEMM.
+    fn on_both_paths(mut f: impl FnMut(Path)) {
+        for p in [Path::Tiled, Path::Cublas] {
+            if p == Path::Cublas && blas().is_err() { continue; }
+            force_path(Some(p));
+            f(p);
+            force_path(None);
+        }
+    }
 
     fn mk(n: usize, ph: f32) -> Vec<f32> { (0..n).map(|i| ((i as f32) * 0.37 + ph).sin() * 0.8).collect() }
 
@@ -199,7 +273,7 @@ mod tests {
     #[test]
     fn matches_the_tape() {
         if !have_device() { return; }
-        for &(nseq, seq, nh, nkv, hd) in &[(1usize, 8usize, 2usize, 1usize, 8usize), (2, 65, 4, 2, 16),
+        on_both_paths(|path| for &(nseq, seq, nh, nkv, hd) in &[(1usize, 8usize, 2usize, 1usize, 8usize), (2, 65, 4, 2, 16),
                                            (3, 130, 3, 3, 32), (2, 70, 4, 2, 64), (1, 40, 2, 1, 256), (1, 1, 2, 2, 4)] {
             let rows = nseq * seq;
             let (qv, kv, vv) = (mk(rows * nh * hd, 0.0), mk(rows * nkv * hd, 1.3), mk(rows * nkv * hd, 2.7));
@@ -219,6 +293,7 @@ mod tests {
             let (dq, dk, dv) = (z(rows * nh * hd), z(rows * nkv * hd), z(rows * nkv * hd));
             assert!(forward(&tq, &tk, &tv, &to, &tl, &sh));
             assert!(backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh));
+            assert_eq!(last_path(), Some(path), "the path this test claims to cover");
 
             let close = |got: &[f32], want: &[f32], what: &str| {
                 assert_eq!(got.len(), want.len(), "{what}: length (a fault downloads nothing)");
@@ -231,13 +306,18 @@ mod tests {
             close(&dq.download(), tape.grad(q), "grad_q");
             close(&dk.download(), tape.grad(k), "grad_k");
             close(&dv.download(), tape.grad(v), "grad_v");
-        }
+        });
     }
 
-    /// Each element is one thread's fixed-order sum: same bits, every run.
+    /// The tiled kernel promises this: each element is one thread's fixed-order
+    /// sum. cuBLAS does not promise it, so this reports what it does.
     #[test]
     fn backward_is_bit_reproducible() {
         if !have_device() { return; }
+        on_both_paths(|_| one_reproducibility_run());
+    }
+
+    fn one_reproducibility_run() {
         let sh = Shape { nseq: 2, seq: 70, nh: 4, nkv: 2, hd: 64, scale: 0.125 };
         let rows = 140usize;
         let (tq, tk, tv, tg) = (Tensor::upload(&mk(rows * 256, 0.0)).unwrap(), Tensor::upload(&mk(rows * 128, 1.3)).unwrap(),

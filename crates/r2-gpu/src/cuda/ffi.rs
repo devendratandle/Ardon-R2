@@ -108,6 +108,7 @@ table!(Cu {
 table!(Cb {
     create = "cublasCreate_v2": fn(*mut Handle) -> c_int;
     sgemm = "cublasSgemm_v2": fn(Handle, c_int, c_int, c_int, c_int, c_int, *const f32, DevPtr, c_int, DevPtr, c_int, *const f32, DevPtr, c_int) -> c_int;
+    sgemm_strided = "cublasSgemmStridedBatched": fn(Handle, c_int, c_int, c_int, c_int, c_int, *const f32, DevPtr, c_int, i64, DevPtr, c_int, i64, *const f32, DevPtr, c_int, i64, c_int) -> c_int;
 });
 
 /// One GPU with its context: the process-wide CUDA device.
@@ -420,6 +421,50 @@ impl Blas {
                             mi, ni, ki, &alpha, a.ptr, ldai, b.ptr, ldbi, &beta, c.ptr, ldci)
         };
         if code == 0 { Ok(()) } else { Err(format!("cublasSgemm_v2: status {code}")) }
+    }
+
+    /// `op(A_b) op(B_b) alpha -> C_b` for every `b` in `0..batch`, the matrices
+    /// at `offset + b * stride` in cuBLAS's column-major terms. Each operand's
+    /// extent is checked against its buffer, as in [`Blas::sgemm`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn sgemm_strided(&self, m: usize, n: usize, k: usize, alpha: f32, a: Strided<'_>, b: Strided<'_>, c: Strided<'_>,
+                         batch: usize) -> Result<(), String> {
+        if m == 0 || n == 0 || k == 0 || batch == 0 { return Err("empty cuBLAS operand".into()); }
+        if c.trans { return Err("cuBLAS cannot transpose its output".into()); }
+        let (ab, bb, cb) = (a.extent(if a.trans { (k, m) } else { (m, k) }, batch), b.extent(if b.trans { (n, k) } else { (k, n) }, batch), c.extent((m, n), batch));
+        if !(ab && bb && cb) { return Err("cuBLAS operand too small".into()); }
+        let dim = |x: usize| c_int::try_from(x).map_err(|_| "cuBLAS dimension too large".to_string());
+        let stride = |x: usize| i64::try_from(x).map_err(|_| "cuBLAS stride too large".to_string());
+        let op = |t: bool| if t { 1 } else { 0 }; // CUBLAS_OP_T, CUBLAS_OP_N
+        let beta = 0.0f32;
+        let (ma, na, ka, la, lb, lc, ba) = (dim(m)?, dim(n)?, dim(k)?, dim(a.ld)?, dim(b.ld)?, dim(c.ld)?, dim(batch)?);
+        let (sa, sb, sc) = (stride(a.stride)?, stride(b.stride)?, stride(c.stride)?);
+        let at = |s: &Strided<'_>| s.buf.ptr + (s.offset * std::mem::size_of::<f32>()) as DevPtr;
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.dev.bind()?;
+        // SAFETY: the handle is live; every matrix of the batch was checked to
+        // lie inside its buffer; alpha and beta are read through host pointers
+        // before this returns.
+        let code = unsafe {
+            (self.cb.sgemm_strided)(self.handle, op(a.trans), op(b.trans), ma, na, ka, &alpha,
+                                    at(&a), la, sa, at(&b), lb, sb, &beta, at(&c), lc, sc, ba)
+        };
+        if code == 0 { Ok(()) } else { Err(format!("cublasSgemmStridedBatched: status {code}")) }
+    }
+}
+
+/// One operand of a strided batch: matrix `b` starts `offset + b * stride`
+/// elements into `buf`, its columns `ld` apart. `trans` asks for `op` = transpose.
+#[derive(Clone, Copy)]
+pub struct Strided<'a> { pub buf: &'a DeviceBuffer<f32>, pub offset: usize, pub trans: bool, pub ld: usize, pub stride: usize }
+
+impl Strided<'_> {
+    /// Whether all `batch` matrices of `(rows, cols)` lie inside the buffer.
+    fn extent(&self, (rows, cols): (usize, usize), batch: usize) -> bool {
+        let end = (batch - 1).checked_mul(self.stride)
+            .and_then(|e| e.checked_add((cols - 1).checked_mul(self.ld)?))
+            .and_then(|e| e.checked_add(rows)).and_then(|e| e.checked_add(self.offset));
+        self.ld >= rows && end.is_some_and(|e| e <= self.buf.len())
     }
 }
 

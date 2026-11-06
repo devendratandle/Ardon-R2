@@ -8,8 +8,8 @@
 //!     cargo run --release -p r2-gpu --features cuda --example cuda_bench
 
 use r2_autograd::Tape;
-use r2_gpu::cuda::attention::{backward, forward, Shape};
-use r2_gpu::cuda::gemm::{gemm_cublas, gemm_tiled};
+use r2_gpu::cuda::attention::{backward, forward, profile_start, profile_take, Shape};
+use r2_gpu::cuda::gemm::{force_path, gemm_cublas, gemm_tiled, last_path, Path};
 use r2_gpu::cuda::optim::adam_step;
 use r2_gpu::cuda::{self, ffi, Tensor};
 use r2_gpu::{cpu, dispatch, last_backend, set_gpu_enabled, Op};
@@ -98,7 +98,7 @@ fn gemms() {
 
 fn attention() {
     println!("\n-- attention, ms per call, CUDA kernels vs the tape on the CPU --");
-    println!("{:<26} {:>9} {:>9} {:>9} {:>9}", "shape", "CUDA fwd", "CPU fwd", "CUDA bwd", "CPU bwd");
+    println!("{:<26} {:>9} {:>9}", "shape", "fwd", "bwd");
     for &(nseq, seq, nh, nkv, hd, reps) in &[(32usize, 64usize, 4usize, 2usize, 64usize, 20usize), (8, 256, 12, 4, 64, 10)] {
         let rows = nseq * seq;
         let (qv, kv, vv, gv) = (fill(rows * nh * hd, 0.0), fill(rows * nkv * hd, 1.0), fill(rows * nkv * hd, 2.0), fill(rows * nh * hd, 3.0));
@@ -109,8 +109,24 @@ fn attention() {
         let (tq, tk, tv, tg) = (up(&qv), up(&kv), up(&vv), up(&gv));
         let (to, tl, td) = (z(rows * nh * hd), z(rows * nh), z(rows * nh));
         let (dq, dk, dv) = (z(rows * nh * hd), z(rows * nkv * hd), z(rows * nkv * hd));
-        let fwd = timed(reps, || forward(&tq, &tk, &tv, &to, &tl, &sh));
-        let bwd = timed(reps, || backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh));
+        let name = format!("{nseq}x{seq} {nh}/{nkv} hd{hd}");
+        let ms = |x: Option<f64>| x.map_or("failed".to_string(), |s| format!("{:.2}", s * 1e3));
+        // interleaved, a path's two rows apart: the split below drains after every
+        // launch, so its sum is above the row's total and only its shares mean anything
+        for path in [Path::Tiled, Path::Cublas, Path::Tiled, Path::Cublas] {
+            force_path(Some(path));
+            let fwd = timed(reps, || forward(&tq, &tk, &tv, &to, &tl, &sh));
+            let bwd = timed(reps, || backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh));
+            profile_start();
+            forward(&tq, &tk, &tv, &to, &tl, &sh);
+            let f = profile_take().unwrap_or_default();
+            profile_start();
+            backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh);
+            let b = profile_take().unwrap_or_default();
+            println!("{:<26} {:>9} {:>9} {:?} (ran {:?}) products/rows fwd {:.2}/{:.2} bwd {:.2}/{:.2}",
+                     name, ms(fwd), ms(bwd), path, last_path(), f[0], f[1], b[0], b[1]);
+            force_path(None);
+        }
         let leafs = |tp: &mut Tape| (tp.leaf(qv.clone(), true), tp.leaf(kv.clone(), true), tp.leaf(vv.clone(), true));
         let cpu_f = median((0..5).map(|_| {
             let mut tp = Tape::new();
@@ -127,8 +143,7 @@ fn attention() {
             tp.backward_from(o, &gv);
             s.elapsed().as_secs_f64() * 1e3
         }).collect());
-        let ms = |x: Option<f64>| x.map_or("failed".to_string(), |s| format!("{:.2}", s * 1e3));
-        println!("{:<26} {:>9} {:>9.2} {:>9} {:>9.2}", format!("{nseq}x{seq} {nh}/{nkv} hd{hd}"), ms(fwd), cpu_f, ms(bwd), (cpu_fb - cpu_f).max(0.0));
+        println!("{:<26} {:>9.2} {:>9.2} tape on the CPU", name, cpu_f, (cpu_fb - cpu_f).max(0.0));
     }
 }
 

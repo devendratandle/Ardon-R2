@@ -58,6 +58,14 @@ thread_local! { static LAST: Cell<Option<Path>> = const { Cell::new(None) }; }
 /// benchmark prints, so one row cannot be mistaken for the other.
 pub fn last_path() -> Option<Path> { LAST.with(|l| l.get()) }
 
+thread_local! { static FORCED: Cell<Option<Path>> = const { Cell::new(None) }; }
+
+/// Makes this thread's GEMMs and attention want `p`, over `R2_CUDA_GEMM`: how a
+/// test or a benchmark exercises both paths in one process.
+pub fn force_path(p: Option<Path>) { FORCED.with(|f| f.set(p)); }
+
+pub(super) fn note_path(p: Path) { LAST.with(|l| l.set(Some(p))); }
+
 /// Operand sizes that fit the kernels' 32-bit indices and the buffers given.
 fn fits(a: &Tensor, b: &Tensor, c: &Tensor, m: usize, k: usize, n: usize) -> bool {
     let small = |x: usize, y: usize| x.checked_mul(y).is_some_and(|p| u32::try_from(p).is_ok());
@@ -123,7 +131,8 @@ pub fn gemm_cublas(a: &Tensor, ta: bool, b: &Tensor, tb: bool, m: usize, k: usiz
 /// the guarantee sets `R2_CUDA_GEMM=tiled`.
 const DEFAULT_PATH: Path = Path::Cublas;
 
-fn wanted() -> Path {
+pub(super) fn wanted() -> Path {
+    if let Some(p) = FORCED.with(|f| f.get()) { return p; }
     // read per call, not cached: a benchmark alternates inside one window,
     // and this is microseconds against a GEMM
     match std::env::var("R2_CUDA_GEMM").as_deref() {

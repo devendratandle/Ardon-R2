@@ -29,6 +29,7 @@ sh(f"cd /tmp/r2 && git add -N {KERNELS} && if git diff --quiet -- {KERNELS}; the
 test("-p r2-gpu --features cuda")
 test("-p r2-train --features cuda --lib gpu_llm")
 test("-p r2-engine --features cuda --test cuda_wiring")
+test("-p r2-engine --features cuda --test llm_finetune")
 test("-p r2-engine --features cuda --test cuda_wiring", env="CUDA_VISIBLE_DEVICES=")
 
 # ── R2 on CUDA against PyTorch on CUDA, same card, interleaved ──────────────
