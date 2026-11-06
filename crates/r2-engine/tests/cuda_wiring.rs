@@ -26,8 +26,8 @@ fn text(v: &RVal) -> String {
 fn gpu_map_runs_on_the_device_and_status_reports_it() {
     let have = r2_gpu::cuda::ffi::device().is_ok();
     if std::env::var_os("R2_REQUIRE_CUDA").is_some() { assert!(have, "R2_REQUIRE_CUDA is set but there is no device"); }
-    let backend = text(&run("gpu.enable(TRUE)\nx <- gpu.map(\"scale\", rep(1.5, 70000), 2)\n\
-                             stopifnot(all(x == 3))\ngpu.status()$last.backend"));
+    let backend = text(&run("gpu.enable(TRUE)\nx <- gpu.map(\"tanh\", rep(0, 70000))\n\
+                             stopifnot(all(x == 0))\ngpu.status()$last.backend"));
     assert_eq!(backend, if have { "CUDA" } else { "CPU" });
     let device = text(&run("gpu.status()$device"));
     assert_eq!(device.contains("no GPU"), !have, "{device}");

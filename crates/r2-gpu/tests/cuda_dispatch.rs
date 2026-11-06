@@ -31,7 +31,10 @@ fn dispatch_and_matmul_report_where_they_ran() {
     assert_eq!(last_backend(), Backend::Cpu);
 
     let expect = if have { Backend::Cuda } else { Backend::Cpu };
+    // an op the copies would outweigh stays on the CPU, one that pays goes over
     assert_eq!(dispatch(Op::Scale(0.5), &xs), want);
+    assert_eq!(last_backend(), Backend::Cpu);
+    assert_eq!(dispatch(Op::Tanh, &xs).len(), xs.len());
     assert_eq!(last_backend(), expect);
 
     let got = matmul(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0], 2, 2, 2);

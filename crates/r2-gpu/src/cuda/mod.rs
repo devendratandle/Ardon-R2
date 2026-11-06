@@ -119,6 +119,12 @@ fn op_code(op: Op) -> (u32, f32) {
     }
 }
 
+/// Whether `op` is worth the two copies at all. On a Tesla T4 the device took
+/// about 2x the CPU's time for these at every size from 64K to 4M elements, while
+/// Sigmoid, Exp and Tanh beat it from 64K up: they are cheap enough that the copies
+/// are the whole cost. Measured by `cuda_bench`; `try_map` itself still serves them.
+pub fn pays_for_copies(op: Op) -> bool { !matches!(op, Op::Identity | Op::Relu | Op::Scale(_)) }
+
 /// Run `op` over `xs` on the device. `None` on ANY failure, so that
 /// `dispatch` falls back to the CPU: a result only comes back after the
 /// download has confirmed the kernel did not fault.

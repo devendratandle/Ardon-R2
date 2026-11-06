@@ -1,11 +1,12 @@
 //! Fused causal grouped-query attention on CUDA, forward and backward: the
 //! `attention` module's public API over `kernels/attention.cu`, which explains
 //! the form. Scores are stored per (sequence, head), `seq x seq` each, in scratch
-//! held here, and the products are batched GEMMs: cuBLAS's by default, the
-//! register-tiled kernel without it or with `R2_CUDA_GEMM=tiled`.
+//! held here, and the products are the tiled kernel, which skips what is zero in
+//! a triangular operand and repeats its bits by construction. cuBLAS's batched GEMM,
+//! with `R2_CUDA_GEMM=cublas`, computes all of it and was level on a Tesla T4.
 
 use super::ffi::{blas, Arg, Kernel, Strided};
-use super::gemm::{note_path, wanted, Path};
+use super::gemm::{chosen, note_path, Path};
 use super::{loaded, sync, Loaded, Tensor};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
@@ -86,12 +87,12 @@ impl Layout {
 #[derive(Clone, Copy)]
 enum Band { Full = 0, ToRow = 1, FromRow = 2 }
 
-/// `C(i, j) = alpha sum_k A(i, k) B(k, j)` for every (sequence, head): cuBLAS's
-/// batched GEMM when it is wanted and there, else the tiled kernel.
+/// `C(i, j) = alpha sum_k A(i, k) B(k, j)` for every (sequence, head): the tiled
+/// kernel, or cuBLAS's batched GEMM when that is asked for and there.
 #[allow(clippy::too_many_arguments)]
 fn product(ks: &Kernels, sh: &Shape, tri: bool, band: Band, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
            m: usize, k: usize, n: usize, alpha: f32) -> Option<()> {
-    let path = if wanted() == Path::Cublas && batched(sh, a, b, c, m, k, n, alpha).is_some() {
+    let path = if chosen() == Some(Path::Cublas) && batched(sh, a, b, c, m, k, n, alpha).is_some() {
         Path::Cublas
     } else {
         tiled(ks, sh, tri, band, a, b, c, m, k, n, alpha)?;

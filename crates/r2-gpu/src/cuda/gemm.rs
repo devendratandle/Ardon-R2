@@ -131,16 +131,19 @@ pub fn gemm_cublas(a: &Tensor, ta: bool, b: &Tensor, tb: bool, m: usize, k: usiz
 /// the guarantee sets `R2_CUDA_GEMM=tiled`.
 const DEFAULT_PATH: Path = Path::Cublas;
 
-pub(super) fn wanted() -> Path {
-    if let Some(p) = FORCED.with(|f| f.get()) { return p; }
+/// The path someone asked for, by [`force_path`] or `R2_CUDA_GEMM`, if any.
+pub(super) fn chosen() -> Option<Path> {
+    if let Some(p) = FORCED.with(|f| f.get()) { return Some(p); }
     // read per call, not cached: a benchmark alternates inside one window,
     // and this is microseconds against a GEMM
     match std::env::var("R2_CUDA_GEMM").as_deref() {
-        Ok("tiled") => Path::Tiled,
-        Ok("cublas") => Path::Cublas,
-        _ => DEFAULT_PATH,
+        Ok("tiled") => Some(Path::Tiled),
+        Ok("cublas") => Some(Path::Cublas),
+        _ => None,
     }
 }
+
+fn wanted() -> Path { chosen().unwrap_or(DEFAULT_PATH) }
 
 /// `C (=|+=) op(A) · op(B)` on the device, by the wanted path, else the other
 /// one. `false` (C untouched) when neither could run. Matches `gemm::gemm`.

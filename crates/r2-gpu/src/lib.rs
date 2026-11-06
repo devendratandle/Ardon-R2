@@ -111,7 +111,7 @@ pub fn dispatch(op: Op, xs: &[f32]) -> Vec<f32> {
     if gpu_enabled() && op.is_f32_safe() && xs.len() >= GPU_MIN_ELEMS {
         #[cfg(feature = "cuda")]
         {
-            if let Some(out) = cuda::try_map(op, xs) {
+            if let Some(out) = cuda::pays_for_copies(op).then(|| cuda::try_map(op, xs)).flatten() {
                 ran(Backend::Cuda);
                 return out;
             }
