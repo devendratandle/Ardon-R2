@@ -1,7 +1,8 @@
 //! Fused causal grouped-query attention on CUDA, forward and backward: the
 //! `attention` module's public API over `kernels/attention.cu`, which explains
 //! the form. Scores are stored per (sequence, head), `seq x seq` each, in scratch
-//! held here, and the products are the tiled kernel, which skips what is zero in
+//! held here where the output is wider than a tile, and otherwise never stored: the
+//! forward is one fused kernel. The products are the tiled kernel, which skips zeros in
 //! a triangular operand and repeats its bits by construction. cuBLAS's batched GEMM,
 //! with `R2_CUDA_GEMM=cublas`, computes all of it and was level on a Tesla T4.
 
@@ -148,9 +149,10 @@ fn rows_launch(k: &Kernel, threads: usize, block: u32, args: &[Arg]) -> Option<(
     Some(())
 }
 
-thread_local! { static FUSED: Cell<bool> = const { Cell::new(false) }; }
+thread_local! { static FUSED: Cell<bool> = const { Cell::new(true) }; }
 
-/// Makes this thread's forward attention use the fused kernel where it can.
+/// Whether this thread's forward attention uses the fused kernel where it can, as it
+/// does by default: on the T4 it took 0.72 ms against 0.92-1.06 for the stored form.
 pub fn force_fused(on: bool) { FUSED.with(|f| f.set(on)); }
 
 thread_local! { static PROFILE: Cell<Option<(Instant, [f64; 2])>> = const { Cell::new(None) }; }
@@ -196,9 +198,9 @@ fn forward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, s
     let ks = kernels().ok()?;
     let (seq, hd) = (sh.seq, sh.hd);
     let (lq, lkv, lp) = (Layout::rows(sh, sh.nh, false), Layout::rows(sh, sh.nkv, true), Layout::pairs(sh));
-    // One kernel, nothing of seq x seq in memory, where the output fits a tile: only
-    // when asked for, until it beats the stored form below on the T4.
-    if hd <= TILE as usize && FUSED.with(|f| f.get()) {
+    // One kernel, nothing of seq x seq in memory, where the output fits a tile. Asking
+    // for cuBLAS asks for its products, so the stored form below serves that.
+    if hd <= TILE as usize && FUSED.with(|f| f.get()) && chosen() != Some(Path::Cublas) {
         let int = Arg::Int;
         ks.fused.launch([(seq as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32, 1], [16, 8, 1], &[
             Arg::F(q), Arg::F(k), Arg::F(v), Arg::F(o), Arg::F(lse),
@@ -332,7 +334,7 @@ mod tests {
             close(&dk.download(), tape.grad(k), "grad_k");
             close(&dv.download(), tape.grad(v), "grad_v");
         }); }
-        force_fused(false);
+        force_fused(true);
     }
 
     /// The tiled kernel promises this: each element is one thread's fixed-order

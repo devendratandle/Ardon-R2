@@ -127,7 +127,7 @@ fn attention() {
             println!("{:<26} {:>9} {:>9} {:?} fused={fused} (ran {:?}) products/rows fwd {:.2}/{:.2} bwd {:.2}/{:.2}",
                      name, ms(fwd), ms(bwd), path, last_path(), f[0], f[1], b[0], b[1]);
             force_path(None);
-            force_fused(false);
+            force_fused(true);
         }
         let leafs = |tp: &mut Tape| (tp.leaf(qv.clone(), true), tp.leaf(kv.clone(), true), tp.leaf(vv.clone(), true));
         let cpu_f = median((0..5).map(|_| {
