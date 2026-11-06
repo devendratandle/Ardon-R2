@@ -59,6 +59,8 @@ for key in sorted({k[:2] for k in rows}):
         v = verdict(r)
         a, b = median(r["r2"]), median(r["torch"])
         table.append(((a - b) * r["count"], op, phase, r["count"], a, b, v, len(r["r2"])))
+    if not table:
+        continue
     table.sort(key=lambda x: -x[0] if not math.isnan(x[0]) else 0)
     tally = collections.Counter(x[6] for x in table if x[3] > 0)
     print(f"\n## {layer} {size}: R2 {tally['R2']}, PyTorch {tally['PyTorch']}, level {tally['level']}"
