@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "pairs", "two", "census"}   # also: "tests", "two", "audit", "bench", "pairs", "census"
+STAGES = {"score"}   # also: "tests", "two", "audit", "bench", "pairs", "census", "score"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -117,6 +117,31 @@ if "two" in STAGES:
     two_gpus("small 7.2M", SMALL, 300, 2)
     two_gpus("medium 39.8M", MEDIUM, 100, 2)
     two_gpus("large 125M", LARGE, 30, 2)
+if "score" in STAGES:
+    # Operation by operation, R2 and PyTorch alternating: benchmarks/llm/scoreboard.py reads these.
+    SCORE = "grep -E '^(SCORE|device:)|rror|panicked|Traceback'"
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example op_scoreboard 2>&1 | tail -1; cp target/release/examples/op_scoreboard /tmp/score_cuda")
+    # wgpu on the same card, if a Vulkan driver answers here; only a real NVIDIA adapter counts
+    sh("apt-get install -y -qq libvulkan1 > /dev/null 2>&1; ls /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>&1")
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features gpu --example op_scoreboard 2>&1 | tail -1; cp target/release/examples/op_scoreboard /tmp/score_wgpu")
+    probe = subprocess.run("SCORE_LAYER=t4wgpu SCORE_SECS=0.001 R2_DIM=64 R2_FFN=64 R2_LAYERS=1 R2_HEADS=2 R2_KV=2 R2_SEQ=8 R2_BATCH=2 R2_VOCAB=64 /tmp/score_wgpu 2>&1 | head -2",
+                           shell=True, text=True, stdout=subprocess.PIPE).stdout
+    print("wgpu here:", probe[:300], flush=True)
+    vulkan = "Tesla" in probe or "NVIDIA" in probe
+    for round_ in range(3):
+        for name, env in [("small", SMALL), ("medium", MEDIUM), ("large", LARGE)]:
+            print(f"\n=== score {name} round {round_ + 1}", flush=True)
+            sh(f"cd /tmp/r2 && {env} SCORE_LAYER=t4 SCORE_SIZE={name} CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | {SCORE}", tail=12000)
+            sh(f"cd /tmp/r2 && {env} SCORE_LAYER=t4 SCORE_SIZE={name} TS_DEVICE=cuda CUDA_VISIBLE_DEVICES=0 python3 benchmarks/llm/op_scoreboard.py 2>&1 | {SCORE}", tail=12000)
+            if vulkan and name != "large":
+                # the same PyTorch figures again, under this layer's name: same card, another API
+                sh(f"cd /tmp/r2 && {env} SCORE_LAYER=t4wgpu SCORE_SIZE={name} /tmp/score_wgpu 2>&1 | {SCORE}", tail=12000)
+                sh(f"cd /tmp/r2 && {env} SCORE_LAYER=t4wgpu SCORE_SIZE={name} TS_DEVICE=cuda CUDA_VISIBLE_DEVICES=0 python3 benchmarks/llm/op_scoreboard.py 2>&1 | {SCORE}", tail=12000)
+            # the gradient exchange, two processes on two GPUs
+            sh(f"cd /tmp/r2 && (CUDA_VISIBLE_DEVICES=1 R2_WORLD=2 R2_RANK=1 {env} SCORE_LAYER=t4x2 SCORE_SIZE={name} /tmp/score_cuda > /tmp/x1.log 2>&1 &); "
+               f"CUDA_VISIBLE_DEVICES=0 R2_WORLD=2 R2_RANK=0 {env} SCORE_LAYER=t4x2 SCORE_SIZE={name} /tmp/score_cuda 2>&1 | {SCORE}; sleep 2; grep -E 'rror|panicked' /tmp/x1.log")
+            py = f"{env} SCORE_LAYER=t4x2 SCORE_SIZE={name} TS_DEVICE=cuda TS_WORLD=2 MASTER_ADDR=127.0.0.1 MASTER_PORT=29601 python3 benchmarks/llm/op_scoreboard.py"
+            sh(f"cd /tmp/r2 && (TS_RANK=1 {py} > /tmp/x1.log 2>&1 &); TS_RANK=0 {py} 2>&1 | {SCORE}; sleep 2; grep -E 'rror|Traceback' /tmp/x1.log")
 sh("nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0")
 
 # Where the step goes now, per kernel (the queue is drained after each launch, so
