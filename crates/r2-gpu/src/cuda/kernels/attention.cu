@@ -22,7 +22,7 @@
 #define BN 64u
 #define BK 16u
 #define TM 8u
-#define TN 8u
+#define TN 4u
 #define THREADS ((BM / TM) * (BN / TN))
 #define LOADS_A ((BM * BK) / THREADS)
 #define LOADS_B ((BK * BN) / THREADS)
@@ -101,12 +101,11 @@ extern "C" __global__ void attn_gemm(const float *A, const float *B, float *C,
 #define FM 8u
 #define FN 4u
 #define FTHREADS ((BM / FM) * (BN / FN))
-#define FLOADS_A ((BM * BK) / FTHREADS)
 #define FLOADS_B ((BK * BN) / FTHREADS)
 
 extern "C" __global__ void attn_fused(const float *Q, const float *K, const float *V, float *O, float *L,
                                       unsigned nseq, unsigned seq, unsigned nh, unsigned nkv, unsigned hd, float scale) {
-    static __shared__ float As[BK * BM];
+    static __shared__ float As[BM * BM];
     static __shared__ float Bs[BK * BN];
     static __shared__ float Ps[BM * BN];
     static __shared__ float Red[BM * (BN / FN)];
@@ -127,6 +126,13 @@ extern "C" __global__ void attn_fused(const float *Q, const float *K, const floa
         for (unsigned j = 0; j < FN; j++) o[i][j] = 0.0f;
     }
 
+    // The query tile, once: every key tile below reads the same one. hd <= BM.
+    for (unsigned t = 0; t < (BM * BM) / FTHREADS; t++) {
+        const unsigned idx = tid + t * FTHREADS;
+        const unsigned ii = m0 + idx % BM, kk = idx / BM;
+        As[idx] = (ii < seq && kk < hd) ? q[ii * qrow + kk] : 0.0f;
+    }
+
     for (unsigned n0 = 0; n0 < seq && n0 < m0 + BM; n0 += BN) {
         const unsigned nbase = n0 + tx * FN;
         // S = scale Q K^T for this tile
@@ -134,11 +140,6 @@ extern "C" __global__ void attn_fused(const float *Q, const float *K, const floa
         for (unsigned i = 0; i < FM; i++)
             for (unsigned j = 0; j < FN; j++) c[i][j] = 0.0f;
         for (unsigned k0 = 0; k0 < hd; k0 += BK) {
-            for (unsigned t = 0; t < FLOADS_A; t++) {
-                const unsigned idx = tid + t * FTHREADS;
-                const unsigned ii = m0 + idx % BM, kk = k0 + idx / BM;
-                As[idx] = (ii < seq && kk < hd) ? q[ii * qrow + kk] : 0.0f;
-            }
             for (unsigned t = 0; t < FLOADS_B; t++) {
                 const unsigned idx = tid + t * FTHREADS;
                 const unsigned jj = n0 + idx % BN, kk = k0 + idx / BN;
@@ -147,7 +148,7 @@ extern "C" __global__ void attn_fused(const float *Q, const float *K, const floa
             __syncthreads();
             for (unsigned kk = 0; kk < BK; kk++) {
                 float x[FM], y[FN];
-                for (unsigned i = 0; i < FM; i++) x[i] = As[kk * BM + ty * FM + i];
+                for (unsigned i = 0; i < FM; i++) x[i] = As[(k0 + kk) * BM + ty * FM + i];
                 for (unsigned j = 0; j < FN; j++) y[j] = Bs[kk * BN + tx * FN + j];
                 for (unsigned i = 0; i < FM; i++)
                     for (unsigned j = 0; j < FN; j++) c[i][j] = fmaf(x[i], y[j], c[i][j]);
@@ -276,25 +277,33 @@ extern "C" __global__ void attn_softmax(float *S, float *L, unsigned nseq, unsig
     }
 }
 
+// Where a row's zeros stop mattering: the band products read none past the end of
+// the row's diagonal tile. tile 0 asks for the whole row, for a reader with no band.
+static inline __device__ unsigned row_end(unsigned i, unsigned seq, unsigned tile) {
+    if (tile == 0u) return seq;
+    const unsigned end = (i / tile + 1u) * tile;
+    return end < seq ? end : seq;
+}
+
 // In place on S: P_ij = exp(S_ij - L_i), the forward's P from its L.
-extern "C" __global__ void attn_probs(float *S, const float *L, unsigned nseq, unsigned seq, unsigned nh) {
+extern "C" __global__ void attn_probs(float *S, const float *L, unsigned nseq, unsigned seq, unsigned nh, unsigned tile) {
     ROW_THREAD
     if (idx >= nseq * nh * seq) return;
-    const unsigned z = idx / seq, i = idx % seq;
+    const unsigned z = idx / seq, i = idx % seq, end = row_end(i, seq, tile);
     const float li = L[(z / nh * seq + i) * nh + z % nh];
     float *row = S + idx * seq;
-    for (unsigned c = lane; c < seq; c += LANES) row[c] = c <= i ? exp_r2(row[c] - li) : 0.0f;
+    for (unsigned c = lane; c < end; c += LANES) row[c] = c <= i ? exp_r2(row[c] - li) : 0.0f;
 }
 
 // In place on GV: dS_ij = P_ij (GV_ij - D_i); entries past the diagonal become 0.
-extern "C" __global__ void attn_dscore(float *GV, const float *P, const float *D, unsigned nseq, unsigned seq, unsigned nh) {
+extern "C" __global__ void attn_dscore(float *GV, const float *P, const float *D, unsigned nseq, unsigned seq, unsigned nh, unsigned tile) {
     ROW_THREAD
     if (idx >= nseq * nh * seq) return;
-    const unsigned z = idx / seq, i = idx % seq;
+    const unsigned z = idx / seq, i = idx % seq, end = row_end(i, seq, tile);
     const float di = D[(z / nh * seq + i) * nh + z % nh];
     float *row = GV + idx * seq;
     const float *p = P + idx * seq;
-    for (unsigned c = lane; c < seq; c += LANES) row[c] = c <= i ? p[c] * (row[c] - di) : 0.0f;
+    for (unsigned c = lane; c < end; c += LANES) row[c] = c <= i ? p[c] * (row[c] - di) : 0.0f;
 }
 
 // D_i = dO_i . O_i, one row per (row, head).

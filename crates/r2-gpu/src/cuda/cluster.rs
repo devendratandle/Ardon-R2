@@ -7,7 +7,7 @@
 //! code runs between two cards in a machine and between machines. It is a star,
 //! which is what two ranks need; rank 0's links are the limit at many ranks.
 
-use super::ffi::{HostBuffer, SharedMem};
+use super::ffi::{copy_both_ways, CopyQueue, HostBuffer, SharedMem};
 use super::{optim, Tensor};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 
 /// How long a silent peer is waited for before the step fails.
 const SILENCE: Duration = Duration::from_secs(600);
+
+/// Elements of a gradient handed over at a time through shared memory: 128 MB.
+const STRETCH: usize = 32 << 20;
 
 /// Seconds an exchange spent, summed since the start.
 #[derive(Clone, Copy, Debug, Default)]
@@ -193,19 +196,38 @@ impl Cluster {
         let sh = self.shared.as_mut().ok_or("cluster buffer")?;
         super::sync();
         let t = Instant::now();
-        let mut at = 0;
-        for (g, &n) in grads.iter().zip(sizes) {
-            g.copy_to(&mut sh.mine.as_mut_slice()[at..at + n])?;
-            at += n;
-        }
-        self.times.device_copies += t.elapsed().as_secs_f64();
-        let t = Instant::now();
         let peer = &mut self.peers[0];
-        peer.write_all(&[1]).map_err(io("ready"))?;
-        peer.read_exact(&mut [0u8; 1]).map_err(io("ready"))?;
-        self.times.network += t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        sh.scratch.copy_from(0, sh.theirs.as_slice())?;
+        let (scratch, theirs) = (&sh.scratch, sh.theirs.as_slice());
+        let mut rest = sh.mine.as_mut_slice();
+        // The link carries both directions at once. A stretch of the other rank's
+        // gradient goes up as soon as that rank says it is down, while this rank's
+        // next stretch comes down, so the copies take the longer direction's time
+        // and not the two added up.
+        copy_both_ways(|down, up| {
+            let (mut sent, mut at) = (0, 0);
+            let mut hand_over = |sent: &mut usize, at: usize, up: &CopyQueue<'_>| -> Result<(), String> {
+                down.finish()?;
+                peer.write_all(&[1]).map_err(io("ready"))?;
+                peer.read_exact(&mut [0u8; 1]).map_err(io("ready"))?;
+                up.upload(scratch, *sent, &theirs[*sent..at])?;
+                *sent = at;
+                Ok(())
+            };
+            for (g, &n) in grads.iter().zip(sizes) {
+                let mut off = 0;
+                while off < n {
+                    let len = (n - off).min(STRETCH);
+                    let (piece, tail) = std::mem::take(&mut rest).split_at_mut(len);
+                    rest = tail;
+                    down.download(g, off, piece)?;
+                    off += len;
+                    at += len;
+                    if at - sent >= STRETCH { hand_over(&mut sent, at, up)?; }
+                }
+            }
+            if at > sent { hand_over(&mut sent, at, up)?; }
+            Ok(())
+        })?;
         self.times.device_copies += t.elapsed().as_secs_f64();
         let t = Instant::now();
         let mut at = 0;

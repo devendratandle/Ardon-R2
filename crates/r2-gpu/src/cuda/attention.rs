@@ -26,7 +26,7 @@ pub struct Shape {
 
 /// As `BM`, `BN` in `kernels/attention.cu`, and its thread grid.
 const TILE: u32 = 64;
-const GEMM_BLOCK: [u32; 3] = [8, 8, 1];
+const GEMM_BLOCK: [u32; 3] = [16, 8, 1];
 /// As `ROWS` to a block in `kernels/attention.cu`, a warp of 32 threads to each.
 const ROW_BLOCK: u32 = 256;
 const LANES: usize = 32;
@@ -42,8 +42,8 @@ fn kernels() -> Result<&'static Kernels, &'static str> {
         fused: m.kernel("attn_fused", 11)?,
         gemm: m.kernel("attn_gemm", 25)?,
         softmax: m.kernel("attn_softmax", 5)?,
-        probs: m.kernel("attn_probs", 5)?,
-        dscore: m.kernel("attn_dscore", 6)?,
+        probs: m.kernel("attn_probs", 6)?,
+        dscore: m.kernel("attn_dscore", 7)?,
         delta: m.kernel("attn_delta", 5)?,
         group_sum: m.kernel("attn_group_sum", 6)?,
     }))
@@ -202,7 +202,7 @@ fn forward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, s
     // for cuBLAS asks for its products, so the stored form below serves that.
     if hd <= TILE as usize && FUSED.with(|f| f.get()) && chosen() != Some(Path::Cublas) {
         let int = Arg::Int;
-        ks.fused.launch([(seq as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32, 1], [16, 8, 1], &[
+        ks.fused.launch([(seq as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32, 1], GEMM_BLOCK, &[
             Arg::F(q), Arg::F(k), Arg::F(v), Arg::F(o), Arg::F(lse),
             int(sh.nseq as u32), int(seq as u32), int(sh.nh as u32), int(sh.nkv as u32), int(hd as u32), Arg::Real(sh.scale),
         ]).ok()?;
@@ -243,6 +243,8 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
     let int = Arg::Int;
     let (nseq_a, seq_a, nh_a) = (int(sh.nseq as u32), int(seq as u32), int(sh.nh as u32));
     let row_threads = sh.nseq * sh.nh * seq * LANES;
+    // the band products read no further than a row's diagonal tile; cuBLAS reads it all
+    let tile_a = int(if chosen() == Some(Path::Cublas) { 0 } else { TILE });
 
     let mut guard = SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
     let sc = guard.get_or_insert_with(Scratch::default);
@@ -258,10 +260,10 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
     rows_launch(&ks.delta, rows * sh.nh * LANES, ROW_BLOCK, &[Arg::F(o), Arg::F(g), Arg::F(delta), int((rows * sh.nh) as u32), int(hd as u32)])?;
     // P from the forward's L
     product(ks, sh, true, Band::Full, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
-    rows_launch(&ks.probs, row_threads, ROW_BLOCK, &[Arg::F(p), Arg::F(lse), nseq_a, seq_a, nh_a])?;
+    rows_launch(&ks.probs, row_threads, ROW_BLOCK, &[Arg::F(p), Arg::F(lse), nseq_a, seq_a, nh_a, tile_a])?;
     // dS = P (dO.V - D)
     product(ks, sh, true, Band::Full, (g, lq), (v, lkv.t()), (ds, lp), seq, hd, seq, 1.0)?;
-    rows_launch(&ks.dscore, row_threads, ROW_BLOCK, &[Arg::F(ds), Arg::F(p), Arg::F(delta), nseq_a, seq_a, nh_a])?;
+    rows_launch(&ks.dscore, row_threads, ROW_BLOCK, &[Arg::F(ds), Arg::F(p), Arg::F(delta), nseq_a, seq_a, nh_a, tile_a])?;
     // dV and dK per head: straight into the output when each kv head has one
     // query head, into a partial when a group has to be summed
     let (tv, tk) = if group > 1 { (sc.part_v.as_ref()?, sc.part_k.as_ref()?) } else { (dv, dk) };

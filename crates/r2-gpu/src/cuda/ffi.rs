@@ -17,7 +17,8 @@
 //! mis-sized parameter cannot read past it.
 //!
 //! All work goes on the context's default stream, which runs in order and is
-//! ordered with the blocking copies: no stream objects and no events. Targets
+//! ordered with the blocking copies; only [`CopyQueue`] has streams, so a copy
+//! each way can overlap, and it holds what it copies until they are done. Targets
 //! other than Unix have no loader here and report "no device".
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
@@ -111,6 +112,11 @@ table!(Cu {
     ipc_close = "cuIpcCloseMemHandle": fn(DevPtr) -> CuResult;
     addr_range = "cuMemGetAddressRange_v2": fn(*mut DevPtr, *mut usize, DevPtr) -> CuResult;
     d_to_h = "cuMemcpyDtoH_v2": fn(*mut c_void, DevPtr, usize) -> CuResult;
+    stream_create = "cuStreamCreate": fn(*mut Handle, c_uint) -> CuResult;
+    stream_sync = "cuStreamSynchronize": fn(Handle) -> CuResult;
+    stream_destroy = "cuStreamDestroy_v2": fn(Handle) -> CuResult;
+    d_to_h_async = "cuMemcpyDtoHAsync_v2": fn(*mut c_void, DevPtr, usize, Handle) -> CuResult;
+    h_to_d_async = "cuMemcpyHtoDAsync_v2": fn(DevPtr, *const c_void, usize, Handle) -> CuResult;
     set32 = "cuMemsetD32_v2": fn(DevPtr, c_uint, usize) -> CuResult;
     module_load = "cuModuleLoadDataEx": fn(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void) -> CuResult;
     module_fn = "cuModuleGetFunction": fn(*mut Handle, Handle, *const c_char) -> CuResult;
@@ -365,6 +371,74 @@ impl<T: Pod> DeviceBuffer<T> {
         let code = unsafe { (self.dev.cu.d_to_h)(out.as_mut_ptr().cast(), self.ptr, out.len() * 4) };
         if code == 0 { Ok(()) } else { Err(self.dev.err("cuMemcpyDtoH", code)) }
     }
+}
+
+/// One direction of copies that overlap the other's: a stream of its own, not
+/// ordered with the default stream, so the caller drains that first. Everything
+/// handed to it stays borrowed for `'a`, until [`copy_both_ways`] has waited.
+pub struct CopyQueue<'a> { dev: &'static Device, stream: Handle, _held: PhantomData<&'a mut [u8]> }
+
+impl CopyQueue<'_> {
+    fn new(dev: &'static Device) -> Result<Self, String> {
+        dev.bind()?;
+        let mut stream: Handle = std::ptr::null_mut();
+        // SAFETY: the context is current and `stream` is a valid out pointer.
+        // Flag 1 is CU_STREAM_NON_BLOCKING.
+        match unsafe { (dev.cu.stream_create)(&mut stream, 1) } {
+            0 => Ok(CopyQueue { dev, stream, _held: PhantomData }),
+            c => Err(dev.err("cuStreamCreate", c)),
+        }
+    }
+
+    /// Wait for what this queue was given.
+    pub fn finish(&self) -> Result<(), String> {
+        self.dev.bind()?;
+        // SAFETY: `stream` is live until drop.
+        match unsafe { (self.dev.cu.stream_sync)(self.stream) } { 0 => Ok(()), c => Err(self.dev.err("cuStreamSynchronize", c)) }
+    }
+}
+
+impl<'a> CopyQueue<'a> {
+    /// Queues `src[at..at + out.len()]` into `out`.
+    pub fn download<T: Pod>(&self, src: &'a DeviceBuffer<T>, at: usize, out: &'a mut [T]) -> Result<(), String> {
+        if at.checked_add(out.len()).is_none_or(|e| e > src.len) { return Err("download past the buffer".into()); }
+        if out.is_empty() { return Ok(()); }
+        self.dev.bind()?;
+        // SAFETY: bounds checked above; `out` and `src` are borrowed for 'a, which
+        // outlives the wait in `copy_both_ways`; `Pod` makes any bit pattern valid.
+        let code = unsafe { (self.dev.cu.d_to_h_async)(out.as_mut_ptr().cast(), src.ptr + (at * 4) as DevPtr, out.len() * 4, self.stream) };
+        if code == 0 { Ok(()) } else { Err(self.dev.err("cuMemcpyDtoHAsync", code)) }
+    }
+
+    /// Queues `data` into `dst[at..]`.
+    pub fn upload<T: Pod>(&self, dst: &'a DeviceBuffer<T>, at: usize, data: &'a [T]) -> Result<(), String> {
+        if at.checked_add(data.len()).is_none_or(|e| e > dst.len) { return Err("upload past the buffer".into()); }
+        if data.is_empty() { return Ok(()); }
+        self.dev.bind()?;
+        // SAFETY: bounds checked above; both are borrowed for 'a, as in `download`.
+        let code = unsafe { (self.dev.cu.h_to_d_async)(dst.ptr + (at * 4) as DevPtr, data.as_ptr().cast(), data.len() * 4, self.stream) };
+        if code == 0 { Ok(()) } else { Err(self.dev.err("cuMemcpyHtoDAsync", code)) }
+    }
+}
+
+impl Drop for CopyQueue<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the stream came from cuStreamCreate and is destroyed only here;
+        // CUDA finishes what it holds first. An error here has nowhere to go.
+        let _ = self.dev.bind().map(|_| unsafe { (self.dev.cu.stream_destroy)(self.stream) });
+    }
+}
+
+/// Runs `f` with a queue for each direction, and returns once both have finished,
+/// even when `f` fails, so nothing they were given is released under a copy.
+pub fn copy_both_ways<'a, R>(f: impl FnOnce(&CopyQueue<'a>, &CopyQueue<'a>) -> Result<R, String>) -> Result<R, String> {
+    let dev = device()?;
+    let (down, up) = (CopyQueue::new(dev)?, CopyQueue::new(dev)?);
+    let result = f(&down, &up);
+    let waited = down.finish().and(up.finish());
+    let r = result?;
+    waited?;
+    Ok(r)
 }
 
 impl<T: Pod> Drop for DeviceBuffer<T> {
