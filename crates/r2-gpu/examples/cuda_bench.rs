@@ -147,6 +147,36 @@ fn attention() {
     }
 }
 
+/// Host slices to host slices, copies included, against the CPU: where routing
+/// to the device starts to pay.
+fn crossovers() {
+    println!("\n-- crossover, ms per call, copies included: device vs CPU --");
+    let time = |f: &mut dyn FnMut()| median((0..5).map(|_| {
+        let s = Instant::now();
+        f();
+        s.elapsed().as_secs_f64() * 1e3
+    }).collect());
+    set_gpu_enabled(true);
+    for len in [1usize << 16, 1 << 18, 1 << 20, 1 << 22] {
+        let xs = fill(len, 0.0);
+        for op in [Op::Relu, Op::Scale(0.7), Op::Sigmoid, Op::Tanh, Op::Exp] {
+            let d = time(&mut || { std::hint::black_box(dispatch(op, &xs)); });
+            let ran = last_backend();
+            let c = time(&mut || { std::hint::black_box(cpu::map(op, &xs)); });
+            println!("map {:>8} {:<12} {:>6} {:>9.3} {:>9.3}", len, format!("{op:?}"), ran.to_string(), d, c);
+        }
+    }
+    for n in [300usize, 400, 512, 640, 800, 1200] {
+        let (a, b) = (fill(n * n, 0.0), fill(n * n, 1.0));
+        let d = time(&mut || { std::hint::black_box(r2_gpu::matmul(&a, &b, n, n, n)); });
+        let ran = last_backend();
+        let mut out = vec![0.0f32; n * n];
+        let c = time(&mut || sgemm_into(&a, Trans::No, &b, Trans::No, n, n, n, &mut out, true));
+        println!("matmul {n}^3 ({:>5}M work) {:>6} {:>9.3} {:>9.3}", n * n * n / 1_000_000, ran.to_string(), d, c);
+    }
+    set_gpu_enabled(false);
+}
+
 fn adam() {
     println!("\n-- Adam, 40M parameters, ms per step --");
     let n = 40_000_000usize;
@@ -178,6 +208,7 @@ fn main() {
     }
     println!("cuBLAS: {}", ffi::blas().map_or_else(|e| format!("not available ({e})"), |_| "loaded".to_string()));
     elementwise();
+    crossovers();
     gemms();
     attention();
     adam();

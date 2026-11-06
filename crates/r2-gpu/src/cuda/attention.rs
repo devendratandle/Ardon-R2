@@ -37,7 +37,7 @@ static KERNELS: Loaded<Kernels> = OnceLock::new();
 
 fn kernels() -> Result<&'static Kernels, &'static str> {
     loaded(&KERNELS, PTX, |m| Ok(Kernels {
-        gemm: m.kernel("attn_gemm", 24)?,
+        gemm: m.kernel("attn_gemm", 25)?,
         softmax: m.kernel("attn_softmax", 5)?,
         probs: m.kernel("attn_probs", 5)?,
         dscore: m.kernel("attn_dscore", 6)?,
@@ -82,15 +82,19 @@ impl Layout {
     fn t(self) -> Layout { Layout { first: self.second, second: self.first, ..self } }
 }
 
+/// Which `k` of `A(i, k)` can be nonzero, as in `kernels/attention.cu`.
+#[derive(Clone, Copy)]
+enum Band { Full = 0, ToRow = 1, FromRow = 2 }
+
 /// `C(i, j) = alpha sum_k A(i, k) B(k, j)` for every (sequence, head): cuBLAS's
 /// batched GEMM when it is wanted and there, else the tiled kernel.
 #[allow(clippy::too_many_arguments)]
-fn product(ks: &Kernels, sh: &Shape, tri: bool, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
+fn product(ks: &Kernels, sh: &Shape, tri: bool, band: Band, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
            m: usize, k: usize, n: usize, alpha: f32) -> Option<()> {
     let path = if wanted() == Path::Cublas && batched(sh, a, b, c, m, k, n, alpha).is_some() {
         Path::Cublas
     } else {
-        tiled(ks, sh, tri, a, b, c, m, k, n, alpha)?;
+        tiled(ks, sh, tri, band, a, b, c, m, k, n, alpha)?;
         Path::Tiled
     };
     note_path(path);
@@ -123,13 +127,13 @@ fn batched(sh: &Shape, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tiled(ks: &Kernels, sh: &Shape, tri: bool, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
+fn tiled(ks: &Kernels, sh: &Shape, tri: bool, band: Band, a: (&Tensor, Layout), b: (&Tensor, Layout), c: (&Tensor, Layout),
          m: usize, k: usize, n: usize, alpha: f32) -> Option<()> {
     let int = Arg::Int;
     let (la, lb, lc) = (a.1, b.1, c.1);
     ks.gemm.launch([(n as u32).div_ceil(TILE), (m as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32], GEMM_BLOCK, &[
         Arg::F(a.0), Arg::F(b.0), Arg::F(c.0),
-        int(m as u32), int(k as u32), int(n as u32), int(sh.nh as u32), int((sh.nh / sh.nkv) as u32), int(tri as u32),
+        int(m as u32), int(k as u32), int(n as u32), int(sh.nh as u32), int((sh.nh / sh.nkv) as u32), int(tri as u32), int(band as u32),
         int(la.ss), int(la.hs), int(la.first), int(la.second), int(la.kv as u32),
         int(lb.ss), int(lb.hs), int(lb.first), int(lb.second), int(lb.kv as u32),
         int(lc.ss), int(lc.hs), int(lc.first), int(lc.second), Arg::Real(alpha),
@@ -189,10 +193,10 @@ fn forward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, s
     let sc = guard.get_or_insert_with(Scratch::default);
     grown(&mut sc.p, pair_len(sh)?)?;
     let p = sc.p.as_ref()?;
-    product(ks, sh, true, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
+    product(ks, sh, true, Band::Full, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
     rows_launch(&ks.softmax, sh.nseq * sh.nh * seq * LANES, ROW_BLOCK,
                 &[Arg::F(p), Arg::F(lse), Arg::Int(sh.nseq as u32), Arg::Int(seq as u32), Arg::Int(sh.nh as u32)])?;
-    product(ks, sh, false, (p, lp), (v, lkv), (o, lq), seq, seq, hd, 1.0)
+    product(ks, sh, false, Band::ToRow, (p, lp), (v, lkv), (o, lq), seq, seq, hd, 1.0)
 }
 
 /// Backward from the upstream gradient `g` (shaped like `o`): writes `dq`, `dk`,
@@ -232,23 +236,23 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
 
     rows_launch(&ks.delta, rows * sh.nh * LANES, ROW_BLOCK, &[Arg::F(o), Arg::F(g), Arg::F(delta), int((rows * sh.nh) as u32), int(hd as u32)])?;
     // P from the forward's L
-    product(ks, sh, true, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
+    product(ks, sh, true, Band::Full, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
     rows_launch(&ks.probs, row_threads, ROW_BLOCK, &[Arg::F(p), Arg::F(lse), nseq_a, seq_a, nh_a])?;
     // dS = P (dO.V - D)
-    product(ks, sh, true, (g, lq), (v, lkv.t()), (ds, lp), seq, hd, seq, 1.0)?;
+    product(ks, sh, true, Band::Full, (g, lq), (v, lkv.t()), (ds, lp), seq, hd, seq, 1.0)?;
     rows_launch(&ks.dscore, row_threads, ROW_BLOCK, &[Arg::F(ds), Arg::F(p), Arg::F(delta), nseq_a, seq_a, nh_a])?;
     // dV and dK per head: straight into the output when each kv head has one
     // query head, into a partial when a group has to be summed
     let (tv, tk) = if group > 1 { (sc.part_v.as_ref()?, sc.part_k.as_ref()?) } else { (dv, dk) };
-    product(ks, sh, false, (p, lp.t()), (g, lq), (tv, lq), seq, seq, hd, 1.0)?;
-    product(ks, sh, false, (ds, lp.t()), (q, lq), (tk, lq), seq, seq, hd, sh.scale)?;
+    product(ks, sh, false, Band::FromRow, (p, lp.t()), (g, lq), (tv, lq), seq, seq, hd, 1.0)?;
+    product(ks, sh, false, Band::FromRow, (ds, lp.t()), (q, lq), (tk, lq), seq, seq, hd, sh.scale)?;
     if group > 1 {
         let n = rows * sh.nkv * hd;
         let args = |part, out| [Arg::F(part), Arg::F(out), int(rows as u32), int(sh.nkv as u32), int(hd as u32), int(group as u32)];
         rows_launch(&ks.group_sum, n, FLAT, &args(tv, dv))?;
         rows_launch(&ks.group_sum, n, FLAT, &args(tk, dk))?;
     }
-    product(ks, sh, false, (ds, lp), (k, lkv), (dq, lq), seq, seq, hd, sh.scale)
+    product(ks, sh, false, Band::ToRow, (ds, lp), (k, lkv), (dq, lq), seq, seq, hd, sh.scale)
 }
 
 #[cfg(test)]

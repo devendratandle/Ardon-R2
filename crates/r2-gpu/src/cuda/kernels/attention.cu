@@ -26,14 +26,18 @@
 #define THREADS ((BM / TM) * (BN / TN))
 #define LOADS_A ((BM * BK) / THREADS)
 #define LOADS_B ((BK * BN) / THREADS)
+#define BAND_TO_ROW 1u
+#define BAND_FROM_ROW 2u
 
 // One (sequence, head) product per grid z: C(i, j) = alpha sum_k A(i, k) B(k, j),
 // where each operand is addressed as base + first * index + second * index, and
 // base = sequence * ss + head * hs (the kv head of the group when *_kv is set).
 // With tri set, only the part with j <= i is promised, and whole tiles above the
-// diagonal are skipped.
+// diagonal are skipped. band says A is triangular, so a tile of rows only sums the
+// k that can be nonzero: BAND_TO_ROW for A(i, k) = 0 past k > i, BAND_FROM_ROW for
+// k < i. cuBLAS cannot be told this, and half of these products is that zero.
 extern "C" __global__ void attn_gemm(const float *A, const float *B, float *C,
-                                     unsigned m, unsigned k, unsigned n, unsigned nh, unsigned group, unsigned tri,
+                                     unsigned m, unsigned k, unsigned n, unsigned nh, unsigned group, unsigned tri, unsigned band,
                                      unsigned a_ss, unsigned a_hs, unsigned a_is, unsigned a_ks, unsigned a_kv,
                                      unsigned b_ss, unsigned b_hs, unsigned b_ks, unsigned b_ns, unsigned b_kv,
                                      unsigned c_ss, unsigned c_hs, unsigned c_is, unsigned c_ns, float alpha) {
@@ -52,7 +56,9 @@ extern "C" __global__ void attn_gemm(const float *A, const float *B, float *C,
     for (unsigned i = 0; i < TM; i++)
         for (unsigned j = 0; j < TN; j++) c[i][j] = 0.0f;
 
-    for (unsigned k0 = 0; k0 < k; k0 += BK) {
+    const unsigned k_lo = band == BAND_FROM_ROW ? m0 : 0u;
+    const unsigned k_hi = band == BAND_TO_ROW && m0 + BM < k ? m0 + BM : k;
+    for (unsigned k0 = k_lo; k0 < k_hi; k0 += BK) {
         for (unsigned t = 0; t < LOADS_A; t++) {
             const unsigned idx = tid + t * THREADS;
             const unsigned ii = m0 + idx % BM, kk = k0 + idx / BM;
