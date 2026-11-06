@@ -84,57 +84,89 @@ extern "C" __global__ void attn_gemm(const float *A, const float *B, float *C,
     }
 }
 
-// In place on S, one thread per (sequence, head, query): the causal softmax of
-// the row, with L its log-sum-exp; entries past the diagonal become 0.
+// The row kernels below run ROWS rows to a block, one warp to a row: a warp's
+// LANES threads take consecutive elements, so its 32 loads or stores fall in one
+// cache line. One thread per row, which this replaced, sends every warp to 32
+// lines at once, and took more time than all the GEMMs on a Tesla T4. A reduction
+// over a row goes through shared memory in lane order, so its bits repeat.
+#define LANES 32u
+#define ROWS 8u
+
+#define ROW_THREAD \
+    const unsigned lane = threadIdx.x % LANES, warp = threadIdx.x / LANES; \
+    const unsigned idx = blockIdx.x * ROWS + warp;
+
+// In place on S, one row per (sequence, head, query): the causal softmax of the
+// row, with L its log-sum-exp; entries past the diagonal become 0.
 extern "C" __global__ void attn_softmax(float *S, float *L, unsigned nseq, unsigned seq, unsigned nh) {
-    const unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;         // z * seq + query
+    static __shared__ float red[ROWS * LANES];
+    ROW_THREAD
     if (idx >= nseq * nh * seq) return;
     const unsigned z = idx / seq, i = idx % seq;
     float *row = S + idx * seq;
+    const float *mine = red + warp * LANES;
     float m = -3.0e38f, l = 0.0f;
-    for (unsigned j = 0; j <= i; j++) m = fmaxf(m, row[j]);
-    for (unsigned j = 0; j <= i; j++) {
-        const float p = exp_r2(row[j] - m);
-        row[j] = p;
-        l += p;
+    for (unsigned c = lane; c <= i; c += LANES) m = fmaxf(m, row[c]);
+    red[threadIdx.x] = m;
+    __syncthreads();
+    for (unsigned u = 0; u < LANES; u++) m = fmaxf(m, mine[u]);
+    __syncthreads();
+    for (unsigned c = lane; c < seq; c += LANES) {
+        if (c <= i) {
+            const float p = exp_r2(row[c] - m);
+            row[c] = p;
+            l += p;
+        } else {
+            row[c] = 0.0f;
+        }
     }
+    red[threadIdx.x] = l;
+    __syncthreads();
+    l = 0.0f;
+    for (unsigned u = 0; u < LANES; u++) l += mine[u];
     const float inv = 1.0f / l;
-    for (unsigned j = 0; j <= i; j++) row[j] = row[j] * inv;
-    for (unsigned j = i + 1u; j < seq; j++) row[j] = 0.0f;
-    const unsigned sq = z / nh, h = z % nh;
-    L[(sq * seq + i) * nh + h] = m + logf(l);
+    for (unsigned c = lane; c <= i; c += LANES) row[c] = row[c] * inv;
+    if (lane == 0) {
+        const unsigned sq = z / nh, h = z % nh;
+        L[(sq * seq + i) * nh + h] = m + logf(l);
+    }
 }
 
 // In place on S: P_ij = exp(S_ij - L_i), the forward's P from its L.
 extern "C" __global__ void attn_probs(float *S, const float *L, unsigned nseq, unsigned seq, unsigned nh) {
-    const unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+    ROW_THREAD
     if (idx >= nseq * nh * seq) return;
     const unsigned z = idx / seq, i = idx % seq;
     const float li = L[(z / nh * seq + i) * nh + z % nh];
     float *row = S + idx * seq;
-    for (unsigned j = 0; j <= i; j++) row[j] = exp_r2(row[j] - li);
-    for (unsigned j = i + 1u; j < seq; j++) row[j] = 0.0f;
+    for (unsigned c = lane; c < seq; c += LANES) row[c] = c <= i ? exp_r2(row[c] - li) : 0.0f;
 }
 
 // In place on GV: dS_ij = P_ij (GV_ij - D_i); entries past the diagonal become 0.
 extern "C" __global__ void attn_dscore(float *GV, const float *P, const float *D, unsigned nseq, unsigned seq, unsigned nh) {
-    const unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+    ROW_THREAD
     if (idx >= nseq * nh * seq) return;
     const unsigned z = idx / seq, i = idx % seq;
     const float di = D[(z / nh * seq + i) * nh + z % nh];
     float *row = GV + idx * seq;
     const float *p = P + idx * seq;
-    for (unsigned j = 0; j <= i; j++) row[j] = p[j] * (row[j] - di);
-    for (unsigned j = i + 1u; j < seq; j++) row[j] = 0.0f;
+    for (unsigned c = lane; c < seq; c += LANES) row[c] = c <= i ? p[c] * (row[c] - di) : 0.0f;
 }
 
-// D_i = dO_i . O_i, one thread per (row, head).
+// D_i = dO_i . O_i, one row per (row, head).
 extern "C" __global__ void attn_delta(const float *O, const float *G, float *D, unsigned rows, unsigned hd) {
-    const unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+    static __shared__ float red[ROWS * LANES];
+    ROW_THREAD
     if (idx >= rows) return;
     float s = 0.0f;
-    for (unsigned c = 0; c < hd; c++) s = fmaf(O[idx * hd + c], G[idx * hd + c], s);
-    D[idx] = s;
+    for (unsigned c = lane; c < hd; c += LANES) s = fmaf(O[idx * hd + c], G[idx * hd + c], s);
+    red[threadIdx.x] = s;
+    __syncthreads();
+    if (lane == 0) {
+        s = 0.0f;
+        for (unsigned u = 0; u < LANES; u++) s += red[warp * LANES + u];
+        D[idx] = s;
+    }
 }
 
 // OUT[row][kv head][c] = sum over the group's heads of PART[row][head][c], in head order.

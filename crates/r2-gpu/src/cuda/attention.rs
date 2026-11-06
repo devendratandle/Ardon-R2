@@ -25,7 +25,9 @@ pub struct Shape {
 /// As `BM`, `BN` in `kernels/attention.cu`, and its thread grid.
 const TILE: u32 = 64;
 const GEMM_BLOCK: [u32; 3] = [8, 8, 1];
-const ROW_THREADS: u32 = 64;
+/// As `ROWS` to a block in `kernels/attention.cu`, a warp of 32 threads to each.
+const ROW_BLOCK: u32 = 256;
+const LANES: usize = 32;
 const FLAT: u32 = 256;
 
 const PTX: &str = include_str!("kernels/attention.ptx");
@@ -135,7 +137,7 @@ fn tiled(ks: &Kernels, sh: &Shape, tri: bool, a: (&Tensor, Layout), b: (&Tensor,
 }
 
 fn rows_launch(k: &Kernel, threads: usize, block: u32, args: &[Arg]) -> Option<()> {
-    k.launch([(threads as u32).div_ceil(block), 1, 1], [block, 1, 1], args).ok()?;
+    k.launch([u32::try_from(threads.div_ceil(block as usize)).ok()?, 1, 1], [block, 1, 1], args).ok()?;
     mark(1);
     Some(())
 }
@@ -188,7 +190,7 @@ fn forward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, s
     grown(&mut sc.p, pair_len(sh)?)?;
     let p = sc.p.as_ref()?;
     product(ks, sh, true, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
-    rows_launch(&ks.softmax, sh.nseq * sh.nh * seq, ROW_THREADS,
+    rows_launch(&ks.softmax, sh.nseq * sh.nh * seq * LANES, ROW_BLOCK,
                 &[Arg::F(p), Arg::F(lse), Arg::Int(sh.nseq as u32), Arg::Int(seq as u32), Arg::Int(sh.nh as u32)])?;
     product(ks, sh, false, (p, lp), (v, lkv), (o, lq), seq, seq, hd, 1.0)
 }
@@ -215,7 +217,7 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
     let (lq, lkv, lp) = (Layout::rows(sh, sh.nh, false), Layout::rows(sh, sh.nkv, true), Layout::pairs(sh));
     let int = Arg::Int;
     let (nseq_a, seq_a, nh_a) = (int(sh.nseq as u32), int(seq as u32), int(sh.nh as u32));
-    let row_threads = sh.nseq * sh.nh * seq;
+    let row_threads = sh.nseq * sh.nh * seq * LANES;
 
     let mut guard = SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
     let sc = guard.get_or_insert_with(Scratch::default);
@@ -228,13 +230,13 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
     }
     let (p, ds) = (sc.p.as_ref()?, sc.ds.as_ref()?);
 
-    rows_launch(&ks.delta, rows * sh.nh, ROW_THREADS, &[Arg::F(o), Arg::F(g), Arg::F(delta), int((rows * sh.nh) as u32), int(hd as u32)])?;
+    rows_launch(&ks.delta, rows * sh.nh * LANES, ROW_BLOCK, &[Arg::F(o), Arg::F(g), Arg::F(delta), int((rows * sh.nh) as u32), int(hd as u32)])?;
     // P from the forward's L
     product(ks, sh, true, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
-    rows_launch(&ks.probs, row_threads, ROW_THREADS, &[Arg::F(p), Arg::F(lse), nseq_a, seq_a, nh_a])?;
+    rows_launch(&ks.probs, row_threads, ROW_BLOCK, &[Arg::F(p), Arg::F(lse), nseq_a, seq_a, nh_a])?;
     // dS = P (dO.V - D)
     product(ks, sh, true, (g, lq), (v, lkv.t()), (ds, lp), seq, hd, seq, 1.0)?;
-    rows_launch(&ks.dscore, row_threads, ROW_THREADS, &[Arg::F(ds), Arg::F(p), Arg::F(delta), nseq_a, seq_a, nh_a])?;
+    rows_launch(&ks.dscore, row_threads, ROW_BLOCK, &[Arg::F(ds), Arg::F(p), Arg::F(delta), nseq_a, seq_a, nh_a])?;
     // dV and dK per head: straight into the output when each kv head has one
     // query head, into a partial when a group has to be summed
     let (tv, tk) = if group > 1 { (sc.part_v.as_ref()?, sc.part_k.as_ref()?) } else { (dv, dk) };
