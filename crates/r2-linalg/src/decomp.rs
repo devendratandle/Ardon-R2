@@ -515,239 +515,27 @@ pub fn dgesvd_full(
 /// after it. Without vectors, U and Vᵀ come back empty.
 fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
     -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinalgError> {
-    use rayon::prelude::*;
     if a.len() != m * n { return Err(LinalgError::InvalidShape("SVD: A shape".into())); }
     if m < n { return Err(LinalgError::InvalidShape("SVD: need m >= n".into())); }
     if n == 0 { return Ok((vec![], vec![], vec![])); }
-    // Work above which a column / row sweep forks.
-    const PAR: usize = 1 << 15;
 
-    // ── Phase 1: bidiagonalize A → U₁ · B · V₁ᵀ ─────────────────────
-    //
-    // Apply left Householders H_k from the LEFT to a working copy of A
-    // (so A becomes upper bidiagonal in-place). Store each Householder
-    // vector (full m-length) and its `tau` so we can reconstruct U₁
-    // afterwards by applying them in reverse order to I_{m×n}.
-    // Same scheme for right Householders G_k → V₁.
-    //
-    // Why store-then-apply rather than accumulate during bidiagonalization?
-    // U₁ is the first n columns of an m×m orthogonal matrix. Maintaining
-    // only m×n during right-multiplication by m×m Householders requires
-    // column data outside the m×n window (mathematically). The standard
-    // LAPACK fix (`dorgbr` after `dgebrd`) is to defer the build: store
-    // the vectors, then apply them in reverse to the thin identity. This
-    // produces a numerically clean orthonormal U₁ at the same asymptotic
-    // cost.
-    let mut work = a.to_vec();
-    let mut left_vs: Vec<Vec<f64>> = Vec::with_capacity(n); // each length m
-    let mut left_taus: Vec<f64> = Vec::with_capacity(n);
-    let mut right_vs: Vec<Vec<f64>> = Vec::with_capacity(n); // each length n
-    let mut right_taus: Vec<f64> = Vec::with_capacity(n);
-
-    let mut d_diag = vec![0.0_f64; n];           // bidiagonal main diag
-    let mut e_super = vec![0.0_f64; n.saturating_sub(1)]; // superdiag
-
-    // Scratch buffer for Householder vector (length m, reused).
-    let mut hv = vec![0.0_f64; m];
-
-    for k in 0..n {
-        // ── Left Householder: zero work[k+1:m, k] ─────────────────────
-        let mut norm_sq = 0.0_f64;
-        for i in k..m {
-            let v = work[k * m + i];
-            norm_sq += v * v;
-        }
-        let norm = norm_sq.sqrt();
-        if norm > 1e-30 {
-            let akk = work[k * m + k];
-            let sign = if akk >= 0.0 { 1.0 } else { -1.0 };
-            let alpha = -sign * norm;
-            // Build full m-length Householder vector v (zero above k).
-            for i in 0..k { hv[i] = 0.0; }
-            hv[k] = akk - alpha;
-            for i in (k + 1)..m { hv[i] = work[k * m + i]; }
-            let v_norm_sq: f64 = (k..m).map(|i| hv[i] * hv[i]).sum();
-            if v_norm_sq > 1e-30 {
-                let tau = 2.0 / v_norm_sq;
-
-                // Apply H_k from left to work[k:m, k:n].
-                // Column k becomes [alpha, 0, ..., 0]^T effectively; we set
-                // it directly to skip the redundant multiply.
-                work[k * m + k] = alpha;
-                for i in (k + 1)..m { work[k * m + i] = 0.0; }
-                // Other columns j ∈ (k+1)..n, each independent.
-                let hvk = &hv[k..m];
-                let app = |col: &mut [f64]| {
-                    let c = &mut col[k..m];
-                    let scale = tau * crate::simd::dot(c, hvk);
-                    crate::simd::axpy(c, -scale, hvk);
-                };
-                let cols = &mut work[(k + 1) * m..];
-                if (n - k - 1) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
-                else { cols.chunks_mut(m).for_each(app); }
-                // Store the Householder vector (full m-length, zeros above k)
-                // and its tau for later left-to-right application onto U₁.
-                left_vs.push(if vectors { hv.clone() } else { Vec::new() });
-                left_taus.push(tau);
-            } else {
-                work[k * m + k] = alpha;
-                left_vs.push(vec![0.0; m]);
-                left_taus.push(0.0);
-            }
-            d_diag[k] = alpha;
-        } else {
-            d_diag[k] = work[k * m + k];
-            // Identity placeholder.
-            left_vs.push(vec![0.0; m]);
-            left_taus.push(0.0);
-        }
-
-        // ── Right Householder: zero work[k, k+2:n] ────────────────────
-        // Only meaningful when there are entries beyond k+1 to zero out.
-        // For the last superdiagonal step (k = n-2) there is exactly one
-        // entry at column k+1 = n-1 and we keep it directly as e_super[k]
-        // — no Householder needed (applying one would flip its sign and
-        // corrupt the rows below).
-        if k + 2 < n {
-            // Operate on row k of work, columns (k+1)..n.
-            let mut norm_sq = 0.0_f64;
-            for j in (k + 1)..n {
-                let v = work[j * m + k];
-                norm_sq += v * v;
-            }
-            let norm = norm_sq.sqrt();
-            if norm > 1e-30 {
-                let akk1 = work[(k + 1) * m + k];
-                let sign = if akk1 >= 0.0 { 1.0 } else { -1.0 };
-                let alpha = -sign * norm;
-                // Build n-length right Householder vector vr (zero up to k).
-                let mut vr = vec![0.0_f64; n];
-                vr[k + 1] = akk1 - alpha;
-                for j in (k + 2)..n { vr[j] = work[j * m + k]; }
-                let v_norm_sq: f64 = ((k + 1)..n).map(|j| vr[j] * vr[j]).sum();
-                if v_norm_sq > 1e-30 {
-                    let tau = 2.0 / v_norm_sq;
-
-                    // Apply G_k from the right to work[k:m, k+1:n].
-                    // Row k: set work[k+1, k] = alpha, work[j, k] = 0 for j > k+1.
-                    work[(k + 1) * m + k] = alpha;
-                    for j in (k + 2)..n { work[j * m + k] = 0.0; }
-                    // Rows (k+1)..m: w_i ← w_i (I - tau v vᵀ), i.e. for each row,
-                    //   row_i[k+1..n] ← row_i[k+1..n] - tau · (row_i · vr) · vrᵀ.
-                    // Written row by row this strides n·m apart per step; done
-                    // column-contiguous in two passes instead: dots[i] =
-                    // Σ_j vr[j]·work[i, j] (an axpy per column, rows split
-                    // across threads), then column j −= τ·vr[j]·dots.
-                    let r0 = k + 1;
-                    let mut dots = vec![0.0_f64; m - r0];
-                    {
-                        let w = &work;
-                        let vrr = &vr;
-                        let fill = |(ci, ch): (usize, &mut [f64])| {
-                            let i0 = r0 + ci * 256;
-                            for j in (k + 1)..n {
-                                let vj = vrr[j];
-                                if vj == 0.0 { continue; }
-                                let src = &w[j * m + i0..j * m + i0 + ch.len()];
-                                crate::simd::axpy(ch, vj, src);
-                            }
-                        };
-                        if (m - r0) * (n - k - 1) >= PAR { dots.par_chunks_mut(256).enumerate().for_each(fill); }
-                        else { dots.chunks_mut(256).enumerate().for_each(fill); }
-                    }
-                    let vrr = &vr;
-                    let upd = |(jj, col): (usize, &mut [f64])| {
-                        let s = tau * vrr[k + 1 + jj];
-                        if s == 0.0 { return; }
-                        crate::simd::axpy(&mut col[r0..m], -s, &dots);
-                    };
-                    let cols = &mut work[(k + 1) * m..n * m];
-                    if (m - r0) * (n - k - 1) >= PAR { cols.par_chunks_mut(m).enumerate().for_each(upd); }
-                    else { cols.chunks_mut(m).enumerate().for_each(upd); }
-                    // Store the right Householder vector and tau.
-                    right_vs.push(vr);
-                    right_taus.push(tau);
-                } else {
-                    work[(k + 1) * m + k] = alpha;
-                    right_vs.push(vec![0.0; n]);
-                    right_taus.push(0.0);
-                }
-                if k < e_super.len() { e_super[k] = alpha; }
-            } else if k < e_super.len() {
-                e_super[k] = work[(k + 1) * m + k];
-                right_vs.push(vec![0.0; n]);
-                right_taus.push(0.0);
-            } else {
-                right_vs.push(vec![0.0; n]);
-                right_taus.push(0.0);
-            }
-        } else if k + 1 < n && k < e_super.len() {
-            // No right Householder needed (only one trailing entry, which
-            // becomes e_super[k] directly).
-            e_super[k] = work[(k + 1) * m + k];
-        }
-    }
-
-    // ── Build U₁ (m×n): apply stored left Householders in reverse order
-    // to the thin identity I_{m×n} (`X[i,j] = δ_{ij}` for j < n, else 0). ─
-    //
-    // X starts as I_{m×n}. For k = n-1 down to 0:
-    //   X ← H_k · X
-    //   H_k = I_m - τ_k · v_k · v_kᵀ acts on rows k..m only (v_k zero above k).
-    // Resulting X = H_0 · H_1 · ... · H_{n-1} · I_{m×n} = U₁.
-    // Columns j < k are still e_j there — zero on rows k.. — so only
-    // columns k.. change, each independently.
-    let mut u1 = Vec::new();
-    if vectors {
-        u1 = vec![0.0_f64; m * n];
-        for i in 0..n { u1[i * m + i] = 1.0; }
-        for k in (0..n).rev() {
-            let tau = left_taus[k];
-            if tau == 0.0 { continue; }
-            let vk = &left_vs[k][k..m];
-            let app = |col: &mut [f64]| {
-                let c = &mut col[k..m];
-                let dot = crate::simd::dot(c, vk);
-                let scale = tau * dot;
-                crate::simd::axpy(c, -scale, vk);
-            };
-            let cols = &mut u1[k * m..];
-            if (n - k) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
-            else { cols.chunks_mut(m).for_each(app); }
-        }
-    }
-
-    // ── Build V₁ (n×n): apply stored right Householders in reverse to I_n.
-    //
-    // V₁ = G_0 · G_1 · ... · G_{last}, built by left-multiplying I_n in
-    // reverse: for k = last down to 0, X ← G_k · X. Each G_k acts on rows
-    // (k+1)..n only (vr_k zero up to and including k).
-    let mut v1 = Vec::new();
-    if vectors {
-        v1 = vec![0.0_f64; n * n];
-        for i in 0..n { v1[i * n + i] = 1.0; }
-        for k in (0..right_vs.len()).rev() {
-            let tau = right_taus[k];
-            if tau == 0.0 { continue; }
-            let vk = &right_vs[k][k + 1..n];
-            let app = |col: &mut [f64]| {
-                let c = &mut col[k + 1..n];
-                let dot = crate::simd::dot(c, vk);
-                let scale = tau * dot;
-                crate::simd::axpy(c, -scale, vk);
-            };
-            let cols = &mut v1[(k + 1) * n..];
-            if (n - k - 1) * (n - k - 1) >= PAR { cols.par_chunks_mut(n).for_each(app); }
-            else { cols.chunks_mut(n).for_each(app); }
-        }
-    }
+    // ── Phase 1: bidiagonalize A → U₁ · B · V₁ᵀ (`reduce`, blocked) ─────
+    let scale = crate::reduce::safe_scale(a);
+    let scaled: Vec<f64>;
+    let a = if scale == 1.0 { a } else { scaled = a.iter().map(|x| x / scale).collect(); &scaled };
+    let (d_diag, e_super, left, right) = crate::reduce::bidiagonalize(a, m, n, vectors)?;
+    let unscale = |s: Vec<f64>| -> Vec<f64> { if scale == 1.0 { s } else { s.into_iter().map(|x| x * scale).collect() } };
 
     // ── Phase 2: diagonalize B = U₂ · diag(σ) · V₂ᵀ on B itself (`dbdsqr`) ─
     //
     // Not through BᵀB, which squares the condition number: every rotation here
     // is orthogonal, so U₂ and V₂ stay orthonormal whatever σ is, zero included.
-    if !vectors { return Ok((crate::bdsqr::values(d_diag, e_super)?, vec![], vec![])); }
+    if !vectors { return Ok((unscale(crate::bdsqr::values(d_diag, e_super)?), vec![], vec![])); }
+    let u1 = crate::reduce::form_q(m, n, 0, &left)?;
+    let v1 = crate::reduce::form_q(n, n, 1, &right)?;
+    drop((left, right));
     let (sigma, u2, v2) = crate::bdsqr::full(d_diag, e_super)?;
+    let sigma = unscale(sigma);
 
     // ── Assemble U = U₁ · U₂ (m×n) and V = V₁ · V₂ (n×n) ────────────
     // Both on the packed GEMM kernel (these were strided triple loops).
