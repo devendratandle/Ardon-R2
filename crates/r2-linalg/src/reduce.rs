@@ -76,17 +76,38 @@ fn minus_low_rank(y: &mut [f64], a: &[f64], b: &[f64], ld: usize, at: usize, col
     }
 }
 
-/// `C −= A·Bᵀ`, with `a` and `b` of `b` columns taken from row `at`, on GEMM.
+/// Columns per parallel chunk of an update: what stays in L2, as `apply_block_reflector`
+/// measured it.
+fn chunk_columns(rows: usize) -> usize { if rows * 64 * 8 <= 1 << 19 { 64 } else { 32 } }
+
+/// `C −= A·Bᵀ`, with `a` and `b` of `depth` columns taken from row `ar` and `br`: small
+/// serial products, a chunk of columns to a thread, so one pass goes over `C` per panel.
+#[allow(clippy::too_many_arguments)]
 fn trailing_update(c: &mut [f64], rows: usize, cols: usize, a: &[f64], lda: usize, ar: usize,
-                   b: &[f64], ldb: usize, br: usize, depth: usize) -> Result<(), LinalgError> {
-    if rows == 0 || cols == 0 || depth == 0 { return Ok(()); }
-    let mut am = vec![0.0f64; rows * depth];
-    let mut bt = vec![0.0f64; depth * cols];
-    for p in 0..depth {
-        am[p * rows..(p + 1) * rows].copy_from_slice(&a[p * lda + ar..p * lda + ar + rows]);
-        for j in 0..cols { bt[j * depth + p] = b[p * ldb + br + j]; }
-    }
-    crate::dgemm(rows, cols, depth, -1.0, &am, &bt, 1.0, c)
+                   b: &[f64], ldb: usize, br: usize, depth: usize) {
+    use crate::gemm::{f64 as g, Trans};
+    if rows == 0 || cols == 0 || depth == 0 { return; }
+    let mut at = vec![0.0f64; rows * depth];
+    for p in 0..depth { at[p * rows..(p + 1) * rows].copy_from_slice(&a[p * lda + ar..p * lda + ar + rows]); }
+    let width = chunk_columns(rows);
+    let at = &at;
+    // Column-major C is row-major Cᵀ, and a's buffer is row-major Aᵀ: Cᵀ −= B·Aᵀ.
+    c.par_chunks_mut(width * rows).enumerate().for_each(|(ci, chunk)| {
+        let cw = chunk.len() / rows;
+        let mut bn = vec![0.0f64; cw * depth];
+        for j in 0..cw {
+            for p in 0..depth { bn[j * depth + p] = -b[p * ldb + br + ci * width + j]; }
+        }
+        g::gemm_into(&bn, Trans::No, at, Trans::No, cw, depth, rows, chunk, false);
+    });
+}
+
+/// `dst` of `rows x cols` from the trailing part of `src`, its own buffer reused.
+fn trailing_copy(dst: &mut Vec<f64>, src: &[f64], lda: usize, skip: usize, rows: usize, cols: usize) {
+    dst.resize(rows * cols, 0.0);
+    dst.par_chunks_mut(rows).enumerate().for_each(|(c, col)| {
+        col.copy_from_slice(&src[(skip + c) * lda + skip..(skip + c) * lda + skip + rows]);
+    });
 }
 
 /// A reduction's output: the condensed matrix and, if asked for, its reflectors.
@@ -99,6 +120,7 @@ pub(crate) fn tridiagonalize(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>,
     let mut e = Vec::with_capacity(n.saturating_sub(1));
     let mut refl = Reflectors { vs: Vec::with_capacity(n), taus: Vec::with_capacity(n) };
     let mut t = a.to_vec();
+    let mut spare = Vec::new();
     let mut m = n;
     while m > 0 {
         let b = PANEL.min(m);
@@ -136,13 +158,10 @@ pub(crate) fn tridiagonalize(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>,
         if b >= m { break; }
         // The rest of the matrix, shrunk to what is left.
         let rest = m - b;
-        let mut tail = vec![0.0f64; rest * rest];
-        for c in 0..rest {
-            tail[c * rest..(c + 1) * rest].copy_from_slice(&t[(b + c) * m + b..(b + c + 1) * m]);
-        }
-        trailing_update(&mut tail, rest, rest, &v, m, b, &w, m, b, b)?;
-        trailing_update(&mut tail, rest, rest, &w, m, b, &v, m, b, b)?;
-        t = tail;
+        trailing_copy(&mut spare, &t, m, b, rest, rest);
+        trailing_update(&mut spare, rest, rest, &v, m, b, &w, m, b, b);
+        trailing_update(&mut spare, rest, rest, &w, m, b, &v, m, b, b);
+        std::mem::swap(&mut t, &mut spare);
         m = rest;
     }
     Ok((d, e, refl))
@@ -158,6 +177,7 @@ pub(crate) fn bidiagonalize(a: &[f64], m0: usize, n0: usize, keep: bool)
     let mut left = Reflectors { vs: Vec::new(), taus: Vec::new() };
     let mut right = Reflectors { vs: Vec::new(), taus: Vec::new() };
     let mut t = a.to_vec();
+    let mut spare = Vec::new();
     let (mut m, mut n) = (m0, n0);
     while n > 0 {
         let b = PANEL.min(n);
@@ -227,11 +247,10 @@ pub(crate) fn bidiagonalize(a: &[f64], m0: usize, n0: usize, keep: bool)
         }
         if b >= n { break; }
         let (rm, rn) = (m - b, n - b);
-        let mut tail = vec![0.0f64; rm * rn];
-        for c in 0..rn { tail[c * rm..(c + 1) * rm].copy_from_slice(&t[(b + c) * m + b..(b + c + 1) * m]); }
-        trailing_update(&mut tail, rm, rn, &u, m, b, &y, n, b, b)?;
-        trailing_update(&mut tail, rm, rn, &x, m, b, &v, n, b, b)?;
-        t = tail;
+        trailing_copy(&mut spare, &t, m, b, rm, rn);
+        trailing_update(&mut spare, rm, rn, &u, m, b, &y, n, b, b);
+        trailing_update(&mut spare, rm, rn, &x, m, b, &v, n, b, b);
+        std::mem::swap(&mut t, &mut spare);
         m = rm;
         n = rn;
     }
@@ -251,7 +270,6 @@ pub(crate) fn form_q(m: usize, n: usize, start: usize, r: &Reflectors) -> Result
         let r0 = start + k0;
         let rows = m - r0;
         if r0 >= n { k1 = k0; continue; }
-        let cols = n - r0;
         // V, zeros above each reflector's first row.
         let mut v = vec![0.0f64; rows * b];
         for p in 0..b {
@@ -271,17 +289,22 @@ pub(crate) fn form_q(m: usize, n: usize, start: usize, r: &Reflectors) -> Result
                 t[p * b + row] = -tau * s;
             }
         }
-        // Q[r0.., r0..] ← (I − V T Vᵀ) Q[r0.., r0..].
-        let mut sub = vec![0.0f64; rows * cols];
-        for c in 0..cols { sub[c * rows..(c + 1) * rows].copy_from_slice(&q[(r0 + c) * m + r0..(r0 + c + 1) * m]); }
-        let mut vt = vec![0.0f64; b * rows];
-        for p in 0..b { for i in 0..rows { vt[i * b + p] = v[p * rows + i]; } }
-        let mut w = vec![0.0f64; b * cols];
-        crate::dgemm(b, cols, rows, 1.0, &vt, &sub, 0.0, &mut w)?;
-        let mut tw = vec![0.0f64; b * cols];
-        crate::dgemm(b, cols, b, 1.0, &t, &w, 0.0, &mut tw)?;
-        crate::dgemm(rows, cols, b, -1.0, &v, &tw, 1.0, &mut sub)?;
-        for c in 0..cols { q[(r0 + c) * m + r0..(r0 + c + 1) * m].copy_from_slice(&sub[c * rows..(c + 1) * rows]); }
+        // Q[r0.., r0..] ← (I − V T Vᵀ) Q[r0.., r0..], a chunk of columns to a thread.
+        // Row-major view: a column-major chunk C is Cᵀ, V's buffer is Vᵀ, T's is Tᵀ:
+        //   Wᵀ = Cᵀ·V,   W₂ᵀ = Wᵀ·Tᵀ,   Cᵀ −= W₂ᵀ·Vᵀ.
+        use crate::gemm::{f64 as g, Trans};
+        let width = chunk_columns(rows);
+        let (vr, tr) = (&v, &t);
+        q[r0 * m..].par_chunks_mut(width * m).for_each(|block| {
+            let cw = block.len() / m;
+            let mut c = vec![0.0f64; rows * cw];
+            for j in 0..cw { c[j * rows..(j + 1) * rows].copy_from_slice(&block[j * m + r0..(j + 1) * m]); }
+            let w = g::gemm(&c, Trans::No, vr, Trans::Yes, cw, rows, b, false);
+            let mut w2 = g::gemm(&w, Trans::No, tr, Trans::No, cw, b, b, false);
+            for x in w2.iter_mut() { *x = -*x; }
+            g::gemm_into(&w2, Trans::No, vr, Trans::No, cw, b, rows, &mut c, false);
+            for j in 0..cw { block[j * m + r0..(j + 1) * m].copy_from_slice(&c[j * rows..(j + 1) * rows]); }
+        });
         k1 = k0;
     }
     Ok(q)

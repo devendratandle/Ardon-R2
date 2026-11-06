@@ -24,7 +24,8 @@ A change stays only if it passes `benchmarks/llm/gate.py`:
 
 ## Rules of evidence
 
-- Only a real step total proves a gain, and under 10% stays unproven.
+- Only a real step total proves a gain, and under 2.5% stays unproven (maintainer, 2026-11-07; it was 10%).
+  A gain also has to exceed what the same side repeats by, in one window on one card, in fair order.
 - A small gain may stay if its row improves in every round, the step gets no worse, and
   the code stays simple.
 - Figures from one run are compared within that run. The card's speed changes between runs.

@@ -24,7 +24,7 @@ const LEAF: usize = 32;
 
 /// One root of the secular equation: `λ = d[origin] + mu`.
 #[derive(Clone, Copy)]
-struct Root { origin: usize, mu: f64 }
+pub(crate) struct Root { pub origin: usize, pub mu: f64 }
 
 /// `f(μ) = 1 + ρ Σ z²ᵢ / (δᵢ − μ)` split at the pole `split` (ψ: below it, φ: from it
 /// up), with derivatives and the bound on `f`'s rounding.
@@ -53,18 +53,19 @@ fn secular(delta: &[f64], z2: &[f64], rho: f64, split: usize, mu: f64) -> Secula
 /// Each iteration fits the two nearest poles to `f`'s value and slope (Bunch, Nielsen
 /// and Sorensen) and takes the fit's root, inside a bracket that always holds the
 /// answer; a fit that leaves the bracket gives way to bisection.
-fn solve_root(d: &[f64], z2: &[f64], rho: f64, norm2: f64, j: usize, delta: &mut [f64]) -> Root {
-    let k = d.len();
+pub(crate) fn solve_root(pole: &impl Fn(usize, usize) -> f64, z2: &[f64], rho: f64, norm2: f64, j: usize, delta: &mut [f64]) -> Root {
+    let k = z2.len();
     let last = j + 1 == k;
-    let gap = if last { rho * norm2 } else { d[j + 1] - d[j] };
+    let gap = if last { rho * norm2 } else { pole(j + 1, j) };
+    if k == 1 { return Root { origin: 0, mu: gap }; }
 
     // Which pole the root is nearer decides the origin: the distance to it is what
     // can be computed to full relative accuracy.
     let mid = 0.5 * gap;
-    for (x, di) in delta.iter_mut().zip(d) { *x = di - d[j]; }
+    for (i, x) in delta.iter_mut().enumerate() { *x = pole(i, j); }
     let at_mid = secular(delta, z2, rho, j + 1, mid);
     let origin = if last || at_mid.f >= 0.0 { j } else { j + 1 };
-    if origin != j { for (x, di) in delta.iter_mut().zip(d) { *x = di - d[origin]; } }
+    if origin != j { for (i, x) in delta.iter_mut().enumerate() { *x = pole(i, origin); } }
     let (mut lo, mut hi) = if last {
         (if at_mid.f >= 0.0 { 0.0 } else { mid }, if at_mid.f >= 0.0 { mid } else { gap })
     } else if origin == j { (0.0, mid) } else { (-mid, 0.0) };
@@ -88,9 +89,7 @@ fn solve_root(d: &[f64], z2: &[f64], rho: f64, norm2: f64, j: usize, delta: &mut
         let qa = c;
         let qb = -(c * (a + b) + p + q);
         let qc = c * a * b + p * b + q * a;
-        let next = if k == 1 {
-            f64::NAN
-        } else if qa == 0.0 {
+        let next = if qa == 0.0 {
             -qc / qb
         } else {
             let disc = qb * qb - 4.0 * qa * qc;
@@ -174,10 +173,11 @@ fn merge(mut d: Vec<f64>, mut z: Vec<f64>, rho: f64, mut q: Vec<f64>, n: usize, 
     let norm2: f64 = z2.iter().sum();
 
     // The roots, and for each, its distance from every pole: `dist[j][i] = dᵢ − λⱼ`.
+    let pole = |i: usize, o: usize| ds[i] - ds[o];
     let mut dist = vec![0.0f64; k * k];
     let roots: Vec<Root> = dist.par_chunks_mut(k).enumerate()
         .map(|(j, col)| {
-            let root = solve_root(&ds, &z2, rho, norm2, j, col);
+            let root = solve_root(&pole, &z2, rho, norm2, j, col);
             for (x, di) in col.iter_mut().zip(&ds) { *x = (di - ds[root.origin]) - root.mu; }
             root
         }).collect();

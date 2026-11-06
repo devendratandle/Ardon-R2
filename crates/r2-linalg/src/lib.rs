@@ -27,6 +27,7 @@ pub mod decomp;
 pub mod eigen;
 pub mod symeig;
 mod bdsqr;
+mod bdsdc;
 mod reduce;
 mod stedc;
 mod simd;

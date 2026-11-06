@@ -15,6 +15,8 @@ use crate::LinalgError;
 /// Unit roundoff, LAPACK's `dlamch('E')`.
 const EPS: f64 = f64::EPSILON / 2.0;
 const UNFL: f64 = f64::MIN_POSITIVE;
+/// From this size the vectors come from `bdsdc`.
+const DC_MIN: usize = 64;
 
 /// `(c, s, r)` with `[c s; -s c] [f; g] = [r; 0]`, `c >= 0` (`dlartg`).
 #[inline]
@@ -313,22 +315,41 @@ pub(crate) fn values(mut d: Vec<f64>, mut e: Vec<f64>) -> Result<Vec<f64>, Linal
 /// The SVD `B = U diag(σ) Vᵀ` of the upper bidiagonal `d`, `e`: σ descending, `U` and
 /// `V` column-major n x n, and the largest-magnitude entry of each column of `V`
 /// positive, the sign this library has always given.
-pub(crate) fn full(mut d: Vec<f64>, mut e: Vec<f64>) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinalgError> {
+pub(crate) fn full(d: Vec<f64>, e: Vec<f64>) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinalgError> {
+    let n = d.len();
+    let (sigma, mut u, mut v) = if n >= DC_MIN {
+        // Divide and conquer for the vectors; these sweeps for the values, whose relative
+        // accuracy it does not have. The two agree to rounding of the largest.
+        let (_, u, v) = crate::bdsdc::solve(&d, &e)?;
+        (values(d, e)?, u, v)
+    } else {
+        by_qr(d, e)?
+    };
+    for k in 0..n {
+        let vk = &mut v[k * n..(k + 1) * n];
+        let largest = vk.iter().copied().fold(0.0f64, |a, x| if x.abs() > a.abs() { x } else { a });
+        if largest < 0.0 {
+            for x in vk.iter_mut() { *x = -*x; }
+            for x in &mut u[k * n..(k + 1) * n] { *x = -*x; }
+        }
+    }
+    Ok((sigma, u, v))
+}
+
+/// [`full`] by the QR sweeps alone, whatever the size and with no sign convention:
+/// σ descending, and `u_k σ_k v_kᵀ` summing to the bidiagonal.
+pub(crate) fn by_qr(mut d: Vec<f64>, mut e: Vec<f64>) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinalgError> {
     let n = d.len();
     let mut sides = Sides { u: Rotations::identity(n), v: Rotations::identity(n) };
     iterate(&mut d, &mut e, Some(&mut sides))?;
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&i, &j| d[j].abs().total_cmp(&d[i].abs()));
-    let mut u = sides.u.into_columns(&order);
+    let u = sides.u.into_columns(&order);
     let mut v = sides.v.into_columns(&order);
     let mut sigma = Vec::with_capacity(n);
     for (k, &old) in order.iter().enumerate() {
         sigma.push(d[old].abs());
-        let vk = &mut v[k * n..(k + 1) * n];
-        let largest = vk.iter().copied().fold(0.0f64, |a, x| if x.abs() > a.abs() { x } else { a });
-        // a negative value moves its sign to one side, then both flip together
-        if (d[old] < 0.0) != (largest < 0.0) { for x in vk.iter_mut() { *x = -*x; } }
-        if largest < 0.0 { for x in &mut u[k * n..(k + 1) * n] { *x = -*x; } }
+        if d[old] < 0.0 { for x in &mut v[k * n..(k + 1) * n] { *x = -*x; } }
     }
     Ok((sigma, u, v))
 }

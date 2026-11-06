@@ -11,6 +11,19 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### `svd()` and `eigen()`: bidiagonal QR, divide and conquer, blocked reductions — 2026-11-07
+
+- **`svd()` is more accurate.** Singular vectors went through `BᵀB`, which squares the
+  condition number: a 1000 x 1000 product reconstructed to 1.8e-11, and a low-rank one to
+  1.4e-9. They now reconstruct to 9e-14 and 1.1e-13 (R: 1.6e-13 on the first). Hilbert(12), whose
+  smallest values are below rounding, matches R's residuals. Values alone use the zero-shift QR
+  of Demmel and Kahan, for high relative accuracy.
+- **Faster at n = 1000, six threads:** `svd()` 1.02 s to 0.59 s, values alone 0.46 s to 0.33 s,
+  symmetric `eigen()` 0.34 s to 0.29 s. R 4.5.3 takes 2.20, 0.88 and 1.25 s on the same machine.
+  From n = 64 vectors come from divide and conquer (Gu and Eisenstat), and the reductions and
+  `Q` are blocked onto GEMM.
+- Matrices of extreme scale are divided down first, so their squares no longer overflow.
+
 ### Training on NVIDIA GPUs through CUDA — 2026-11-06
 
 - **`--features cuda`**: `llm.train` and `llm.finetune` with `device = "gpu"`, and

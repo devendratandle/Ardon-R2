@@ -43,7 +43,6 @@ to be worse than documented and was fixed here rather than scheduled.
 | `read.parquet` cannot read zstd-compressed files — the only zstd implementation is C, and R2 ships none. snappy/gzip/lz4/brotli read fine; recompress zstd files with snappy | Low — a `pyarrow` one-liner | by design — needs a pure-Rust zstd in the `parquet` crate |
 | `confint(glm)` is the Wald interval (R's `confint.default`), not the profile-likelihood interval R's `confint.glm` computes | Low — they agree away from the boundary | **v0.5.0** |
 | `format(Sys.time())` prints UTC where R prints local time; `Sys.time() - t` is numeric, not `difftime` | Low | **next release** |
-| Divide-and-conquer SVD/eigensolver (speed on large/wide matrices; `prcomp` on ≳100 features) | Low — perf, not correctness | **v1.0** |
 | Oracle parallelism-threshold auto-calibration (hardware awareness) | Low — perf tuning | **v1.0+** |
 | Apple-Silicon JIT (falls back to interpreter — upstream Cranelift aarch64 PLT) | Low — correct, just slower on ARM Mac | upstream |
 
@@ -144,10 +143,6 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ## Linear algebra
 
-- **No divide-and-conquer SVD/eigensolver.** `svd()`/`eigen()` are correct
-  and accurate but use QR-iteration; very large or very wide matrices
-  (`prcomp` on ≳100 features) are slower than R's LAPACK D&C routines. This
-  is a *speed* gap, not an accuracy one. v1.0.
 
 ## Graphics
 
