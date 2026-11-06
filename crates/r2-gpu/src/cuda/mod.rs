@@ -17,6 +17,7 @@
 #[allow(unsafe_code)]
 pub mod ffi;
 pub mod attention;
+pub mod cluster;
 pub mod elementwise;
 pub mod gemm;
 pub mod optim;

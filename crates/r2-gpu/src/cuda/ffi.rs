@@ -95,6 +95,8 @@ table!(Cu {
     ctx_sync = "cuCtxSynchronize": fn() -> CuResult;
     alloc = "cuMemAlloc_v2": fn(*mut DevPtr, usize) -> CuResult;
     free = "cuMemFree_v2": fn(DevPtr) -> CuResult;
+    alloc_host = "cuMemAllocHost_v2": fn(*mut *mut c_void, usize) -> CuResult;
+    free_host = "cuMemFreeHost": fn(*mut c_void) -> CuResult;
     h_to_d = "cuMemcpyHtoD_v2": fn(DevPtr, *const c_void, usize) -> CuResult;
     d_to_h = "cuMemcpyDtoH_v2": fn(*mut c_void, DevPtr, usize) -> CuResult;
     set32 = "cuMemsetD32_v2": fn(DevPtr, c_uint, usize) -> CuResult;
@@ -329,6 +331,18 @@ impl<T: Pod> DeviceBuffer<T> {
         let code = unsafe { (self.dev.cu.d_to_h)(out.as_mut_ptr().cast(), self.ptr, self.len * 4) };
         if code == 0 { Ok(out) } else { Err(self.dev.err("cuMemcpyDtoH", code)) }
     }
+
+    /// Read the first `out.len()` elements into `out`, waiting as [`Self::to_vec`]
+    /// does. Pinned memory, a [`HostBuffer`], makes this a direct transfer.
+    pub fn copy_to(&self, out: &mut [T]) -> Result<(), String> {
+        if out.len() > self.len { return Err(format!("read of {} in {} elements", out.len(), self.len)); }
+        if out.is_empty() { return Ok(()); }
+        self.dev.bind()?;
+        // SAFETY: `out` is a live slice, no longer than the allocation, of
+        // 4-byte elements, and `Pod` makes any device bit pattern a valid `T`.
+        let code = unsafe { (self.dev.cu.d_to_h)(out.as_mut_ptr().cast(), self.ptr, out.len() * 4) };
+        if code == 0 { Ok(()) } else { Err(self.dev.err("cuMemcpyDtoH", code)) }
+    }
 }
 
 impl<T: Pod> Drop for DeviceBuffer<T> {
@@ -340,6 +354,55 @@ impl<T: Pod> Drop for DeviceBuffer<T> {
             // nothing queued can reference it after the sync above.
             let _ = unsafe { (self.dev.cu.free)(self.ptr) };
         }
+    }
+}
+
+/// `len` f32 of page-locked host memory, zeroed, freed on drop: what the device
+/// copies to and from directly, and what a gradient exchange sends.
+pub struct HostBuffer { dev: &'static Device, ptr: *mut f32, len: usize }
+// SAFETY: this owns its allocation, and `&mut` access goes through `&mut self`.
+unsafe impl Send for HostBuffer {}
+
+impl HostBuffer {
+    pub fn new(len: usize) -> Result<HostBuffer, String> {
+        let dev = device().map_err(str::to_string)?;
+        let bytes = len.checked_mul(4).filter(|&b| b > 0).ok_or("host buffer size")?;
+        dev.bind()?;
+        let mut p: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `p` is a valid out pointer; the context is current.
+        match unsafe { (dev.cu.alloc_host)(&mut p, bytes) } {
+            0 => {
+                // SAFETY: the allocation is `bytes` long and exclusively ours.
+                unsafe { std::ptr::write_bytes(p.cast::<u8>(), 0, bytes) };
+                Ok(HostBuffer { dev, ptr: p.cast(), len })
+            }
+            c => Err(dev.err("cuMemAllocHost", c)),
+        }
+    }
+    pub fn as_slice(&self) -> &[f32] {
+        // SAFETY: `len` initialized f32 owned by self, for the borrow's life.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        // SAFETY: as `as_slice`, and `&mut self` makes the borrow exclusive.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+    /// The same memory as bytes, for a socket. Any byte pattern is a valid f32.
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: as `as_slice`, over the same `len * 4` bytes.
+        unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.len * 4) }
+    }
+    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
+        // SAFETY: as `as_mut_slice`; any bytes written are a valid f32.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.cast(), self.len * 4) }
+    }
+}
+
+impl Drop for HostBuffer {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` came from cuMemAllocHost; the copies using it are
+        // synchronous, so nothing is still reading it.
+        let _ = unsafe { (self.dev.cu.free_host)(self.ptr.cast()) };
     }
 }
 

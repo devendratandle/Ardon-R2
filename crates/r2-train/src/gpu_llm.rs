@@ -101,6 +101,9 @@ const SCALE_MAX: f32 = 65536.0;
 const SCALE_GROW_EVERY: u32 = 1000;
 
 pub struct GpuTrainer {
+    /// Other processes to average gradients with, each step.
+    #[cfg(feature = "cuda")]
+    pub cluster: Option<r2_gpu::cuda::cluster::Cluster>,
     pub cfg: Config,
     w: Vec<Tensor>,
     /// f16 copies of the GEMM weights under `Mixed` (`None` for the norm
@@ -162,7 +165,7 @@ impl GpuTrainer {
         }
         let w16 = (0..w.len()).map(|_| None).collect();
         let norm_scratch = tz(optim::norm_scratch_len(&sizes))?;
-        Ok(GpuTrainer { cfg: tr.cfg, w, w16, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
+        Ok(GpuTrainer { #[cfg(feature = "cuda")] cluster: None, cfg: tr.cfg, w, w16, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
                         beta2: tr.opt.beta2, eps: tr.opt.eps, sched: tr.sched, t: tr.opt.t, step: tr.step,
                         weight_decay: tr.opt.weight_decay, decay: tr.decay_mask(), clip: tr.clip,
                         last_grad_norm: None, norm_scratch,
@@ -258,6 +261,11 @@ impl GpuTrainer {
             self.clean_steps = 0;
             self.step += 1;
             return Ok(loss);
+        }
+        #[cfg(feature = "cuda")]
+        if let Some(c) = &mut self.cluster {
+            let grads: Vec<&Tensor> = self.g.iter().collect();
+            c.average(&grads, &self.sizes)?;
         }
         // ── Adam, one launch per block; the loss scale divided back out ──
         // Clipping folds into the scale Adam divides by, as on the CPU.

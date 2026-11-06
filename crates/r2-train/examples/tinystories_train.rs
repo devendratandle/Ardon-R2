@@ -383,6 +383,25 @@ fn main() {
 
     let mut curve: Vec<(usize, f32)> = Vec::new();
     let every = (steps / 10).max(1);
+    // R2_WORLD=n, R2_RANK=i: one process per GPU, gradients averaged each step.
+    // Start each with its own CUDA_VISIBLE_DEVICES and working directory.
+    let (world, rank): (usize, usize) = (env("R2_WORLD", 1usize), env("R2_RANK", 0usize));
+    let fnv = |params: &[Vec<f32>]| params.iter().flatten().fold(0xcbf29ce484222325u64, |h, x| {
+        (h ^ x.to_bits() as u64).wrapping_mul(0x100000001b3)
+    });
+    #[cfg(feature = "cuda")]
+    if world > 1 {
+        let Some(g) = gpu_tr.as_mut() else { die("cluster", "R2_WORLD needs R2_GPU=1") };
+        let mut c = r2_gpu::cuda::cluster::Cluster::from_env().unwrap_or_else(|e| die("cluster", e))
+            .unwrap_or_else(|| die("cluster", "no cluster"));
+        // the tokens and the seed decide the weights, so this checks both
+        if !c.agree(fnv(&tr.params)).unwrap_or_else(|e| die("cluster", e)) { die("cluster", "ranks start from different weights"); }
+        println!("  cluster    rank {rank} of {world}, the same starting weights");
+        g.cluster = Some(c);
+    }
+    #[cfg(not(feature = "cuda"))]
+    if world > 1 { die("cluster", "R2_WORLD needs `--features cuda`"); }
+
     let eval_every: usize = env("R2_EVAL_EVERY", 0usize);
     let mut held: Vec<(usize, f32)> = Vec::new();
     let mut eval_s = 0.0f64;
@@ -390,7 +409,8 @@ fn main() {
     let mut first = 0.0f32;
     let mut last = 0.0f32;
     for s in tr.step as usize..steps {
-        let batch = batch_at(&train, s, bn, seq);
+        // each rank its own windows, as many as one GPU alone would train on
+        let batch = batch_at(&train, s * world + rank, bn, seq);
         #[cfg(any(feature = "gpu", feature = "cuda"))]
         let loss = match gpu_tr.as_mut() {
             Some(g) => g.train_step(&batch).unwrap_or_else(|e| die("train_step (gpu)", e)),
@@ -434,6 +454,18 @@ fn main() {
         }
     }
     let train_s = t0.elapsed().as_secs_f64() - eval_s;
+    println!("  weights    fnv {:016x}", fnv(&tr.params));
+    #[cfg(feature = "cuda")]
+    if let Some(c) = gpu_tr.as_mut().and_then(|g| g.cluster.as_mut()) {
+        let ms = |s: f64| s * 1e3 / c.times.exchanges.max(1) as f64;
+        println!("  exchange   ms/step: device copies {:.1}, network {:.1}, averaging {:.1}",
+                 ms(c.times.device_copies), ms(c.times.network), ms(c.times.averaging));
+        let same = c.agree(fnv(&tr.params)).unwrap_or_else(|e| die("cluster", e));
+        println!("  cluster    ranks {} after training", if same { "hold the same weights" } else { "DIFFER" });
+        if !same { die("cluster", "ranks drifted"); }
+        // one rank evaluates, saves and writes the manifest
+        if rank != 0 { return; }
+    }
     let val_after = tr.eval_loss(&val).unwrap_or_else(|e| die("eval", e));
 
     // Bits per byte: the loss is per TOKEN, and a token is not a fixed
@@ -444,7 +476,7 @@ fn main() {
     let bpb = val_after as f64 / std::f64::consts::LN_2 * val_tok_per_byte;
 
     println!("\n  trained    {steps} steps in {train_s:.2} s  ({:.1} tokens/s, {:.1} ms/step)",
-             (steps * bn * seq) as f64 / train_s, train_s * 1000.0 / steps as f64);
+             (steps * bn * seq * world) as f64 / train_s, train_s * 1000.0 / steps as f64);
     println!("  train loss {first:.4} -> {last:.4}");
     println!("  HELD-OUT   {val_before:.4} -> {val_after:.4}   ({bpb:.4} bits/byte)");
 

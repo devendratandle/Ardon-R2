@@ -64,6 +64,10 @@ elif DEVICE == "cuda":
     if not torch.cuda.is_available():
         sys.exit("TS_DEVICE=cuda but torch.cuda.is_available() is False")
     DEV = torch.device("cuda")
+    # TS_WORLD=n: DistributedDataParallel, one process per GPU, as R2's R2_WORLD.
+    WORLD, RANK = int(os.environ.get("TS_WORLD", "1")), int(os.environ.get("TS_RANK", "0"))
+    if WORLD > 1:
+        torch.cuda.set_device(RANK)
     DEV_NAME = f"CUDA: {torch.cuda.get_device_name(0)}, torch {torch.__version__}"
 else:
     DEV = torch.device("cpu")
@@ -324,12 +328,20 @@ def main():
     every = max(steps // 10, 1)
     curve = []
     eval_every, eval_s, held = d.get("eval_every", 0), 0.0, []
+    world, rank = (WORLD, RANK) if DEVICE == "cuda" else (1, 0)
+    net = model
+    if world > 1:
+        import torch.distributed as dist
+        from torch.nn.parallel import DistributedDataParallel
+        dist.init_process_group("nccl", rank=rank, world_size=world)
+        net = DistributedDataParallel(model, device_ids=[rank], broadcast_buffers=False)
+        dist.barrier()
     device_sync()
     t0 = time.perf_counter()
     first = last = 0.0
     for s in range(steps):
-        idx, tgt = batch_at(train_ids, s, bn, seq)
-        loss = loss_on(model, idx, tgt)
+        idx, tgt = batch_at(train_ids, s * world + rank, bn, seq)
+        loss = F.cross_entropy(net(idx).reshape(-1, model.vocab), tgt.reshape(-1))
         opt.zero_grad(set_to_none=True)
         loss.backward()
         if clip > 0:
@@ -357,6 +369,13 @@ def main():
             print(f"  held-out  step {s+1:>6}  loss {v:.4f}")
     device_sync()
     train_s = time.perf_counter() - t0 - eval_s
+    import hashlib
+    weights = hashlib.sha256(b"".join(p.detach().cpu().numpy().tobytes() for p in model.P)).hexdigest()[:16]
+    print(f"  weights    sha256 {weights}")
+    if world > 1:
+        dist.barrier()
+        if rank != 0:      # one rank evaluates and reports, as on the R2 side
+            return
     val_after = eval_loss(model, val_ids, bn, seq, d["val_batches"])
     bpb = val_after / math.log(2) * (d["val_tokens"] / d["val_bytes"])
     torch_tokenize_s = measure_tokenize(d)
