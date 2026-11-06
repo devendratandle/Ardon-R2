@@ -12,11 +12,11 @@ const NORM_THREADS: u32 = 64;
 
 const PTX: &str = include_str!("kernels/optim.ptx");
 
-struct Kernels { adam: Kernel, norm: Kernel }
+struct Kernels { adam: Kernel, norm: Kernel, mean: Kernel }
 static KERNELS: Loaded<Kernels> = OnceLock::new();
 
 fn kernels() -> Result<&'static Kernels, &'static str> {
-    loaded(&KERNELS, PTX, |m| Ok(Kernels { adam: m.kernel("adam_step", 13)?, norm: m.kernel("grad_sq_chunk", 4)? }))
+    loaded(&KERNELS, PTX, |m| Ok(Kernels { adam: m.kernel("adam_step", 13)?, norm: m.kernel("grad_sq_chunk", 4)?, mean: m.kernel("grad_mean", 4)? }))
 }
 
 /// Whether the module loads, for `module_status`.
@@ -40,6 +40,16 @@ pub fn adam_step(w: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, n: usize,
         Arg::F(w), Arg::F(g), Arg::F(m), Arg::F(v), Arg::Int(nu),
         r(beta1), r(beta2), r(bc1), r(bc2), r(lr), r(eps), r(scale), r(c),
     ]).is_ok()
+}
+
+/// `g[..n] = (g[..n] + peer[at..at + n]) / 2`: one rank's half of a two-rank mean.
+/// `false` and nothing queued when there is no device or a buffer is short.
+pub fn grad_mean(g: &Tensor, peer: &Tensor, at: usize, n: usize) -> bool {
+    if g.len() < n || at.checked_add(n).is_none_or(|e| e > peer.len()) { return false; }
+    let (Ok(nu), Ok(base)) = (u32::try_from(n), u32::try_from(at)) else { return false };
+    if n == 0 { return true; }
+    let Ok(ks) = kernels() else { return false };
+    ks.mean.launch([nu.div_ceil(THREADS), 1, 1], [THREADS, 1, 1], &[Arg::F(g), Arg::F(peer), Arg::Int(base), Arg::Int(nu)]).is_ok()
 }
 
 /// Values [`grad_sq_norm`]'s scratch tensor must hold for these block sizes.

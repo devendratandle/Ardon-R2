@@ -21,6 +21,14 @@ extern "C" __global__ void adam_step(float *W, const float *G, float *M, float *
     W[i] = w - lr * mh / (sqrtf(vh) + eps);
 }
 
+// G = (G + PEER[base..]) / 2. Addition commutes bit for bit, so two ranks each
+// doing this with the other's values hold the same result.
+extern "C" __global__ void grad_mean(float *G, const float *PEER, unsigned base, unsigned n) {
+    const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    G[i] = (G[i] + PEER[base + i]) * 0.5f;
+}
+
 #define NORM_CHUNK 256u
 
 // Sum of g^2 per chunk with its rounding errors kept (TwoSum, and fmaf for each

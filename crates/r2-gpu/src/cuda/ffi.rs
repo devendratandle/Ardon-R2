@@ -103,6 +103,8 @@ table!(Cu {
     free_host = "cuMemFreeHost": fn(*mut c_void) -> CuResult;
     h_to_d = "cuMemcpyHtoD_v2": fn(DevPtr, *const c_void, usize) -> CuResult;
     d_to_d = "cuMemcpyDtoD_v2": fn(DevPtr, DevPtr, usize) -> CuResult;
+    host_register = "cuMemHostRegister_v2": fn(*mut c_void, usize, c_uint) -> CuResult;
+    host_unregister = "cuMemHostUnregister": fn(*mut c_void) -> CuResult;
     can_access = "cuDeviceCanAccessPeer": fn(*mut c_int, c_int, c_int) -> CuResult;
     ipc_get = "cuIpcGetMemHandle": fn(*mut IpcHandle, DevPtr) -> CuResult;
     ipc_open = "cuIpcOpenMemHandle_v2": fn(*mut DevPtr, IpcHandle, c_uint) -> CuResult;
@@ -449,6 +451,81 @@ pub fn peer_access(other: usize) -> Result<(bool, usize), String> {
         if code != 0 { return Err(dev.err("cuDeviceCanAccessPeer", code)); }
     }
     Ok((can != 0, dev.ordinal))
+}
+
+table!(Libc {
+    mmap = "mmap": fn(*mut c_void, usize, c_int, c_int, c_int, i64) -> *mut c_void;
+    munmap = "munmap": fn(*mut c_void, usize) -> c_int;
+});
+
+/// `len` f32 in a file under `/dev/shm`, mapped into this process and pinned for
+/// the device, so two processes on one machine can hand each other data with no
+/// copy between them. The ranks take turns by a message on their control link; a
+/// rank must not read a region while the other may be writing it.
+pub struct SharedMem { dev: &'static Device, libc: Libc, ptr: *mut f32, len: usize }
+// SAFETY: this owns its mapping, and `&mut` access goes through `&mut self`.
+unsafe impl Send for SharedMem {}
+
+impl SharedMem {
+    #[cfg(not(unix))]
+    pub fn map(path: &str, _len: usize, _create: bool) -> Result<SharedMem, String> {
+        Err(format!("{path}: shared memory needs unix"))
+    }
+
+    /// Maps `path`, creating it with this length when `create`. Readable and
+    /// writable only by this user.
+    #[cfg(unix)]
+    pub fn map(path: &str, len: usize, create: bool) -> Result<SharedMem, String> {
+        let dev = device().map_err(str::to_string)?;
+        let lib = open_lib("libc.so.6").ok_or("libc.so.6 not found")?;
+        let libc = Libc::load(lib)?;
+        let bytes = len.checked_mul(4).filter(|&b| b > 0).ok_or("shared memory size")?;
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.read(true).write(true).mode(0o600);
+            if create { o.create(true).truncate(true); }
+            o.open(path).map_err(|e| format!("{path}: {e}"))?
+        };
+        if create { file.set_len(bytes as u64).map_err(|e| format!("{path}: {e}"))?; }
+        if file.metadata().map_err(|e| e.to_string())?.len() != bytes as u64 { return Err(format!("{path}: wrong size")); }
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+        const PROT_READ_WRITE: c_int = 3;
+        const MAP_SHARED: c_int = 1;
+        // SAFETY: a fresh mapping at an address of the kernel's choosing, of a file
+        // just checked to hold `bytes`; it outlives the descriptor by POSIX rule.
+        let p = unsafe { (libc.mmap)(std::ptr::null_mut(), bytes, PROT_READ_WRITE, MAP_SHARED, fd, 0) };
+        if p.is_null() || p as isize == -1 { return Err(format!("{path}: mmap failed")); }
+        dev.bind()?;
+        // SAFETY: `p` is page-aligned and `bytes` long, and stays mapped until drop,
+        // which unregisters it first.
+        let code = unsafe { (dev.cu.host_register)(p, bytes, 0) };
+        if code != 0 {
+            // SAFETY: mapped just above, and nothing else refers to it.
+            unsafe { (libc.munmap)(p, bytes); }
+            return Err(dev.err("cuMemHostRegister", code));
+        }
+        Ok(SharedMem { dev, libc, ptr: p.cast(), len })
+    }
+    pub fn as_slice(&self) -> &[f32] {
+        // SAFETY: `len` f32 mapped for this value's life; any bits are a valid f32,
+        // and the turn-taking in the type's contract keeps the peer from writing now.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        // SAFETY: as `as_slice`, and `&mut self` makes it exclusive in this process.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for SharedMem {
+    fn drop(&mut self) {
+        // SAFETY: registered and mapped by `map`; the copies using it are synchronous.
+        unsafe {
+            let _ = (self.dev.cu.host_unregister)(self.ptr.cast());
+            (self.libc.munmap)(self.ptr.cast(), self.len * 4);
+        }
+    }
 }
 
 /// `len` f32 of page-locked host memory, zeroed, freed on drop: what the device
