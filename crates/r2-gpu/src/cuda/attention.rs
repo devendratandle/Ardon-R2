@@ -33,11 +33,12 @@ const FLAT: u32 = 256;
 
 const PTX: &str = include_str!("kernels/attention.ptx");
 
-struct Kernels { gemm: Kernel, softmax: Kernel, probs: Kernel, dscore: Kernel, delta: Kernel, group_sum: Kernel }
+struct Kernels { fused: Kernel, gemm: Kernel, softmax: Kernel, probs: Kernel, dscore: Kernel, delta: Kernel, group_sum: Kernel }
 static KERNELS: Loaded<Kernels> = OnceLock::new();
 
 fn kernels() -> Result<&'static Kernels, &'static str> {
     loaded(&KERNELS, PTX, |m| Ok(Kernels {
+        fused: m.kernel("attn_fused", 11)?,
         gemm: m.kernel("attn_gemm", 25)?,
         softmax: m.kernel("attn_softmax", 5)?,
         probs: m.kernel("attn_probs", 5)?,
@@ -190,6 +191,18 @@ fn forward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, s
     let ks = kernels().ok()?;
     let (seq, hd) = (sh.seq, sh.hd);
     let (lq, lkv, lp) = (Layout::rows(sh, sh.nh, false), Layout::rows(sh, sh.nkv, true), Layout::pairs(sh));
+    // One kernel, nothing of seq x seq in memory, where the output fits a tile. Asking
+    // for cuBLAS asks for its products, so the stored form below serves that.
+    if hd <= TILE as usize && chosen() != Some(Path::Cublas) {
+        let int = Arg::Int;
+        ks.fused.launch([(seq as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32, 1], GEMM_BLOCK, &[
+            Arg::F(q), Arg::F(k), Arg::F(v), Arg::F(o), Arg::F(lse),
+            int(sh.nseq as u32), int(seq as u32), int(sh.nh as u32), int(sh.nkv as u32), int(hd as u32), Arg::Real(sh.scale),
+        ]).ok()?;
+        note_path(Path::Tiled);
+        mark(0);
+        return Some(());
+    }
     let mut guard = SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
     let sc = guard.get_or_insert_with(Scratch::default);
     grown(&mut sc.p, pair_len(sh)?)?;

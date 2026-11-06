@@ -90,6 +90,136 @@ extern "C" __global__ void attn_gemm(const float *A, const float *B, float *C,
     }
 }
 
+// The forward as one kernel, for hd <= BN: scores stay in registers and the softmax
+// is kept online, so nothing of size seq x seq goes through global memory, and the
+// keys past a query tile's diagonal are never read. One block per (query tile,
+// sequence x head). For each key tile: S in registers; each row's max and sum over
+// the threads that share it; P to shared memory; O += P V, in registers, rescaled
+// whenever a row's max moves. O and L are written at the end.
+extern "C" __global__ void attn_fused(const float *Q, const float *K, const float *V, float *O, float *L,
+                                      unsigned nseq, unsigned seq, unsigned nh, unsigned nkv, unsigned hd, float scale) {
+    static __shared__ float As[BK * BM];
+    static __shared__ float Bs[BK * BN];
+    static __shared__ float Ps[BM * BN];
+    static __shared__ float Red[BM * (BN / TN)];
+    const unsigned m0 = blockIdx.x * BM;
+    const unsigned s = blockIdx.y / nh, h = blockIdx.y % nh, group = nh / nkv;
+    const unsigned qrow = nh * hd, kvrow = nkv * hd;
+    const float *q = Q + s * seq * qrow + h * hd;
+    const float *kk_base = K + s * seq * kvrow + (h / group) * hd;
+    const float *v = V + s * seq * kvrow + (h / group) * hd;
+    const unsigned tx = threadIdx.x, ty = threadIdx.y;
+    const unsigned tid = ty * (BN / TN) + tx;
+    const unsigned mbase = m0 + ty * TM;
+
+    float o[TM][TN], mi[TM], si[TM];
+    for (unsigned i = 0; i < TM; i++) {
+        mi[i] = -3.0e38f;
+        si[i] = 0.0f;
+        for (unsigned j = 0; j < TN; j++) o[i][j] = 0.0f;
+    }
+
+    for (unsigned n0 = 0; n0 < seq && n0 < m0 + BM; n0 += BN) {
+        const unsigned nbase = n0 + tx * TN;
+        // S = scale Q K^T for this tile
+        float c[TM][TN];
+        for (unsigned i = 0; i < TM; i++)
+            for (unsigned j = 0; j < TN; j++) c[i][j] = 0.0f;
+        for (unsigned k0 = 0; k0 < hd; k0 += BK) {
+            for (unsigned t = 0; t < LOADS_A; t++) {
+                const unsigned idx = tid + t * THREADS;
+                const unsigned ii = m0 + idx % BM, kk = k0 + idx / BM;
+                As[idx] = (ii < seq && kk < hd) ? q[ii * qrow + kk] : 0.0f;
+            }
+            for (unsigned t = 0; t < LOADS_B; t++) {
+                const unsigned idx = tid + t * THREADS;
+                const unsigned jj = n0 + idx % BN, kk = k0 + idx / BN;
+                Bs[idx] = (jj < seq && kk < hd) ? kk_base[jj * kvrow + kk] : 0.0f;
+            }
+            __syncthreads();
+            for (unsigned kk = 0; kk < BK; kk++) {
+                float x[TM], y[TN];
+                for (unsigned i = 0; i < TM; i++) x[i] = As[kk * BM + ty * TM + i];
+                for (unsigned j = 0; j < TN; j++) y[j] = Bs[kk * BN + tx * TN + j];
+                for (unsigned i = 0; i < TM; i++)
+                    for (unsigned j = 0; j < TN; j++) c[i][j] = fmaf(x[i], y[j], c[i][j]);
+            }
+            __syncthreads();
+        }
+        // each row's new max, over the threads sharing the row
+        for (unsigned i = 0; i < TM; i++) {
+            const unsigned row = mbase + i;
+            float m = -3.0e38f;
+            for (unsigned j = 0; j < TN; j++) {
+                c[i][j] *= scale;
+                if (row < seq && nbase + j < seq && nbase + j <= row) m = fmaxf(m, c[i][j]);
+            }
+            Red[(ty * TM + i) * (BN / TN) + tx] = m;
+        }
+        __syncthreads();
+        float rescale[TM];
+        for (unsigned i = 0; i < TM; i++) {
+            float m = mi[i];
+            for (unsigned u = 0; u < BN / TN; u++) m = fmaxf(m, Red[(ty * TM + i) * (BN / TN) + u]);
+            rescale[i] = n0 == 0 ? 1.0f : exp_r2(mi[i] - m);
+            mi[i] = m;
+        }
+        __syncthreads();
+        // P, unnormalized, against the new max; the row's sum
+        for (unsigned i = 0; i < TM; i++) {
+            const unsigned row = mbase + i;
+            float l = 0.0f;
+            for (unsigned j = 0; j < TN; j++) {
+                float p = 0.0f;
+                if (row < seq && nbase + j < seq && nbase + j <= row) {
+                    p = exp_r2(c[i][j] - mi[i]);
+                    l += p;
+                }
+                Ps[(ty * TM + i) * BN + tx * TN + j] = p;
+                o[i][j] *= rescale[i];
+            }
+            Red[(ty * TM + i) * (BN / TN) + tx] = l;
+        }
+        __syncthreads();
+        for (unsigned i = 0; i < TM; i++) {
+            float l = 0.0f;
+            for (unsigned u = 0; u < BN / TN; u++) l += Red[(ty * TM + i) * (BN / TN) + u];
+            si[i] = si[i] * rescale[i] + l;
+        }
+        __syncthreads();
+        // O += P V: keys are the summed index, V's columns the output's
+        for (unsigned k0 = 0; k0 < BN; k0 += BK) {
+            for (unsigned t = 0; t < LOADS_B; t++) {
+                const unsigned idx = tid + t * THREADS;
+                const unsigned cc = idx % BN, key = n0 + k0 + idx / BN;
+                Bs[idx] = (key < seq && cc < hd) ? v[key * kvrow + cc] : 0.0f;
+            }
+            __syncthreads();
+            for (unsigned kk = 0; kk < BK; kk++) {
+                float x[TM], y[TN];
+                for (unsigned i = 0; i < TM; i++) x[i] = Ps[(ty * TM + i) * BN + k0 + kk];
+                for (unsigned j = 0; j < TN; j++) y[j] = Bs[kk * BN + tx * TN + j];
+                for (unsigned i = 0; i < TM; i++)
+                    for (unsigned j = 0; j < TN; j++) o[i][j] = fmaf(x[i], y[j], o[i][j]);
+            }
+            __syncthreads();
+        }
+    }
+
+    float *out = O + s * seq * qrow + h * hd;
+    for (unsigned i = 0; i < TM; i++) {
+        const unsigned row = mbase + i;
+        if (row >= seq) break;
+        const float inv = 1.0f / si[i];
+        for (unsigned j = 0; j < TN; j++) {
+            const unsigned col = tx * TN + j;
+            if (col >= hd) break;
+            out[row * qrow + col] = o[i][j] * inv;
+        }
+        if (tx == 0) L[(s * seq + row) * nh + h] = mi[i] + logf(si[i]);
+    }
+}
+
 // The row kernels below run ROWS rows to a block, one warp to a row: a warp's
 // LANES threads take consecutive elements, so its 32 loads or stores fall in one
 // cache line. One thread per row, which this replaced, sends every warp to 32
