@@ -63,6 +63,7 @@ use builtins::session::*;
 use builtins::internal::*;
 use builtins::llm::*;
 use builtins::llm_train::*;
+use builtins::llm_inspect::*;
 use builtins::data::*;
 use builtins::graphics::*;
 use builtins::io::*;

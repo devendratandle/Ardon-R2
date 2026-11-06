@@ -24,6 +24,7 @@ pub(crate) mod graphics;
 pub(crate) mod io;
 pub(crate) mod llm;
 pub(crate) mod llm_train;
+pub(crate) mod llm_inspect;
 pub(crate) mod ml;
 pub(crate) mod stats;
 pub(crate) mod strings;

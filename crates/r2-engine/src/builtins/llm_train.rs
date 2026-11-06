@@ -14,12 +14,56 @@ use r2_train::llm::Trainer;
 use r2_train::optim::LrSchedule;
 use r2_types::*;
 
-use super::llm::{as_num, bool_arg, handle, insert, load_tokenizer, num_arg, str_arg, tokenizer_for,
-                 with_registry, with_tokenizers, Slot, TOKENIZER_FILE};
+use super::llm::{as_num, bool_arg, handle, insert, load_tokenizer, num_arg, refuse_running, str_arg,
+                 tokenizer_for, with_registry, with_tokenizers, Running, Slot, TOKENIZER_FILE};
 use crate::{err, gn, gv, Engine};
 
-fn fail(ctx: &str, e: impl std::fmt::Display) -> R2Err {
+pub(super) fn fail(ctx: &str, e: impl std::fmt::Display) -> R2Err {
     R2Err { msg: format!("{ctx}: {e}"), kind: ErrKind::Runtime }
+}
+
+// The GPU's side of the loop, so the loop itself reads the same in every build.
+#[cfg(any(feature = "gpu", feature = "cuda"))]
+type Device = r2_train::gpu_llm::GpuTrainer;
+#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+type Device = std::convert::Infallible;
+
+#[cfg(any(feature = "gpu", feature = "cuda"))]
+fn open_device(ctx: &str, s: &Settings, t: &Trainer) -> Result<Option<Device>, R2Err> {
+    if !s.gpu { return Ok(None); }
+    if s.accum > 1 { return err!(Runtime, "{}: accum is CPU only so far", ctx); }
+    Device::from_trainer(t).map(Some).map_err(|e| fail(ctx, e))
+}
+#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+fn open_device(ctx: &str, s: &Settings, _: &Trainer) -> Result<Option<Device>, R2Err> {
+    if s.gpu { return err!(Runtime, "{}: this build has no GPU support (build with --features gpu or cuda)", ctx); }
+    Ok(None)
+}
+
+#[cfg(any(feature = "gpu", feature = "cuda"))]
+fn device_step(device: &mut Option<Device>, batch: &Batch) -> Option<Result<f32, String>> {
+    device.as_mut().map(|g| g.train_step(batch))
+}
+#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+fn device_step(_: &mut Option<Device>, _: &Batch) -> Option<Result<f32, String>> { None }
+
+/// Weights and optimizer state back from the device, if there is one.
+#[cfg(any(feature = "gpu", feature = "cuda"))]
+fn bring_back(device: &Option<Device>, t: &mut Trainer) {
+    if let Some(g) = device { g.download_into(t); }
+}
+#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+fn bring_back(_: &Option<Device>, _: &mut Trainer) {}
+
+/// The handle's trainer, or the reason it has none.
+fn trainer_in<'a>(r: &'a mut std::collections::HashMap<u32, Slot>, ctx: &str, id: u32) -> Result<&'a mut Trainer, R2Err> {
+    match r.get_mut(&id) {
+        Some(Slot::Training(t)) => Ok(t),
+        Some(Slot::Serving(_)) => err!(Runtime,
+            "{}: this handle is a loaded model (serving only). \
+             Use llm.load(dir, train = TRUE) to fine-tune it.", ctx),
+        None => err!(Runtime, "{}: unknown model handle {}", ctx, id),
+    }
 }
 
 /// The settings `llm.train` and `llm.finetune` share.
@@ -37,11 +81,21 @@ struct Settings {
     checkpoint: Option<String>,
     every: usize,
     keep: usize,
+    callback: Option<RVal>,
 }
 
 impl Settings {
     fn parse(ctx: &str, a: &[EvalArg], default_steps: f64) -> Result<Settings, R2Err> {
         let steps = num_arg(a, "steps", default_steps) as usize;
+        let report = num_arg(a, "report", 0.0) as usize;
+        let callback = gn(a, "callback").filter(|v| !matches!(v, RVal::Null));
+        match &callback {
+            None | Some(RVal::Closure(_) | RVal::BuiltinFn(_)) => {}
+            Some(other) => return err!(Runtime, "{}: callback must be a function, got {}", ctx, other.type_name()),
+        }
+        if callback.is_some() && report == 0 {
+            return err!(Runtime, "{}: callback needs report = n, the steps between its calls", ctx);
+        }
         let opt = |name: &str| gn(a, name).and_then(|v| v.scalar_f64().ok().flatten()).map(|x| x as f32);
         let cosine = match gn(a, "schedule").map(|v| str_arg(&v)).transpose()?.as_deref() {
             None | Some("constant") => false,
@@ -56,7 +110,8 @@ impl Settings {
         Ok(Settings {
             gpu,
             steps,
-            report: num_arg(a, "report", 0.0) as usize,
+            report,
+            callback,
             accum: (num_arg(a, "accum", 1.0) as usize).max(1),
             lr: opt("lr"), wd: opt("wd"), clip: opt("clip"),
             cosine,
@@ -78,12 +133,30 @@ impl Settings {
                                         total: t.step + self.steps as u64 });
         }
     }
+
+    /// Does step `n` of this call report: print its loss, or call back?
+    fn reports(&self, n: usize) -> bool {
+        self.report > 0 && (n % self.report == 0 || n == 1)
+    }
+
+    /// The last step to run before the script gets control again: the next
+    /// reporting step with a callback, the end of the run without one.
+    fn stretch_end(&self, n: usize) -> usize {
+        if self.callback.is_none() { return self.steps; }
+        let next = if n == 1 { 1 } else { n.div_ceil(self.report) * self.report };
+        next.min(self.steps)
+    }
 }
 
 /// The training loop: one batch per step, from the trainer's own step count,
 /// so a later call or a resumed run continues the same sequence.
-fn run_steps(ctx: &str, id: u32, s: &Settings, tok: &Tokenizer, batch_at: impl Fn(usize) -> Batch)
-    -> Result<RVal, R2Err>
+///
+/// The registry stays locked while steps run, and is free only while a
+/// callback does: the callback may call any `llm.*`, which takes that lock.
+/// So the steps go in stretches between callbacks, and a run without one is a
+/// single stretch, with nothing extra per step.
+fn run_steps(e: &mut Engine, env: &EnvRef, ctx: &str, id: u32, s: &Settings, tok: &Tokenizer,
+             batch_at: impl Fn(usize) -> Batch) -> Result<RVal, R2Err>
 {
     if let Some(dir) = &s.checkpoint {
         // the tokenizer sits beside the checkpoints, for llm.resume
@@ -91,54 +164,50 @@ fn run_steps(ctx: &str, id: u32, s: &Settings, tok: &Tokenizer, batch_at: impl F
             .and_then(|_| std::fs::write(std::path::Path::new(dir).join(TOKENIZER_FILE), tok.to_tokenizer_json()))
             .map_err(|e| fail(ctx, format!("checkpoint: {e}")))?;
     }
-    with_registry(|r| {
-        let t = match r.get_mut(&id) {
-            Some(Slot::Training(t)) => t,
-            Some(Slot::Serving(_)) => return err!(Runtime,
-                "{}: this handle is a loaded model (serving only). \
-                 Use llm.load(dir, train = TRUE) to fine-tune it.", ctx),
-            None => return err!(Runtime, "{}: unknown model handle {}", ctx, id),
-        };
+    let _running = s.callback.as_ref().map(|_| Running::enter(id));
+    let (first_step, mut device) = with_registry(|r| {
+        let t = trainer_in(r, ctx, id)?;
         s.apply(t);
-        let first_step = t.step as usize;
-        #[cfg(any(feature = "gpu", feature = "cuda"))]
-        let mut device = if s.gpu {
-            if s.accum > 1 { return err!(Runtime, "{}: accum is CPU only so far", ctx); }
-            Some(r2_train::gpu_llm::GpuTrainer::from_trainer(t).map_err(|e| fail(ctx, e))?)
-        } else { None };
-        #[cfg(not(any(feature = "gpu", feature = "cuda")))]
-        if s.gpu {
-            return err!(Runtime, "{}: this build has no GPU support (build with --features gpu or cuda)", ctx);
-        }
-        let mut last = 0.0f32;
-        for n in 1..=s.steps {
-            let batch = batch_at(first_step + n - 1);
-            #[cfg(any(feature = "gpu", feature = "cuda"))]
-            let on_device = device.as_mut().map(|g| g.train_step(&batch));
-            #[cfg(not(any(feature = "gpu", feature = "cuda")))]
-            let on_device: Option<Result<f32, String>> = None;
-            last = match on_device {
-                Some(r) => r,
-                None if s.accum > 1 => {
-                    let parts: Vec<&[(Vec<usize>, Vec<usize>)]> = batch.chunks(batch.len().div_ceil(s.accum).max(1)).collect();
-                    t.train_step_parts(&parts)
+        Ok::<_, R2Err>((t.step as usize, open_device(ctx, s, t)?))
+    })?;
+    let mut last = 0.0f32;
+    let mut next = 1;
+    while next <= s.steps {
+        let end = s.stretch_end(next);
+        let call_back = s.callback.as_ref().filter(|_| s.reports(end));
+        with_registry(|r| {
+            let t = trainer_in(r, ctx, id)?;
+            for n in next..=end {
+                let batch = batch_at(first_step + n - 1);
+                last = match device_step(&mut device, &batch) {
+                    Some(r) => r,
+                    None if s.accum > 1 => {
+                        let parts: Vec<&[(Vec<usize>, Vec<usize>)]> = batch.chunks(batch.len().div_ceil(s.accum).max(1)).collect();
+                        t.train_step_parts(&parts)
+                    }
+                    None => t.train_step(&batch),
+                }.map_err(|e| fail(ctx, e))?;
+                // a callback decides for itself what to show
+                if s.callback.is_none() && s.reports(n) {
+                    r2_types::out::rout(&format!("step {:>5}  loss {:.4}\n", n, last));
                 }
-                None => t.train_step(&batch),
-            }.map_err(|e| fail(ctx, e))?;
-            if s.report > 0 && (n % s.report == 0 || n == 1) {
-                r2_types::out::rout(&format!("step {:>5}  loss {:.4}\n", n, last));
+                if let Some(dir) = s.checkpoint.as_ref().filter(|_| n % s.every == 0 || n == s.steps) {
+                    bring_back(&device, t);
+                    t.save_checkpoint(dir, s.keep).map_err(|e| fail(ctx, e))?;
+                }
             }
-            if let Some(dir) = s.checkpoint.as_ref().filter(|_| n % s.every == 0 || n == s.steps) {
-                #[cfg(any(feature = "gpu", feature = "cuda"))]
-                if let Some(g) = &device { g.download_into(t); }
-                t.save_checkpoint(dir, s.keep).map_err(|e| fail(ctx, e))?;
-            }
+            // The weights live on the device until here. A callback sees them
+            // current, at the price of this read-back on each of its steps.
+            if end == s.steps || call_back.is_some() { bring_back(&device, t); }
+            Ok::<_, R2Err>(())
+        })?;
+        if let Some(f) = call_back {
+            e.call_fn(f, &[EvalArg { name: None, value: as_num(end as f64) },
+                           EvalArg { name: None, value: as_num(last as f64) }], env)?;
         }
-        // the weights live on the device until here
-        #[cfg(any(feature = "gpu", feature = "cuda"))]
-        if let Some(g) = &device { g.download_into(t); }
-        Ok(as_num(last as f64))
-    })
+        next = end + 1;
+    }
+    Ok(as_num(last as f64))
 }
 
 /// Attach a tokenizer to this handle the first time it trains. A model asked
@@ -179,7 +248,7 @@ fn ensure_tokenizer(ctx: &str, id: u32, text: &str, a: &[EvalArg]) -> Result<Tok
 }
 
 /// Training text: the text itself, or the path of a file holding it.
-fn corpus_text(s: String) -> Result<String, R2Err> {
+pub(super) fn corpus_text(s: String) -> Result<String, R2Err> {
     if s.len() < 4096 && !s.contains('\n') && std::path::Path::new(&s).is_file() {
         return std::fs::read_to_string(&s).map_err(|e| fail("llm.train", format!("cannot read '{s}': {e}")));
     }
@@ -193,8 +262,9 @@ fn order_arg(a: &[EvalArg], default: bool) -> Order {
 /// `llm.train(model, text, steps=, seq=, batch=, ...)` — train on a text (a
 /// string or a file). Returns the final loss so a script can decide whether
 /// to keep going.
-pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+pub(crate) fn bi_llm_train(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let id = handle(&gv(a, 0))?;
+    refuse_running("llm.train", id)?;
     let text = corpus_text(str_arg(&gv(a, 1))?)?;
     let settings = Settings::parse("llm.train", a, 50.0)?;
     let seq = num_arg(a, "seq", 16.0) as usize;
@@ -209,10 +279,10 @@ pub(crate) fn bi_llm_train(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     // Each step takes the next windows of the text; the target is the window
     // shifted by one, which is what "predict the next token" means.
     let batcher = Batcher { batch: max_batch.min(ids.len() - seq - 1).max(1), seq, order: order_arg(a, false) };
-    run_steps("llm.train", id, &settings, &tok, |step| batcher.at(&ids[..], step))
+    run_steps(e, env, "llm.train", id, &settings, &tok, |step| batcher.at(&ids[..], step))
 }
 
-fn strings(ctx: &str, v: &RVal) -> Result<Vec<String>, R2Err> {
+pub(super) fn strings(ctx: &str, v: &RVal) -> Result<Vec<String>, R2Err> {
     let RVal::Character(s, _) = v else { return err!(Runtime, "{}: expected text, got {}", ctx, v.type_name()) };
     s.iter().map(|x| x.as_ref().map(|t| t.to_string()).ok_or_else(|| fail(ctx, "NA in the examples"))).collect()
 }
@@ -220,9 +290,10 @@ fn strings(ctx: &str, v: &RVal) -> Result<Vec<String>, R2Err> {
 /// `llm.finetune(model, prompts, completions, steps=, batch=, seq=, ...)` —
 /// teach what follows each prompt. Only completion tokens count in the loss;
 /// batches are padded to their longest example. Returns the final loss.
-pub(crate) fn bi_llm_finetune(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+pub(crate) fn bi_llm_finetune(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let ctx = "llm.finetune";
     let id = handle(&gv(a, 0))?;
+    refuse_running(ctx, id)?;
     let (prompts, completions) = (strings(ctx, &gv(a, 1))?, strings(ctx, &gv(a, 2))?);
     if prompts.len() != completions.len() {
         return err!(Runtime, "{}: {} prompts but {} completions", ctx, prompts.len(), completions.len());
@@ -240,7 +311,7 @@ pub(crate) fn bi_llm_finetune(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
     // reach the loss or a gradient (r2_train::data::PairSet).
     let set = PairSet::new(&pairs, seq + 1, 0).map_err(|e| fail(ctx, e))?;
     let order = order_arg(a, true);
-    run_steps(ctx, id, &settings, &tok, |step| set.at(batch, step, order))
+    run_steps(e, env, ctx, id, &settings, &tok, |step| set.at(batch, step, order))
 }
 
 /// `llm.lora(model, rank=8, alpha=2*rank, targets=)` — freeze the model and
@@ -248,6 +319,7 @@ pub(crate) fn bi_llm_finetune(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Res
 pub(crate) fn bi_llm_lora(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let ctx = "llm.lora";
     let id = handle(&gv(a, 0))?;
+    refuse_running(ctx, id)?;
     let rank = num_arg(a, "rank", 8.0) as usize;
     let alpha = num_arg(a, "alpha", 2.0 * rank as f64) as f32;
     let names = gn(a, "targets").map(|v| strings(ctx, &v)).transpose()?;
@@ -296,6 +368,7 @@ pub(crate) fn bi_llm_load_adapter(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) ->
 pub(crate) fn bi_llm_freeze(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let ctx = "llm.freeze";
     let id = handle(&gv(a, 0))?;
+    refuse_running(ctx, id)?;
     let names = strings(ctx, &gv(a, 1))?;
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     with_registry(|r| match r.get_mut(&id) {

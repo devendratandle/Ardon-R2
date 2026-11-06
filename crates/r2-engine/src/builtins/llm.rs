@@ -114,17 +114,76 @@ pub(super) fn bool_arg(a: &[EvalArg], name: &str, default: bool) -> bool {
 
 pub(super) fn as_num(x: f64) -> RVal { RVal::Numeric(vec![Some(x)].into(), Attrs::default()) }
 
-/// `llm.new(dim=, layers=, heads=, kv.heads=, ffn=, ctx=)` — create a
+/// Handles a callback is training right now. While one is listed, the script
+/// can read that model but not change it: the loop holds a step count, a
+/// schedule and possibly a device copy that a change would leave behind.
+/// Only a run with a callback ever enters this list.
+static RUNNING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+pub(super) fn refuse_running(ctx: &str, id: u32) -> Result<(), R2Err> {
+    if RUNNING.lock().unwrap().contains(&id) {
+        return err!(Runtime, "{}: model {} is still training: its callback can read it, not change it", ctx, id);
+    }
+    Ok(())
+}
+
+/// Lists a handle in [`RUNNING`] until dropped, however the run ends.
+pub(super) struct Running(u32);
+
+impl Running {
+    pub(super) fn enter(id: u32) -> Running {
+        RUNNING.lock().unwrap().push(id);
+        Running(id)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.lock().unwrap().retain(|&x| x != self.0);
+    }
+}
+
+/// A shape `llm.new(preset =)` can name.
+struct Shape { dim: usize, layers: usize, heads: usize, kv_heads: usize, ffn: usize, ctx: usize, vocab: usize }
+
+/// Shape only: the weights still come from `seed` and training, and every
+/// field is a named argument's default. These are the shapes R2 has been
+/// benchmarked at (`benchmarks/llm/`), under the names its reports use.
+const PRESETS: [(&str, Shape); 4] = [
+    ("tiny", Shape { dim: 128, layers: 4, heads: 4, kv_heads: 2, ffn: 384, ctx: 64, vocab: 2000 }),      // 1.30M
+    ("small", Shape { dim: 256, layers: 4, heads: 4, kv_heads: 2, ffn: 768, ctx: 64, vocab: 8000 }),     // 7.24M
+    ("medium", Shape { dim: 768, layers: 4, heads: 12, kv_heads: 4, ffn: 2304, ctx: 256, vocab: 8000 }), // 39.8M
+    ("large", Shape { dim: 768, layers: 12, heads: 12, kv_heads: 12, ffn: 3072, ctx: 512, vocab: 8000 }), // 125.5M
+];
+
+fn preset_arg(a: &[EvalArg]) -> Result<Option<&'static Shape>, R2Err> {
+    let Some(name) = gn(a, "preset").filter(|v| !matches!(v, RVal::Null)) else { return Ok(None) };
+    let name = str_arg(&name)?;
+    match PRESETS.iter().find(|(n, _)| *n == name) {
+        Some((_, shape)) => Ok(Some(shape)),
+        None => {
+            let names: Vec<&str> = PRESETS.iter().map(|(n, _)| *n).collect();
+            err!(Runtime, "llm.new: unknown preset '{}' ({})", name, names.join(", "))
+        }
+    }
+}
+
+/// `llm.new(preset=, dim=, layers=, heads=, kv.heads=, ffn=, ctx=)` — create a
 /// trainable model. Vocabulary is the 256 byte values, so any text (any
 /// language, any bytes) is representable with no tokenizer training step.
 pub(crate) fn bi_llm_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let dim = num_arg(a, "dim", 128.0) as usize;
-    let n_heads = num_arg(a, "heads", 4.0) as usize;
+    let preset = preset_arg(a)?;
+    // a named argument wins, then the preset, then the plain default
+    let arg = |name: &str, of: fn(&Shape) -> usize, plain: f64| {
+        num_arg(a, name, preset.map_or(plain, |s| of(s) as f64))
+    };
+    let dim = arg("dim", |s| s.dim, 128.0) as usize;
+    let n_heads = arg("heads", |s| s.heads, 4.0) as usize;
     let cfg = Config {
         dim,
         n_heads,
-        n_kv_heads: num_arg(a, "kv.heads", n_heads as f64) as usize,
-        n_layers: num_arg(a, "layers", 4.0) as usize,
+        n_kv_heads: arg("kv.heads", |s| s.kv_heads, n_heads as f64) as usize,
+        n_layers: arg("layers", |s| s.layers, 4.0) as usize,
         // `vocab` is the tokenizer's size, and the DEFAULT IS BPE.
         //
         // 8,000 measures 0.242 tokens per byte on TinyStories — 4.13 bytes
@@ -149,9 +208,9 @@ pub(crate) fn bi_llm_new(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
         // Bigger vocabularies keep improving quality per byte, but the
         // output projection is dim*vocab per token, so on a SMALL model it
         // starts costing more than the shorter sequence saves.
-        vocab: num_arg(a, "vocab", 8000.0) as usize,
-        ffn_hidden: num_arg(a, "ffn", (dim * 3) as f64) as usize,
-        max_seq: num_arg(a, "ctx", 64.0) as usize,
+        vocab: arg("vocab", |s| s.vocab, 8000.0) as usize,
+        ffn_hidden: arg("ffn", |s| s.ffn, (dim * 3) as f64) as usize,
+        max_seq: arg("ctx", |s| s.ctx, 64.0) as usize,
         rope_base: 10000.0,
         eps: 1e-5,
     };
@@ -284,6 +343,26 @@ pub(crate) fn bi_llm_info(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 /// script is done with a handle.
 pub(crate) fn bi_llm_free(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let id = handle(&gv(a, 0))?;
+    refuse_running("llm.free", id)?;
     let existed = with_registry(|r| r.remove(&id).is_some());
     Ok(RVal::Logical(vec![Some(existed)].into(), Attrs::default()))
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    /// The sizes the preset names promise, without allocating 125M weights.
+    #[test]
+    fn each_preset_has_the_size_it_was_benchmarked_at() {
+        let params: Vec<(&str, usize)> = PRESETS.iter().map(|(name, s)| {
+            let cfg = Config { dim: s.dim, n_heads: s.heads, n_kv_heads: s.kv_heads, n_layers: s.layers,
+                               vocab: s.vocab, ffn_hidden: s.ffn, max_seq: s.ctx, rope_base: 10000.0, eps: 1e-5 };
+            cfg.validate().unwrap_or_else(|e| panic!("{name}: {e}"));
+            (*name, cfg.n_params())
+        }).collect();
+        for ((name, n), millions) in params.iter().zip([1.30, 7.24, 39.8, 125.5]) {
+            assert!((*n as f64 / 1e6 - millions).abs() < 0.05, "{name}: {n}");
+        }
+    }
 }
