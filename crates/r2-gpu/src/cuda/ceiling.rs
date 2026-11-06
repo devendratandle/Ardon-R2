@@ -19,7 +19,7 @@ fn kernels() -> Option<&'static Kernels> {
         read: m.kernel("ceil_read", 3)?,
         write: m.kernel("ceil_write", 3)?,
         copy: m.kernel("ceil_copy", 3)?,
-        tile: m.kernel("ceil_tile", 6)?,
+        tile: m.kernel("ceil_tile", 7)?,
     })).ok()
 }
 
@@ -47,9 +47,10 @@ pub fn copy(a: &Tensor, y: &Tensor, n: usize, len: usize) -> bool {
 }
 
 /// The loads of every tile of an `m x k` matrix, addressed `a(i, j) = A[i * is + j * ks]`.
-pub fn tile(a: &Tensor, out: &Tensor, m: usize, k: usize, is: usize, ks: usize) -> bool {
+/// `walk_k` has a warp's lanes step through `k` and not `i`.
+pub fn tile(a: &Tensor, out: &Tensor, m: usize, k: usize, is: usize, ks: usize, walk_k: bool) -> bool {
     let blocks = m.div_ceil(64) as u32;
     kernels().is_some_and(|ks_| ks_.tile.launch([blocks, 1, 1], [16, 8, 1], &[
-        Arg::F(a), Arg::F(out), Arg::Int(m as u32), Arg::Int(k as u32), Arg::Int(is as u32), Arg::Int(ks as u32),
+        Arg::F(a), Arg::F(out), Arg::Int(m as u32), Arg::Int(k as u32), Arg::Int(is as u32), Arg::Int(ks as u32), Arg::Int(walk_k as u32),
     ]).is_ok())
 }

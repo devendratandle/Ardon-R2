@@ -107,11 +107,42 @@ there, and still 1.17x behind at 39.8M. The attention changes gave little: backw
 3%, forward unchanged, despite fewer loads, so loads may not be what limits forward.
 They stay because the gate passes and the code is no larger, but they are not proven gains.
 
-### Open leads from run 27
+### Run 28 (b9cf375): the card's limits and the leads from run 27
 
-- **Attention in the real step:** forward costs 4.3 ms per call in the census against 2.6 ms
-  in its row, while GEMMs cost no more. The row's data is smooth and training data is not.
-- **Time outside the kernels:** kernels and Adam add up to about 1,170 ms, against a real
-  step near 1,260 ms over 30 steps. The first step may account for it.
-- **One card slower than the other:** rank 1 waits about 300 ms per step for rank 0 at 125M,
-  more than the copies themselves.
+The T4 under load runs at its 70 W power cap, and that decides its clock.
+
+| Card, 125M, 30 steps | R2 clock | R2 step | PyTorch clock | PyTorch step |
+|---|---:|---:|---:|---:|
+| Card 0, round 1 | 645 MHz, 78 C | 1,218 ms | 630 MHz, 80 C | 1,280 ms |
+| Card 1, round 1 | 930 MHz, 52 C | 870 ms | 900 MHz, 63 C | 983 ms |
+| Card 0, round 2 | 765 MHz, 67 C | 1,021 ms | 690 MHz, 75 C | 1,190 ms |
+| Card 1, round 2 | 855 MHz, 63 C | 947 ms | 780 MHz, 72 C | 1,079 ms |
+
+All readings sit at 65-69 W with throttle reason 0x4, the software power cap. Clock is
+lower when the card is hotter, and PyTorch always ran second, on the card R2 had just heated,
+so these ratios may favour R2. Run 29 alternates the order.
+
+| Burst limit, card 0 | Measured |
+|---|---:|
+| Multiply-adds in registers | 6,630-6,970 GFLOP/s |
+| Memory read, past the caches | 242 GB/s |
+| Memory write | 225 GB/s |
+| Memory copy, read plus write | 190 GB/s |
+| Tile loads, row storage, lanes across rows | 87-89 GB/s |
+| Tile loads, column storage | 254-258 GB/s |
+| PCIe, down / up / both at once | 13.1 / 12.3 / 22.3 GB/s |
+
+**Closed:**
+- **Smooth data:** attention takes the same time on data with unalike neighbours.
+- **First step:** it costs the same as the median step, so setup does not explain the time
+  outside the kernels at 125M. The kernel rows run in bursts at a higher clock than a sustained
+  step, which may explain it, and run 29 measures sustained rates.
+
+**Open:**
+- **Accuracy gate failed at 100 steps:** held-out loss 5.1245 against 5.1256 at 125M, over the
+  0.0002 limit. R2's weights repeat and PyTorch's default run does not, so this may be PyTorch's
+  own scatter, but one pair cannot show that. Run 29 runs each side twice.
+- **Attention in the real step:** forward costs 4.3 ms per call in the census against 2.6 ms in
+  its row. Run 29 tests peaked scores.
+- **Attention's loads:** `attn_gemm` and `attn_fused` had lanes across rows, the 88 GB/s pattern.
+  R2's own `sgemm_tiled` already walks along. Changed for run 29.

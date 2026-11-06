@@ -148,7 +148,8 @@ def main():
         q, k, v = (z.transpose(1, 2) for z in (q, k, v))
         ctx = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         return ctx.transpose(1, 2).reshape(nseq, seq, dim)
-    row("attention", nl, [fill(t * dim, 0.0, True), fill(t * kv, 1.0, True), fill(t * kv, 2.0, True)],
+    amp = float(os.environ.get("SCORE_AMP", "1"))
+    row("attention", nl, [(fill(t * dim, 0.0) * amp).requires_grad_(), (fill(t * kv, 1.0) * amp).requires_grad_(), fill(t * kv, 2.0, True)],
         attention, fill(t * dim, 3.0).view(nseq, seq, dim))
 
     row("add", 2 * nl, [fill(t * dim, 0.0, True), fill(t * dim, 1.0, True)], lambda a, b: a + b, fill(t * dim, 2.0))

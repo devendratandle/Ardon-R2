@@ -27,9 +27,42 @@ fn timed(mut f: impl FnMut() -> bool) -> f64 {
 
 fn say(what: &str, value: f64, unit: &str) { println!("CEILING {what} {value:.1} {unit}"); }
 
+/// The rate of one kind of work held for 30 s.
+fn sustain(kind: &str) {
+    let out = Tensor::zeros(1 << 24).unwrap();
+    let n = 1usize << 28;
+    let (a, y) = (Tensor::upload(&vec![1.0f32; n]).unwrap(), Tensor::zeros(n).unwrap());
+    let (t, k, m) = (4096usize, 768usize, 3072usize);
+    let (ga, gb, gc) = (Tensor::upload(&vec![0.5f32; t * k]).unwrap(), Tensor::upload(&vec![0.5f32; k * m]).unwrap(), Tensor::zeros(t * m).unwrap());
+    let start = Instant::now();
+    let mut units = 0.0f64;
+    let unit = match kind { "fma" | "cublas" => "GFLOP/s", _ => "GB/s" };
+    while start.elapsed().as_secs_f64() < 30.0 {
+        for _ in 0..20 {
+            let ok = match kind {
+                "fma" => { units += 256.0 * 4096.0 * 1024.0 * 16.0; ceiling::fma(&out, 4096, 1024) }
+                "cublas" => { units += 2.0 * (t * k * m) as f64; r2_gpu::cuda::gemm::gemm_cublas(&ga, false, &gb, false, t, k, m, &gc, false) }
+                "read" => { units += (n * 4) as f64; ceiling::read(&a, &out, n, 768) }
+                _ => { units += (n * 8) as f64; ceiling::copy(&a, &y, n, 768) }
+            };
+            assert!(ok, "kernel failed");
+        }
+        assert!(sync(), "fence failed");
+    }
+    say(&format!("sustained_{kind}"), units / start.elapsed().as_secs_f64() / 1e9, unit);
+}
+
 fn main() {
     println!("device: {}", r2_gpu::cuda::device_line());
     if ffi::device().is_err() { println!("no device"); return; }
+
+    // `sustain <kind>`: 30 s of one kind of work, for a sampler to read power and
+    // clock under it. The T4 has a 70 W cap, so a burst overstates what a step gets.
+    if std::env::args().nth(1).as_deref() == Some("sustain") {
+        let kind = std::env::args().nth(2).unwrap_or_default();
+        sustain(&kind);
+        return;
+    }
 
     // registers: 2 FLOPs a multiply-add
     let out = Tensor::zeros(1 << 24).unwrap();
@@ -53,9 +86,11 @@ fn main() {
     // a tile's loads, on the 125M model's activations, stored by row and by column
     for (m, k) in [(4096usize, 768usize), (4096, 3072)] {
         let bytes = (m * k * 4) as f64;
-        let by_row = timed(|| ceiling::tile(&a, &out, m, k, k, 1));
-        let by_col = timed(|| ceiling::tile(&a, &out, m, k, 1, m));
-        say(&format!("tile_loads_{m}x{k}_by_row"), bytes / by_row / 1e9, "GB/s");
+        let across = timed(|| ceiling::tile(&a, &out, m, k, k, 1, false));
+        let along = timed(|| ceiling::tile(&a, &out, m, k, k, 1, true));
+        let by_col = timed(|| ceiling::tile(&a, &out, m, k, 1, m, false));
+        say(&format!("tile_loads_{m}x{k}_by_row_lanes_across"), bytes / across / 1e9, "GB/s");
+        say(&format!("tile_loads_{m}x{k}_by_row_lanes_along"), bytes / along / 1e9, "GB/s");
         say(&format!("tile_loads_{m}x{k}_by_column"), bytes / by_col / 1e9, "GB/s");
     }
 

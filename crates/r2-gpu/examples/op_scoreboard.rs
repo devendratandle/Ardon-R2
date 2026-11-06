@@ -210,7 +210,10 @@ mod device_layer {
 
         // attention
         let sh = attention::Shape { nseq: m.nseq, seq: m.seq, nh: m.nh, nkv: m.nkv, hd: m.hd, scale: 1.0 / (m.hd as f32).sqrt() };
-        let (q, k, v) = (up(&fill(t * d, 0.0)), up(&fill(t * kv, 1.0)), up(&fill(t * kv, 2.0)));
+        // SCORE_AMP over 1 peaks the softmax, as trained activations can
+        let amp: f32 = env("SCORE_AMP", 1.0);
+        let scaled = |n: usize, ph: f32| -> Vec<f32> { fill(n, ph).iter().map(|x| x * amp).collect() };
+        let (q, k, v) = (up(&scaled(t * d, 0.0)), up(&scaled(t * kv, 1.0)), up(&fill(t * kv, 2.0)));
         let (ctx, lse, ga, de) = (zeros(t * d), zeros(t * m.nh), up(&fill(t * d, 3.0)), zeros(t * m.nh));
         let (dq, dk, dv) = (zeros(t * d), zeros(t * kv), zeros(t * kv));
         o.line("attention", "fwd", l, timed(|| attention::forward(&q, &k, &v, &ctx, &lse, &sh)), sums(&[&ctx]));

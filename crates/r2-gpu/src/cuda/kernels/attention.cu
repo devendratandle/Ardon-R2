@@ -59,15 +59,19 @@ extern "C" __global__ void attn_gemm(const float *A, const float *B, float *C,
     const unsigned k_lo = band == BAND_FROM_ROW ? m0 : 0u;
     const unsigned k_hi = band == BAND_TO_ROW && m0 + BM < k ? m0 + BM : k;
     for (unsigned k0 = k_lo; k0 < k_hi; k0 += BK) {
+        // Lanes walk the index that is contiguous in memory, so a warp's loads share
+        // a cache line: the other way this load ran at a third of the speed on a T4.
         for (unsigned t = 0; t < LOADS_A; t++) {
             const unsigned idx = tid + t * THREADS;
-            const unsigned ii = m0 + idx % BM, kk = k0 + idx / BM;
-            As[idx] = (ii < m && kk < k) ? a[ii * a_is + kk * a_ks] : 0.0f;
+            const unsigned r = a_ks < a_is ? idx / BK : idx % BM, s = a_ks < a_is ? idx % BK : idx / BM;
+            const unsigned ii = m0 + r, kk = k0 + s;
+            As[s * BM + r] = (ii < m && kk < k) ? a[ii * a_is + kk * a_ks] : 0.0f;
         }
         for (unsigned t = 0; t < LOADS_B; t++) {
             const unsigned idx = tid + t * THREADS;
-            const unsigned jj = n0 + idx % BN, kk = k0 + idx / BN;
-            Bs[idx] = (jj < n && kk < k) ? b[kk * b_ks + jj * b_ns] : 0.0f;
+            const unsigned r = b_ks < b_ns ? idx / BK : idx % BN, s = b_ks < b_ns ? idx % BK : idx / BN;
+            const unsigned jj = n0 + r, kk = k0 + s;
+            Bs[s * BN + r] = (jj < n && kk < k) ? b[kk * b_ks + jj * b_ns] : 0.0f;
         }
         __syncthreads();
         for (unsigned kk = 0; kk < BK; kk++) {
@@ -129,8 +133,8 @@ extern "C" __global__ void attn_fused(const float *Q, const float *K, const floa
     // The query tile, once: every key tile below reads the same one. hd <= BM.
     for (unsigned t = 0; t < (BM * BM) / FTHREADS; t++) {
         const unsigned idx = tid + t * FTHREADS;
-        const unsigned ii = m0 + idx % BM, kk = idx / BM;
-        As[idx] = (ii < seq && kk < hd) ? q[ii * qrow + kk] : 0.0f;
+        const unsigned ii = m0 + idx / BM, kk = idx % BM;
+        As[kk * BM + idx / BM] = (ii < seq && kk < hd) ? q[ii * qrow + kk] : 0.0f;
     }
 
     for (unsigned n0 = 0; n0 < seq && n0 < m0 + BM; n0 += BN) {
@@ -142,8 +146,9 @@ extern "C" __global__ void attn_fused(const float *Q, const float *K, const floa
         for (unsigned k0 = 0; k0 < hd; k0 += BK) {
             for (unsigned t = 0; t < FLOADS_B; t++) {
                 const unsigned idx = tid + t * FTHREADS;
-                const unsigned jj = n0 + idx % BN, kk = k0 + idx / BN;
-                Bs[idx] = (jj < seq && kk < hd) ? kk_base[jj * kvrow + kk] : 0.0f;
+                const unsigned r = idx / BK, s = idx % BK;
+                const unsigned jj = n0 + r, kk = k0 + s;
+                Bs[s * BN + r] = (jj < seq && kk < hd) ? kk_base[jj * kvrow + kk] : 0.0f;
             }
             __syncthreads();
             for (unsigned kk = 0; kk < BK; kk++) {

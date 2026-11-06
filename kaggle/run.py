@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"leads"}   # also: "tests", "two", "audit", "bench", "pairs", "census", "score"
+STAGES = {"tests", "energy"}   # also: "tests", "two", "audit", "bench", "pairs", "census", "score"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.

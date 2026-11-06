@@ -45,15 +45,17 @@ extern "C" __global__ void ceil_copy(const float *A, float *Y, unsigned len) {
 #define BM 64u
 #define BK 16u
 #define THREADS 128u
-extern "C" __global__ void ceil_tile(const float *A, float *out, unsigned m, unsigned k, unsigned is, unsigned ks) {
+// walk_k: a warp's lanes step through k, not i.
+extern "C" __global__ void ceil_tile(const float *A, float *out, unsigned m, unsigned k, unsigned is, unsigned ks, unsigned walk_k) {
     static __shared__ float As[BK * BM];
     const unsigned tid = threadIdx.y * 16u + threadIdx.x, m0 = blockIdx.x * BM;
     float s = 0.0f;
     for (unsigned k0 = 0; k0 < k; k0 += BK) {
         for (unsigned t = 0; t < (BM * BK) / THREADS; t++) {
             const unsigned idx = tid + t * THREADS;
-            const unsigned ii = m0 + idx % BM, kk = k0 + idx / BM;
-            As[idx] = (ii < m && kk < k) ? A[ii * is + kk * ks] : 0.0f;
+            const unsigned r = walk_k ? idx / BK : idx % BM, c = walk_k ? idx % BK : idx / BM;
+            const unsigned ii = m0 + r, kk = k0 + c;
+            As[c * BM + r] = (ii < m && kk < k) ? A[ii * is + kk * ks] : 0.0f;
         }
         __syncthreads();
         s += As[tid];
