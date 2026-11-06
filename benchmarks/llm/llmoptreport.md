@@ -269,3 +269,61 @@ about 1.2x the energy per step.
 - **Energy per FLOP:** operands of 0.5 have an empty mantissa. Test sustained cuBLAS on random data
   with 24, 16, 12 and 8 significant bits. Only if the clock rises does training on fewer bits become
   worth testing, and it would have to pass the gate.
+
+### Run 32 (2251683): the loss gap settled, operand bits, `torch.compile`
+
+All 45 tests pass and the PTX is current. `gate.py` still fails, on its 0.0002 limit and on the
+weights differing across nudges, which this run does on purpose. Raw logs of runs 26 onward are in
+`kaggle-logs/`.
+
+**Loss at 125M, 100 steps, three held-out batches.** Each pair starts from the same weights, with one
+moved by one ulp:
+
+| Nudge | R2 | PyTorch | PyTorch minus R2 |
+|---:|---:|---:|---:|
+| 1 | 5.1362 | 5.1367 | +0.0005 |
+| 2 | 5.1364 | 5.1385 | +0.0021 |
+| 3 | 5.1364 | 5.1385 | +0.0021 |
+| 4 | 5.1372 | 5.1381 | +0.0009 |
+| 5 | 5.1379 | 5.1369 | -0.0010 |
+| 6 | 5.1370 | 5.1363 | -0.0007 |
+| Mean | 5.13685 | 5.13750 | +0.00065 |
+| Standard deviation | 0.00064 | 0.00098 | 0.00133 |
+
+**Verdict:** no sign of a real difference. The paired mean is 1.2 standard errors from zero, and its
+95% range is -0.0007 to +0.0020. The two sides overlap, and PyTorch is lower in two of six. One ulp in
+one weight of 125M moves R2 by up to 0.0017, so the limit of 0.0002 cannot hold at this size and
+length. A bias smaller than that range cannot be excluded from six pairs.
+
+**R2 and PyTorch alternating without a pause:** in pairs 2 to 6 the card stays equally hot. R2 takes
+1,065.5-1,068.5 ms and PyTorch 1,123.3-1,124.3 ms, so R2 leads 1.05x, and under the 10% rule.
+
+**Fewer significant bits in random operands, cuBLAS sustained:**
+
+| Bits | Card 0, round 1 | Card 0, round 2 | Card 0 clock | Card 1, round 2 |
+|---:|---:|---:|---:|---:|
+| 24 | 3,350 GFLOP/s | 3,232 GFLOP/s | 675-690 MHz | 3,195 GFLOP/s |
+| 16 | 3,406 GFLOP/s | 3,419 GFLOP/s | 705 MHz | 3,262 GFLOP/s |
+| 12 | 3,552 GFLOP/s | 3,531 GFLOP/s | 735 MHz | 3,429 GFLOP/s |
+| 8 | 3,657 GFLOP/s | 3,668 GFLOP/s | 765 MHz | 3,529 GFLOP/s |
+
+Card 1's first round heated from 55 C to 71 C across the row, which hides the effect, so it is left out.
+**Closed:** 16 bits gain about 4%, and 8 bits about 11% while giving up most of the precision. Training
+on fewer bits is not worth testing on this card. Empty mantissas do not explain the gain from constant
+operands in run 31, so identical data must account for most of it.
+
+**`torch.compile`, in the order R2, plain, compiled, compiled, plain, R2.** Median step after the first, ms:
+
+| Model | R2 | PyTorch plain | PyTorch compiled | R2 over plain | R2 over compiled |
+|---|---:|---:|---:|---:|---:|
+| 7.2M | 22.4, 23.5 | 27.0, 27.9 | 23.9, 24.0 | 1.20x | 1.04x |
+| 39.8M | 130.7, 135.8 | 143.5, 148.7 | 136.5, 137.5 | 1.10x | 1.03x |
+| 125M | 977.6, 1,026.0 | 1,070.2, 1,085.5 | 1,039.0, 994.8 | 1.08x | 1.02x |
+
+Compiled PyTorch trains to the same losses at these lengths. Its first step costs 12.7-25.3 s when
+compiling and 2.5-4.4 s on the repeat in the same session. Compiled runs sit in the hottest part of the
+order, which does not favour them. **Against compiled PyTorch, R2 has no proven per-step lead at any size.**
+PyTorch's `fused=True` Adam has not been tested and might narrow it further.
+
+R2's weights repeat exactly across runs here. Compiled PyTorch's do not, and plain PyTorch's differ
+except at 7.2M.
