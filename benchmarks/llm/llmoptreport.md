@@ -213,3 +213,59 @@ that clock. The constant data flatters cuBLAS, so its gap to the step is not yet
   operands just written remain as causes.
 - **Energy:** cuBLAS sustained on random data, to show what the data costs in clock. Fusing work that
   shares an operand may save energy as well as time, and only a step total at the cap can show it.
+
+### Run 31 (cee1d7d): the loss gap, operand data and clock, attention on real activations
+
+All 45 tests pass and the PTX is current. `gate.py` still fails. Its weight failures come from this
+run comparing tiled with cuBLAS on purpose: each path repeats its own weights exactly.
+
+**Loss at 125M, 100 steps:**
+
+| Held-out batches | R2 cuBLAS | R2 tiled | PyTorch, each run |
+|---|---:|---:|---:|
+| One, run 30 | 5.1245, 5.1245 | | 5.1258, 5.1256 |
+| One, run 31 | 5.1245 | 5.1238 | 5.1265, 5.1259 |
+| Three | 5.1365 | 5.1358 | 5.1371 |
+
+| Step, one batch | R2 cuBLAS | R2 tiled | PyTorch |
+|---:|---:|---:|---:|
+| 10 to 60 | Identical at four decimals on all sides | | |
+| 70 | 5.8207 | 5.8206 | 5.8210, 5.8208 |
+| 80 | 5.2620 | 5.2621 | 5.2632, 5.2624 |
+| 90 | 5.2083 | 5.2082 | 5.2084, 5.2086 |
+| 100 | 5.1245 | 5.1238 | 5.1265, 5.1259 |
+
+Other rounding moves R2 by 0.0007, and PyTorch differs from itself by up to 0.0009 across four runs,
+so the 0.0002 limit cannot hold at this size and length: PyTorch fails it against itself. That does
+not clear the gap. R2 stays below every PyTorch run, by 0.0006 on three batches and 0.0011-0.0020 on
+one, which more samples must settle. R2 is the lower side, and the gap is under 0.04% of the loss.
+
+**What operand data costs, cuBLAS 4096x768x3072 held for 30 s:**
+
+| Operands | Card 0 | Card 0 clock | Card 1 | Card 1 clock |
+|---|---:|---:|---:|---:|
+| Constant 0.5 | 4,641-4,689 GFLOP/s | 960 MHz | 4,923-5,401 GFLOP/s | 1,020-1,125 MHz |
+| Random | 2,961-3,081 GFLOP/s | 615-630 MHz | 3,125-3,497 GFLOP/s | 645-720 MHz |
+
+Random operands cost about a third of the clock under the same power cap. The step's GEMMs at about
+3,100 GFLOP/s and 645-735 MHz match this. **The real step's GEMMs already run at what cuBLAS sustains
+on this card with data that is not constant.** cuBLAS holds about 94% of 2 FLOPs per lane per cycle
+either way, so the limit is the energy per FLOP on real data.
+
+**R2 tiled products, sustained under the cap:** 1,445-1,458 ms per step at 975-990 MHz, against
+cuBLAS at 1,196 ms and 630 MHz in the same set. Tiled runs a third of the clock higher and still costs
+about 1.2x the energy per step.
+
+**Closed:**
+- **Forward attention on just-written memory:** repeating it on the same operands takes the same
+  time, 35.2 and 35.0 ms, then 36.3 and 36.5 ms.
+- **Forward attention at 4.2 ms per call:** this was largely heat. This census reads 2.9-3.0 ms and
+  its backward 7.0-7.3 ms. Compared with backward, forward still costs about 1.45x what its row shows,
+  so the activations themselves remain the lead.
+
+**Open:**
+- **Loss:** several runs per side, each with a one-ulp change to the starting weights, then compare
+  the two means against their spread.
+- **Energy per FLOP:** operands of 0.5 have an empty mantissa. Test sustained cuBLAS on random data
+  with 24, 16, 12 and 8 significant bits. Only if the clock rises does training on fewer bits become
+  worth testing, and it would have to pass the gate.
