@@ -86,6 +86,39 @@ fn flush(qb: &mut [f64], n: usize, rots: &mut Vec<(usize, f64, f64)>) {
     rots.clear();
 }
 
+/// An n x n orthogonal matrix built up from rotations of adjacent columns, in the
+/// blocked form above: rows in `RB` blocks, rotations applied a batch at a time.
+pub(crate) struct Rotations { qb: Vec<f64>, n: usize, rots: Vec<(usize, f64, f64)> }
+
+impl Rotations {
+    pub(crate) fn identity(n: usize) -> Rotations {
+        let nb = n.div_ceil(RB);
+        let mut qb = vec![0.0f64; nb * RB * n];
+        for i in 0..n { qb[(i / RB) * RB * n + i * RB + i % RB] = 1.0; }
+        Rotations { qb, n, rots: Vec::with_capacity(ROT_BATCH + n) }
+    }
+
+    /// Columns `k` and `k + 1` become `c·x + s·y` and `c·y − s·x`.
+    #[inline]
+    pub(crate) fn push(&mut self, k: usize, c: f64, s: f64) {
+        self.rots.push((k, c, s));
+        if self.rots.len() >= ROT_BATCH { flush(&mut self.qb, self.n, &mut self.rots); }
+    }
+
+    /// The matrix column-major, its columns in the given order.
+    pub(crate) fn into_columns(mut self, order: &[usize]) -> Vec<f64> {
+        flush(&mut self.qb, self.n, &mut self.rots);
+        let n = self.n;
+        let mut q = vec![0.0f64; n * n];
+        for (new, &old) in order.iter().enumerate() {
+            for (r, x) in q[new * n..(new + 1) * n].iter_mut().enumerate() {
+                *x = self.qb[(r / RB) * RB * n + old * RB + r % RB];
+            }
+        }
+        q
+    }
+}
+
 fn givens(a: f64, b: f64) -> (f64, f64) {
     if b == 0.0 { return (1.0, 0.0); }
     if a == 0.0 { return (0.0, 1.0); }

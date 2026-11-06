@@ -194,3 +194,35 @@ fn svd_reconstructs_a() {
         assert!(d < 1e-9 * s[0], "dgesvd vs dgesvd_full n={n}: {d}");
     }
 }
+
+/// What going through BᵀB cost: low rank gave |UΣVᵀ − A| = 1.4e-9 at n = 1000 (R: 1e-13),
+/// and Hilbert(12), whose smallest values are below rounding, 40 times R's residual.
+#[test]
+fn svd_keeps_its_accuracy_on_singular_and_ill_conditioned_matrices() {
+    let check = |n: usize, a: &[f64], tol: f64| {
+        let (s, u, vt) = dgesvd_full(n, n, a).unwrap();
+        let mut us = u.clone();
+        for k in 0..n { for i in 0..n { us[k * n + i] *= s[k]; } }
+        let back = matmul(n, n, n, &us, &vt);
+        let err = back.iter().zip(a).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        assert!(err < tol * s[0], "n={n}: |UΣVᵀ − A| = {err}, σ₁ = {}", s[0]);
+        let t = |q: &[f64]| { let mut qt = vec![0.0; n * n];
+            for j in 0..n { for i in 0..n { qt[i * n + j] = q[j * n + i]; } } matmul(n, n, n, &qt, q) };
+        let uvt = t(&u);
+        let vvt = matmul(n, n, n, &vt, &{ let mut x = vec![0.0; n * n];
+            for j in 0..n { for i in 0..n { x[i * n + j] = vt[j * n + i]; } } x });
+        for (name, q) in [("U", &uvt), ("V", &vvt)] {
+            for j in 0..n { for i in 0..n {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((q[j * n + i] - want).abs() < 1e-12, "n={n}: {name}ᵀ{name}[{i},{j}] = {}", q[j * n + i]);
+            } }
+        }
+    };
+    let hilbert = |n: usize| (0..n * n).map(|p| 1.0 / ((p / n + p % n + 1) as f64)).collect::<Vec<f64>>();
+    for n in [8, 12, 40] { check(n, &hilbert(n), 2e-15); }
+    // rank 7 of 300: most singular values are rounding around zero
+    let (b, c) = (mat(300, 7, 21), mat(7, 300, 22));
+    check(300, &matmul(300, 7, 300, &b, &c), 2e-14);
+    check(50, &vec![0.0; 2500].iter().enumerate().map(|(p, _)| if p % 51 == 0 { 1.0 } else { 0.0 }).collect::<Vec<f64>>(), 2e-15);
+    check(50, &vec![1.0; 2500], 2e-15);
+}

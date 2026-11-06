@@ -479,13 +479,8 @@ fn apply_block_reflector(m: usize, a: &mut [f64], tau: &[f64], k0: usize, kb: us
 /// A is m×n (m >= n), column-major. Returns the n singular values in
 /// descending order — exactly [`dgesvd_full`]'s σ.
 ///
-/// This had its own Golub-Kahan phase 2, and it was wrong at every size:
-/// each "Givens" step rotated one side of the bidiagonal and dropped the
-/// fill-in, which is not an orthogonal transform, so it converged to
-/// numbers that were not the singular values (11x4: 2.217 against the
-/// true 2.408; Σσ² ≠ ‖A‖²_F). Until a proper implicit-shift bidiagonal QR
-/// (LAPACK `dbdsqr`) is written, the values come from the full routine,
-/// which `crates/r2-linalg/tests/decomp_large.rs` checks against A itself.
+/// Both run the bidiagonal QR iteration in `bdsqr`, this one recording no rotation;
+/// `crates/r2-linalg/tests/decomp_large.rs` checks the full routine against A itself.
 pub fn dgesvd(m: usize, n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
     svd_impl(m, n, a, false).map(|(sigma, _, _)| sigma)
 }
@@ -502,23 +497,10 @@ pub fn dgesvd(m: usize, n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
 ///   1. Householder bidiagonalization (Golub-Kahan): A = U₁ B V₁ᵀ where B
 ///      is n×n bidiagonal with main diagonal `d` and superdiagonal `e`.
 ///      U₁ (m×n) and V₁ (n×n) are accumulated explicitly column-by-column.
-///   2. Diagonalize B by going through Bᵀ·B (n×n symmetric tridiagonal),
-///      using the already-shipped `dsyev_full` (Householder tridiag +
-///      implicit-shift symmetric QR with Wilkinson shift). Eigenvalues of
-///      Bᵀ·B are σ² (descending). Right singular vectors V₂ are
-///      eigenvectors; left singular vectors are recovered via
-///      u₂_k = (B · v₂_k) / σ_k for σ_k > 0 (zero column for σ_k ≈ 0).
+///   2. Diagonalize B with implicit QR on B itself (`bdsqr`, LAPACK's `dbdsqr`),
+///      accumulating B = U₂ · diag(σ) · V₂ᵀ.
 ///
 /// Final factors: U = U₁ · U₂ (m×n), V = V₁ · V₂ (n×n), Vᵀ = transpose.
-///
-/// **Honest accuracy caveat:** the Bᵀ·B route squares the condition number
-/// of A. For well-conditioned matrices (κ ≲ 1/√ε ≈ 6.7e7) the singular
-/// values and vectors are accurate to ~1e-12. For badly conditioned
-/// matrices (κ approaching 1/ε), small singular values lose accuracy
-/// proportionally — equivalent to half the floating-point precision.
-/// LAPACK's `dbdsqr` (proper implicit-shift bidiagonal QR with full
-/// accumulation) would give κ-independent accuracy at higher
-/// implementation cost. See `docs/KNOWN_LIMITATIONS.md`.
 pub fn dgesvd_full(
     m: usize,
     n: usize,
@@ -760,66 +742,12 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
         }
     }
 
-    // ── Phase 2: diagonalize B = U₂ · diag(σ) · V₂ᵀ via Bᵀ·B ────────
+    // ── Phase 2: diagonalize B = U₂ · diag(σ) · V₂ᵀ on B itself (`dbdsqr`) ─
     //
-    // T := Bᵀ·B is n×n symmetric tridiagonal with
-    //   T[i][i]   = d[i]² + e[i-1]²   (e[-1] := 0)
-    //   T[i][i+1] = d[i] · e[i]
-    // Already tridiagonal: straight to the QR iteration (densifying it
-    // would pay an O(n³) tridiagonalisation of a tridiagonal matrix).
-    let tdiag: Vec<f64> = (0..n).map(|i| {
-        let prev_e = if i == 0 { 0.0 } else { e_super[i - 1] };
-        d_diag[i] * d_diag[i] + prev_e * prev_e
-    }).collect();
-    let toff: Vec<f64> = (0..n - 1).map(|i| d_diag[i] * e_super[i]).collect();
-    let basis = if vectors {
-        let mut id = vec![0.0_f64; n * n];
-        for i in 0..n { id[i * n + i] = 1.0; }
-        Some((id, n))
-    } else { None };
-    // Values only: the Golub–Kahan values below are the whole answer.
-    let (eig_vals, v2) = if vectors {
-        crate::symeig::tridiag_eigen(tdiag, toff, basis)?
-    } else {
-        ((0..n).map(|i| -(i as f64)).collect(), None)   // placeholder order: rank = index
-    };
-    // The singular VALUES come from the Golub–Kahan form instead: the 2n×2n
-    // tridiagonal with zero diagonal and off-diagonal d₀,e₀,d₁,e₁,…,d_{n−1}
-    // has eigenvalues ±σ — no squaring, so small σ keep their digits
-    // (through BᵀB, √λ of a tiny λ carries the rounding of the large ones:
-    // Hilbert(10)'s σ₁₀ was 4% off). Values alone are O(n²); the vectors
-    // stay on BᵀB, whose 2n-size version would cost ~8× the vector phase.
-    let gk_off: Vec<f64> = (0..2 * n - 1)
-        .map(|i| if i % 2 == 0 { d_diag[i / 2] } else { e_super[i / 2] }).collect();
-    let (mut gk, _) = crate::symeig::tridiag_eigen(vec![0.0; 2 * n], gk_off, None)?;
-    gk.sort_by(|a, b| b.total_cmp(a));
-    let mut gk_pos: Vec<f64> = gk[..n].iter().map(|s| s.max(0.0)).collect();
-    // Pair each value with its BᵀB eigenvector by rank (the same set of
-    // numbers up to rounding, in the same order).
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| eig_vals[j].total_cmp(&eig_vals[i]));
-    let mut sigma = vec![0.0_f64; n];
-    for (r, &k) in order.iter().enumerate() { sigma[k] = std::mem::take(&mut gk_pos[r]); }
-    if !vectors { return Ok((sigma, vec![], vec![])); }
-    let v2 = v2.expect("vectors requested");
-
-    // ── Compute U₂ (n×n column-major): u₂_k = (B · v₂_k) / σ_k ──────
-    //
-    // Since B is bidiagonal:
-    //   (B · v)[i] = d[i] · v[i] + e[i] · v[i+1]   (e[n-1] = 0 by convention)
-    let mut u2 = vec![0.0_f64; n * n];
-    let sigma_floor = 1e-13_f64 * sigma.first().copied().unwrap_or(1.0).max(1.0);
-    for k in 0..n {
-        if sigma[k] > sigma_floor {
-            for i in 0..n {
-                let next_v = if i + 1 < n { v2[k * n + (i + 1)] } else { 0.0 };
-                let bv_i = d_diag[i] * v2[k * n + i]
-                    + (if i + 1 < n { e_super[i] } else { 0.0 }) * next_v;
-                u2[k * n + i] = bv_i / sigma[k];
-            }
-        }
-    }
-    orthonormalize_weak_columns(n, &mut u2, &sigma);
+    // Not through BᵀB, which squares the condition number: every rotation here
+    // is orthogonal, so U₂ and V₂ stay orthonormal whatever σ is, zero included.
+    if !vectors { return Ok((crate::bdsqr::values(d_diag, e_super)?, vec![], vec![])); }
+    let (sigma, u2, v2) = crate::bdsqr::full(d_diag, e_super)?;
 
     // ── Assemble U = U₁ · U₂ (m×n) and V = V₁ · V₂ (n×n) ────────────
     // Both on the packed GEMM kernel (these were strided triple loops).
@@ -841,67 +769,6 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
 /// The Jacobi method is simple and always converges for symmetric matrices.
 /// For small matrices (n < 100), it's fast enough and numerically robust.
 /// Algorithm: repeatedly zero the largest off-diagonal element via Givens rotations.
-/// Make the columns of U₂ (n×n, column-major) that belong to small σ
-/// orthonormal, as LAPACK's are. u_k = B·v_k/σ_k carries rounding of order
-/// ε·σ_max/σ_k, so a column with σ_k < 10⁻³·σ_max is no longer orthogonal
-/// to the rest (Hilbert(10): σ₁₀/σ₁ ≈ 6e-14), and a σ_k = 0 column was left
-/// all zeros. Such columns, largest σ first, are taken in blocks of 64:
-/// projected off every accepted column twice ("twice is enough") as two
-/// GEMMs, then Gram–Schmidt'ed twice within the block and normalised. A
-/// column with nothing of its own (σ = 0: B·v = 0) starts from a fixed
-/// pseudo-random vector instead, so it becomes a valid completion. A·V = U·Σ
-/// is unchanged to rounding (these columns carry tiny σ). Nothing happens
-/// for a well-conditioned matrix; a rank-deficient one costs ~2n³ flops,
-/// nearly all in the GEMM kernel.
-fn orthonormalize_weak_columns(n: usize, u: &mut [f64], sigma: &[f64]) {
-    const BLOCK: usize = 64;
-    let smax = sigma.iter().copied().fold(0.0_f64, f64::max);
-    let strong = |k: usize| sigma[k] > 1e-3 * smax;
-    let mut weak: Vec<usize> = (0..n).filter(|&k| !strong(k)).collect();
-    if weak.is_empty() { return; }
-    weak.sort_by(|&i, &j| sigma[j].total_cmp(&sigma[i]));
-    // Accepted columns, contiguous (n × a, column-major).
-    let mut acc: Vec<f64> = (0..n).filter(|&k| strong(k)).flat_map(|k| u[k * n..(k + 1) * n].to_vec()).collect();
-    let norm = |c: &[f64]| c.iter().map(|x| x * x).sum::<f64>().sqrt();
-    let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
-    for block in weak.chunks(BLOCK) {
-        let b = block.len();
-        let mut x: Vec<f64> = block.iter().flat_map(|&k| u[k * n..(k + 1) * n].to_vec()).collect();
-        for c in 0..b {
-            if norm(&x[c * n..(c + 1) * n]) < 1e-8 {
-                for v in &mut x[c * n..(c + 1) * n] {
-                    seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
-                    *v = (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
-                }
-            }
-        }
-        // x −= acc·(accᵀ·x), twice
-        let a = acc.len() / n;
-        if a > 0 {
-            let mut acc_t = vec![0.0; a * n];
-            crate::dtranspose(n, a, &acc, &mut acc_t).expect("shapes");
-            let mut p = vec![0.0; a * b];
-            for _pass in 0..2 {
-                crate::dgemm(a, b, n, 1.0, &acc_t, &x, 0.0, &mut p).expect("shapes");
-                crate::dgemm(n, b, a, -1.0, &acc, &p, 1.0, &mut x).expect("shapes");
-            }
-        }
-        // within the block, in σ order, twice; then normalise
-        for c in 0..b {
-            for _pass in 0..2 {
-                for j in 0..c {
-                    let dot: f64 = (0..n).map(|i| x[j * n + i] * x[c * n + i]).sum();
-                    for i in 0..n { x[c * n + i] -= dot * x[j * n + i]; }
-                }
-            }
-            let nc = norm(&x[c * n..(c + 1) * n]);
-            for v in &mut x[c * n..(c + 1) * n] { *v /= nc; }
-        }
-        for (c, &k) in block.iter().enumerate() { u[k * n..(k + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]); }
-        acc.extend_from_slice(&x);
-    }
-}
-
 pub fn dsyev(n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
     if a.len() != n * n { return Err(LinalgError::NotSquare); }
     if n == 0 { return Ok(vec![]); }
