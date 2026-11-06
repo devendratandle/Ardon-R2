@@ -11,7 +11,9 @@ use super::{loaded, Loaded, Tensor};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-const ROW_THREADS: u32 = 64;
+/// As in `kernels/elementwise.cu`: 8 rows to a block, a warp of 32 threads to each.
+const ROW_BLOCK: u32 = 256;
+const LANES: usize = 32;
 const FLAT: u32 = 256;
 /// Row blocks the rmsnorm dW reduction is split across.
 const RM_PARTS: usize = 64;
@@ -64,7 +66,7 @@ pub fn rmsnorm_scratch_len(rows: usize, d: usize) -> usize { rows + RM_PARTS * d
 pub fn rmsnorm_fwd(x: &Tensor, w: &Tensor, y: &Tensor, rows: usize, d: usize, eps: f32) -> bool {
     let Some(ks) = kernels() else { return false };
     if x.len() < rows * d || y.len() < rows * d || w.len() < d { return false; }
-    run(&ks.rm_fwd, rows, ROW_THREADS, &[Arg::F(x), Arg::F(w), Arg::F(y), int(rows), int(d), Arg::Real(eps)])
+    run(&ks.rm_fwd, rows * LANES, ROW_BLOCK, &[Arg::F(x), Arg::F(w), Arg::F(y), int(rows), int(d), Arg::Real(eps)])
 }
 
 /// rmsnorm backward: `gx (=|+=)` per `assign_x`, `gw (=|+=)` per `assign_w`.
@@ -76,7 +78,7 @@ pub fn rmsnorm_bwd(x: &Tensor, w: &Tensor, g: &Tensor, gx: &Tensor, gw: &Tensor,
         || scratch.len() < rmsnorm_scratch_len(rows, d) { return false; }
     let parts = RM_PARTS.min(rows).max(1);
     let (off, s) = (int(rows), Arg::F(scratch));
-    run(&ks.rm_bwd_x, rows, ROW_THREADS, &[Arg::F(x), Arg::F(w), Arg::F(g), Arg::F(gx), s,
+    run(&ks.rm_bwd_x, rows * LANES, ROW_BLOCK, &[Arg::F(x), Arg::F(w), Arg::F(g), Arg::F(gx), s,
                                            int(rows), int(d), Arg::Real(eps), int(!assign_x as usize)])
         && run(&ks.rm_part, parts * d, FLAT, &[Arg::F(x), Arg::F(g), s, off, int(rows), int(d), int(parts)])
         && run(&ks.rm_sum, d, FLAT, &[s, off, Arg::F(gw), int(d), int(parts), int(!assign_w as usize)])
@@ -170,7 +172,7 @@ pub fn upload_ids(ids: &[usize]) -> Option<Ids> {
 pub fn softmax_ce_fwd(x: &Tensor, ids: &Ids, lse: &Tensor, loss: &Tensor, rows: usize, d: usize) -> bool {
     let Some(ks) = kernels() else { return false };
     if x.len() < rows * d || ids.len() < rows || lse.len() < rows || loss.len() < rows { return false; }
-    run(&ks.ce_fwd, rows, ROW_THREADS, &[Arg::F(x), Arg::U(ids), Arg::F(lse), Arg::F(loss), int(rows), int(d)])
+    run(&ks.ce_fwd, rows * LANES, ROW_BLOCK, &[Arg::F(x), Arg::U(ids), Arg::F(lse), Arg::F(loss), int(rows), int(d)])
 }
 
 /// `gx (=|+=) inv * (softmax(x) - onehot)`.

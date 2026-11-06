@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "audit", "bench"}   # also: "tests", "two", "audit", "bench", "pairs", "census"
+STAGES = {"tests", "audit", "bench", "census"}   # also: "tests", "two", "audit", "bench", "pairs", "census"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -124,4 +124,4 @@ sh("nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0"
 for name, env in [] if "census" not in STAGES else [("medium", "R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8"),
                   ("large", "R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8")]:
     print(f"\n=== census {name}", flush=True)
-    sh(f"cd /tmp/r2 && {env} R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 ./target/release/examples/tinystories_train 2>&1 | grep -A16 'GPU step census'; true")
+    sh(f"cd /tmp/r2 && {env} R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 ./target/release/examples/tinystories_train 2>&1 | grep -A60 'GPU step census'; true")

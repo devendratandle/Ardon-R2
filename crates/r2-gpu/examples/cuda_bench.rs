@@ -8,7 +8,7 @@
 //!     cargo run --release -p r2-gpu --features cuda --example cuda_bench
 
 use r2_autograd::Tape;
-use r2_gpu::cuda::attention::{backward, forward, profile_start, profile_take, Shape};
+use r2_gpu::cuda::attention::{backward, force_fused, forward, profile_start, profile_take, Shape};
 use r2_gpu::cuda::gemm::{force_path, gemm_cublas, gemm_tiled, last_path, Path};
 use r2_gpu::cuda::optim::adam_step;
 use r2_gpu::cuda::{self, ffi, Tensor};
@@ -113,8 +113,9 @@ fn attention() {
         let ms = |x: Option<f64>| x.map_or("failed".to_string(), |s| format!("{:.2}", s * 1e3));
         // interleaved, a path's two rows apart: the split below drains after every
         // launch, so its sum is above the row's total and only its shares mean anything
-        for path in [Path::Tiled, Path::Cublas, Path::Tiled, Path::Cublas] {
+        for (path, fused) in [(Path::Tiled, false), (Path::Tiled, true), (Path::Cublas, false), (Path::Tiled, false), (Path::Tiled, true), (Path::Cublas, false)] {
             force_path(Some(path));
+            force_fused(fused);
             let fwd = timed(reps, || forward(&tq, &tk, &tv, &to, &tl, &sh));
             let bwd = timed(reps, || backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh));
             profile_start();
@@ -123,9 +124,10 @@ fn attention() {
             profile_start();
             backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh);
             let b = profile_take().unwrap_or_default();
-            println!("{:<26} {:>9} {:>9} {:?} (ran {:?}) products/rows fwd {:.2}/{:.2} bwd {:.2}/{:.2}",
+            println!("{:<26} {:>9} {:>9} {:?} fused={fused} (ran {:?}) products/rows fwd {:.2}/{:.2} bwd {:.2}/{:.2}",
                      name, ms(fwd), ms(bwd), path, last_path(), f[0], f[1], b[0], b[1]);
             force_path(None);
+            force_fused(false);
         }
         let leafs = |tp: &mut Tape| (tp.leaf(qv.clone(), true), tp.leaf(kv.clone(), true), tp.leaf(vv.clone(), true));
         let cpu_f = median((0..5).map(|_| {

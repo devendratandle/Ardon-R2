@@ -96,12 +96,20 @@ extern "C" __global__ void attn_gemm(const float *A, const float *B, float *C,
 // sequence x head). For each key tile: S in registers; each row's max and sum over
 // the threads that share it; P to shared memory; O += P V, in registers, rescaled
 // whenever a row's max moves. O and L are written at the end.
+// Four warps to a block, 8 x 4 values to a thread, as PyTorch's kernel on this
+// device: at 8 x 8 and two warps the same work ran 3x slower than that kernel.
+#define FM 8u
+#define FN 4u
+#define FTHREADS ((BM / FM) * (BN / FN))
+#define FLOADS_A ((BM * BK) / FTHREADS)
+#define FLOADS_B ((BK * BN) / FTHREADS)
+
 extern "C" __global__ void attn_fused(const float *Q, const float *K, const float *V, float *O, float *L,
                                       unsigned nseq, unsigned seq, unsigned nh, unsigned nkv, unsigned hd, float scale) {
     static __shared__ float As[BK * BM];
     static __shared__ float Bs[BK * BN];
     static __shared__ float Ps[BM * BN];
-    static __shared__ float Red[BM * (BN / TN)];
+    static __shared__ float Red[BM * (BN / FN)];
     const unsigned m0 = blockIdx.x * BM;
     const unsigned s = blockIdx.y / nh, h = blockIdx.y % nh, group = nh / nkv;
     const unsigned qrow = nh * hd, kvrow = nkv * hd;
@@ -109,110 +117,110 @@ extern "C" __global__ void attn_fused(const float *Q, const float *K, const floa
     const float *kk_base = K + s * seq * kvrow + (h / group) * hd;
     const float *v = V + s * seq * kvrow + (h / group) * hd;
     const unsigned tx = threadIdx.x, ty = threadIdx.y;
-    const unsigned tid = ty * (BN / TN) + tx;
-    const unsigned mbase = m0 + ty * TM;
+    const unsigned tid = ty * (BN / FN) + tx;
+    const unsigned mbase = m0 + ty * FM;
 
-    float o[TM][TN], mi[TM], si[TM];
-    for (unsigned i = 0; i < TM; i++) {
+    float o[FM][FN], mi[FM], si[FM];
+    for (unsigned i = 0; i < FM; i++) {
         mi[i] = -3.0e38f;
         si[i] = 0.0f;
-        for (unsigned j = 0; j < TN; j++) o[i][j] = 0.0f;
+        for (unsigned j = 0; j < FN; j++) o[i][j] = 0.0f;
     }
 
     for (unsigned n0 = 0; n0 < seq && n0 < m0 + BM; n0 += BN) {
-        const unsigned nbase = n0 + tx * TN;
+        const unsigned nbase = n0 + tx * FN;
         // S = scale Q K^T for this tile
-        float c[TM][TN];
-        for (unsigned i = 0; i < TM; i++)
-            for (unsigned j = 0; j < TN; j++) c[i][j] = 0.0f;
+        float c[FM][FN];
+        for (unsigned i = 0; i < FM; i++)
+            for (unsigned j = 0; j < FN; j++) c[i][j] = 0.0f;
         for (unsigned k0 = 0; k0 < hd; k0 += BK) {
-            for (unsigned t = 0; t < LOADS_A; t++) {
-                const unsigned idx = tid + t * THREADS;
+            for (unsigned t = 0; t < FLOADS_A; t++) {
+                const unsigned idx = tid + t * FTHREADS;
                 const unsigned ii = m0 + idx % BM, kk = k0 + idx / BM;
                 As[idx] = (ii < seq && kk < hd) ? q[ii * qrow + kk] : 0.0f;
             }
-            for (unsigned t = 0; t < LOADS_B; t++) {
-                const unsigned idx = tid + t * THREADS;
+            for (unsigned t = 0; t < FLOADS_B; t++) {
+                const unsigned idx = tid + t * FTHREADS;
                 const unsigned jj = n0 + idx % BN, kk = k0 + idx / BN;
                 Bs[idx] = (jj < seq && kk < hd) ? kk_base[jj * kvrow + kk] : 0.0f;
             }
             __syncthreads();
             for (unsigned kk = 0; kk < BK; kk++) {
-                float x[TM], y[TN];
-                for (unsigned i = 0; i < TM; i++) x[i] = As[kk * BM + ty * TM + i];
-                for (unsigned j = 0; j < TN; j++) y[j] = Bs[kk * BN + tx * TN + j];
-                for (unsigned i = 0; i < TM; i++)
-                    for (unsigned j = 0; j < TN; j++) c[i][j] = fmaf(x[i], y[j], c[i][j]);
+                float x[FM], y[FN];
+                for (unsigned i = 0; i < FM; i++) x[i] = As[kk * BM + ty * FM + i];
+                for (unsigned j = 0; j < FN; j++) y[j] = Bs[kk * BN + tx * FN + j];
+                for (unsigned i = 0; i < FM; i++)
+                    for (unsigned j = 0; j < FN; j++) c[i][j] = fmaf(x[i], y[j], c[i][j]);
             }
             __syncthreads();
         }
         // each row's new max, over the threads sharing the row
-        for (unsigned i = 0; i < TM; i++) {
+        for (unsigned i = 0; i < FM; i++) {
             const unsigned row = mbase + i;
             float m = -3.0e38f;
-            for (unsigned j = 0; j < TN; j++) {
+            for (unsigned j = 0; j < FN; j++) {
                 c[i][j] *= scale;
                 if (row < seq && nbase + j < seq && nbase + j <= row) m = fmaxf(m, c[i][j]);
             }
-            Red[(ty * TM + i) * (BN / TN) + tx] = m;
+            Red[(ty * FM + i) * (BN / FN) + tx] = m;
         }
         __syncthreads();
-        float rescale[TM];
-        for (unsigned i = 0; i < TM; i++) {
+        float rescale[FM];
+        for (unsigned i = 0; i < FM; i++) {
             float m = mi[i];
-            for (unsigned u = 0; u < BN / TN; u++) m = fmaxf(m, Red[(ty * TM + i) * (BN / TN) + u]);
+            for (unsigned u = 0; u < BN / FN; u++) m = fmaxf(m, Red[(ty * FM + i) * (BN / FN) + u]);
             rescale[i] = n0 == 0 ? 1.0f : exp_r2(mi[i] - m);
             mi[i] = m;
         }
         __syncthreads();
         // P, unnormalized, against the new max; the row's sum
-        for (unsigned i = 0; i < TM; i++) {
+        for (unsigned i = 0; i < FM; i++) {
             const unsigned row = mbase + i;
             float l = 0.0f;
-            for (unsigned j = 0; j < TN; j++) {
+            for (unsigned j = 0; j < FN; j++) {
                 float p = 0.0f;
                 if (row < seq && nbase + j < seq && nbase + j <= row) {
                     p = exp_r2(c[i][j] - mi[i]);
                     l += p;
                 }
-                Ps[(ty * TM + i) * BN + tx * TN + j] = p;
+                Ps[(ty * FM + i) * BN + tx * FN + j] = p;
                 o[i][j] *= rescale[i];
             }
-            Red[(ty * TM + i) * (BN / TN) + tx] = l;
+            Red[(ty * FM + i) * (BN / FN) + tx] = l;
         }
         __syncthreads();
-        for (unsigned i = 0; i < TM; i++) {
+        for (unsigned i = 0; i < FM; i++) {
             float l = 0.0f;
-            for (unsigned u = 0; u < BN / TN; u++) l += Red[(ty * TM + i) * (BN / TN) + u];
+            for (unsigned u = 0; u < BN / FN; u++) l += Red[(ty * FM + i) * (BN / FN) + u];
             si[i] = si[i] * rescale[i] + l;
         }
         __syncthreads();
         // O += P V: keys are the summed index, V's columns the output's
         for (unsigned k0 = 0; k0 < BN; k0 += BK) {
-            for (unsigned t = 0; t < LOADS_B; t++) {
-                const unsigned idx = tid + t * THREADS;
+            for (unsigned t = 0; t < FLOADS_B; t++) {
+                const unsigned idx = tid + t * FTHREADS;
                 const unsigned cc = idx % BN, key = n0 + k0 + idx / BN;
                 Bs[idx] = (key < seq && cc < hd) ? v[key * kvrow + cc] : 0.0f;
             }
             __syncthreads();
             for (unsigned kk = 0; kk < BK; kk++) {
-                float x[TM], y[TN];
-                for (unsigned i = 0; i < TM; i++) x[i] = Ps[(ty * TM + i) * BN + k0 + kk];
-                for (unsigned j = 0; j < TN; j++) y[j] = Bs[kk * BN + tx * TN + j];
-                for (unsigned i = 0; i < TM; i++)
-                    for (unsigned j = 0; j < TN; j++) o[i][j] = fmaf(x[i], y[j], o[i][j]);
+                float x[FM], y[FN];
+                for (unsigned i = 0; i < FM; i++) x[i] = Ps[(ty * FM + i) * BN + k0 + kk];
+                for (unsigned j = 0; j < FN; j++) y[j] = Bs[kk * BN + tx * FN + j];
+                for (unsigned i = 0; i < FM; i++)
+                    for (unsigned j = 0; j < FN; j++) o[i][j] = fmaf(x[i], y[j], o[i][j]);
             }
             __syncthreads();
         }
     }
 
     float *out = O + s * seq * qrow + h * hd;
-    for (unsigned i = 0; i < TM; i++) {
+    for (unsigned i = 0; i < FM; i++) {
         const unsigned row = mbase + i;
         if (row >= seq) break;
         const float inv = 1.0f / si[i];
-        for (unsigned j = 0; j < TN; j++) {
-            const unsigned col = tx * TN + j;
+        for (unsigned j = 0; j < FN; j++) {
+            const unsigned col = tx * FN + j;
             if (col >= hd) break;
             out[row * qrow + col] = o[i][j] * inv;
         }

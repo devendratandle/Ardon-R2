@@ -148,6 +148,11 @@ fn rows_launch(k: &Kernel, threads: usize, block: u32, args: &[Arg]) -> Option<(
     Some(())
 }
 
+thread_local! { static FUSED: Cell<bool> = const { Cell::new(false) }; }
+
+/// Makes this thread's forward attention use the fused kernel where it can.
+pub fn force_fused(on: bool) { FUSED.with(|f| f.set(on)); }
+
 thread_local! { static PROFILE: Cell<Option<(Instant, [f64; 2])>> = const { Cell::new(None) }; }
 
 /// Starts this thread's split of attention into its products and row kernels.
@@ -191,11 +196,11 @@ fn forward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, s
     let ks = kernels().ok()?;
     let (seq, hd) = (sh.seq, sh.hd);
     let (lq, lkv, lp) = (Layout::rows(sh, sh.nh, false), Layout::rows(sh, sh.nkv, true), Layout::pairs(sh));
-    // One kernel, nothing of seq x seq in memory, where the output fits a tile. Asking
-    // for cuBLAS asks for its products, so the stored form below serves that.
-    if hd <= TILE as usize && chosen() != Some(Path::Cublas) {
+    // One kernel, nothing of seq x seq in memory, where the output fits a tile: only
+    // when asked for, until it beats the stored form below on the T4.
+    if hd <= TILE as usize && FUSED.with(|f| f.get()) {
         let int = Arg::Int;
-        ks.fused.launch([(seq as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32, 1], GEMM_BLOCK, &[
+        ks.fused.launch([(seq as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32, 1], [16, 8, 1], &[
             Arg::F(q), Arg::F(k), Arg::F(v), Arg::F(o), Arg::F(lse),
             int(sh.nseq as u32), int(seq as u32), int(sh.nh as u32), int(sh.nkv as u32), int(hd as u32), Arg::Real(sh.scale),
         ]).ok()?;
@@ -293,7 +298,7 @@ mod tests {
     #[test]
     fn matches_the_tape() {
         if !have_device() { return; }
-        on_both_paths(|path| for &(nseq, seq, nh, nkv, hd) in &[(1usize, 8usize, 2usize, 1usize, 8usize), (2, 65, 4, 2, 16),
+        for fused in [false, true] { force_fused(fused); on_both_paths(|path| for &(nseq, seq, nh, nkv, hd) in &[(1usize, 8usize, 2usize, 1usize, 8usize), (2, 65, 4, 2, 16),
                                            (3, 130, 3, 3, 32), (2, 70, 4, 2, 64), (1, 40, 2, 1, 256), (1, 1, 2, 2, 4)] {
             let rows = nseq * seq;
             let (qv, kv, vv) = (mk(rows * nh * hd, 0.0), mk(rows * nkv * hd, 1.3), mk(rows * nkv * hd, 2.7));
@@ -326,7 +331,8 @@ mod tests {
             close(&dq.download(), tape.grad(q), "grad_q");
             close(&dk.download(), tape.grad(k), "grad_k");
             close(&dv.download(), tape.grad(v), "grad_v");
-        });
+        }); }
+        force_fused(false);
     }
 
     /// The tiled kernel promises this: each element is one thread's fixed-order

@@ -2,42 +2,64 @@
 // SiLU, products and sums, RoPE, softmax cross-entropy, the embedding gather.
 // The operations and the meaning of each code are `src/elementwise.rs`'s.
 //
-// One thread owns one output element or row and sums in a fixed order, so the
-// results are the same bits on every run. The backward ops that scatter on a
-// CPU are written as gathers, and no kernel uses atomics. Where the wgpu kernels
-// reduce a row across a workgroup, one thread here walks the row: this device
-// has lanes to spare, and the row reductions need no barriers this way.
+// Every element comes from a fixed order of operations, so the results are the
+// same bits on every run. The backward ops that scatter on a CPU are written as
+// gathers, and no kernel uses atomics.
 #include "r2_math.h"
 
 #define IDX (blockIdx.x * blockDim.x + threadIdx.x)
 
-// y[r] = x[r] / rms(x[r]) * w, one thread per row.
+// Row kernels: ROWS rows to a block, a warp to a row, a warp's lanes on consecutive
+// elements, so its 32 loads fall in one cache line. One thread per row sent each warp
+// to 32 lines at once. A row's reduction goes through shared memory in lane order.
+#define LANES 32u
+#define ROWS 8u
+#define ROW_THREAD \
+    const unsigned lane = threadIdx.x % LANES, warp = threadIdx.x / LANES; \
+    const unsigned r = blockIdx.x * ROWS + warp;
+
+// y[r] = x[r] / rms(x[r]) * w.
 extern "C" __global__ void rmsnorm_fwd(const float *X, const float *W, float *Y, unsigned rows, unsigned d, float eps) {
-    const unsigned r = IDX;
+    static __shared__ float red[ROWS * LANES];
+    ROW_THREAD
     if (r >= rows) return;
     const float *x = X + r * d;
     float ss = 0.0f;
-    for (unsigned j = 0; j < d; j++) ss = fmaf(x[j], x[j], ss);
+    for (unsigned j = lane; j < d; j += LANES) ss = fmaf(x[j], x[j], ss);
+    red[threadIdx.x] = ss;
+    __syncthreads();
+    ss = 0.0f;
+    for (unsigned u = 0; u < LANES; u++) ss += red[warp * LANES + u];
     const float scale = 1.0f / sqrtf(ss / (float)d + eps);
-    for (unsigned j = 0; j < d; j++) Y[r * d + j] = x[j] * scale * W[j];
+    for (unsigned j = lane; j < d; j += LANES) Y[r * d + j] = x[j] * scale * W[j];
 }
 
 // dX (assign or accumulate), and the per-row rinv the dW pass reads.
 extern "C" __global__ void rmsnorm_bwd_x(const float *X, const float *W, const float *G, float *GX, float *RI,
                                          unsigned rows, unsigned d, float eps, unsigned acc) {
-    const unsigned r = IDX;
+    static __shared__ float red[2u * ROWS * LANES];
+    ROW_THREAD
     if (r >= rows) return;
     const float *x = X + r * d;
     const float *g = G + r * d;
     float ss = 0.0f, sg = 0.0f;
-    for (unsigned j = 0; j < d; j++) {
+    for (unsigned j = lane; j < d; j += LANES) {
         ss = fmaf(x[j], x[j], ss);
         sg = fmaf(g[j] * W[j], x[j], sg);
     }
+    red[2u * threadIdx.x] = ss;
+    red[2u * threadIdx.x + 1u] = sg;
+    __syncthreads();
+    ss = 0.0f;
+    sg = 0.0f;
+    for (unsigned u = 0; u < LANES; u++) {
+        ss += red[2u * (warp * LANES + u)];
+        sg += red[2u * (warp * LANES + u) + 1u];
+    }
     const float ri = 1.0f / sqrtf(ss / (float)d + eps);
     const float coef = ri * ri * ri / (float)d * sg;
-    RI[r] = ri;
-    for (unsigned j = 0; j < d; j++) {
+    if (lane == 0) RI[r] = ri;
+    for (unsigned j = lane; j < d; j += LANES) {
         const float dx = g[j] * W[j] * ri - coef * x[j];
         if (acc) GX[r * d + j] += dx; else GX[r * d + j] = dx;
     }
@@ -135,16 +157,30 @@ extern "C" __global__ void rope(const float *X, const float *TAB, float *Y, unsi
 // Per row: LSE[r] = logsumexp(row), LOSS[r] = LSE[r] - x[target]; an ignored
 // row has no loss at all.
 extern "C" __global__ void softmax_ce_fwd(const float *X, const unsigned *ids, float *LSE, float *LOSS, unsigned rows, unsigned d) {
-    const unsigned r = IDX;
+    static __shared__ float red[ROWS * LANES];
+    ROW_THREAD
     if (r >= rows) return;
-    if (ids[r] == IGNORED) { LSE[r] = 0.0f; LOSS[r] = 0.0f; return; }
+    if (ids[r] == IGNORED) {
+        if (lane == 0) { LSE[r] = 0.0f; LOSS[r] = 0.0f; }
+        return;
+    }
     const float *x = X + r * d;
     float m = -3.0e38f, sum = 0.0f;
-    for (unsigned j = 0; j < d; j++) m = fmaxf(m, x[j]);
-    for (unsigned j = 0; j < d; j++) sum += exp_r2(x[j] - m);
-    const float lse = m + logf(sum);
-    LSE[r] = lse;
-    LOSS[r] = lse - x[ids[r]];
+    for (unsigned j = lane; j < d; j += LANES) m = fmaxf(m, x[j]);
+    red[threadIdx.x] = m;
+    __syncthreads();
+    for (unsigned u = 0; u < LANES; u++) m = fmaxf(m, red[warp * LANES + u]);
+    __syncthreads();
+    for (unsigned j = lane; j < d; j += LANES) sum += exp_r2(x[j] - m);
+    red[threadIdx.x] = sum;
+    __syncthreads();
+    if (lane == 0) {
+        sum = 0.0f;
+        for (unsigned u = 0; u < LANES; u++) sum += red[warp * LANES + u];
+        const float lse = m + logf(sum);
+        LSE[r] = lse;
+        LOSS[r] = lse - x[ids[r]];
+    }
 }
 
 // GX (=|+=) inv * (exp(x - lse) - [j == target]).
