@@ -101,6 +101,9 @@ const SCALE_MAX: f32 = 65536.0;
 const SCALE_GROW_EVERY: u32 = 1000;
 
 pub struct GpuTrainer {
+    /// `Some` to sum milliseconds per phase: prepare, forward, backward, loss read,
+    /// exchange, Adam. One fence per phase; off by default.
+    pub phase_ms: Option<[f64; 6]>,
     /// Other processes to average gradients with, each step.
     #[cfg(feature = "cuda")]
     pub cluster: Option<r2_gpu::cuda::cluster::Cluster>,
@@ -165,7 +168,7 @@ impl GpuTrainer {
         }
         let w16 = (0..w.len()).map(|_| None).collect();
         let norm_scratch = tz(optim::norm_scratch_len(&sizes))?;
-        Ok(GpuTrainer { #[cfg(feature = "cuda")] cluster: None, cfg: tr.cfg, w, w16, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
+        Ok(GpuTrainer { #[cfg(feature = "cuda")] cluster: None, phase_ms: None, cfg: tr.cfg, w, w16, g, m, v, sizes, lr: tr.opt.lr, beta1: tr.opt.beta1,
                         beta2: tr.opt.beta2, eps: tr.opt.eps, sched: tr.sched, t: tr.opt.t, step: tr.step,
                         weight_decay: tr.opt.weight_decay, decay: tr.decay_mask(), clip: tr.clip,
                         last_grad_norm: None, norm_scratch,
@@ -253,6 +256,7 @@ impl GpuTrainer {
     /// the mean cross-entropy over every token, as `Trainer::train_step`.
     pub fn train_step(&mut self, batch: &[(Vec<usize>, Vec<usize>)]) -> Result<f32, String> {
         let (loss, overflow) = self.forward_backward(batch)?;
+        let after = std::time::Instant::now();
         if overflow {
             // dynamic loss scaling: the gradients are unusable, the step
             // is skipped and the scale halved
@@ -267,6 +271,7 @@ impl GpuTrainer {
             let grads: Vec<&Tensor> = self.g.iter().collect();
             c.average(&grads, &self.sizes)?;
         }
+        let exchanged = after.elapsed().as_secs_f64() * 1e3;
         // ── Adam, one launch per block; the loss scale divided back out ──
         // Clipping folds into the scale Adam divides by, as on the CPU.
         let mut scale = self.loss_scale;
@@ -288,6 +293,11 @@ impl GpuTrainer {
                           self.lr, self.beta1, self.beta2, self.eps, self.t as u32, scale, c) {
                 return Err("GPU kernel failed: adam".into());
             }
+        }
+        if let Some(p) = &mut self.phase_ms {
+            sync();
+            p[4] += exchanged;
+            p[5] += after.elapsed().as_secs_f64() * 1e3 - exchanged;
         }
         if self.precision == Precision::Mixed {
             self.clean_steps += 1;
@@ -315,6 +325,7 @@ impl GpuTrainer {
     /// loss and whether any weight gradient overflowed — the only
     /// read-back.
     fn forward_backward(&mut self, batch: &[(Vec<usize>, Vec<usize>)]) -> Result<(f32, bool), String> {
+        let started = std::time::Instant::now();
         if batch.is_empty() { return Err("train_step: empty batch".into()); }
         let seq = batch[0].0.len();
         if !batch.iter().all(|(i, t)| i.len() == seq && t.len() == seq) {
@@ -341,6 +352,16 @@ impl GpuTrainer {
         let wg = |i: usize| -> &Tensor { self.w16[i].as_ref().unwrap_or(&self.w[i]) };
         // the overflow flag slot, cleared before the step writes it
         a.loss_rows.write_at(t, &[0.0]);
+        // `phase_ms`: one fence per phase, not per kernel, so the phases keep
+        // what overlaps inside them, and their sum can be held against the step.
+        let prof = self.phase_ms.is_some();
+        let spent = std::cell::Cell::new([0.0f64; 4]);
+        let tick = |i: usize| if prof {
+            sync();
+            let mut v = spent.get();
+            v[i] = started.elapsed().as_secs_f64() * 1e3 - v.iter().sum::<f64>();
+            spent.set(v);
+        };
         // `R2_GPU_STATS=<step>` drains the queue after every launch of that
         // step and prints where the time went, label by label. The drain
         // serialises what normally overlaps, so the total overstates the
@@ -409,6 +430,7 @@ impl GpuTrainer {
             }
         }
 
+        tick(0);
         // ── forward ──
         ok(ew::embed_fwd(wg(0), &ids, &a.x[0], t, d), "embed")?;
         for l in 0..c.n_layers {
@@ -419,6 +441,7 @@ impl GpuTrainer {
         ok(gemm(&a.xn, false, wg(2), false, t, d, vocab, &a.logits, false), "head")?;
         ok(ew::softmax_ce_fwd(&a.logits, &tg_ids, &a.lse_ce, &a.loss_rows, t, vocab), "softmax_ce")?;
 
+        tick(1);
         // ── backward: the same graph reversed; the residual stream's
         //    gradient lives in `gres` and is accumulated down the layers ──
         let g = &self.g;
@@ -481,10 +504,13 @@ impl GpuTrainer {
             }
         }
 
+        tick(2);
         // t per-token losses and the overflow flag come back; nothing else does
         let rows = a.loss_rows.download();
         // a device that faulted reads back nothing
         if rows.len() != t + 1 { return Err("GPU kernel failed: the device stopped responding".into()); }
+        tick(3);
+        let spent = spent.get();
         if census {
             let mut tb = table.into_inner();
             tb.sort_by(|x, y| y.2.partial_cmp(&x.2).unwrap());
@@ -495,6 +521,9 @@ impl GpuTrainer {
                 eprintln!("  {what:<20} {n:>6} {ms:>10.2} {:>6.1}%", ms / total * 100.0);
             }
             eprintln!("  {:<20} {:>6} {total:>10.2}", "total", tb.iter().map(|r| r.1).sum::<u32>());
+        }
+        if let Some(p) = &mut self.phase_ms {
+            for (x, s) in p.iter_mut().zip(spent) { *x += s; }
         }
         Ok((rows[..t].iter().sum::<f32>() / kept as f32, rows[t] != 0.0))
     }

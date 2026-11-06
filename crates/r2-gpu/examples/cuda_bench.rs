@@ -147,6 +147,29 @@ fn attention() {
     }
 }
 
+/// One product on the 125M model's real shapes, with the activations stored as
+/// now (a row per token) and as cuBLAS's native column-major would have them.
+fn layouts() {
+    println!("\n-- layout, ms per call: activations by row (now) vs by column, cuBLAS, interleaved --");
+    let Ok(blas) = ffi::blas() else { println!("no cuBLAS"); return };
+    for &(t, k, n, name) in &[(4096usize, 768usize, 3072usize, "w1 forward"), (4096, 3072, 768, "w2 forward"),
+                              (4096, 768, 768, "wq forward"), (2048, 768, 2304, "medium w1"), (2048, 2304, 768, "medium w2")] {
+        let (a, b) = (Tensor::upload(&fill(t * k, 0.0)).unwrap(), Tensor::upload(&fill(k * n, 1.0)).unwrap());
+        let c = Tensor::zeros(t * n).unwrap();
+        let flops = 2.0 * (t * k * n) as f64;
+        let reps = 20;
+        let (mut by_row, mut by_col) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            by_row.extend(timed(reps, || gemm_cublas(&a, false, &b, false, t, k, n, &c, false)));
+            // the same numbers, read as column-major: a k x t, b n x k, c t x n
+            by_col.extend(timed(reps, || blas.sgemm(true, true, t, n, k, &a, k, &b, n, 0.0, &c, t).is_ok()));
+        }
+        let (r, cc) = (median(by_row), median(by_col));
+        println!("{name:<12} {t}x{k}x{n}: by row {:.2} ms ({:.0} GFLOP/s), by column {:.2} ms ({:.0} GFLOP/s)",
+                 r * 1e3, flops / r / 1e9, cc * 1e3, flops / cc / 1e9);
+    }
+}
+
 /// Host slices to host slices, copies included, against the CPU: where routing
 /// to the device starts to pay.
 fn crossovers() {
@@ -207,6 +230,7 @@ fn main() {
         return;
     }
     println!("cuBLAS: {}", ffi::blas().map_or_else(|e| format!("not available ({e})"), |_| "loaded".to_string()));
+    if std::env::args().nth(1).as_deref() == Some("layout") { layouts(); return; }
     elementwise();
     crossovers();
     gemms();

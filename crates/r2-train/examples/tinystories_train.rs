@@ -73,6 +73,11 @@ fn write_f32(path: &str, v: &[f32]) {
 ///
 /// Reads through the memory map, so the resident cost is O(batch x seq)
 /// rather than O(corpus) — the whole point of the token store.
+#[cfg(feature = "cuda")]
+fn r2_gpu_sync() { r2_gpu::cuda::sync(); }
+#[cfg(all(feature = "gpu", not(feature = "cuda")))]
+fn r2_gpu_sync() { r2_gpu::device::sync(); }
+
 fn batch_at(ids: &TokenStore, s: usize, bn: usize, seq: usize) -> Vec<(Vec<usize>, Vec<usize>)> {
     r2_train::data::Batcher { batch: bn, seq, order: r2_train::data::Order::Sequential }.at(ids, s)
 }
@@ -408,9 +413,22 @@ fn main() {
     let t0 = std::time::Instant::now();
     let mut first = 0.0f32;
     let mut last = 0.0f32;
+    // R2_PROFILE=1: where a step goes, against the same fences on the PyTorch side
+    // (TS_PROFILE=1). The first steps allocate, so they are not counted.
+    let profile = std::env::var("R2_PROFILE").is_ok_and(|v| v == "1");
+    const PROFILE_FROM: usize = 5;
+    let (mut data_ms, mut profile_start): (f64, Option<std::time::Instant>) = (0.0, None);
     for s in tr.step as usize..steps {
+        #[cfg(any(feature = "gpu", feature = "cuda"))]
+        if profile && s == PROFILE_FROM {
+            if let Some(g) = gpu_tr.as_mut() { g.phase_ms = Some([0.0; 6]); }
+            r2_gpu_sync();
+            profile_start = Some(std::time::Instant::now());
+        }
+        let td = std::time::Instant::now();
         // each rank its own windows, as many as one GPU alone would train on
         let batch = batch_at(&train, s * world + rank, bn, seq);
+        if profile_start.is_some() { data_ms += td.elapsed().as_secs_f64() * 1e3; }
         #[cfg(any(feature = "gpu", feature = "cuda"))]
         let loss = match gpu_tr.as_mut() {
             Some(g) => g.train_step(&batch).unwrap_or_else(|e| die("train_step (gpu)", e)),
@@ -444,6 +462,17 @@ fn main() {
             eval_s += t.elapsed().as_secs_f64();
             held.push((s + 1, v));
             println!("  held-out  step {:>6}  loss {v:.4}", s + 1);
+        }
+    }
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    if let (Some(g), Some(start)) = (&gpu_tr, profile_start) {
+        if let Some(p) = g.phase_ms {
+            r2_gpu_sync();
+            let n = (steps - PROFILE_FROM) as f64;
+            let wall = start.elapsed().as_secs_f64() * 1e3 / n;
+            let v: Vec<f64> = std::iter::once(data_ms).chain(p).map(|x| x / n).collect();
+            println!("  phases     ms/step: data {:.2}, prepare {:.2}, forward {:.2}, backward {:.2}, read {:.2}, exchange {:.2}, adam {:.2}, unaccounted {:.2}, total {:.2}",
+                     v[0], v[1], v[2], v[3], v[4], v[5], v[6], wall - v.iter().sum::<f64>(), wall);
         }
     }
     #[cfg(any(feature = "gpu", feature = "cuda"))]

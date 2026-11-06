@@ -253,6 +253,27 @@ def measure_tokenize(d):
     return secs
 
 
+def kineto_report(prof, steps=3, top=45):
+    """What the device ran per step, by kernel, grid and block."""
+    path = "/tmp/kineto_trace.json"
+    prof.export_chrome_trace(path)
+    rows = {}
+    for e in json.load(open(path)).get("traceEvents", []):
+        cat = e.get("cat", "")
+        if cat not in ("kernel", "gpu_memcpy", "gpu_memset"):
+            continue
+        a = e.get("args", {})
+        key = (cat, e.get("name", "?")[:70], str(a.get("grid")), str(a.get("block")))
+        n, us = rows.get(key, (0, 0.0))
+        rows[key] = (n + 1, us + e.get("dur", 0.0))
+    total = sum(us for _, us in rows.values())
+    print(f"\n  kineto: {sum(n for n, _ in rows.values()) / steps:.0f} device events per step, {total / 1e3 / steps:.1f} ms/step")
+    print(f"  {'ms/step':>8} {'calls':>6}  grid / block / name")
+    for (cat, name, grid, block), (n, us) in sorted(rows.items(), key=lambda r: -r[1][1])[:top]:
+        print(f"  {us / 1e3 / steps:>8.2f} {n / steps:>6.1f}  {grid} / {block} / {cat}: {name}")
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=25, max_name_column_width=50))
+
+
 def main():
     torch.set_num_threads(int(os.environ.get("TS_THREADS", "6")))
     man = os.path.join(OUT, "r2.json")
@@ -339,18 +360,49 @@ def main():
     device_sync()
     t0 = time.perf_counter()
     first = last = 0.0
+    # TS_PROFILE=1: the same fences as R2_PROFILE=1, and the first steps not counted
+    profile, PROFILE_FROM, phase = os.environ.get("TS_PROFILE") == "1", 5, [0.0] * 5
+    profile_start = None
+
+    def tick(i, since):
+        if profile and profile_start is not None:
+            device_sync()
+            phase[i] += (time.perf_counter() - since) * 1e3
+        return time.perf_counter()
+
+    # TS_KINETO=1: every kernel PyTorch and cuBLAS launch in three steps, with its
+    # grid and block. Timings are disturbed; what ran and how is the information.
+    kineto = None
     for s in range(steps):
+        if os.environ.get("TS_KINETO") == "1" and s == 5:
+            from torch.profiler import profile as kprofile, ProfilerActivity as PA
+            kineto = kprofile(activities=[PA.CPU, PA.CUDA])
+            kineto.__enter__()
+        if kineto is not None and s == 8:
+            device_sync()
+            kineto.__exit__(None, None, None)
+            kineto_report(kineto)
+            kineto = None
+        if profile and s == PROFILE_FROM:
+            device_sync()
+            profile_start = time.perf_counter()
+        mark = time.perf_counter()
         idx, tgt = batch_at(train_ids, s * world + rank, bn, seq)
+        mark = tick(0, mark)
         loss = F.cross_entropy(net(idx).reshape(-1, model.vocab), tgt.reshape(-1))
+        mark = tick(1, mark)
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        mark = tick(2, mark)
         if clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
         if sched == "cosine":
             for g in opt.param_groups:
                 g["lr"] = lr_at(s)
         opt.step()
+        mark = tick(3, mark)
         last = loss.item()
+        tick(4, mark)
         if s == 0:
             first = last
         if s == 0 or (s + 1) % every == 0:
@@ -369,6 +421,12 @@ def main():
             print(f"  held-out  step {s+1:>6}  loss {v:.4f}")
     device_sync()
     train_s = time.perf_counter() - t0 - eval_s
+    if profile_start is not None:
+        n = steps - PROFILE_FROM
+        wall = (time.perf_counter() - profile_start) * 1e3 / n
+        v = [x / n for x in phase]
+        print(f"  phases     ms/step: data {v[0]:.2f}, forward {v[1]:.2f}, backward {v[2]:.2f}, adam {v[3]:.2f}, "
+              f"read {v[4]:.2f}, unaccounted {wall - sum(v):.2f}, total {wall:.2f}")
     import hashlib
     weights = hashlib.sha256(b"".join(p.detach().cpu().numpy().tobytes() for p in model.P)).hexdigest()[:16]
     print(f"  weights    sha256 {weights}")

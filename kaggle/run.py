@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "two"}   # also: "bench", "pairs", "census"
+STAGES = {"audit"}   # also: "tests", "two", "bench", "pairs", "census"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -74,6 +74,12 @@ def two_gpus(name, env, steps, n):
         r2_two(env, steps)
         torch_two(env)
 
+def audit(name, env, steps, n):
+    for i in range(n):
+        print(f"\n=== audit {name} round {i + 1} of {n}", flush=True)
+        sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_PROFILE=1 {env} R2_STEPS={steps} R2_GPU=1 {TRAIN} 2>&1 | grep -E 'phases  |trained|rror|panicked'")
+        sh(f"cd /tmp/r2 && TS_PROFILE=1 {env} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E 'phases  |^ms/step|rror|Traceback'")
+
 def pairs(name, env, steps, n):
     for i in range(n):
         print(f"\n=== {name} pair {i + 1} of {n}: {env}, {steps} steps", flush=True)
@@ -90,6 +96,16 @@ if "pairs" in STAGES:
     pairs("medium 39.8M", MEDIUM, 100, 3)
     sh("free -g | head -2")
     pairs("large 125M", LARGE, 30, 2)
+if "audit" in STAGES:
+    sh(f"cd /tmp/r2 && {CARGO} run --release -p r2-gpu --features cuda --example cuda_bench -- layout 2>&1 | grep -vE '^ +(Compiling|Finished|Running)'")
+    # what PyTorch really launches, at the sizes where it leads: R2 first, for its manifest
+    for name, env, steps in [("medium", MEDIUM, 12), ("large", LARGE, 12)]:
+        print(f"\n=== kineto {name}", flush=True)
+        sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {env} R2_STEPS={steps} R2_GPU=1 {TRAIN} 2>&1 | tail -1")
+        sh(f"cd /tmp/r2 && TS_KINETO=1 {env} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -A85 'kineto:'", tail=16000)
+    audit("small 7.2M", SMALL, 300, 2)
+    audit("medium 39.8M", MEDIUM, 100, 2)
+    audit("large 125M", LARGE, 30, 2)
 if "two" in STAGES:
     sh("nvidia-smi -L; nproc; free -g | head -2")
     two_gpus("small 7.2M", SMALL, 300, 2)
