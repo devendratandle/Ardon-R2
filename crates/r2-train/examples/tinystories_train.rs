@@ -353,6 +353,13 @@ fn main() {
     // The initial weights, so the other side starts from this exact point
     // rather than from its own RNG.
     let names = tr.block_names();
+    // R2_NUDGE=k moves one starting weight of the first query projection by one ulp.
+    // Both sides start from it, so repeats show how far rounding alone spreads the loss.
+    let nudge: usize = env("R2_NUDGE", 0);
+    if nudge > 0 && tr.step == 0 {
+        let x = &mut tr.params[4][nudge];
+        *x = f32::from_bits(x.to_bits() + 1);
+    }
     if tr.step == 0 { for (i, p) in tr.params.iter().enumerate() {
         write_f32(&format!("{OUT}/init_{i}.bin"), p);
     } }

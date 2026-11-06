@@ -350,7 +350,8 @@ def main():
     curve = []
     eval_every, eval_s, held = d.get("eval_every", 0), 0.0, []
     world, rank = (WORLD, RANK) if DEVICE == "cuda" else (1, 0)
-    net = model
+    # TS_COMPILE=1: PyTorch at its fastest, for any claim against it.
+    net = torch.compile(model) if os.environ.get("TS_COMPILE") == "1" else model
     if world > 1:
         import torch.distributed as dist
         from torch.nn.parallel import DistributedDataParallel

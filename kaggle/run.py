@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "lossgap"}   # also: "energy", "two", "audit", "bench", "pairs", "census", "score"
+STAGES = {"tests", "settle"}   # also: "lossgap", "energy", "two", "audit", "bench", "pairs", "census", "score"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -182,6 +182,38 @@ if "energy" in STAGES:
         r2_run(env, steps, card)
     print("\n=== census large", flush=True)
     sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {LARGE} R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 {TRAIN} 2>&1 | grep -A60 'GPU step census'; true")
+if "settle" in STAGES:
+    # Paired starts: each nudge moves one weight by one ulp, and both sides train from it.
+    # The spread is what rounding alone does, so the means can be held against it.
+    wide = LARGE.replace("R2_VAL_BATCHES=1", "R2_VAL_BATCHES=3")
+    for k in range(1, 7):
+        print(f"\n=== nudge {k} of 6", flush=True)
+        sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {wide} R2_NUDGE={k} R2_STEPS=100 R2_GPU=1 {TRAIN} 2>&1 | {R2PICK}")
+        sh(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {wide} R2_NUDGE={k} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | {PICK}")
+    # Whether fewer significant bits in the operands cost less energy, and so raise the clock.
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example cuda_ceiling 2>&1 | tail -1; cp target/release/examples/cuda_ceiling /tmp/ceiling")
+    for card in (0, 1):
+        for round_ in range(2):
+            for bits in (24, 16, 12, 8):
+                print(f"\n=== sustain bits {bits} card {card} round {round_ + 1}", flush=True)
+                sh("sleep 45")
+                sampled(f"CUDA_VISIBLE_DEVICES={card} /tmp/ceiling sustain cublas_bits_{bits} 2>&1 | grep -E '^CEILING|rror|panicked'")
+    # PyTorch at its fastest, in fair order: R2, plain, compiled, compiled, plain, R2.
+    def r2_turn(env, steps):
+        sh("sleep 45")
+        sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {env} R2_STEPS={steps} R2_GPU=1 {TRAIN} 2>&1 | {R2PICK}")
+    def torch_turn(env, compiled):
+        sh("sleep 45")
+        print(f"--- PyTorch {'compiled' if compiled else 'plain'}", flush=True)
+        sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 {env} TS_COMPILE={int(compiled)} TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | {PICK}")
+    for name, env, steps in [("small", SMALL, 300), ("medium", MEDIUM, 100), ("large", LARGE, 30)]:
+        print(f"\n=== compile pair {name}, {steps} steps", flush=True)
+        r2_turn(env, steps)
+        torch_turn(env, False)
+        torch_turn(env, True)
+        torch_turn(env, True)
+        torch_turn(env, False)
+        r2_turn(env, steps)
 if "lossgap" in STAGES:
     # Tiled products are the same maths as cuBLAS with other rounding, so how far they
     # move the loss says how far rounding alone can. Held-out every 10 steps shows the

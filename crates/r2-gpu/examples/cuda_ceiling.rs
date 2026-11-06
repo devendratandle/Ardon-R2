@@ -34,20 +34,26 @@ fn sustain(kind: &str) {
     let (a, y) = (Tensor::upload(&vec![1.0f32; n]).unwrap(), Tensor::zeros(n).unwrap());
     let (t, k, m) = (4096usize, 768usize, 3072usize);
     // Constant operands toggle few bits, so they cost less energy than real ones.
+    // `cublas_bits_N` keeps N significant bits of each random operand.
+    let bits = if kind == "cublas_random" { Some(24) } else { kind.strip_prefix("cublas_bits_").and_then(|b| b.parse::<u32>().ok()) };
     let operand = |n: usize, seed: u32| -> Vec<f32> {
-        if kind != "cublas_random" { return vec![0.5; n]; }
+        let Some(bits) = bits else { return vec![0.5; n] };
+        let mask = !0u32 << (24 - bits);
         let mut x = seed;
-        (0..n).map(|_| { x = x.wrapping_mul(1664525).wrapping_add(1013904223); (x >> 8) as f32 / (1u32 << 24) as f32 - 0.5 }).collect()
+        (0..n).map(|_| {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            f32::from_bits(((x >> 8) as f32 / (1u32 << 24) as f32 - 0.5).to_bits() & mask)
+        }).collect()
     };
     let (ga, gb, gc) = (Tensor::upload(&operand(t * k, 1)).unwrap(), Tensor::upload(&operand(k * m, 2)).unwrap(), Tensor::zeros(t * m).unwrap());
     let start = Instant::now();
     let mut units = 0.0f64;
-    let unit = match kind { "fma" | "cublas" | "cublas_random" => "GFLOP/s", _ => "GB/s" };
+    let unit = if kind == "fma" || kind.starts_with("cublas") { "GFLOP/s" } else { "GB/s" };
     while start.elapsed().as_secs_f64() < 30.0 {
         for _ in 0..20 {
             let ok = match kind {
                 "fma" => { units += 256.0 * 4096.0 * 1024.0 * 16.0; ceiling::fma(&out, 4096, 1024) }
-                "cublas" | "cublas_random" => { units += 2.0 * (t * k * m) as f64; r2_gpu::cuda::gemm::gemm_cublas(&ga, false, &gb, false, t, k, m, &gc, false) }
+                s if s.starts_with("cublas") => { units += 2.0 * (t * k * m) as f64; r2_gpu::cuda::gemm::gemm_cublas(&ga, false, &gb, false, t, k, m, &gc, false) }
                 "read" => { units += (n * 4) as f64; ceiling::read(&a, &out, n, 768) }
                 _ => { units += (n * 8) as f64; ceiling::copy(&a, &y, n, 768) }
             };
