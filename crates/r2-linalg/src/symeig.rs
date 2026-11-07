@@ -43,6 +43,9 @@ const RB: usize = 16;
 /// rotation, ~780 KB) is shared from cache by every block.
 const ROT_BATCH: usize = 1 << 15;
 
+/// From this size `dsyev_full` divides and conquers (`stedc`).
+const STEDC_MIN: usize = 64;
+
 /// Apply rotations, in order, to one RB-row block of Q (column-major
 /// within the block): columns k and k+1 of every row.
 fn rotate_block(block: &mut [f64], rots: &[(usize, f64, f64)]) {
@@ -86,6 +89,39 @@ fn flush(qb: &mut [f64], n: usize, rots: &mut Vec<(usize, f64, f64)>) {
     rots.clear();
 }
 
+/// An n x n orthogonal matrix built up from rotations of adjacent columns, in the
+/// blocked form above: rows in `RB` blocks, rotations applied a batch at a time.
+pub(crate) struct Rotations { qb: Vec<f64>, n: usize, rots: Vec<(usize, f64, f64)> }
+
+impl Rotations {
+    pub(crate) fn identity(n: usize) -> Rotations {
+        let nb = n.div_ceil(RB);
+        let mut qb = vec![0.0f64; nb * RB * n];
+        for i in 0..n { qb[(i / RB) * RB * n + i * RB + i % RB] = 1.0; }
+        Rotations { qb, n, rots: Vec::with_capacity(ROT_BATCH + n) }
+    }
+
+    /// Columns `k` and `k + 1` become `c·x + s·y` and `c·y − s·x`.
+    #[inline]
+    pub(crate) fn push(&mut self, k: usize, c: f64, s: f64) {
+        self.rots.push((k, c, s));
+        if self.rots.len() >= ROT_BATCH { flush(&mut self.qb, self.n, &mut self.rots); }
+    }
+
+    /// The matrix column-major, its columns in the given order.
+    pub(crate) fn into_columns(mut self, order: &[usize]) -> Vec<f64> {
+        flush(&mut self.qb, self.n, &mut self.rots);
+        let n = self.n;
+        let mut q = vec![0.0f64; n * n];
+        for (new, &old) in order.iter().enumerate() {
+            for (r, x) in q[new * n..(new + 1) * n].iter_mut().enumerate() {
+                *x = self.qb[(r / RB) * RB * n + old * RB + r % RB];
+            }
+        }
+        q
+    }
+}
+
 fn givens(a: f64, b: f64) -> (f64, f64) {
     if b == 0.0 { return (1.0, 0.0); }
     if a == 0.0 { return (0.0, 1.0); }
@@ -93,7 +129,6 @@ fn givens(a: f64, b: f64) -> (f64, f64) {
     (a / r, b / r)
 }
 
-use crate::simd::{axpy, dot, rank2};
 
 /// Symmetric eigendecomposition of the column-major n x n `a`.
 /// Returns (eigenvalues descending, eigenvectors column-major n x n with
@@ -104,75 +139,31 @@ pub fn dsyev_full(n: usize, a: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LinalgErr
     if n == 0 { return Ok((vec![], vec![])); }
     if n == 1 { return Ok((vec![a[0]], vec![1.0])); }
 
-    // ── Stage 1: tridiagonalise, keeping each reflector ─────────────────
-    let mut t = a.to_vec();
-    let mut refl: Vec<(Vec<f64>, f64)> = Vec::with_capacity(n.saturating_sub(2));
-    for k in 0..n.saturating_sub(2) {
-        let m = n - k - 1;                       // trailing size, rows k+1..n
-        let x = &t[k * n + k + 1..k * n + n];    // column k below the diagonal
-        let norm_sq: f64 = x.iter().map(|v| v * v).sum();
-        if norm_sq < 1e-300 { refl.push((Vec::new(), 0.0)); continue; }
-        let xkk = x[0];
-        let alpha = if xkk == 0.0 { -norm_sq.sqrt() } else { -xkk.signum() * norm_sq.sqrt() };
-        let mut v = x.to_vec();
-        v[0] -= alpha;
-        let vtv: f64 = v.iter().map(|x| x * x).sum();
-        if vtv < 1e-300 { refl.push((Vec::new(), 0.0)); continue; }
-        let beta = 2.0 / vtv;
-
-        // p = β·A₂₂·v; A₂₂ symmetric, so p[i] = β·(column i of A₂₂)·v.
-        let base = (k + 1) * n + k + 1;
-        let col = |i: usize| &t[base + i * n..base + i * n + m];
-        let p: Vec<f64> = if m * m >= PAR_MIN {
-            (0..m).into_par_iter().map(|i| beta * dot(col(i), &v)).collect()
-        } else {
-            (0..m).map(|i| beta * dot(col(i), &v)).collect()
-        };
-        // w = p − (β/2)(pᵀv)·v
-        let half = 0.5 * beta * dot(&p, &v);
-        let w: Vec<f64> = p.iter().zip(&v).map(|(pi, vi)| pi - half * vi).collect();
-        // A₂₂ −= v·wᵀ + w·vᵀ, one column at a time.
-        let upd = |(j, c): (usize, &mut [f64])| {
-            let c = &mut c[k + 1..n];
-            let (wj, vj) = (w[j], v[j]);
-            rank2(c, &v, &w, wj, vj);
-        };
-        let trail = &mut t[(k + 1) * n..];
-        if m * m >= PAR_MIN { trail.par_chunks_mut(n).enumerate().for_each(upd); }
-        else { trail.chunks_mut(n).enumerate().for_each(upd); }
-        // Column / row k become (…, α, 0, …, 0).
-        t[k * n + k + 1] = alpha;
-        t[(k + 1) * n + k] = alpha;
-        for i in k + 2..n { t[k * n + i] = 0.0; t[i * n + k] = 0.0; }
-        refl.push((v, beta));
-    }
-    let d: Vec<f64> = (0..n).map(|i| t[i * n + i]).collect();
-    let e: Vec<f64> = (0..n - 1).map(|i| t[i * n + i + 1]).collect();
-    drop(t);
-
-    // ── Stage 2: Q₁ = H₀·H₁···H_{n−3}, built backwards from I ───────────
-    // When H_k is applied, Q is still the identity outside rows/columns
-    // k+1.., so only those columns change: Q[k+1.., c] −= β·(vᵀ·Q[k+1.., c])·v.
-    let mut q = vec![0.0f64; n * n];
-    for i in 0..n { q[i * n + i] = 1.0; }
-    for k in (0..refl.len()).rev() {
-        let (v, beta) = &refl[k];
-        if *beta == 0.0 { continue; }
-        let m = n - k - 1;
-        let app = |c: &mut [f64]| {
-            let seg = &mut c[k + 1..n];
-            let s = beta * dot(seg, v);
-            axpy(seg, -s, v);
-        };
-        let cols = &mut q[(k + 1) * n..];
-        if m * m >= PAR_MIN { cols.par_chunks_mut(n).for_each(app); }
-        else { cols.chunks_mut(n).for_each(app); }
-    }
+    // ── Stage 1: tridiagonalise (blocked), and Q₁ from its reflectors ───
+    let scale = crate::reduce::safe_scale(a);
+    let scaled: Vec<f64>;
+    let a = if scale == 1.0 { a } else { scaled = a.iter().map(|x| x / scale).collect(); &scaled };
+    let (d, e, refl) = crate::reduce::tridiagonalize(a, n)?;
+    let q = crate::reduce::form_q(n, n, 1, &refl)?;
     drop(refl);
 
-    // Stages 3-4 — shared with the SVD, which arrives already tridiagonal.
-    tridiag_eigen(d, e, Some((q, n)))
-        .map(|(vals, vecs)| (vals, vecs.expect("vectors requested")))
+    // Stages 3-4. Divide and conquer once a block is worth splitting.
+    let (mut vals, vecs) = if n >= STEDC_MIN {
+        let (vals, z) = crate::stedc::solve(&d, &e)?;
+        let mut out = vec![0.0f64; n * n];
+        crate::dgemm(n, n, n, 1.0, &q, &z, 0.0, &mut out)?;
+        for c in out.chunks_mut(n) {
+            // Sign convention (R / LAPACK): largest-magnitude entry positive.
+            let largest = c.iter().copied().fold(0.0f64, |m, v| if v.abs() > m.abs() { v } else { m });
+            if largest < 0.0 { for v in c.iter_mut() { *v = -*v; } }
+        }
+        (vals, out)
+    } else {
+        let (vals, vecs) = tridiag_eigen(d, e, Some((q, n)))?;
+        (vals, vecs.expect("vectors requested"))
+    };
+    if scale != 1.0 { for v in &mut vals { *v *= scale; } }
+    Ok((vals, vecs))
 }
 
 /// Eigen-decomposition of the symmetric TRIDIAGONAL matrix with diagonal

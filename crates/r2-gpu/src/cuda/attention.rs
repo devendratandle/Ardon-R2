@@ -34,12 +34,13 @@ const FLAT: u32 = 256;
 
 const PTX: &str = include_str!("kernels/attention.ptx");
 
-struct Kernels { fused: Kernel, gemm: Kernel, softmax: Kernel, probs: Kernel, dscore: Kernel, delta: Kernel, group_sum: Kernel }
+struct Kernels { fused: Kernel, scores: Kernel, gemm: Kernel, softmax: Kernel, probs: Kernel, dscore: Kernel, delta: Kernel, group_sum: Kernel }
 static KERNELS: Loaded<Kernels> = OnceLock::new();
 
 fn kernels() -> Result<&'static Kernels, &'static str> {
     loaded(&KERNELS, PTX, |m| Ok(Kernels {
         fused: m.kernel("attn_fused", 11)?,
+        scores: m.kernel("attn_scores", 14)?,
         gemm: m.kernel("attn_gemm", 25)?,
         softmax: m.kernel("attn_softmax", 5)?,
         probs: m.kernel("attn_probs", 6)?,
@@ -155,6 +156,10 @@ thread_local! { static FUSED: Cell<bool> = const { Cell::new(true) }; }
 /// does by default: on the T4 it took 0.72 ms against 0.92-1.06 for the stored form.
 pub fn force_fused(on: bool) { FUSED.with(|f| f.set(on)); }
 
+/// `R2_CUDA_ATTN_SCORES=0` keeps the backward's scores in the stored form, so a run
+/// can hold the two against each other. Read per call, as `R2_CUDA_GEMM` is.
+fn scores_on() -> bool { std::env::var("R2_CUDA_ATTN_SCORES").map_or(true, |v| v != "0") }
+
 thread_local! { static PROFILE: Cell<Option<(Instant, [f64; 2])>> = const { Cell::new(None) }; }
 
 /// Starts this thread's split of attention into its products and row kernels.
@@ -258,12 +263,22 @@ fn backward_inner(q: &Tensor, k: &Tensor, v: &Tensor, o: &Tensor, lse: &Tensor, 
     let (p, ds) = (sc.p.as_ref()?, sc.ds.as_ref()?);
 
     rows_launch(&ks.delta, rows * sh.nh * LANES, ROW_BLOCK, &[Arg::F(o), Arg::F(g), Arg::F(delta), int((rows * sh.nh) as u32), int(hd as u32)])?;
-    // P from the forward's L
-    product(ks, sh, true, Band::Full, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
-    rows_launch(&ks.probs, row_threads, ROW_BLOCK, &[Arg::F(p), Arg::F(lse), nseq_a, seq_a, nh_a, tile_a])?;
-    // dS = P (dO.V - D)
-    product(ks, sh, true, Band::Full, (g, lq), (v, lkv.t()), (ds, lp), seq, hd, seq, 1.0)?;
-    rows_launch(&ks.dscore, row_threads, ROW_BLOCK, &[Arg::F(ds), Arg::F(p), Arg::F(delta), nseq_a, seq_a, nh_a, tile_a])?;
+    if hd <= TILE as usize && FUSED.with(|f| f.get()) && chosen() != Some(Path::Cublas) && scores_on() {
+        // P and dS as one kernel, the two products in registers
+        ks.scores.launch([(seq as u32).div_ceil(TILE), (sh.nseq * sh.nh) as u32, 1], GEMM_BLOCK, &[
+            Arg::F(q), Arg::F(k), Arg::F(g), Arg::F(v), Arg::F(lse), Arg::F(delta), Arg::F(p), Arg::F(ds),
+            nseq_a, seq_a, nh_a, int(sh.nkv as u32), int(hd as u32), Arg::Real(sh.scale),
+        ]).ok()?;
+        note_path(Path::Tiled);
+        mark(0);
+    } else {
+        // P from the forward's L
+        product(ks, sh, true, Band::Full, (q, lq), (k, lkv.t()), (p, lp), seq, hd, seq, sh.scale)?;
+        rows_launch(&ks.probs, row_threads, ROW_BLOCK, &[Arg::F(p), Arg::F(lse), nseq_a, seq_a, nh_a, tile_a])?;
+        // dS = P (dO.V - D)
+        product(ks, sh, true, Band::Full, (g, lq), (v, lkv.t()), (ds, lp), seq, hd, seq, 1.0)?;
+        rows_launch(&ks.dscore, row_threads, ROW_BLOCK, &[Arg::F(ds), Arg::F(p), Arg::F(delta), nseq_a, seq_a, nh_a, tile_a])?;
+    }
     // dV and dK per head: straight into the output when each kv head has one
     // query head, into a partial when a group has to be summed
     let (tv, tk) = if group > 1 { (sc.part_v.as_ref()?, sc.part_k.as_ref()?) } else { (dv, dk) };
@@ -362,6 +377,35 @@ mod tests {
         let first = run();
         assert!(!first.0.is_empty());
         for _ in 0..3 { assert_eq!(run(), first); }
+    }
+
+    /// The fused scores promise the stored form's bits, so training does not move.
+    #[test]
+    fn fused_scores_give_the_stored_forms_bits() {
+        if !have_device() { return; }
+        force_path(Some(Path::Tiled));
+        for &(nseq, seq, nh, nkv, hd) in &[(2usize, 70usize, 4usize, 2usize, 64usize), (1, 64, 2, 2, 32), (3, 65, 4, 4, 16), (2, 200, 2, 1, 64)] {
+            let sh = Shape { nseq, seq, nh, nkv, hd, scale: 1.0 / (hd as f32).sqrt() };
+            let rows = nseq * seq;
+            let up = |n: usize, ph: f32| Tensor::upload(&mk(n, ph)).unwrap();
+            let (tq, tk, tv, tg) = (up(rows * nh * hd, 0.0), up(rows * nkv * hd, 1.3), up(rows * nkv * hd, 2.7), up(rows * nh * hd, 0.9));
+            let run = |fused: bool| {
+                force_fused(fused);
+                let z = |n: usize| Tensor::zeros(n).unwrap();
+                let (to, tl, td) = (z(rows * nh * hd), z(rows * nh), z(rows * nh));
+                let (dq, dk, dv) = (z(rows * nh * hd), z(rows * nkv * hd), z(rows * nkv * hd));
+                // the same forward each time: the fused forward's bits are its own promise
+                force_fused(true);
+                assert!(forward(&tq, &tk, &tv, &to, &tl, &sh));
+                force_fused(fused);
+                assert!(backward(&tq, &tk, &tv, &to, &tl, &tg, &td, &dq, &dk, &dv, &sh));
+                force_fused(true);
+                let bits = |t: &Tensor| t.download().iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+                (bits(&dq), bits(&dk), bits(&dv))
+            };
+            assert_eq!(run(true), run(false), "{nseq} {seq} {nh} {nkv} {hd}");
+        }
+        force_path(None);
     }
 
     /// Shapes the kernels do not serve, and undersized buffers, are refused

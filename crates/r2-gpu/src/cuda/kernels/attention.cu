@@ -234,6 +234,98 @@ extern "C" __global__ void attn_fused(const float *Q, const float *K, const floa
     }
 }
 
+// The start of the backward as one kernel, for hd <= BM, as attn_fused is the forward:
+// P_ij = exp(S_ij - L_i) and dS_ij = P_ij (dO_i.V_j - D_i), both products in registers,
+// so neither score matrix goes through global memory to reach its row kernel. K and V
+// are read together, and each query tile and its gradient once. Only tiles up to a
+// row's diagonal tile are written, which is all the band products read. The sums run
+// in the order attn_gemm's do, so the bits are the same as the stored form's.
+extern "C" __global__ void attn_scores(const float *Q, const float *K, const float *G, const float *V,
+                                       const float *L, const float *D, float *P, float *DS,
+                                       unsigned nseq, unsigned seq, unsigned nh, unsigned nkv, unsigned hd, float scale) {
+    static __shared__ float As[BM * BM];
+    static __shared__ float Gs[BM * BM];
+    static __shared__ float Bs[BK * BN];
+    static __shared__ float Vs[BK * BN];
+    const unsigned m0 = blockIdx.x * BM;
+    const unsigned s = blockIdx.y / nh, h = blockIdx.y % nh, group = nh / nkv;
+    const unsigned qrow = nh * hd, kvrow = nkv * hd;
+    const float *q = Q + s * seq * qrow + h * hd;
+    const float *g = G + s * seq * qrow + h * hd;
+    const float *kk_base = K + s * seq * kvrow + (h / group) * hd;
+    const float *v = V + s * seq * kvrow + (h / group) * hd;
+    float *p_out = P + (s * nh + h) * seq * seq;
+    float *ds_out = DS + (s * nh + h) * seq * seq;
+    const unsigned tx = threadIdx.x, ty = threadIdx.y;
+    const unsigned tid = ty * (BN / FN) + tx;
+    const unsigned mbase = m0 + ty * FM;
+
+    float li[FM], di[FM];
+    for (unsigned i = 0; i < FM; i++) {
+        const unsigned row = mbase + i;
+        li[i] = row < seq ? L[(s * seq + row) * nh + h] : 0.0f;
+        di[i] = row < seq ? D[(s * seq + row) * nh + h] : 0.0f;
+    }
+
+    for (unsigned t = 0; t < (BM * BM) / FTHREADS; t++) {
+        const unsigned idx = tid + t * FTHREADS;
+        const unsigned ii = m0 + idx / BM, kk = idx % BM;
+        const bool in = ii < seq && kk < hd;
+        As[kk * BM + idx / BM] = in ? q[ii * qrow + kk] : 0.0f;
+        Gs[kk * BM + idx / BM] = in ? g[ii * qrow + kk] : 0.0f;
+    }
+
+    for (unsigned n0 = 0; n0 < seq && n0 < m0 + BM; n0 += BN) {
+        const unsigned nbase = n0 + tx * FN;
+        float c[FM][FN], d[FM][FN];
+        for (unsigned i = 0; i < FM; i++)
+            for (unsigned j = 0; j < FN; j++) { c[i][j] = 0.0f; d[i][j] = 0.0f; }
+        for (unsigned k0 = 0; k0 < hd; k0 += BK) {
+            for (unsigned t = 0; t < FLOADS_B; t++) {
+                const unsigned idx = tid + t * FTHREADS;
+                const unsigned r = idx / BK, sk = idx % BK;
+                const unsigned jj = n0 + r, kk = k0 + sk;
+                const bool in = jj < seq && kk < hd;
+                Bs[sk * BN + r] = in ? kk_base[jj * kvrow + kk] : 0.0f;
+                Vs[sk * BN + r] = in ? v[jj * kvrow + kk] : 0.0f;
+            }
+            __syncthreads();
+            for (unsigned kk = 0; kk < BK; kk++) {
+                float x[FM], w[FM], y[FN], z[FN];
+                for (unsigned i = 0; i < FM; i++) {
+                    x[i] = As[(k0 + kk) * BM + ty * FM + i];
+                    w[i] = Gs[(k0 + kk) * BM + ty * FM + i];
+                }
+                for (unsigned j = 0; j < FN; j++) {
+                    y[j] = Bs[kk * BN + tx * FN + j];
+                    z[j] = Vs[kk * BN + tx * FN + j];
+                }
+                for (unsigned i = 0; i < FM; i++)
+                    for (unsigned j = 0; j < FN; j++) {
+                        c[i][j] = fmaf(x[i], y[j], c[i][j]);
+                        d[i][j] = fmaf(w[i], z[j], d[i][j]);
+                    }
+            }
+            __syncthreads();
+        }
+        for (unsigned i = 0; i < FM; i++) {
+            const unsigned row = mbase + i;
+            if (row >= seq) break;
+            for (unsigned j = 0; j < FN; j++) {
+                const unsigned col = nbase + j;
+                if (col >= seq) break;
+                float pv = 0.0f, dv = 0.0f;
+                if (col <= row) {
+                    pv = exp_r2(c[i][j] * scale - li[i]);
+                    dv = pv * (d[i][j] - di[i]);
+                }
+                p_out[row * seq + col] = pv;
+                ds_out[row * seq + col] = dv;
+            }
+        }
+    }
+}
+
 // The row kernels below run ROWS rows to a block, one warp to a row: a warp's
 // LANES threads take consecutive elements, so its 32 loads or stores fall in one
 // cache line. One thread per row, which this replaced, sends every warp to 32

@@ -1,0 +1,1142 @@
+$ curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+info: downloading installer
+info: profile set to minimal
+info: default host tuple is x86_64-unknown-linux-gnu
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+info: downloading 3 components
+info: default toolchain set to stable-x86_64-unknown-linux-gnu
+
+  stable-x86_64-unknown-linux-gnu installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+
+
+Rust is installed now. Great!
+
+To get started you may need to restart your current shell.
+This would reload your PATH environment variable to include
+Cargo's bin directory ($HOME/.cargo/bin).
+
+To configure your current shell, you need to source the
+corresponding env file under $HOME/.cargo.
+
+Consider running the right command for your shell (note the leading DOT):
+. "$HOME/.cargo/env" # For sh/ash/dash/pdksh/bash
+cargo:rerun-if-env-changed=CC_x86_64-unknown-linux-gnu
+CC_x86_64-unknown-linux-gnu = None
+cargo:rerun-if-env-changed=CC_x86_64_unknown_linux_gnu
+CC_x86_64_unknown_linux_gnu = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CPATH
+cargo:rerun-if-env-changed=C_INCLUDE_PATH
+cargo:rerun-if-env-changed=CPLUS_INCLUDE_PATH
+cargo:rerun-if-env-changed=OBJC_INCLUDE_PATH
+cargo:rerun-if-env-changed=OBJCPLUS_INCLUDE_PATH
+cargo:rerun-if-env-changed=COMPILER_PATH
+cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH
+cargo:rerun-if-env-changed=GCC_EXEC_PREFIX
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_unknown_linux_gnu
+CFLAGS_x86_64_unknown_linux_gnu = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-unknown-linux-gnu
+CFLAGS_x86_64-unknown-linux-gnu = None
+
+[exit 0]
+$ rm -rf /tmp/r2 && git clone --depth 1 --branch cuda-backend https://github.com/devendratandle/Ardon-R2.git /tmp/r2
+Cloning into '/tmp/r2'...
+
+[exit 0]
+$ cd /tmp/r2 && git log --oneline -1
+df2e4af benchmarks: run 32 in llmoptreport.md, with its raw log
+
+[exit 0]
+$ cd /tmp/r2 && git apply --whitespace=nowarn /tmp/unpushed.patch && git status --short | wc -l
+15
+
+[exit 0]
+$ nvidia-smi -L; nvcc --version | tail -2
+GPU 0: Tesla T4 (UUID: GPU-7c096b5b-08e8-0769-6912-d9e32016952a)
+GPU 1: Tesla T4 (UUID: GPU-709d8c5c-fd58-4552-5a5f-d86cfd1036cd)
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+
+[exit 0]
+$ cd /tmp/r2/crates/r2-gpu/src/cuda/kernels && sh build.sh && mkdir -p /kaggle/working/ptx && cp *.ptx /kaggle/working/ptx/
+
+[exit 0]
+$ cd /tmp/r2 && git add -N crates/r2-gpu/src/cuda/kernels && if git diff --quiet -- crates/r2-gpu/src/cuda/kernels; then echo PTX up to date; else echo STALE; git diff --stat -- crates/r2-gpu/src/cuda/kernels; fi
+STALE
+ crates/r2-gpu/src/cuda/kernels/attention.cu  |   92 +
+ crates/r2-gpu/src/cuda/kernels/attention.ptx | 3087 +++++++++++++++++++++++++-
+ 2 files changed, 3111 insertions(+), 68 deletions(-)
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-gpu --features cuda 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running unittests src/lib.rs (target/release/deps/r2_gpu-0884bc79b6e177e3)
+test cuda::attention::tests::unsupported_shapes_are_refused ... ok
+test cuda::cluster::tests::disagreement_is_reported_to_every_rank ... ok
+test cuda::cluster::tests::every_rank_gets_the_same_mean ... ok
+test cuda::attention::tests::fused_scores_give_the_stored_forms_bits ... ok
+test cuda::cluster::tests::missing_ranks_fail_and_do_not_hang ... ok
+test cuda::elementwise::tests::kernels_match_the_tape ... ok
+test cuda::cluster::tests::two_ranks_share_memory_and_agree ... ok
+test cuda::elementwise::tests::short_buffers_are_refused ... ok
+test cuda::elementwise::tests::rope_table_matches_the_cpu ... ok
+test cuda::gemm::tests::operands_too_small_are_refused ... ok
+test cuda::gemm::tests::resident_matmul_matches_matmul ... ok
+test cuda::gemm::tests::tiled_is_bit_reproducible ... ok
+test cuda::attention::tests::backward_is_bit_reproducible ... ok
+test cuda::optim::tests::adam_is_bit_identical_to_the_cpu ... ok
+test cuda::optim::tests::adamw_is_bit_identical_to_the_cpu ... ok
+test cuda::optim::tests::grad_norm_matches_f64_on_the_host ... ok
+test cuda::optim::tests::short_buffers_are_refused ... ok
+test cuda::tests::a_wrong_argument_count_is_refused ... ok
+test cuda::tests::device_buffer_round_trips_and_checks_bounds ... ok
+test cuda::tests::empty_and_one_element_inputs ... ok
+test cuda::tests::every_op_matches_the_cpu_reference ... ok
+test tests::cpu_reference_kernels_correct ... ok
+test tests::dispatch_below_threshold_uses_cpu_even_if_enabled ... ok
+test tests::statistics_ops_are_not_in_the_f32_safe_set ... ok
+test cuda::attention::tests::matches_the_tape ... ok
+test cuda::gemm::tests::tiled_matches_the_cpu_kernel ... ok
+test cuda::gemm::tests::cublas_matches_the_cpu_kernel ... ok
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.26s
+     Running tests/cuda_dispatch.rs (target/release/deps/cuda_dispatch-38951213de272ba2)
+test dispatch_and_matmul_report_where_they_ran ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-train --features cuda --lib gpu_llm 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running unittests src/lib.rs (target/release/deps/r2_train-88110dec8aa07a2b)
+test gpu_llm::tests::gpu_steps_track_the_cpu_trainer_and_round_trip_the_state ... ok
+test gpu_llm::tests::gpu_ignores_prompts_and_padding_as_the_tape_does ... ok
+test gpu_llm::tests::mixed_precision_tracks_f32_and_reproduces_itself ... ok
+test gpu_llm::tests::gpu_loss_and_gradients_match_the_tape_block_by_block ... ok
+test gpu_llm::tests::mixed_precision_is_refused_on_cuda ... ok
+test gpu_llm::tests::gpu_adamw_clipping_and_schedule_track_the_cpu_trainer ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.58s
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-engine --features cuda --test cuda_wiring 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running tests/cuda_wiring.rs (target/release/deps/cuda_wiring-c6925df860e2d120)
+test gpu_map_runs_on_the_device_and_status_reports_it ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-engine --features cuda --test llm_finetune 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running tests/llm_finetune.rs (target/release/deps/llm_finetune-3e852c75ade0736e)
+test a_model_learns_what_follows_each_prompt ... ok
+test accumulation_is_the_same_update_in_less_memory ... ok
+test an_unknown_device_is_refused ... ok
+test a_frozen_block_does_not_train ... ok
+test bad_examples_are_refused_by_name ... ok
+test a_fine_tune_resumes_on_its_base ... ok
+test lora_trains_small_adapters_and_they_travel_two_ways ... ok
+test settings_reach_the_trainer ... ok
+test lora_on_the_gpu_is_refused_by_name ... ok
+test the_gpu_runs_the_same_recipe ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES= CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-engine --features cuda --test cuda_wiring 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running tests/cuda_wiring.rs (target/release/deps/cuda_wiring-c6925df860e2d120)
+test gpu_map_runs_on_the_device_and_status_reports_it ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+[exit 0]
+$ cd /tmp/r2 && curl -sSfL -r 0-19447281 -o corpus.txt https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt; ls -la corpus.txt; sha256sum corpus.txt
+-rw-r--r-- 1 root root 19447282 Nov  6 22:52 corpus.txt
+94e431816c4cce81ff71e4408ff8d3bda9a42e8d2663986697c3954288cb38b4  corpus.txt
+
+[exit 0]
+$ python3 -c 'import numpy, tokenizers, torch; print(torch.__version__, torch.cuda.get_device_name(0))' || pip install -q numpy tokenizers
+2.11.0+cu130 Tesla T4
+
+[exit 0]
+$ cd /tmp/r2 && CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build --release -p r2-train --features cuda --example tinystories_train 2>&1 | tail -1
+    Finished `release` profile [optimized] target(s) in 16.97s
+
+[exit 0]
+$ cd /tmp/r2 && CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build --release -p r2-gpu --features cuda --example cuda_ceiling --example op_scoreboard 2>&1 | tail -1; cp target/release/examples/cuda_ceiling /tmp/ceiling; cp target/release/examples/op_scoreboard /tmp/score_cuda
+    Finished `release` profile [optimized] target(s) in 9.03s
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+fast16 refused: cublasGemmEx: status 7
+f16 refused: cublasGemmEx: status 7
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling launch 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING launch_queued_us 2.6 us
+CEILING launch_with_fence_us 8.1 us
+
+[exit 0]
+
+=== sustain cublas_random card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain cublas_random 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_cublas_random 3758.3 GFLOP/s
+
+[exit 0]
+card 0: 29 s busy, median clock 795 MHz, memory 5000 MHz, 55 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_f32 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_gemm_ex_f32 3653.2 GFLOP/s
+
+[exit 0]
+card 0: 29 s busy, median clock 750 MHz, memory 5000 MHz, 62 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_fast16 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_fast16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (7971) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== sustain gemm_ex_f16 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (7983) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== sustain cublas_random card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain cublas_random 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_cublas_random 3674.4 GFLOP/s
+
+[exit 0]
+card 0: 29 s busy, median clock 750 MHz, memory 5000 MHz, 61 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_f32 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_gemm_ex_f32 3491.1 GFLOP/s
+
+[exit 0]
+card 0: 28 s busy, median clock 720 MHz, memory 5000 MHz, 66 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_fast16 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_fast16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (8019) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== sustain gemm_ex_f16 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (8031) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== sustain cublas_random card 1 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain cublas_random 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_cublas_random 4018.8 GFLOP/s
+
+[exit 0]
+card 1: 28 s busy, median clock 825 MHz, memory 5000 MHz, 55 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_f32 card 1 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain gemm_ex_f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_gemm_ex_f32 3829.3 GFLOP/s
+
+[exit 0]
+card 1: 28 s busy, median clock 780 MHz, memory 5000 MHz, 63 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_fast16 card 1 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain gemm_ex_fast16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (8067) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== sustain gemm_ex_f16 card 1 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain gemm_ex_f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (8079) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== sustain cublas_random card 1 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain cublas_random 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_cublas_random 3816.5 GFLOP/s
+
+[exit 0]
+card 1: 28 s busy, median clock 780 MHz, memory 5000 MHz, 63 C, 68 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_f32 card 1 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain gemm_ex_f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+CEILING sustained_gemm_ex_f32 3664.7 GFLOP/s
+
+[exit 0]
+card 1: 28 s busy, median clock 750 MHz, memory 5000 MHz, 68 C, 68 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_fast16 card 1 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain gemm_ex_fast16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (8115) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== sustain gemm_ex_f16 card 1 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/ceiling sustain gemm_ex_f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked'
+thread 'main' (8127) panicked at crates/r2-gpu/examples/cuda_ceiling.rs:144:97:
+Aborted (core dumped)
+
+[exit 0]
+
+=== census small
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32 R2_STEPS=12 R2_GPU_STATS=10 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -A60 'GPU step census'; true
+GPU step census (step 10, queue drained after every launch; 2048 tokens)
+  kernel                calls         ms       %
+  head grad_A               1       2.02    8.2%
+  head                      1       1.89    7.7%
+  head grad_B               1       1.82    7.4%
+  attention bwd             4       1.58    6.4%
+  w2                        4       1.01    4.1%
+  w3 grad_A                 4       0.91    3.7%
+  w1 grad_A                 4       0.90    3.7%
+  w2 grad_A                 4       0.88    3.6%
+  w2 grad_B                 4       0.82    3.4%
+  w3 grad_B                 4       0.81    3.3%
+  w1 grad_B                 4       0.81    3.3%
+  w1                        4       0.81    3.3%
+  w3                        4       0.81    3.3%
+  attention                 4       0.77    3.1%
+  attention again           4       0.75    3.0%
+  softmax_ce                1       0.69    2.8%
+  softmax_ce bwd            1       0.65    2.6%
+  gate*up bwd               4       0.53    2.1%
+  wq grad_B                 4       0.38    1.6%
+  wq                        4       0.37    1.5%
+  wo grad_A                 4       0.37    1.5%
+  wq grad_A                 4       0.37    1.5%
+  wo                        4       0.37    1.5%
+  wo grad_B                 4       0.36    1.5%
+  silu bwd                  4       0.33    1.3%
+  gate*up                   4       0.32    1.3%
+  rmsnorm bwd               4       0.30    1.2%
+  ffn rmsnorm bwd           4       0.29    1.2%
+  wk grad_B                 4       0.25    1.0%
+  wv grad_B                 4       0.25    1.0%
+  silu                      4       0.25    1.0%
+  wk grad_A                 4       0.24    1.0%
+  wv grad_A                 4       0.24    1.0%
+  residual                  8       0.23    1.0%
+  wk                        4       0.23    0.9%
+  wv                        4       0.22    0.9%
+  rope q                    4       0.11    0.4%
+  rmsnorm                   4       0.09    0.4%
+  ffn rmsnorm               4       0.09    0.4%
+  rope q bwd                4       0.08    0.3%
+  embed bwd                 1       0.07    0.3%
+  rope k bwd                4       0.07    0.3%
+  rope k                    4       0.07    0.3%
+  final rmsnorm bwd         1       0.06    0.3%
+  embed                     1       0.03    0.1%
+  final rmsnorm             1       0.02    0.1%
+  total                   161      24.55
+  step   10/12  loss 7.6900   0.3 s elapsed
+  step   11/12  loss 7.5596   0.4 s elapsed
+  step   12/12  loss 7.4588   0.4 s elapsed
+  weights    fnv ac2185330daaab58
+
+  trained    12 steps in 0.38 s  (64550.9 tokens/s, 31.7 ms/step)
+  steptime   first 120.6 ms, median after it 23.4 ms
+  train loss 9.1095 -> 7.4588
+  HELD-OUT   9.1157 -> 7.4320   (2.5895 bits/byte)
+
+  saved      ts_run/model (29.0 MB)
+  prompt     "Once upon a time"
+
+[exit 0]
+
+=== scores pair small, 300 steps: fused, stored, PyTorch, PyTorch, stored, fused
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32  R2_STEPS=300 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      7.24M parameters, dim 256 x 4 layers, ffn 768, 4 q / 2 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv bc64d34c3790f59b
+  trained    300 steps in 7.10 s  (86500.1 tokens/s, 23.7 ms/step)
+  steptime   first 124.6 ms, median after it 23.4 ms
+  HELD-OUT   9.1157 -> 4.3113   (1.5022 bits/byte)
+  saved      ts_run/model (29.0 MB)
+
+[exit 0]
+card 0: 7 s busy, median clock 975 MHz, memory 5000 MHz, 50 C, 68 W, throttle ['0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32 R2_CUDA_ATTN_SCORES=0 R2_STEPS=300 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      7.24M parameters, dim 256 x 4 layers, ffn 768, 4 q / 2 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv bc64d34c3790f59b
+  trained    300 steps in 7.14 s  (86062.2 tokens/s, 23.8 ms/step)
+  steptime   first 122.8 ms, median after it 23.5 ms
+  HELD-OUT   9.1157 -> 4.3113   (1.5022 bits/byte)
+  saved      ts_run/model (29.0 MB)
+
+[exit 0]
+card 0: 7 s busy, median clock 960 MHz, memory 5000 MHz, 52 C, 66 W, throttle ['0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 390.1 ms, median after it 28.0 ms
+  weights    sha256 41a1fae0ad0d1ee9
+train, seconds                      7.14          8.82   R2 1.24x faster
+tokens/s                        86062.47      69645.82   R2 1.24x faster
+ms/step                            23.80         29.41   R2 1.24x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               4.3113        4.3114   R2 lower by 0.0000
+train loss, first -> last   9.109->4.299   9.109->4.299 
+
+[exit 0]
+card 0: 8 s busy, median clock 1050 MHz, memory 5000 MHz, 55 C, 66 W, throttle ['0x0000000000000000', '0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 285.3 ms, median after it 28.1 ms
+  weights    sha256 41a1fae0ad0d1ee9
+train, seconds                      7.14          8.75   R2 1.23x faster
+tokens/s                        86062.47      70221.61   R2 1.23x faster
+ms/step                            23.80         29.16   R2 1.23x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               4.3113        4.3114   R2 lower by 0.0000
+train loss, first -> last   9.109->4.299   9.109->4.299 
+
+[exit 0]
+card 0: 8 s busy, median clock 1035 MHz, memory 5000 MHz, 56 C, 68 W, throttle ['0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32 R2_CUDA_ATTN_SCORES=0 R2_STEPS=300 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      7.24M parameters, dim 256 x 4 layers, ffn 768, 4 q / 2 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv bc64d34c3790f59b
+  trained    300 steps in 7.29 s  (84309.9 tokens/s, 24.3 ms/step)
+  steptime   first 134.0 ms, median after it 23.9 ms
+  HELD-OUT   9.1157 -> 4.3113   (1.5022 bits/byte)
+  saved      ts_run/model (29.0 MB)
+
+[exit 0]
+card 0: 7 s busy, median clock 960 MHz, memory 5000 MHz, 56 C, 65 W, throttle ['0x0000000000000004']
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=256 R2_LAYERS=4 R2_FFN=768 R2_HEADS=4 R2_KV=2 R2_SEQ=64 R2_BATCH=32  R2_STEPS=300 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      7.24M parameters, dim 256 x 4 layers, ffn 768, 4 q / 2 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv bc64d34c3790f59b
+  trained    300 steps in 7.34 s  (83729.4 tokens/s, 24.5 ms/step)
+  steptime   first 130.1 ms, median after it 24.0 ms
+  HELD-OUT   9.1157 -> 4.3113   (1.5022 bits/byte)
+  saved      ts_run/model (29.0 MB)
+
+[exit 0]
+card 0: 7 s busy, median clock 945 MHz, memory 5000 MHz, 57 C, 68 W, throttle ['0x0000000000000004']
+
+=== scores pair medium, 100 steps: fused, stored, PyTorch, PyTorch, stored, fused
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8  R2_STEPS=100 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      39.82M parameters, dim 768 x 4 layers, ffn 2304, 12 q / 4 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c98634a076811a76
+  trained    100 steps in 13.17 s  (15556.2 tokens/s, 131.7 ms/step)
+  steptime   first 252.4 ms, median after it 130.3 ms
+  HELD-OUT   9.1359 -> 5.2064   (1.8140 bits/byte)
+  saved      ts_run/model (159.3 MB)
+
+[exit 0]
+card 0: 12 s busy, median clock 870 MHz, memory 5000 MHz, 59 C, 68 W, throttle ['0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 R2_STEPS=100 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      39.82M parameters, dim 768 x 4 layers, ffn 2304, 12 q / 4 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c98634a076811a76
+  trained    100 steps in 13.35 s  (15343.5 tokens/s, 133.5 ms/step)
+  steptime   first 231.4 ms, median after it 132.8 ms
+  HELD-OUT   9.1359 -> 5.2064   (1.8140 bits/byte)
+  saved      ts_run/model (159.3 MB)
+
+[exit 0]
+card 0: 13 s busy, median clock 840 MHz, memory 5000 MHz, 60 C, 68 W, throttle ['0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 295.6 ms, median after it 146.8 ms
+  weights    sha256 a4c9e5995c2ad655
+train, seconds                     13.35         14.82   R2 1.11x faster
+tokens/s                        15343.47      13816.92   R2 1.11x faster
+ms/step                           133.48        148.22   R2 1.11x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               5.2064        5.2064   R2 lower by 0.0000
+train loss, first -> last   9.148->4.767   9.148->4.767 
+
+[exit 0]
+card 0: 14 s busy, median clock 900 MHz, memory 5000 MHz, 62 C, 68 W, throttle ['0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 301.9 ms, median after it 148.4 ms
+  weights    sha256 6fc0720602efedd6
+train, seconds                     13.35         14.98   R2 1.12x faster
+tokens/s                        15343.47      13674.76   R2 1.12x faster
+ms/step                           133.48        149.76   R2 1.12x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               5.2064        5.2064   R2 lower by 0.0000
+train loss, first -> last   9.148->4.767   9.148->4.767 
+
+[exit 0]
+card 0: 14 s busy, median clock 870 MHz, memory 5000 MHz, 64 C, 68 W, throttle ['0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 R2_STEPS=100 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      39.82M parameters, dim 768 x 4 layers, ffn 2304, 12 q / 4 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c98634a076811a76
+  trained    100 steps in 13.73 s  (14920.2 tokens/s, 137.3 ms/step)
+  steptime   first 235.6 ms, median after it 135.8 ms
+  HELD-OUT   9.1359 -> 5.2064   (1.8140 bits/byte)
+  saved      ts_run/model (159.3 MB)
+
+[exit 0]
+card 0: 13 s busy, median clock 810 MHz, memory 5000 MHz, 64 C, 69 W, throttle ['0x0000000000000004']
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_DIM=768 R2_LAYERS=4 R2_FFN=2304 R2_HEADS=12 R2_KV=4 R2_SEQ=256 R2_BATCH=8  R2_STEPS=100 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      39.82M parameters, dim 768 x 4 layers, ffn 2304, 12 q / 4 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c98634a076811a76
+  trained    100 steps in 13.53 s  (15132.5 tokens/s, 135.3 ms/step)
+  steptime   first 255.9 ms, median after it 133.5 ms
+  HELD-OUT   9.1359 -> 5.2064   (1.8140 bits/byte)
+  saved      ts_run/model (159.3 MB)
+
+[exit 0]
+card 0: 13 s busy, median clock 855 MHz, memory 5000 MHz, 63 C, 68 W, throttle ['0x0000000000000004']
+
+=== scores pair large, 30 steps: fused, stored, PyTorch, PyTorch, stored, fused
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 29.01 s  (4236.4 tokens/s, 966.9 ms/step)
+  steptime   first 1038.1 ms, median after it 957.5 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 27 s busy, median clock 780 MHz, memory 5000 MHz, 66 C, 68 W, throttle ['0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 30.12 s  (4079.7 tokens/s, 1004.0 ms/step)
+  steptime   first 1048.7 ms, median after it 1000.6 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 28 s busy, median clock 750 MHz, memory 5000 MHz, 68 C, 68 W, throttle ['0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 1129.9 ms, median after it 1091.1 ms
+  weights    sha256 331830b84c886365
+train, seconds                     30.12         32.64   R2 1.08x faster
+tokens/s                         4079.67       3764.30   R2 1.08x faster
+ms/step                          1004.00       1088.12   R2 1.08x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               6.2250        6.2250   R2 lower by 0.0000
+train loss, first -> last   9.146->6.138   9.146->6.138 
+
+[exit 0]
+card 0: 33 s busy, median clock 780 MHz, memory 5000 MHz, 71 C, 68 W, throttle ['0x0000000000000000', '0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 1166.9 ms, median after it 1119.6 ms
+  weights    sha256 36629288e81fa370
+train, seconds                     30.12         33.75   R2 1.12x faster
+tokens/s                         4079.67       3640.65   R2 1.12x faster
+ms/step                          1004.00       1125.07   R2 1.12x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               6.2250        6.2250   R2 lower by 0.0000
+train loss, first -> last   9.146->6.138   9.146->6.138 
+
+[exit 0]
+card 0: 34 s busy, median clock 750 MHz, memory 5000 MHz, 74 C, 67 W, throttle ['0x0000000000000000', '0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 32.56 s  (3774.1 tokens/s, 1085.3 ms/step)
+  steptime   first 1153.4 ms, median after it 1079.2 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 32 s busy, median clock 750 MHz, memory 5000 MHz, 74 C, 67 W, throttle ['0x0000000000000000', '0x0000000000000004']
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 32.07 s  (3831.7 tokens/s, 1069.0 ms/step)
+  steptime   first 1098.4 ms, median after it 1062.0 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 30 s busy, median clock 735 MHz, memory 5000 MHz, 74 C, 68 W, throttle ['0x0000000000000004']
+
+=== scores pair large, 30 steps: fused, stored, PyTorch, PyTorch, stored, fused
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 31.98 s  (3841.9 tokens/s, 1066.1 ms/step)
+  steptime   first 1112.2 ms, median after it 1063.4 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 30 s busy, median clock 765 MHz, memory 5000 MHz, 73 C, 68 W, throttle ['0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 32.29 s  (3806.1 tokens/s, 1076.2 ms/step)
+  steptime   first 1087.7 ms, median after it 1076.3 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 30 s busy, median clock 735 MHz, memory 5000 MHz, 73 C, 68 W, throttle ['0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 1171.7 ms, median after it 1138.3 ms
+  weights    sha256 6c17cc928424fa60
+train, seconds                     32.29         34.35   R2 1.06x faster
+tokens/s                         3806.09       3577.39   R2 1.06x faster
+ms/step                          1076.17       1144.97   R2 1.06x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               6.2250        6.2250   R2 lower by 0.0000
+train loss, first -> last   9.146->6.138   9.146->6.138 
+
+[exit 0]
+card 0: 34 s busy, median clock 735 MHz, memory 5000 MHz, 75 C, 67 W, throttle ['0x0000000000000004']
+--- PyTorch
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 TS_DEVICE=cuda python3 benchmarks/llm/tinystories_train.py 2>&1 | grep -E '^(train, seconds|tokens/s|ms/step|loss after training|train loss|ACCURACY)|device  |weights  |steptime|FAIL|panicked|rror'
+  steptime   first 1184.9 ms, median after it 1149.1 ms
+  weights    sha256 6a93992498bf5f64
+train, seconds                     32.29         34.79   R2 1.08x faster
+tokens/s                         3806.09       3532.34   R2 1.08x faster
+ms/step                          1076.17       1159.57   R2 1.08x faster
+ACCURACY (held-out)                   R2       PyTorch    
+loss after training               6.2250        6.2250   R2 lower by 0.0000
+train loss, first -> last   9.146->6.138   9.146->6.138 
+
+[exit 0]
+card 0: 34 s busy, median clock 705 MHz, memory 5000 MHz, 76 C, 68 W, throttle ['0x0000000000000004']
+--- stored
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 32.56 s  (3774.3 tokens/s, 1085.2 ms/step)
+  steptime   first 1161.3 ms, median after it 1085.4 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 32 s busy, median clock 735 MHz, memory 5000 MHz, 74 C, 67 W, throttle ['0x0000000000000000', '0x0000000000000004']
+--- fused
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  R2_STEPS=30 R2_GPU=1 /tmp/r2/target/release/examples/tinystories_train 2>&1 | grep -E 'device  |model |trained|steptime|HELD-OUT|cluster  |exchange  |weights  |rror|panicked'
+  model      125.55M parameters, dim 768 x 12 layers, ffn 3072, 12 q / 12 kv heads
+  device     Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+  weights    fnv c32fd5dd84def12c
+  trained    30 steps in 32.01 s  (3838.8 tokens/s, 1067.0 ms/step)
+  steptime   first 1094.3 ms, median after it 1068.1 ms
+  HELD-OUT   9.1405 -> 6.2250   (2.1689 bits/byte)
+  saved      ts_run/model (502.2 MB)
+
+[exit 0]
+card 0: 30 s busy, median clock 765 MHz, memory 5000 MHz, 73 C, 68 W, throttle ['0x0000000000000004']
+
+=== score large fused round 1
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  SCORE_LAYER=t4 SCORE_SIZE=large CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+SCORE r2 t4 large embed fwd 1 0.1242 2.002731e6
+SCORE r2 t4 large embed bwd 1 0.2054 6.194006e5
+SCORE r2 t4 large rmsnorm fwd 25 0.1765 2.836100e6
+SCORE r2 t4 large rmsnorm bwd 25 0.4738 3.271111e6
+SCORE r2 t4 large gemm_wq fwd 24 1.4974 1.561821e6
+SCORE r2 t4 large gemm_wq bwd 24 2.8446 1.451213e9
+SCORE r2 t4 large gemm_wk fwd 24 1.5242 1.561821e6
+SCORE r2 t4 large gemm_wk bwd 24 2.8648 1.451213e9
+SCORE r2 t4 large gemm_w1 fwd 24 6.5725 2.994132e6
+SCORE r2 t4 large gemm_w1 bwd 24 12.9344 3.194573e9
+SCORE r2 t4 large gemm_w2 fwd 12 6.2839 5.123067e6
+SCORE r2 t4 large gemm_w2 bwd 12 12.9441 3.830999e9
+SCORE r2 t4 large gemm_head fwd 1 20.4016 3.888060e7
+SCORE r2 t4 large gemm_head bwd 1 33.0100 8.042163e9
+SCORE r2 t4 large rope_q fwd 12 0.1123 1.846942e6
+SCORE r2 t4 large rope_q bwd 12 0.1284 1.846669e6
+SCORE r2 t4 large rope_k fwd 12 0.1119 1.846942e6
+SCORE r2 t4 large rope_k bwd 12 0.1300 1.846669e6
+SCORE r2 t4 large attention fwd 12 2.6239 1.395826e6
+SCORE r2 t4 large attention bwd 12 7.1775 5.442740e6
+SCORE r2 t4 large add fwd 24 0.1457 3.515118e6
+SCORE r2 t4 large silu fwd 12 0.5184 4.005484e6
+SCORE r2 t4 large silu bwd 12 0.6716 4.005326e6
+SCORE r2 t4 large mul fwd 12 0.5747 4.605850e6
+SCORE r2 t4 large mul bwd 12 0.9769 8.962673e6
+SCORE r2 t4 large softmax_ce fwd 1 1.5722 9.220616e0
+SCORE r2 t4 large softmax_ce bwd 1 1.4844 1.999750e0
+SCORE r2 t4 large read_loss step 1 0.0371 NaN
+SCORE r2 t4 large batch_setup step 1 0.0858 NaN
+SCORE r2 t4 large adam step 1 14.1709 NaN
+SCORE r2 t4 large launch_one info 0 0.0030 NaN
+SCORE r2 t4 large upload_64MB info 0 14.0038 NaN
+SCORE r2 t4 large download_64MB info 0 59.7922 NaN
+
+[exit 0]
+
+=== score large stored round 1
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 SCORE_LAYER=t4 SCORE_SIZE=large CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+SCORE r2 t4 large embed fwd 1 0.1279 2.002731e6
+SCORE r2 t4 large embed bwd 1 0.2102 6.194006e5
+SCORE r2 t4 large rmsnorm fwd 25 0.1777 2.836100e6
+SCORE r2 t4 large rmsnorm bwd 25 0.4764 3.271111e6
+SCORE r2 t4 large gemm_wq fwd 24 1.5689 1.561821e6
+SCORE r2 t4 large gemm_wq bwd 24 2.8614 1.451213e9
+SCORE r2 t4 large gemm_wk fwd 24 1.5322 1.561821e6
+SCORE r2 t4 large gemm_wk bwd 24 2.8614 1.451213e9
+SCORE r2 t4 large gemm_w1 fwd 24 6.3842 2.994132e6
+SCORE r2 t4 large gemm_w1 bwd 24 12.5134 3.194573e9
+SCORE r2 t4 large gemm_w2 fwd 12 5.9631 5.123067e6
+SCORE r2 t4 large gemm_w2 bwd 12 12.0494 3.830999e9
+SCORE r2 t4 large gemm_head fwd 1 18.8876 3.888060e7
+SCORE r2 t4 large gemm_head bwd 1 30.3914 8.042163e9
+SCORE r2 t4 large rope_q fwd 12 0.1119 1.846942e6
+SCORE r2 t4 large rope_q bwd 12 0.1097 1.846669e6
+SCORE r2 t4 large rope_k fwd 12 0.1115 1.846942e6
+SCORE r2 t4 large rope_k bwd 12 0.1092 1.846669e6
+SCORE r2 t4 large attention fwd 12 2.4976 1.395826e6
+SCORE r2 t4 large attention bwd 12 7.8382 5.442740e6
+SCORE r2 t4 large add fwd 24 0.1457 3.515118e6
+SCORE r2 t4 large silu fwd 12 0.4606 4.005484e6
+SCORE r2 t4 large silu bwd 12 0.5924 4.005326e6
+SCORE r2 t4 large mul fwd 12 0.5756 4.605850e6
+SCORE r2 t4 large mul bwd 12 0.9817 8.962673e6
+SCORE r2 t4 large softmax_ce fwd 1 1.3952 9.220616e0
+SCORE r2 t4 large softmax_ce bwd 1 1.3711 1.999750e0
+SCORE r2 t4 large read_loss step 1 0.0353 NaN
+SCORE r2 t4 large batch_setup step 1 0.0842 NaN
+SCORE r2 t4 large adam step 1 14.1777 NaN
+SCORE r2 t4 large launch_one info 0 0.0027 NaN
+SCORE r2 t4 large upload_64MB info 0 13.9410 NaN
+SCORE r2 t4 large download_64MB info 0 59.7791 NaN
+
+[exit 0]
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 SCORE_LAYER=t4 SCORE_SIZE=large TS_DEVICE=cuda CUDA_VISIBLE_DEVICES=0 python3 benchmarks/llm/op_scoreboard.py 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: cuda torch 2.11.0+cu130
+SCORE torch t4 large embed fwd 1 0.1063 2.002731e+06
+SCORE torch t4 large embed bwd 1 0.2601 6.194006e+05
+SCORE torch t4 large rmsnorm fwd 25 0.3834 2.836100e+06
+SCORE torch t4 large rmsnorm bwd 25 1.2569 3.271110e+06
+SCORE torch t4 large gemm_wq fwd 24 1.3992 1.561821e+06
+SCORE torch t4 large gemm_wq bwd 24 2.6458 1.451213e+09
+SCORE torch t4 large gemm_wk fwd 24 1.3968 1.561821e+06
+SCORE torch t4 large gemm_wk bwd 24 2.6778 1.451213e+09
+SCORE torch t4 large gemm_w1 fwd 24 6.0783 2.994132e+06
+SCORE torch t4 large gemm_w1 bwd 24 11.6177 3.194573e+09
+SCORE torch t4 large gemm_w2 fwd 12 5.7049 5.123067e+06
+SCORE torch t4 large gemm_w2 bwd 12 11.6224 3.830999e+09
+SCORE torch t4 large gemm_head fwd 1 18.0170 3.888060e+07
+SCORE torch t4 large gemm_head bwd 1 29.5612 8.042163e+09
+SCORE torch t4 large rope_q fwd 12 0.7237 1.846942e+06
+SCORE torch t4 large rope_q bwd 12 1.0510 1.846669e+06
+SCORE torch t4 large rope_k fwd 12 0.7238 1.846942e+06
+SCORE torch t4 large rope_k bwd 12 1.0506 1.846669e+06
+SCORE torch t4 large attention fwd 12 1.8750 1.395826e+06
+SCORE torch t4 large attention bwd 12 6.4177 5.442740e+06
+SCORE torch t4 large add fwd 24 0.1571 3.515118e+06
+SCORE torch t4 large add bwd 24 0.2138 4.005043e+06
+SCORE torch t4 large silu fwd 12 0.4218 4.005484e+06
+SCORE torch t4 large silu bwd 12 0.6154 4.005326e+06
+SCORE torch t4 large mul fwd 12 0.6186 4.605850e+06
+SCORE torch t4 large mul bwd 12 1.2372 8.962673e+06
+SCORE torch t4 large softmax_ce fwd 1 1.1528 9.220616e+00
+SCORE torch t4 large softmax_ce bwd 1 2.1777 1.999750e+00
+SCORE torch t4 large read_loss step 1 0.0881 nan
+SCORE torch t4 large batch_setup step 1 0.0513 nan
+SCORE torch t4 large adam step 1 37.4737 nan
+SCORE torch t4 large launch_one info 0 0.0082 nan
+SCORE torch t4 large upload_64MB info 0 14.0511 nan
+SCORE torch t4 large download_64MB info 0 56.5672 nan
+
+[exit 0]
+
+=== score large fused round 2
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  SCORE_LAYER=t4 SCORE_SIZE=large CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+SCORE r2 t4 large embed fwd 1 0.1271 2.002731e6
+SCORE r2 t4 large embed bwd 1 0.2105 6.194006e5
+SCORE r2 t4 large rmsnorm fwd 25 0.1774 2.836100e6
+SCORE r2 t4 large rmsnorm bwd 25 0.4766 3.271111e6
+SCORE r2 t4 large gemm_wq fwd 24 1.5685 1.561821e6
+SCORE r2 t4 large gemm_wq bwd 24 2.9227 1.451213e9
+SCORE r2 t4 large gemm_wk fwd 24 1.5761 1.561821e6
+SCORE r2 t4 large gemm_wk bwd 24 2.9257 1.451213e9
+SCORE r2 t4 large gemm_w1 fwd 24 6.6105 2.994132e6
+SCORE r2 t4 large gemm_w1 bwd 24 13.0167 3.194573e9
+SCORE r2 t4 large gemm_w2 fwd 12 6.2371 5.123067e6
+SCORE r2 t4 large gemm_w2 bwd 12 12.9014 3.830999e9
+SCORE r2 t4 large gemm_head fwd 1 20.1171 3.888060e7
+SCORE r2 t4 large gemm_head bwd 1 31.9500 8.042163e9
+SCORE r2 t4 large rope_q fwd 12 0.1119 1.846942e6
+SCORE r2 t4 large rope_q bwd 12 0.1176 1.846669e6
+SCORE r2 t4 large rope_k fwd 12 0.1118 1.846942e6
+SCORE r2 t4 large rope_k bwd 12 0.1122 1.846669e6
+SCORE r2 t4 large attention fwd 12 2.5541 1.395826e6
+SCORE r2 t4 large attention bwd 12 6.7737 5.442740e6
+SCORE r2 t4 large add fwd 24 0.1456 3.515118e6
+SCORE r2 t4 large silu fwd 12 0.4904 4.005484e6
+SCORE r2 t4 large silu bwd 12 0.6277 4.005326e6
+SCORE r2 t4 large mul fwd 12 0.5750 4.605850e6
+SCORE r2 t4 large mul bwd 12 0.9790 8.962673e6
+SCORE r2 t4 large softmax_ce fwd 1 1.4812 9.220616e0
+SCORE r2 t4 large softmax_ce bwd 1 1.4019 1.999750e0
+SCORE r2 t4 large read_loss step 1 0.0374 NaN
+SCORE r2 t4 large batch_setup step 1 0.0957 NaN
+SCORE r2 t4 large adam step 1 14.1714 NaN
+SCORE r2 t4 large launch_one info 0 0.0028 NaN
+SCORE r2 t4 large upload_64MB info 0 13.9395 NaN
+SCORE r2 t4 large download_64MB info 0 59.6238 NaN
+
+[exit 0]
+
+=== score large stored round 2
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 SCORE_LAYER=t4 SCORE_SIZE=large CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+SCORE r2 t4 large embed fwd 1 0.1259 2.002731e6
+SCORE r2 t4 large embed bwd 1 0.2063 6.194006e5
+SCORE r2 t4 large rmsnorm fwd 25 0.1766 2.836100e6
+SCORE r2 t4 large rmsnorm bwd 25 0.4744 3.271111e6
+SCORE r2 t4 large gemm_wq fwd 24 1.4577 1.561821e6
+SCORE r2 t4 large gemm_wq bwd 24 2.8105 1.451213e9
+SCORE r2 t4 large gemm_wk fwd 24 1.4864 1.561821e6
+SCORE r2 t4 large gemm_wk bwd 24 2.8318 1.451213e9
+SCORE r2 t4 large gemm_w1 fwd 24 6.2797 2.994132e6
+SCORE r2 t4 large gemm_w1 bwd 24 12.1728 3.194573e9
+SCORE r2 t4 large gemm_w2 fwd 12 5.8318 5.123067e6
+SCORE r2 t4 large gemm_w2 bwd 12 12.0373 3.830999e9
+SCORE r2 t4 large gemm_head fwd 1 18.4967 3.888060e7
+SCORE r2 t4 large gemm_head bwd 1 30.3471 8.042163e9
+SCORE r2 t4 large rope_q fwd 12 0.1118 1.846942e6
+SCORE r2 t4 large rope_q bwd 12 0.1088 1.846669e6
+SCORE r2 t4 large rope_k fwd 12 0.1120 1.846942e6
+SCORE r2 t4 large rope_k bwd 12 0.1087 1.846669e6
+SCORE r2 t4 large attention fwd 12 2.4875 1.395826e6
+SCORE r2 t4 large attention bwd 12 7.8462 5.442740e6
+SCORE r2 t4 large add fwd 24 0.1457 3.515118e6
+SCORE r2 t4 large silu fwd 12 0.4632 4.005484e6
+SCORE r2 t4 large silu bwd 12 0.5984 4.005326e6
+SCORE r2 t4 large mul fwd 12 0.5754 4.605850e6
+SCORE r2 t4 large mul bwd 12 0.9812 8.962673e6
+SCORE r2 t4 large softmax_ce fwd 1 1.4101 9.220616e0
+SCORE r2 t4 large softmax_ce bwd 1 1.3774 1.999750e0
+SCORE r2 t4 large read_loss step 1 0.0452 NaN
+SCORE r2 t4 large batch_setup step 1 0.0847 NaN
+SCORE r2 t4 large adam step 1 14.1861 NaN
+SCORE r2 t4 large launch_one info 0 0.0027 NaN
+SCORE r2 t4 large upload_64MB info 0 13.7668 NaN
+SCORE r2 t4 large download_64MB info 0 58.6052 NaN
+
+[exit 0]
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 SCORE_LAYER=t4 SCORE_SIZE=large TS_DEVICE=cuda CUDA_VISIBLE_DEVICES=0 python3 benchmarks/llm/op_scoreboard.py 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: cuda torch 2.11.0+cu130
+SCORE torch t4 large embed fwd 1 0.1063 2.002731e+06
+SCORE torch t4 large embed bwd 1 0.2901 6.194006e+05
+SCORE torch t4 large rmsnorm fwd 25 0.3838 2.836100e+06
+SCORE torch t4 large rmsnorm bwd 25 1.2558 3.271110e+06
+SCORE torch t4 large gemm_wq fwd 24 1.4254 1.561821e+06
+SCORE torch t4 large gemm_wq bwd 24 2.7201 1.451213e+09
+SCORE torch t4 large gemm_wk fwd 24 1.4637 1.561821e+06
+SCORE torch t4 large gemm_wk bwd 24 2.7806 1.451213e+09
+SCORE torch t4 large gemm_w1 fwd 24 6.1635 2.994132e+06
+SCORE torch t4 large gemm_w1 bwd 24 12.0566 3.194573e+09
+SCORE torch t4 large gemm_w2 fwd 12 5.7103 5.123067e+06
+SCORE torch t4 large gemm_w2 bwd 12 11.9862 3.830999e+09
+SCORE torch t4 large gemm_head fwd 1 18.7859 3.888060e+07
+SCORE torch t4 large gemm_head bwd 1 30.3971 8.042163e+09
+SCORE torch t4 large rope_q fwd 12 0.7238 1.846942e+06
+SCORE torch t4 large rope_q bwd 12 1.0507 1.846669e+06
+SCORE torch t4 large rope_k fwd 12 0.7239 1.846942e+06
+SCORE torch t4 large rope_k bwd 12 1.0503 1.846669e+06
+SCORE torch t4 large attention fwd 12 1.9120 1.395826e+06
+SCORE torch t4 large attention bwd 12 6.4695 5.442740e+06
+SCORE torch t4 large add fwd 24 0.1570 3.515118e+06
+SCORE torch t4 large add bwd 24 0.2134 4.005043e+06
+SCORE torch t4 large silu fwd 12 0.4216 4.005484e+06
+SCORE torch t4 large silu bwd 12 0.6151 4.005326e+06
+SCORE torch t4 large mul fwd 12 0.6174 4.605850e+06
+SCORE torch t4 large mul bwd 12 1.2359 8.962673e+06
+SCORE torch t4 large softmax_ce fwd 1 1.1752 9.220616e+00
+SCORE torch t4 large softmax_ce bwd 1 2.1769 1.999750e+00
+SCORE torch t4 large read_loss step 1 0.0926 nan
+SCORE torch t4 large batch_setup step 1 0.0512 nan
+SCORE torch t4 large adam step 1 37.4686 nan
+SCORE torch t4 large launch_one info 0 0.0082 nan
+SCORE torch t4 large upload_64MB info 0 14.0279 nan
+SCORE torch t4 large download_64MB info 0 56.8913 nan
+
+[exit 0]
+
+=== score large fused round 3
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8  SCORE_LAYER=t4 SCORE_SIZE=large CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+SCORE r2 t4 large embed fwd 1 0.1257 2.002731e6
+SCORE r2 t4 large embed bwd 1 0.2104 6.194006e5
+SCORE r2 t4 large rmsnorm fwd 25 0.1777 2.836100e6
+SCORE r2 t4 large rmsnorm bwd 25 0.4766 3.271111e6
+SCORE r2 t4 large gemm_wq fwd 24 1.5687 1.561821e6
+SCORE r2 t4 large gemm_wq bwd 24 2.9112 1.451213e9
+SCORE r2 t4 large gemm_wk fwd 24 1.5714 1.561821e6
+SCORE r2 t4 large gemm_wk bwd 24 2.9126 1.451213e9
+SCORE r2 t4 large gemm_w1 fwd 24 6.4497 2.994132e6
+SCORE r2 t4 large gemm_w1 bwd 24 12.6773 3.194573e9
+SCORE r2 t4 large gemm_w2 fwd 12 5.9802 5.123067e6
+SCORE r2 t4 large gemm_w2 bwd 12 12.4698 3.830999e9
+SCORE r2 t4 large gemm_head fwd 1 19.0069 3.888060e7
+SCORE r2 t4 large gemm_head bwd 1 30.4302 8.042163e9
+SCORE r2 t4 large rope_q fwd 12 0.1120 1.846942e6
+SCORE r2 t4 large rope_q bwd 12 0.1128 1.846669e6
+SCORE r2 t4 large rope_k fwd 12 0.1117 1.846942e6
+SCORE r2 t4 large rope_k bwd 12 0.1101 1.846669e6
+SCORE r2 t4 large attention fwd 12 2.5300 1.395826e6
+SCORE r2 t4 large attention bwd 12 6.6978 5.442740e6
+SCORE r2 t4 large add fwd 24 0.1456 3.515118e6
+SCORE r2 t4 large silu fwd 12 0.4769 4.005484e6
+SCORE r2 t4 large silu bwd 12 0.6070 4.005326e6
+SCORE r2 t4 large mul fwd 12 0.5750 4.605850e6
+SCORE r2 t4 large mul bwd 12 0.9800 8.962673e6
+SCORE r2 t4 large softmax_ce fwd 1 1.4306 9.220616e0
+SCORE r2 t4 large softmax_ce bwd 1 1.3792 1.999750e0
+SCORE r2 t4 large read_loss step 1 0.0332 NaN
+SCORE r2 t4 large batch_setup step 1 0.0855 NaN
+SCORE r2 t4 large adam step 1 14.1778 NaN
+SCORE r2 t4 large launch_one info 0 0.0029 NaN
+SCORE r2 t4 large upload_64MB info 0 13.6859 NaN
+SCORE r2 t4 large download_64MB info 0 59.1449 NaN
+
+[exit 0]
+
+=== score large stored round 3
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 R2_CUDA_ATTN_SCORES=0 SCORE_LAYER=t4 SCORE_SIZE=large CUDA_VISIBLE_DEVICES=0 /tmp/score_cuda 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: Tesla T4 (CUDA, driver API 13.0, 14911 MB, device 0 of 1)
+SCORE r2 t4 large embed fwd 1 0.1235 2.002731e6
+SCORE r2 t4 large embed bwd 1 0.2055 6.194006e5
+SCORE r2 t4 large rmsnorm fwd 25 0.1759 2.836100e6
+SCORE r2 t4 large rmsnorm bwd 25 0.4727 3.271111e6
+SCORE r2 t4 large gemm_wq fwd 24 1.4550 1.561821e6
+SCORE r2 t4 large gemm_wq bwd 24 2.7461 1.451213e9
+SCORE r2 t4 large gemm_wk fwd 24 1.4550 1.561821e6
+SCORE r2 t4 large gemm_wk bwd 24 2.7498 1.451213e9
+SCORE r2 t4 large gemm_w1 fwd 24 6.1510 2.994132e6
+SCORE r2 t4 large gemm_w1 bwd 24 12.0824 3.194573e9
+SCORE r2 t4 large gemm_w2 fwd 12 5.8987 5.123067e6
+SCORE r2 t4 large gemm_w2 bwd 12 12.0142 3.830999e9
+SCORE r2 t4 large gemm_head fwd 1 18.9891 3.888060e7
+SCORE r2 t4 large gemm_head bwd 1 30.4084 8.042163e9
+SCORE r2 t4 large rope_q fwd 12 0.1120 1.846942e6
+SCORE r2 t4 large rope_q bwd 12 0.1098 1.846669e6
+SCORE r2 t4 large rope_k fwd 12 0.1119 1.846942e6
+SCORE r2 t4 large rope_k bwd 12 0.1100 1.846669e6
+SCORE r2 t4 large attention fwd 12 2.5170 1.395826e6
+SCORE r2 t4 large attention bwd 12 8.0652 5.442740e6
+SCORE r2 t4 large add fwd 24 0.1456 3.515118e6
+SCORE r2 t4 large silu fwd 12 0.4711 4.005484e6
+SCORE r2 t4 large silu bwd 12 0.6030 4.005326e6
+SCORE r2 t4 large mul fwd 12 0.5753 4.605850e6
+SCORE r2 t4 large mul bwd 12 0.9809 8.962673e6
+SCORE r2 t4 large softmax_ce fwd 1 1.4341 9.220616e0
+SCORE r2 t4 large softmax_ce bwd 1 1.3802 1.999750e0
+SCORE r2 t4 large read_loss step 1 0.0301 NaN
+SCORE r2 t4 large batch_setup step 1 0.0841 NaN
+SCORE r2 t4 large adam step 1 14.1695 NaN
+SCORE r2 t4 large launch_one info 0 0.0028 NaN
+SCORE r2 t4 large upload_64MB info 0 15.5443 NaN
+SCORE r2 t4 large download_64MB info 0 58.4158 NaN
+
+[exit 0]
+$ cd /tmp/r2 && R2_VAL_BATCHES=1 R2_DIM=768 R2_LAYERS=12 R2_FFN=3072 R2_HEADS=12 R2_KV=12 R2_SEQ=512 R2_BATCH=8 SCORE_LAYER=t4 SCORE_SIZE=large TS_DEVICE=cuda CUDA_VISIBLE_DEVICES=0 python3 benchmarks/llm/op_scoreboard.py 2>&1 | grep -E '^(SCORE|device:)|rror|panicked|Traceback'
+device: cuda torch 2.11.0+cu130
+SCORE torch t4 large embed fwd 1 0.1063 2.002731e+06
+SCORE torch t4 large embed bwd 1 0.2547 6.194006e+05
+SCORE torch t4 large rmsnorm fwd 25 0.3838 2.836100e+06
+SCORE torch t4 large rmsnorm bwd 25 1.2556 3.271110e+06
+SCORE torch t4 large gemm_wq fwd 24 1.4873 1.561821e+06
+SCORE torch t4 large gemm_wq bwd 24 2.8181 1.451213e+09
+SCORE torch t4 large gemm_wk fwd 24 1.4983 1.561821e+06
+SCORE torch t4 large gemm_wk bwd 24 2.8350 1.451213e+09
+SCORE torch t4 large gemm_w1 fwd 24 6.2980 2.994132e+06
+SCORE torch t4 large gemm_w1 bwd 24 12.3470 3.194573e+09
+SCORE torch t4 large gemm_w2 fwd 12 5.9820 5.123067e+06
+SCORE torch t4 large gemm_w2 bwd 12 12.2331 3.830999e+09
+SCORE torch t4 large gemm_head fwd 1 19.2479 3.888060e+07
+SCORE torch t4 large gemm_head bwd 1 30.7132 8.042163e+09
+SCORE torch t4 large rope_q fwd 12 0.7241 1.846942e+06
+SCORE torch t4 large rope_q bwd 12 1.0501 1.846669e+06
+SCORE torch t4 large rope_k fwd 12 0.7237 1.846942e+06
+SCORE torch t4 large rope_k bwd 12 1.0499 1.846669e+06
+SCORE torch t4 large attention fwd 12 1.9216 1.395826e+06
+SCORE torch t4 large attention bwd 12 6.5321 5.442740e+06
+SCORE torch t4 large add fwd 24 0.1568 3.515118e+06
+SCORE torch t4 large add bwd 24 0.2130 4.005043e+06
+SCORE torch t4 large silu fwd 12 0.4213 4.005484e+06
+SCORE torch t4 large silu bwd 12 0.6154 4.005326e+06
+SCORE torch t4 large mul fwd 12 0.6172 4.605850e+06
+SCORE torch t4 large mul bwd 12 1.2348 8.962673e+06
+SCORE torch t4 large softmax_ce fwd 1 1.1990 9.220616e+00
+SCORE torch t4 large softmax_ce bwd 1 2.1771 1.999750e+00
+SCORE torch t4 large read_loss step 1 0.0889 nan
+SCORE torch t4 large batch_setup step 1 0.0507 nan
+SCORE torch t4 large adam step 1 37.4503 nan
+SCORE torch t4 large launch_one info 0 0.0089 nan
+SCORE torch t4 large upload_64MB info 0 13.9079 nan
+SCORE torch t4 large download_64MB info 0 56.6945 nan
+
+[exit 0]
+$ nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0
+1590 MHz, 78
+
+[exit 0]
+/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\|'
+  cells[i][c] = re.sub('\\\\\|', '|', cell)
+/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\_'
+  text = re.sub(r'_', '\_', text) # Escape underscores in display text
+[NbConvertApp] Converting notebook __script__.ipynb to html
+[NbConvertApp] Writing 409045 bytes to __results__.html

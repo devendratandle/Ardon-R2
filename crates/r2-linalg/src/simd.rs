@@ -43,7 +43,6 @@ macro_rules! dispatch {
 
 dispatch!(dot, dot_avx2, dot_impl, (x: &[f64], y: &[f64]) -> f64);
 dispatch!(axpy, axpy_avx2, axpy_impl, (y: &mut [f64], a: f64, x: &[f64]) -> ());
-dispatch!(rank2, rank2_avx2, rank2_impl, (c: &mut [f64], v: &[f64], w: &[f64], wj: f64, vj: f64) -> ());
 
 /// x·y over the shorter length, four accumulators so the adds overlap.
 #[inline(always)]
@@ -67,8 +66,3 @@ fn axpy_impl(y: &mut [f64], a: f64, x: &[f64]) {
     for (yi, xi) in y.iter_mut().zip(x) { *yi += a * xi; }
 }
 
-/// c −= v·wj + w·vj — one column of a symmetric rank-2 update.
-#[inline(always)]
-fn rank2_impl(c: &mut [f64], v: &[f64], w: &[f64], wj: f64, vj: f64) {
-    for ((ci, vi), wi) in c.iter_mut().zip(v).zip(w) { *ci -= vi * wj + wi * vj; }
-}

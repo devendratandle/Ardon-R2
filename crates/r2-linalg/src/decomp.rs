@@ -479,13 +479,8 @@ fn apply_block_reflector(m: usize, a: &mut [f64], tau: &[f64], k0: usize, kb: us
 /// A is m×n (m >= n), column-major. Returns the n singular values in
 /// descending order — exactly [`dgesvd_full`]'s σ.
 ///
-/// This had its own Golub-Kahan phase 2, and it was wrong at every size:
-/// each "Givens" step rotated one side of the bidiagonal and dropped the
-/// fill-in, which is not an orthogonal transform, so it converged to
-/// numbers that were not the singular values (11x4: 2.217 against the
-/// true 2.408; Σσ² ≠ ‖A‖²_F). Until a proper implicit-shift bidiagonal QR
-/// (LAPACK `dbdsqr`) is written, the values come from the full routine,
-/// which `crates/r2-linalg/tests/decomp_large.rs` checks against A itself.
+/// Both run the bidiagonal QR iteration in `bdsqr`, this one recording no rotation;
+/// `crates/r2-linalg/tests/decomp_large.rs` checks the full routine against A itself.
 pub fn dgesvd(m: usize, n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
     svd_impl(m, n, a, false).map(|(sigma, _, _)| sigma)
 }
@@ -502,23 +497,10 @@ pub fn dgesvd(m: usize, n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
 ///   1. Householder bidiagonalization (Golub-Kahan): A = U₁ B V₁ᵀ where B
 ///      is n×n bidiagonal with main diagonal `d` and superdiagonal `e`.
 ///      U₁ (m×n) and V₁ (n×n) are accumulated explicitly column-by-column.
-///   2. Diagonalize B by going through Bᵀ·B (n×n symmetric tridiagonal),
-///      using the already-shipped `dsyev_full` (Householder tridiag +
-///      implicit-shift symmetric QR with Wilkinson shift). Eigenvalues of
-///      Bᵀ·B are σ² (descending). Right singular vectors V₂ are
-///      eigenvectors; left singular vectors are recovered via
-///      u₂_k = (B · v₂_k) / σ_k for σ_k > 0 (zero column for σ_k ≈ 0).
+///   2. Diagonalize B with implicit QR on B itself (`bdsqr`, LAPACK's `dbdsqr`),
+///      accumulating B = U₂ · diag(σ) · V₂ᵀ.
 ///
 /// Final factors: U = U₁ · U₂ (m×n), V = V₁ · V₂ (n×n), Vᵀ = transpose.
-///
-/// **Honest accuracy caveat:** the Bᵀ·B route squares the condition number
-/// of A. For well-conditioned matrices (κ ≲ 1/√ε ≈ 6.7e7) the singular
-/// values and vectors are accurate to ~1e-12. For badly conditioned
-/// matrices (κ approaching 1/ε), small singular values lose accuracy
-/// proportionally — equivalent to half the floating-point precision.
-/// LAPACK's `dbdsqr` (proper implicit-shift bidiagonal QR with full
-/// accumulation) would give κ-independent accuracy at higher
-/// implementation cost. See `docs/KNOWN_LIMITATIONS.md`.
 pub fn dgesvd_full(
     m: usize,
     n: usize,
@@ -533,293 +515,27 @@ pub fn dgesvd_full(
 /// after it. Without vectors, U and Vᵀ come back empty.
 fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
     -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinalgError> {
-    use rayon::prelude::*;
     if a.len() != m * n { return Err(LinalgError::InvalidShape("SVD: A shape".into())); }
     if m < n { return Err(LinalgError::InvalidShape("SVD: need m >= n".into())); }
     if n == 0 { return Ok((vec![], vec![], vec![])); }
-    // Work above which a column / row sweep forks.
-    const PAR: usize = 1 << 15;
 
-    // ── Phase 1: bidiagonalize A → U₁ · B · V₁ᵀ ─────────────────────
+    // ── Phase 1: bidiagonalize A → U₁ · B · V₁ᵀ (`reduce`, blocked) ─────
+    let scale = crate::reduce::safe_scale(a);
+    let scaled: Vec<f64>;
+    let a = if scale == 1.0 { a } else { scaled = a.iter().map(|x| x / scale).collect(); &scaled };
+    let (d_diag, e_super, left, right) = crate::reduce::bidiagonalize(a, m, n, vectors)?;
+    let unscale = |s: Vec<f64>| -> Vec<f64> { if scale == 1.0 { s } else { s.into_iter().map(|x| x * scale).collect() } };
+
+    // ── Phase 2: diagonalize B = U₂ · diag(σ) · V₂ᵀ on B itself (`dbdsqr`) ─
     //
-    // Apply left Householders H_k from the LEFT to a working copy of A
-    // (so A becomes upper bidiagonal in-place). Store each Householder
-    // vector (full m-length) and its `tau` so we can reconstruct U₁
-    // afterwards by applying them in reverse order to I_{m×n}.
-    // Same scheme for right Householders G_k → V₁.
-    //
-    // Why store-then-apply rather than accumulate during bidiagonalization?
-    // U₁ is the first n columns of an m×m orthogonal matrix. Maintaining
-    // only m×n during right-multiplication by m×m Householders requires
-    // column data outside the m×n window (mathematically). The standard
-    // LAPACK fix (`dorgbr` after `dgebrd`) is to defer the build: store
-    // the vectors, then apply them in reverse to the thin identity. This
-    // produces a numerically clean orthonormal U₁ at the same asymptotic
-    // cost.
-    let mut work = a.to_vec();
-    let mut left_vs: Vec<Vec<f64>> = Vec::with_capacity(n); // each length m
-    let mut left_taus: Vec<f64> = Vec::with_capacity(n);
-    let mut right_vs: Vec<Vec<f64>> = Vec::with_capacity(n); // each length n
-    let mut right_taus: Vec<f64> = Vec::with_capacity(n);
-
-    let mut d_diag = vec![0.0_f64; n];           // bidiagonal main diag
-    let mut e_super = vec![0.0_f64; n.saturating_sub(1)]; // superdiag
-
-    // Scratch buffer for Householder vector (length m, reused).
-    let mut hv = vec![0.0_f64; m];
-
-    for k in 0..n {
-        // ── Left Householder: zero work[k+1:m, k] ─────────────────────
-        let mut norm_sq = 0.0_f64;
-        for i in k..m {
-            let v = work[k * m + i];
-            norm_sq += v * v;
-        }
-        let norm = norm_sq.sqrt();
-        if norm > 1e-30 {
-            let akk = work[k * m + k];
-            let sign = if akk >= 0.0 { 1.0 } else { -1.0 };
-            let alpha = -sign * norm;
-            // Build full m-length Householder vector v (zero above k).
-            for i in 0..k { hv[i] = 0.0; }
-            hv[k] = akk - alpha;
-            for i in (k + 1)..m { hv[i] = work[k * m + i]; }
-            let v_norm_sq: f64 = (k..m).map(|i| hv[i] * hv[i]).sum();
-            if v_norm_sq > 1e-30 {
-                let tau = 2.0 / v_norm_sq;
-
-                // Apply H_k from left to work[k:m, k:n].
-                // Column k becomes [alpha, 0, ..., 0]^T effectively; we set
-                // it directly to skip the redundant multiply.
-                work[k * m + k] = alpha;
-                for i in (k + 1)..m { work[k * m + i] = 0.0; }
-                // Other columns j ∈ (k+1)..n, each independent.
-                let hvk = &hv[k..m];
-                let app = |col: &mut [f64]| {
-                    let c = &mut col[k..m];
-                    let scale = tau * crate::simd::dot(c, hvk);
-                    crate::simd::axpy(c, -scale, hvk);
-                };
-                let cols = &mut work[(k + 1) * m..];
-                if (n - k - 1) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
-                else { cols.chunks_mut(m).for_each(app); }
-                // Store the Householder vector (full m-length, zeros above k)
-                // and its tau for later left-to-right application onto U₁.
-                left_vs.push(if vectors { hv.clone() } else { Vec::new() });
-                left_taus.push(tau);
-            } else {
-                work[k * m + k] = alpha;
-                left_vs.push(vec![0.0; m]);
-                left_taus.push(0.0);
-            }
-            d_diag[k] = alpha;
-        } else {
-            d_diag[k] = work[k * m + k];
-            // Identity placeholder.
-            left_vs.push(vec![0.0; m]);
-            left_taus.push(0.0);
-        }
-
-        // ── Right Householder: zero work[k, k+2:n] ────────────────────
-        // Only meaningful when there are entries beyond k+1 to zero out.
-        // For the last superdiagonal step (k = n-2) there is exactly one
-        // entry at column k+1 = n-1 and we keep it directly as e_super[k]
-        // — no Householder needed (applying one would flip its sign and
-        // corrupt the rows below).
-        if k + 2 < n {
-            // Operate on row k of work, columns (k+1)..n.
-            let mut norm_sq = 0.0_f64;
-            for j in (k + 1)..n {
-                let v = work[j * m + k];
-                norm_sq += v * v;
-            }
-            let norm = norm_sq.sqrt();
-            if norm > 1e-30 {
-                let akk1 = work[(k + 1) * m + k];
-                let sign = if akk1 >= 0.0 { 1.0 } else { -1.0 };
-                let alpha = -sign * norm;
-                // Build n-length right Householder vector vr (zero up to k).
-                let mut vr = vec![0.0_f64; n];
-                vr[k + 1] = akk1 - alpha;
-                for j in (k + 2)..n { vr[j] = work[j * m + k]; }
-                let v_norm_sq: f64 = ((k + 1)..n).map(|j| vr[j] * vr[j]).sum();
-                if v_norm_sq > 1e-30 {
-                    let tau = 2.0 / v_norm_sq;
-
-                    // Apply G_k from the right to work[k:m, k+1:n].
-                    // Row k: set work[k+1, k] = alpha, work[j, k] = 0 for j > k+1.
-                    work[(k + 1) * m + k] = alpha;
-                    for j in (k + 2)..n { work[j * m + k] = 0.0; }
-                    // Rows (k+1)..m: w_i ← w_i (I - tau v vᵀ), i.e. for each row,
-                    //   row_i[k+1..n] ← row_i[k+1..n] - tau · (row_i · vr) · vrᵀ.
-                    // Written row by row this strides n·m apart per step; done
-                    // column-contiguous in two passes instead: dots[i] =
-                    // Σ_j vr[j]·work[i, j] (an axpy per column, rows split
-                    // across threads), then column j −= τ·vr[j]·dots.
-                    let r0 = k + 1;
-                    let mut dots = vec![0.0_f64; m - r0];
-                    {
-                        let w = &work;
-                        let vrr = &vr;
-                        let fill = |(ci, ch): (usize, &mut [f64])| {
-                            let i0 = r0 + ci * 256;
-                            for j in (k + 1)..n {
-                                let vj = vrr[j];
-                                if vj == 0.0 { continue; }
-                                let src = &w[j * m + i0..j * m + i0 + ch.len()];
-                                crate::simd::axpy(ch, vj, src);
-                            }
-                        };
-                        if (m - r0) * (n - k - 1) >= PAR { dots.par_chunks_mut(256).enumerate().for_each(fill); }
-                        else { dots.chunks_mut(256).enumerate().for_each(fill); }
-                    }
-                    let vrr = &vr;
-                    let upd = |(jj, col): (usize, &mut [f64])| {
-                        let s = tau * vrr[k + 1 + jj];
-                        if s == 0.0 { return; }
-                        crate::simd::axpy(&mut col[r0..m], -s, &dots);
-                    };
-                    let cols = &mut work[(k + 1) * m..n * m];
-                    if (m - r0) * (n - k - 1) >= PAR { cols.par_chunks_mut(m).enumerate().for_each(upd); }
-                    else { cols.chunks_mut(m).enumerate().for_each(upd); }
-                    // Store the right Householder vector and tau.
-                    right_vs.push(vr);
-                    right_taus.push(tau);
-                } else {
-                    work[(k + 1) * m + k] = alpha;
-                    right_vs.push(vec![0.0; n]);
-                    right_taus.push(0.0);
-                }
-                if k < e_super.len() { e_super[k] = alpha; }
-            } else if k < e_super.len() {
-                e_super[k] = work[(k + 1) * m + k];
-                right_vs.push(vec![0.0; n]);
-                right_taus.push(0.0);
-            } else {
-                right_vs.push(vec![0.0; n]);
-                right_taus.push(0.0);
-            }
-        } else if k + 1 < n && k < e_super.len() {
-            // No right Householder needed (only one trailing entry, which
-            // becomes e_super[k] directly).
-            e_super[k] = work[(k + 1) * m + k];
-        }
-    }
-
-    // ── Build U₁ (m×n): apply stored left Householders in reverse order
-    // to the thin identity I_{m×n} (`X[i,j] = δ_{ij}` for j < n, else 0). ─
-    //
-    // X starts as I_{m×n}. For k = n-1 down to 0:
-    //   X ← H_k · X
-    //   H_k = I_m - τ_k · v_k · v_kᵀ acts on rows k..m only (v_k zero above k).
-    // Resulting X = H_0 · H_1 · ... · H_{n-1} · I_{m×n} = U₁.
-    // Columns j < k are still e_j there — zero on rows k.. — so only
-    // columns k.. change, each independently.
-    let mut u1 = Vec::new();
-    if vectors {
-        u1 = vec![0.0_f64; m * n];
-        for i in 0..n { u1[i * m + i] = 1.0; }
-        for k in (0..n).rev() {
-            let tau = left_taus[k];
-            if tau == 0.0 { continue; }
-            let vk = &left_vs[k][k..m];
-            let app = |col: &mut [f64]| {
-                let c = &mut col[k..m];
-                let dot = crate::simd::dot(c, vk);
-                let scale = tau * dot;
-                crate::simd::axpy(c, -scale, vk);
-            };
-            let cols = &mut u1[k * m..];
-            if (n - k) * (m - k) >= PAR { cols.par_chunks_mut(m).for_each(app); }
-            else { cols.chunks_mut(m).for_each(app); }
-        }
-    }
-
-    // ── Build V₁ (n×n): apply stored right Householders in reverse to I_n.
-    //
-    // V₁ = G_0 · G_1 · ... · G_{last}, built by left-multiplying I_n in
-    // reverse: for k = last down to 0, X ← G_k · X. Each G_k acts on rows
-    // (k+1)..n only (vr_k zero up to and including k).
-    let mut v1 = Vec::new();
-    if vectors {
-        v1 = vec![0.0_f64; n * n];
-        for i in 0..n { v1[i * n + i] = 1.0; }
-        for k in (0..right_vs.len()).rev() {
-            let tau = right_taus[k];
-            if tau == 0.0 { continue; }
-            let vk = &right_vs[k][k + 1..n];
-            let app = |col: &mut [f64]| {
-                let c = &mut col[k + 1..n];
-                let dot = crate::simd::dot(c, vk);
-                let scale = tau * dot;
-                crate::simd::axpy(c, -scale, vk);
-            };
-            let cols = &mut v1[(k + 1) * n..];
-            if (n - k - 1) * (n - k - 1) >= PAR { cols.par_chunks_mut(n).for_each(app); }
-            else { cols.chunks_mut(n).for_each(app); }
-        }
-    }
-
-    // ── Phase 2: diagonalize B = U₂ · diag(σ) · V₂ᵀ via Bᵀ·B ────────
-    //
-    // T := Bᵀ·B is n×n symmetric tridiagonal with
-    //   T[i][i]   = d[i]² + e[i-1]²   (e[-1] := 0)
-    //   T[i][i+1] = d[i] · e[i]
-    // Already tridiagonal: straight to the QR iteration (densifying it
-    // would pay an O(n³) tridiagonalisation of a tridiagonal matrix).
-    let tdiag: Vec<f64> = (0..n).map(|i| {
-        let prev_e = if i == 0 { 0.0 } else { e_super[i - 1] };
-        d_diag[i] * d_diag[i] + prev_e * prev_e
-    }).collect();
-    let toff: Vec<f64> = (0..n - 1).map(|i| d_diag[i] * e_super[i]).collect();
-    let basis = if vectors {
-        let mut id = vec![0.0_f64; n * n];
-        for i in 0..n { id[i * n + i] = 1.0; }
-        Some((id, n))
-    } else { None };
-    // Values only: the Golub–Kahan values below are the whole answer.
-    let (eig_vals, v2) = if vectors {
-        crate::symeig::tridiag_eigen(tdiag, toff, basis)?
-    } else {
-        ((0..n).map(|i| -(i as f64)).collect(), None)   // placeholder order: rank = index
-    };
-    // The singular VALUES come from the Golub–Kahan form instead: the 2n×2n
-    // tridiagonal with zero diagonal and off-diagonal d₀,e₀,d₁,e₁,…,d_{n−1}
-    // has eigenvalues ±σ — no squaring, so small σ keep their digits
-    // (through BᵀB, √λ of a tiny λ carries the rounding of the large ones:
-    // Hilbert(10)'s σ₁₀ was 4% off). Values alone are O(n²); the vectors
-    // stay on BᵀB, whose 2n-size version would cost ~8× the vector phase.
-    let gk_off: Vec<f64> = (0..2 * n - 1)
-        .map(|i| if i % 2 == 0 { d_diag[i / 2] } else { e_super[i / 2] }).collect();
-    let (mut gk, _) = crate::symeig::tridiag_eigen(vec![0.0; 2 * n], gk_off, None)?;
-    gk.sort_by(|a, b| b.total_cmp(a));
-    let mut gk_pos: Vec<f64> = gk[..n].iter().map(|s| s.max(0.0)).collect();
-    // Pair each value with its BᵀB eigenvector by rank (the same set of
-    // numbers up to rounding, in the same order).
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| eig_vals[j].total_cmp(&eig_vals[i]));
-    let mut sigma = vec![0.0_f64; n];
-    for (r, &k) in order.iter().enumerate() { sigma[k] = std::mem::take(&mut gk_pos[r]); }
-    if !vectors { return Ok((sigma, vec![], vec![])); }
-    let v2 = v2.expect("vectors requested");
-
-    // ── Compute U₂ (n×n column-major): u₂_k = (B · v₂_k) / σ_k ──────
-    //
-    // Since B is bidiagonal:
-    //   (B · v)[i] = d[i] · v[i] + e[i] · v[i+1]   (e[n-1] = 0 by convention)
-    let mut u2 = vec![0.0_f64; n * n];
-    let sigma_floor = 1e-13_f64 * sigma.first().copied().unwrap_or(1.0).max(1.0);
-    for k in 0..n {
-        if sigma[k] > sigma_floor {
-            for i in 0..n {
-                let next_v = if i + 1 < n { v2[k * n + (i + 1)] } else { 0.0 };
-                let bv_i = d_diag[i] * v2[k * n + i]
-                    + (if i + 1 < n { e_super[i] } else { 0.0 }) * next_v;
-                u2[k * n + i] = bv_i / sigma[k];
-            }
-        }
-    }
-    orthonormalize_weak_columns(n, &mut u2, &sigma);
+    // Not through BᵀB, which squares the condition number: every rotation here
+    // is orthogonal, so U₂ and V₂ stay orthonormal whatever σ is, zero included.
+    if !vectors { return Ok((unscale(crate::bdsqr::values(d_diag, e_super)?), vec![], vec![])); }
+    let u1 = crate::reduce::form_q(m, n, 0, &left)?;
+    let v1 = crate::reduce::form_q(n, n, 1, &right)?;
+    drop((left, right));
+    let (sigma, u2, v2) = crate::bdsqr::full(d_diag, e_super)?;
+    let sigma = unscale(sigma);
 
     // ── Assemble U = U₁ · U₂ (m×n) and V = V₁ · V₂ (n×n) ────────────
     // Both on the packed GEMM kernel (these were strided triple loops).
@@ -841,67 +557,6 @@ fn svd_impl(m: usize, n: usize, a: &[f64], vectors: bool)
 /// The Jacobi method is simple and always converges for symmetric matrices.
 /// For small matrices (n < 100), it's fast enough and numerically robust.
 /// Algorithm: repeatedly zero the largest off-diagonal element via Givens rotations.
-/// Make the columns of U₂ (n×n, column-major) that belong to small σ
-/// orthonormal, as LAPACK's are. u_k = B·v_k/σ_k carries rounding of order
-/// ε·σ_max/σ_k, so a column with σ_k < 10⁻³·σ_max is no longer orthogonal
-/// to the rest (Hilbert(10): σ₁₀/σ₁ ≈ 6e-14), and a σ_k = 0 column was left
-/// all zeros. Such columns, largest σ first, are taken in blocks of 64:
-/// projected off every accepted column twice ("twice is enough") as two
-/// GEMMs, then Gram–Schmidt'ed twice within the block and normalised. A
-/// column with nothing of its own (σ = 0: B·v = 0) starts from a fixed
-/// pseudo-random vector instead, so it becomes a valid completion. A·V = U·Σ
-/// is unchanged to rounding (these columns carry tiny σ). Nothing happens
-/// for a well-conditioned matrix; a rank-deficient one costs ~2n³ flops,
-/// nearly all in the GEMM kernel.
-fn orthonormalize_weak_columns(n: usize, u: &mut [f64], sigma: &[f64]) {
-    const BLOCK: usize = 64;
-    let smax = sigma.iter().copied().fold(0.0_f64, f64::max);
-    let strong = |k: usize| sigma[k] > 1e-3 * smax;
-    let mut weak: Vec<usize> = (0..n).filter(|&k| !strong(k)).collect();
-    if weak.is_empty() { return; }
-    weak.sort_by(|&i, &j| sigma[j].total_cmp(&sigma[i]));
-    // Accepted columns, contiguous (n × a, column-major).
-    let mut acc: Vec<f64> = (0..n).filter(|&k| strong(k)).flat_map(|k| u[k * n..(k + 1) * n].to_vec()).collect();
-    let norm = |c: &[f64]| c.iter().map(|x| x * x).sum::<f64>().sqrt();
-    let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
-    for block in weak.chunks(BLOCK) {
-        let b = block.len();
-        let mut x: Vec<f64> = block.iter().flat_map(|&k| u[k * n..(k + 1) * n].to_vec()).collect();
-        for c in 0..b {
-            if norm(&x[c * n..(c + 1) * n]) < 1e-8 {
-                for v in &mut x[c * n..(c + 1) * n] {
-                    seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
-                    *v = (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
-                }
-            }
-        }
-        // x −= acc·(accᵀ·x), twice
-        let a = acc.len() / n;
-        if a > 0 {
-            let mut acc_t = vec![0.0; a * n];
-            crate::dtranspose(n, a, &acc, &mut acc_t).expect("shapes");
-            let mut p = vec![0.0; a * b];
-            for _pass in 0..2 {
-                crate::dgemm(a, b, n, 1.0, &acc_t, &x, 0.0, &mut p).expect("shapes");
-                crate::dgemm(n, b, a, -1.0, &acc, &p, 1.0, &mut x).expect("shapes");
-            }
-        }
-        // within the block, in σ order, twice; then normalise
-        for c in 0..b {
-            for _pass in 0..2 {
-                for j in 0..c {
-                    let dot: f64 = (0..n).map(|i| x[j * n + i] * x[c * n + i]).sum();
-                    for i in 0..n { x[c * n + i] -= dot * x[j * n + i]; }
-                }
-            }
-            let nc = norm(&x[c * n..(c + 1) * n]);
-            for v in &mut x[c * n..(c + 1) * n] { *v /= nc; }
-        }
-        for (c, &k) in block.iter().enumerate() { u[k * n..(k + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]); }
-        acc.extend_from_slice(&x);
-    }
-}
-
 pub fn dsyev(n: usize, a: &[f64]) -> Result<Vec<f64>, LinalgError> {
     if a.len() != n * n { return Err(LinalgError::NotSquare); }
     if n == 0 { return Ok(vec![]); }

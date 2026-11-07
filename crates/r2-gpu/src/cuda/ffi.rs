@@ -129,6 +129,7 @@ table!(Cb {
     create = "cublasCreate_v2": fn(*mut Handle) -> c_int;
     sgemm = "cublasSgemm_v2": fn(Handle, c_int, c_int, c_int, c_int, c_int, *const f32, DevPtr, c_int, DevPtr, c_int, *const f32, DevPtr, c_int) -> c_int;
     sgemm_strided = "cublasSgemmStridedBatched": fn(Handle, c_int, c_int, c_int, c_int, c_int, *const f32, DevPtr, c_int, i64, DevPtr, c_int, i64, *const f32, DevPtr, c_int, i64, c_int) -> c_int;
+    gemm_ex = "cublasGemmEx": fn(Handle, c_int, c_int, c_int, c_int, c_int, *const c_void, DevPtr, c_int, c_int, DevPtr, c_int, c_int, *const c_void, DevPtr, c_int, c_int, c_int, c_int) -> c_int;
 });
 
 /// One GPU with its context: the process-wide CUDA device.
@@ -732,6 +733,49 @@ impl Blas {
         if code == 0 { Ok(()) } else { Err(format!("cublasSgemm_v2: status {code}")) }
     }
 
+    /// `C = A B`, no transposes, in cuBLAS's column-major terms, through
+    /// `cublasGemmEx`: storage and arithmetic types chosen per call. Only
+    /// `examples/cuda_ceiling.rs` uses this, to measure what tensor cores give.
+    pub fn gemm_ex(&self, form: GemmForm, m: usize, n: usize, k: usize, a: &DeviceBuffer<f32>, b: &DeviceBuffer<f32>,
+                   c: &DeviceBuffer<f32>) -> Result<(), String> {
+        const R_32F: c_int = 0;              // CUDA_R_32F
+        const R_16F: c_int = 6;              // CUDA_R_16F
+        const COMPUTE_32F: c_int = 0;        // CUBLAS_COMPUTE_32F
+        const COMPUTE_16F: c_int = 64;       // CUBLAS_COMPUTE_16F
+        const COMPUTE_32F_FAST_16F: c_int = 74;
+        const GEMM_DEFAULT: c_int = -1;
+        const GEMM_TENSOR_OP: c_int = 160;   // CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        let (store, compute, algo) = match form {
+            GemmForm::F32 => (R_32F, COMPUTE_32F, GEMM_DEFAULT),
+            GemmForm::F16 => (R_16F, COMPUTE_16F, GEMM_TENSOR_OP),
+            GemmForm::F32Fast16 => (R_32F, COMPUTE_32F_FAST_16F, GEMM_TENSOR_OP),
+        };
+        // a buffer holds f32 slots, and two f16 fit in each
+        let slots = |elems: usize| if store == R_16F { elems.div_ceil(2) } else { elems };
+        if a.len() < slots(m * k) || b.len() < slots(k * n) || c.len() < slots(m * n) {
+            return Err("cuBLAS operand too small".into());
+        }
+        let dim = |x: usize| c_int::try_from(x).map_err(|_| "cuBLAS dimension too large".to_string());
+        let (mi, ni, ki) = (dim(m)?, dim(n)?, dim(k)?);
+        // alpha and beta have the arithmetic's type: 16-bit one and zero, or f32
+        let (a16, z16) = (0x3C00u16, 0u16);
+        let (a32, z32) = (1.0f32, 0.0f32);
+        let (alpha, beta): (*const c_void, *const c_void) = if compute == COMPUTE_16F {
+            (&a16 as *const u16 as *const c_void, &z16 as *const u16 as *const c_void)
+        } else {
+            (&a32 as *const f32 as *const c_void, &z32 as *const f32 as *const c_void)
+        };
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.dev.bind()?;
+        // SAFETY: the handle is live; the extents were checked above in units of the
+        // storage type; alpha and beta are read through host pointers before this returns.
+        let code = unsafe {
+            (self.cb.gemm_ex)(self.handle, 0, 0, mi, ni, ki, alpha, a.ptr, store, mi, b.ptr, store, ki,
+                              beta, c.ptr, store, mi, compute, algo)
+        };
+        if code == 0 { Ok(()) } else { Err(format!("cublasGemmEx: status {code}")) }
+    }
+
     /// `op(A_b) op(B_b) alpha -> C_b` for every `b` in `0..batch`, the matrices
     /// at `offset + b * stride` in cuBLAS's column-major terms. Each operand's
     /// extent is checked against its buffer, as in [`Blas::sgemm`].
@@ -760,6 +804,17 @@ impl Blas {
         };
         if code == 0 { Ok(()) } else { Err(format!("cublasSgemmStridedBatched: status {code}")) }
     }
+}
+
+/// What [`Blas::gemm_ex`] stores and computes in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GemmForm {
+    /// f32 throughout, the control.
+    F32,
+    /// f16 storage and tensor-core arithmetic.
+    F16,
+    /// f32 storage, with cuBLAS free to do the arithmetic in f16.
+    F32Fast16,
 }
 
 /// One operand of a strided batch: matrix `b` starts `offset + b * stride`
