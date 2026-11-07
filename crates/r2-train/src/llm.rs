@@ -154,6 +154,14 @@ impl Trainer {
     /// position-independent and fuses safely.
     fn forward_fused(&self, tape: &mut Tape, tokens: &[usize], seq: usize,
                      leaves: &[Var]) -> Var {
+        self.forward_traced(tape, tokens, seq, leaves, None)
+    }
+
+    /// [`Self::forward_fused`], naming the activations in `trace` when asked
+    /// (`crate::inspect`). The tape holds every activation until it is
+    /// dropped, so tracing adds no buffer, and with `None` no name is built.
+    pub(crate) fn forward_traced(&self, tape: &mut Tape, tokens: &[usize], seq: usize, leaves: &[Var],
+                                 mut trace: Option<&mut Vec<(String, Var)>>) -> Var {
         let c = &self.cfg;
         let (d, kv, hd, t) = (c.dim, c.kv_dim(), c.head_dim(), tokens.len());
         let nseq = if seq == 0 { 1 } else { t / seq };
@@ -165,6 +173,7 @@ impl Trainer {
         // Tolerable while the vocabulary was 256; not once BPE made it
         // 8,000+. See `Op::Embed` for the measurements.
         let mut x = tape.embed(leaves[0], tokens, d);
+        if let Some(tr) = trace.as_deref_mut() { tr.push(("embed".into(), x)); }
 
         for l in 0..c.n_layers {
             let b = |p: usize| leaves[self.layer_block(l, p)];
@@ -205,9 +214,15 @@ impl Trainer {
             let gated = tape.mul(act, up);
             let down = self.project(tape, leaves, gated, l, 7, t, c.ffn_hidden, d);
             x = tape.add(x, down);
+            if let Some(tr) = trace.as_deref_mut() {
+                tr.push((format!("layer.{l}.attn"), ctx));
+                tr.push((format!("layer.{l}.ffn"), gated));
+                tr.push((format!("layer.{l}.out"), x));
+            }
         }
 
         let xn = tape.rmsnorm(x, leaves[1], d, c.eps);
+        if let Some(tr) = trace.as_deref_mut() { tr.push(("final".into(), xn)); }
         tape.matmul(xn, leaves[2], t, d, c.vocab)
     }
 

@@ -560,14 +560,15 @@ readline(prompt)    Block until stdin line is entered; returns character.
                       invisible(readline("Press Enter to continue..."))
 ```
 
-## LLM training & serving (13)
+## LLM training & serving (14)
 ```
-llm.new(dim=128, layers=4, heads=4, kv.heads=heads, ffn=3*dim, vocab=8000, ctx=64, lr=0.003, seed=42)
-                    Create a transformer model; returns an integer handle
-llm.train(m, text, steps=50, batch=8, seq=16, report=0, shuffle=FALSE, lr=, wd=, clip=, schedule="constant", warmup=0, min.lr=lr/10, accum=1, device="cpu", checkpoint=NULL, every=steps/10, keep=3)
+llm.new(preset=NULL, dim=128, layers=4, heads=4, kv.heads=heads, ffn=3*dim, vocab=8000, ctx=64, lr=0.003, seed=42)
+                    Create a transformer model; returns an integer handle. preset= names a shape R2 was benchmarked at, shape only, no weights: "tiny" 1.3M, "small" 7.2M, "medium" 40M, "large" 125M parameters; a named argument overrides it
+llm.train(m, text, steps=50, batch=8, seq=16, report=0, shuffle=FALSE, lr=, wd=, clip=, schedule="constant", warmup=0, min.lr=lr/10, accum=1, device="cpu", checkpoint=NULL, every=steps/10, keep=3, callback=NULL)
                     Train handle m on a text (string or file path), walking through all of it; report= prints every n steps
+                    callback= is function(step, loss), called instead of that print on the first and every n-th step; needs report=. It may read the model (llm.inspect, llm.generate, llm.save), not change it; stop() in it ends the run and keeps the weights. On device="gpu" each call first reads the weights back to the CPU
 llm.finetune(m, prompts, completions, steps=100, batch=4, seq=64, shuffle=TRUE, ...)
-                    Teach what follows each prompt: only completion tokens count in the loss, batches pad to their longest example; takes llm.train's settings
+                    Teach what follows each prompt: only completion tokens count in the loss, batches pad to their longest example; takes llm.train's settings, callback= among them
 llm.freeze(m, blocks)
                     Stop training every block whose name starts with one of blocks ("tok_embed", "layer.0.", "layer.1.wq"); returns how many are frozen
 llm.lora(m, rank=8, alpha=2*rank, targets=c("wq","wk","wv","wo"), seed=42)
@@ -584,6 +585,9 @@ llm.load(dir, train=FALSE, lr=3e-4)
 llm.resume(dir, base=NULL)
                     Continue a run from the newest checkpoint in dir, exactly; base= is the model it was fine-tuned from, when blocks are frozen; returns a handle
 llm.info(m)         Configuration and parameter count of a handle
+llm.inspect(m, text, seq=16, batch=8)
+                    Gradient and activation summaries on one batch: list(loss, blocks, activations). blocks: block, params, trainable, weight.norm, grad.norm, grad.max, grad.ratio (NA for a frozen block). activations: stage, mean, sd, max.abs, nonfinite
+                    Costs one forward and backward pass and that pass's memory per call, nothing otherwise; changes no weight. completions= with prompts as text looks at fine-tuning examples (seq=64, batch=4). Needs a training handle
 llm.free(m)         Release a handle's memory
 ```
 
