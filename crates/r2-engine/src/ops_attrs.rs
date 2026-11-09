@@ -11,6 +11,17 @@ use crate::{err, Engine};
 
 impl Engine {
     pub(crate) fn binary_op(&mut self, op: BinOp, lhs: &RVal, rhs: &RVal) -> Result<RVal, R2Err> {
+        if !self.s3_names.is_empty() {
+            let name = match op {
+                BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/", BinOp::Pow => "^",
+                BinOp::Mod => "%%", BinOp::IntDiv => "%/%", BinOp::Eq => "==", BinOp::Ne => "!=", BinOp::Lt => "<",
+                BinOp::Gt => ">", BinOp::Le => "<=", BinOp::Ge => ">=", BinOp::And => "&", BinOp::Or => "|",
+                _ => "",
+            };
+            if !name.is_empty() {
+                if let Some(r) = self.operator_method(name, lhs, rhs) { return r; }
+            }
+        }
         if let Some(r) = time_arith(self, op, lhs, rhs)? { return Ok(r); }
         let out = self.binary_values(op, lhs, rhs)?;
         Ok(carry_attrs(op, lhs, rhs, out))

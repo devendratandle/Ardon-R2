@@ -128,7 +128,7 @@ fn eval(engine: &mut Engine, id: u64, code: &str, last_plot: &mut Option<String>
     let (mut failed, mut interrupted) = (false, false);
     for stmt in &stmts {
         match engine.eval(stmt) {
-            Ok(v) => if r2_console::should_autoprint(engine.visible, &v) { stream(id, false, &format!("{v}\n")); },
+            Ok(v) => if r2_console::should_autoprint(engine.visible, &v) && !engine.print_by_method(&v).unwrap_or(false) { stream(id, false, &format!("{v}\n")); },
             Err(e) if matches!(e.kind, ErrKind::Interrupt) => {
                 stream(id, true, "interrupted\n");
                 r2_types::clear_interrupt();

@@ -26,12 +26,18 @@ impl Engine {
         match target {
             Expr::Symbol(name) => {
                 if matches!(name.as_ref(), "TRUE"|"FALSE") { return err!(Runtime, "cannot assign to the reserved constant '{}'", name); }
+                self.note_s3_name(name, &val);
                 if superassign { self.super_assign(name.clone(), val); }
                 else { self.scope_insert(name.clone(), val); }
                 Ok(())
             }
+            // A quoted name is a name, as in R: `"+.money" <- function(e1, e2) ...`
+            Expr::StrLit(s) => {
+                let name: Arc<str> = Arc::from(s.as_ref());
+                self.assign_to(&Expr::Symbol(name), val, superassign, env)
+            }
             // Literals are not valid targets (e.g. `1 <- x`).
-            Expr::NumLit(_) | Expr::IntLit(_) | Expr::StrLit(_) | Expr::BoolLit(_)
+            Expr::NumLit(_) | Expr::IntLit(_) | Expr::BoolLit(_)
             | Expr::NullLit | Expr::NaLit =>
                 err!(Runtime, "cannot assign to a literal value"),
             Expr::Index { object, indices } => {

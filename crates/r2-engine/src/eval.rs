@@ -68,6 +68,8 @@ impl Engine {
                 else if let Some(val) = self.global_env.lookup(name) { Ok(val) }
                 // 4. Check builtins
                 else if self.registry.resolve(name.as_ref()).is_some() { Ok(RVal::BuiltinFn(name.clone())) }
+                // `.Generic` inside an S3 method
+                else if let Some(g) = (name.as_ref() == ".Generic").then(|| self.dispatch_generic()).flatten() { Ok(g) }
                 // ..1, ..2, … — the N-th element of the captured `...`.
                 else if let Some(v) = name.strip_prefix("..").and_then(|s| s.parse::<usize>().ok())
                     .and_then(|n| match self.lookup_dots(env) { Some(RVal::List(d, _)) => d.get(n.wrapping_sub(1)).map(|(_, v)| v.clone()), _ => None }) { Ok(v) }
@@ -288,6 +290,7 @@ impl Engine {
                 self.nse_stack.push(NseFrame {
                     call: Arc::new(Expr::Call { func: Box::new(func.clone()), args: args.to_vec() }),
                     params: cl.params.clone(),
+                    args: Vec::new(),
                 });
                 true
             }
@@ -312,6 +315,9 @@ impl Engine {
             && !args.is_empty() && !ea.iter().any(|a| a.name.as_deref() == Some("title")) {
             ea.push(EvalArg { name: Some(Arc::from("title")),
                               value: rstr(&crate::formula::fmt_expr(&args[0].value)) });
+        }
+        if pushed_nse {
+            if let Some(frame) = self.nse_stack.last_mut() { frame.args = ea.clone(); }
         }
         let result = self.call_fn(&f, &ea, env);
         if pushed_nse { self.nse_stack.pop(); }

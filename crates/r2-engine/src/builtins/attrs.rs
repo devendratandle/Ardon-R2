@@ -183,3 +183,25 @@ pub(crate) fn bi_weekdays(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
 pub(crate) fn bi_months(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     calendar_names(e, a, "months", |d| MONTHS[r2_stats::time::civil_from_days(d).1 as usize - 1])
 }
+
+/// `conditionMessage(c)`: the message of a condition caught by `tryCatch`.
+pub(crate) fn bi_condition_message(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match gv(a, 0) {
+        RVal::List(items, _) => Ok(items.into_iter().find(|(n, _)| n.as_deref() == Some("message")).map(|(_, v)| v).unwrap_or(RVal::Null)),
+        RVal::Character(s, at) => Ok(RVal::Character(s, at)),
+        other => err!(Runtime, "no applicable method for 'conditionMessage' applied to an object of class \"{}\"", other.type_name()),
+    }
+}
+
+/// `get(x)`: the value named `x` where the caller sees it, a builtin or an
+/// operator included (`get("+")(1, 2)`, `get(.Generic)` in a group method).
+pub(crate) fn bi_get(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
+    let name = match gv(a, 0) {
+        RVal::Character(s, _) => s.first().cloned().flatten(),
+        _ => None,
+    };
+    let Some(name) = name else { return err!(Runtime, "invalid first argument") };
+    if let Some(v) = env.lookup(&name).or_else(|| e.global_env.lookup(&name)) { return Ok(v); }
+    if e.registry.resolve(&name).is_some() { return Ok(RVal::BuiltinFn(name)); }
+    err!(Runtime, "object '{}' not found", name)
+}

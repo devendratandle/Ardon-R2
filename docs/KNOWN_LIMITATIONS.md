@@ -103,9 +103,14 @@ to be worse than documented and was fixed here rather than scheduled.
   norm and differs from R's: for the Hilbert matrix of order 6 the truth is
   3.98624e-07, R has 3.98600e-07 and this has 3.98607e-07. Below the rank, the
   columns moved aside hold rounding noise, in R as here, and the two differ there.
-- **A class does not dispatch.** `class(x) <- "foo"`, `inherits` and printing work,
-  but there is no `UseMethod` or `NextMethod`, so `print.foo` and `summary.foo` are
-  never called. R2's own `method name(x: Type)` still works for declared types.
+- **S3 dispatch covers the common forms.** `UseMethod`, `NextMethod`, `g.default`,
+  methods for builtins (`print.foo`, `format.foo`, `summary.foo`, `length.foo`) and
+  for operators (`+.foo`, `Ops.foo` with `.Generic`) work, and auto-print uses
+  `print.foo`. Not covered: methods for `[`, `[[` and `$`, the `Math` and `Summary`
+  groups, `.Class`, and S4. `NextMethod()` passes the arguments the method was called
+  with, not values the method changed. A builtin dispatches only on a class the
+  object was given, not on an implicit one (`print.numeric` is not called by
+  `print(1)`; `UseMethod` does use implicit classes).
 - **Classed results are lists with differences.** `names(fit)` is sorted and lists the
   fields R2 keeps, which are not R's for `lm` or `htest`; `length` counts the same
   fields. `qr` is the exception and has R's four fields in R's order. `class(x) <-`

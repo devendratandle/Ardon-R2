@@ -11,6 +11,28 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### S3 methods: `UseMethod`, `NextMethod`, `print.foo` — 2026-11-09
+
+- **`UseMethod("g")`** in a generic calls `g.<class>` for the first class of the
+  object (its class attribute, else R's implicit class: `numeric`, `character`,
+  `function`, ...), else `g.default`, else the builtin of that name, and returns
+  its value from the generic. `UseMethod("g", obj)` dispatches on another argument.
+  With no method it stops with R's "no applicable method" message.
+- **`NextMethod()`** calls the next class's method, then the default, then the
+  builtin, so a `print.foo` can add a line and hand over to the ordinary print.
+- **A builtin dispatches to a user's method**: `print.money`, `format.temp`,
+  `length.stack`, `summary.stack`, `toString.money`, and auto-print uses
+  `print.<class>`. **Operators too**: `"+.money" <- function(e1, e2)`, or one
+  `Ops.temp` for all of them, reading `.Generic`.
+- **`get("name")`** returns a variable, a builtin or an operator (`get("+")(1, 2)`).
+  **`conditionMessage(e)`**, and `tryCatch` hands its error handler R's condition
+  object, so `e$message` works; it was a bare string. A quoted name can be assigned
+  (`"+.money" <- ...`). 536 built-in functions.
+- Nothing is looked up until a function with a dot in its name is defined, so code
+  without methods pays nothing. Compared with R line by line in
+  `tests/differential/output/s3_dispatch.R`; what is not covered is in
+  `docs/KNOWN_LIMITATIONS.md`.
+
 ### Dates that stay dates; operators keep names and shape — 2026-11-09
 
 - **Date arithmetic keeps the class.** `d + 1` and `d - 1` are dates, `d2 - d` is a
@@ -24,7 +46,7 @@ development; that number was never released.)
   `"year"`, a number of days, `to` or `length.out`) and **`diff` of dates** (a
   `difftime`). `as.POSIXct("2024-03-15")` reads a date alone, as R's does, and keeps
   `tz` and the class `c("POSIXct", "POSIXt")`.
-- **New: `as.difftime`, `weekdays`, `months`.** 534 built-in functions.
+- **New: `as.difftime`, `weekdays`, `months`.**
 - **Operators keep names and shape.** `x * 2` keeps `x`'s names; arithmetic keeps a
   class (`class(y * 2)`); `-m` stays a matrix. `m > 2`, `m == 3` and `!g` give logical
   matrices that print as R prints them and work in `which(g, arr.ind = TRUE)`,

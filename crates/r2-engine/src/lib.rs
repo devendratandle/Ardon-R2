@@ -87,6 +87,7 @@ mod fusion;
 mod formula_eval;
 mod formula_call;  // lm(y ~ x, data = df) and friends: the formula interface
 mod special_forms; // NSE calls intercepted before argument evaluation
+mod s3;            // UseMethod, NextMethod, and methods for builtins and operators
 mod call;          // call_fn: builtins, closures, type constructors
 mod jit_call;      // the compiled fast path of a closure call
 use packages::*;
@@ -163,6 +164,11 @@ pub struct Engine {
     /// The Arc is retained to defeat pointer recycling (same fix as
     /// `jit_cache`). Computed once per unique closure body.
     nse_cache: HashMap<usize, (Arc<Expr>, bool)>,
+    /// Names of functions that could be S3 methods (`print.money`), so a
+    /// builtin or an operator looks for one only when one could exist.
+    pub(crate) s3_names: std::collections::HashSet<Arc<str>>,
+    /// The dispatches in progress, for `NextMethod` and `.Generic`.
+    pub(crate) s3_stack: Vec<s3::S3Call>,
 }
 
 /// One NSE call frame (Phase L.3). Captures the UNEVALUATED call so that
@@ -173,6 +179,8 @@ pub(crate) struct NseFrame {
     pub(crate) call: Arc<Expr>,
     /// The called closure's formals — for R-style arg→param matching.
     pub(crate) params: Vec<r2_types::Param>,
+    /// The evaluated arguments of the call, which `UseMethod` passes on.
+    pub(crate) args: Vec<EvalArg>,
 }
 
 /// Does this expression define or return a closure anywhere? Used to keep
@@ -273,6 +281,8 @@ impl Engine {
             jit_enabled: self.jit_enabled,
             nse_stack: Vec::new(),
             nse_cache: HashMap::new(),
+            s3_names: self.s3_names.clone(),
+            s3_stack: Vec::new(),
         }
     }
 
@@ -348,6 +358,8 @@ impl Engine {
             jit_enabled: std::env::var("R2_JIT").map(|v| v != "0").unwrap_or(true),
             nse_stack: Vec::new(),
             nse_cache: HashMap::new(),
+            s3_names: Default::default(),
+            s3_stack: Vec::new(),
         };
 
         // Built-in package layers. The tables live in `registry_tables`

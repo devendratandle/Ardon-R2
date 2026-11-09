@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 534 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 536 Built-in Functions and Operators
 
-## Core (91)
+## Core (93)
 ```
 seq(from,to,by=)   Regular sequence; also seq(along=x), seq_len(n)
 rep(x,times=,each=)   Repeat a vector
@@ -18,6 +18,7 @@ rowSums(x) / colSums(x)     Row / column totals of a matrix
 rowMeans(x) / colMeans(x)   Row / column means
 t(x)               Matrix transpose
 exists(name)       TRUE if a variable of that name is defined
+get(name)          The value of that name: a variable, a builtin or an operator (get("+"))
 ls()               Names of objects in the current environment
 rm(x)              Remove objects from the environment
 stop(msg)          Raise an error (caught by tryCatch)
@@ -93,6 +94,7 @@ is.list(x)          Test if a list
 is.vector(x)        Test if an atomic vector
 is.element(el,set)  el %in% set
 tryCatch(expr,error=,finally=)  Function-form error handling
+conditionMessage(e)  The message of a condition caught by tryCatch (also e$message)
 match.arg(arg,choices)  Match arg against choices (exact / unique prefix)
 nargs()             Number of arguments the enclosing call received
 ```
@@ -597,7 +599,7 @@ llm.info(m)         Configuration and parameter count of a handle
 llm.free(m)         Release a handle's memory
 ```
 
-## Language / Metaprogramming (10)
+## Language / Metaprogramming (15)
 ```
 quote(expr)        Capture an expression unevaluated (a language object)
 eval(expr)         Evaluate a language object (e.g. eval(parse(text=...)))
@@ -612,6 +614,8 @@ substitute(expr)   Replace a function's params with the caller's expressions
 match.call()       Current call with args matched to formal names
 sys.call()         Current call exactly as written
 bquote(expr)       Quote expr, splicing in any .(x) evaluated inline
+UseMethod("g")     In a generic: call g.<class> of the first argument (S3), else g.default
+NextMethod()       In a method: call the next class's method, the default, or the builtin
 ```
 Note: arguments are evaluated eagerly (no lazy promises), so `substitute`
 captures the caller's expression for labeling/deparse but the argument must
