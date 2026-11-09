@@ -744,11 +744,11 @@ impl Blas {
         const COMPUTE_16F: c_int = 64;       // CUBLAS_COMPUTE_16F
         const COMPUTE_32F_FAST_16F: c_int = 74;
         const GEMM_DEFAULT: c_int = -1;
-        const GEMM_TENSOR_OP: c_int = 160;   // CUBLAS_GEMM_DEFAULT_TENSOR_OP
         let (store, compute, algo) = match form {
             GemmForm::F32 => (R_32F, COMPUTE_32F, GEMM_DEFAULT),
-            GemmForm::F16 => (R_16F, COMPUTE_16F, GEMM_TENSOR_OP),
-            GemmForm::F32Fast16 => (R_32F, COMPUTE_32F_FAST_16F, GEMM_TENSOR_OP),
+            // the compute type alone asks for tensor cores; algorithm 160 was refused (run 33)
+            GemmForm::F16 => (R_16F, COMPUTE_16F, GEMM_DEFAULT),
+            GemmForm::F32Fast16 => (R_32F, COMPUTE_32F_FAST_16F, GEMM_DEFAULT),
         };
         // a buffer holds f32 slots, and two f16 fit in each
         let slots = |elems: usize| if store == R_16F { elems.div_ceil(2) } else { elems };

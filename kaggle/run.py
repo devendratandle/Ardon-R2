@@ -7,7 +7,7 @@ def sh(cmd, tail=8000):
     return r.returncode
 
 # What this run does. All of them take about 20 minutes.
-STAGES = {"tests", "leads"}   # also: "settle", "lossgap", "energy", "two", "audit", "bench", "pairs", "census", "score"
+STAGES = {"tests", "fp16"}   # also: "leads", "settle", "lossgap", "energy", "two", "audit", "bench", "pairs", "census", "score"
 
 KERNELS = "crates/r2-gpu/src/cuda/kernels"
 # The workspace profile is fat LTO; a test run would link for hours without this.
@@ -222,6 +222,22 @@ if "settle" in STAGES:
         torch_turn(env, True)
         torch_turn(env, False)
         r2_turn(env, steps)
+if "fp16" in STAGES:
+    # Run 33's cublasGemmEx asked for algorithm 160 and got status 7 (invalid value). Now
+    # the default algorithm, cuBLAS's own log for the accuracy call, and PyTorch's f16 and
+    # f32 products held the same way on the same card, alternating with R2's.
+    sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example cuda_ceiling 2>&1 | tail -1; "
+       "cp target/release/examples/cuda_ceiling /tmp/ceiling")
+    PICKC = "grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'"
+    sh(f"CUBLAS_LOGINFO_DBG=1 CUBLAS_LOGDEST_DBG=stdout CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -vE '^ *$' | tail -40")
+    for round_ in range(2):
+        for kind in ("gemm_ex_f32", "torch_f32", "gemm_ex_fast16", "gemm_ex_f16", "torch_f16"):
+            print(f"\n=== sustain {kind} card 0 round {round_ + 1}", flush=True)
+            sh("sleep 45")
+            if kind.startswith("torch"):
+                sampled(f"cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 python3 kaggle/torch_sustain.py {kind[6:]} 2>&1 | {PICKC}")
+            else:
+                sampled(f"CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain {kind} 2>&1 | {PICKC}")
 if "leads" in STAGES:
     # Tensor cores under the 70 W cap: f32 through plain cuBLAS and through cublasGemmEx, then
     # f32 storage with f16 arithmetic, then f16 throughout, on the same random operands.

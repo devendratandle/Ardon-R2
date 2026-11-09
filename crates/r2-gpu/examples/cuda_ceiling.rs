@@ -141,7 +141,10 @@ fn sustain(kind: &str) {
                 "fma" => { units += 256.0 * 4096.0 * 1024.0 * 16.0; ceiling::fma(&out, 4096, 1024) }
                 s if s.starts_with("gemm_ex") => {
                     units += 2.0 * (t * k * m) as f64;
-                    ffi::blas().expect("cuBLAS").gemm_ex(form.unwrap(), t, m, k, &ga, &gb, &gc).expect("gemm_ex");
+                    if let Err(e) = ffi::blas().expect("cuBLAS").gemm_ex(form.unwrap(), t, m, k, &ga, &gb, &gc) {
+                        println!("{kind} refused: {e}");
+                        return;
+                    }
                     true
                 }
                 s if s.starts_with("cublas") => { units += 2.0 * (t * k * m) as f64; r2_gpu::cuda::gemm::gemm_cublas(&ga, false, &gb, false, t, k, m, &gc, false) }
