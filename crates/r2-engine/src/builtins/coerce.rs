@@ -454,7 +454,7 @@ pub(crate) fn bi_as_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     }
     match &gv(a,0) {
         RVal::Character(v, _) => Ok(RVal::Character(v.clone(), Attrs::default())),
-        RVal::Numeric(v, _) => Ok(RVal::Character(v.iter().map(|x| x.map(|n| Arc::from(fmt_num(n).as_str()))).collect(), Attrs::default())),
+        RVal::Numeric(v, _) => Ok(RVal::Character(v.iter().map(|x| x.map(|n| Arc::from(r2_types::as_character(n).as_str()))).collect(), Attrs::default())),
         RVal::Integer(v, _) => Ok(RVal::Character(v.iter().map(|x| x.map(|n| Arc::from(format!("{}", n).as_str()))).collect(), Attrs::default())),
         RVal::Logical(v, _) => Ok(RVal::Character(v.iter().map(|x| x.map(|b| Arc::from(if b { "TRUE" } else { "FALSE" }))).collect(), Attrs::default())),
         RVal::Factor(f) => Ok(RVal::Character(f.codes.iter().map(|c| c.and_then(|i| f.levels.get(i as usize).cloned())).collect(), Attrs::default())),

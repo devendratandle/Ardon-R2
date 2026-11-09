@@ -114,6 +114,17 @@ pub fn format_reals(v: &[Real], digits: usize, nsmall: usize) -> Vec<String> {
     v.iter().map(|x| encode_real(*x, f)).collect()
 }
 
+/// One number as R's `as.character()` and `paste()` write it: up to 15
+/// significant digits, trailing zeros dropped, and scientific notation
+/// whenever that is no wider than the fixed form — `0.1 + 0.2` is "0.3",
+/// `1/3` "0.333333333333333", `1e5` "1e+05", `123456` "123456". The shared
+/// routine for turning a double into text, so every caller agrees with R.
+pub fn as_character(x: f64) -> String {
+    if x.is_nan() { return "NaN".into(); }
+    if x.is_infinite() { return if x > 0.0 { "Inf".into() } else { "-Inf".into() }; }
+    format_reals(&[Some(x)], 15, 0).remove(0).trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

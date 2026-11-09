@@ -11,13 +11,24 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Numbers as text, as R writes them — 2026-11-09
+
+- **`as.character()` and `paste()` write a number with up to 15 significant digits**, as R
+  does, where they used 7: `paste(1/3)` is "0.333333333333333", `paste(0.1 + 0.2)` "0.3".
+  Scientific notation is used where it is no wider, so `as.character(1e5)` is "1e+05",
+  `123456` stays "123456". Text written this way reads back with `as.numeric()` and
+  `read.csv()`. Printing is unchanged (7 digits, as in R).
+- **`sprintf()` takes a numeric matrix**, formatting its numbers column by column.
+- The CUDA example programs are marked as needing `--features cuda`, so
+  `cargo test --workspace` builds again without it. Differential case `as_character.R`.
+
 ### `try()`, `conditionMessage()`; `prcomp()` and `kappa()` on the SVD — 2026-11-09
 
 - **`try(expr, silent = FALSE)`** works as in R: the value, or on an error an invisible
   string of class `"try-error"` with the condition in `attr(, "condition")`. R2's own
   `try { } catch (e) { }` syntax still works beside it.
 - **A `tryCatch` handler gets a condition**, so `e$message` and `conditionMessage(e)` work;
-  `conditionCall(e)` is `NULL`, as R2 records no call. 534 built-in functions.
+  `conditionCall(e)` is `NULL`, as R2 records no call. 527 built-in functions.
 - **`prcomp()` is computed as R computes it**, from the SVD of the centred (and scaled)
   data rather than the eigenvectors of its covariance matrix, which squares the condition
   number: a component near zero now keeps its digits. It returns the scores `$x`, and

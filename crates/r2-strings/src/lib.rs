@@ -408,13 +408,13 @@ pub fn bi_strsplit(a: &[EvalArg]) -> Result<RVal, R2Err> {
 fn paste_elems(v: &RVal) -> Vec<String> {
     match v {
         RVal::Character(c, _) => c.iter().map(|x| x.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "NA".into())).collect(),
-        RVal::Numeric(n, _)   => n.as_vec().iter().map(|x| x.map(r2_types::fmt_num).unwrap_or_else(|| "NA".into())).collect(),
+        RVal::Numeric(n, _)   => n.as_vec().iter().map(|x| x.map(r2_types::as_character).unwrap_or_else(|| "NA".into())).collect(),
         RVal::Integer(n, _)   => n.as_vec().iter().map(|x| x.map(|i| i.to_string()).unwrap_or_else(|| "NA".into())).collect(),
         RVal::Logical(l, _)   => l.as_vec().iter().map(|x| x.map(|b| if b { "TRUE" } else { "FALSE" }.to_string()).unwrap_or_else(|| "NA".into())).collect(),
         RVal::Factor(f)       => f.codes.iter().map(|c| c.and_then(|i| f.levels.get(i as usize).map(|s| s.to_string())).unwrap_or_else(|| "NA".into())).collect(),
         RVal::Null            => Vec::new(),
         // A matrix pastes its cells column by column; NaN cells are NA.
-        RVal::Matrix(m)       => m.data.iter().map(|x| if x.is_nan() { "NA".into() } else { r2_types::fmt_num(*x) }).collect(),
+        RVal::Matrix(m)       => m.data.iter().map(|x| if x.is_nan() { "NA".into() } else { r2_types::as_character(*x) }).collect(),
         other                 => vec![val_to_str(other)],
     }
 }
@@ -664,7 +664,12 @@ pub fn bi_sprintf(a: &[EvalArg]) -> Result<RVal, R2Err> {
         RVal::Character(v, _) => v.iter().map(|x| x.as_ref().map(|s| s.to_string())).collect(),
         _ => return Err(runtime_err("'fmt' is not a character vector")),
     };
-    let args: Vec<RVal> = a.iter().skip(1).map(|x| x.value.clone()).collect();
+    // A numeric matrix is its numbers, column by column, as in R (the result has no dim).
+    let args: Vec<RVal> = a.iter().skip(1).map(|x| match &x.value {
+        RVal::Matrix(m) => RVal::Numeric(m.data.iter().map(|v| if v.is_nan() { None } else { Some(*v) })
+            .collect::<Vec<_>>().into(), Attrs::default()),
+        v => v.clone(),
+    }).collect();
     let lens: Vec<usize> = std::iter::once(fmts.len()).chain(args.iter().map(sp_len)).collect();
     if lens.contains(&0) { return Ok(RVal::Character(Vec::new(), Attrs::default())); }
     let n = *lens.iter().max().unwrap_or(&1);

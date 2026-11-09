@@ -57,3 +57,11 @@ required-features = ["cuda"]
 [[example]]
 name = "cuda_bench"
 required-features = ["cuda"]
+
+[[example]]
+name = "cuda_ceiling"
+required-features = ["cuda"]
+
+[[example]]
+name = "cuda_peer_probe"
+required-features = ["cuda"]
