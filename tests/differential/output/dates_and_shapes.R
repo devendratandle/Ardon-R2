@@ -57,3 +57,10 @@ m2 <- m; m2[m2 > 3] <- 0; m2
 weekdays(c(d, d2), abbreviate = TRUE)
 months(d)
 months(t1)
+
+# a logical matrix by row and column
+g[1, ]
+g[, 2]
+g[2, 3]
+g[1:2, 2:3]
+m[g]

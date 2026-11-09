@@ -31,8 +31,33 @@ impl Engine {
         if idx.len()==2 {
             if let RVal::DataFrame(df) = obj { return self.index_df(df, &idx[0], &idx[1]); }
             if let RVal::Matrix(m) = obj { return self.index_matrix(m, &idx[0], &idx[1]); }
+            if let Some(r) = self.index_shaped(obj, &idx[0], &idx[1]) { return r; }
         }
         err!(Runtime, "invalid indexing")
+    }
+
+    /// `g[i, j]` of a logical or character vector with two dimensions: the
+    /// matrix of positions is indexed as a matrix, and the elements at the
+    /// positions it keeps are taken, keeping the shape when it stays 2-D.
+    fn index_shaped(&self, obj: &RVal, row: &Option<RVal>, col: &Option<RVal>) -> Option<Result<RVal, R2Err>> {
+        let at = match obj {
+            RVal::Logical(_, at) | RVal::Character(_, at) | RVal::Integer(_, at) | RVal::Numeric(_, at) => at,
+            _ => return None,
+        };
+        let &[nrow, ncol] = at.dim.as_deref()? else { return None };
+        let positions = Matrix::new((0..nrow * ncol).map(|k| k as f64).collect(), nrow, ncol);
+        let picked = match self.index_matrix(&positions, row, col) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+        let (keep, dim) = match &picked {
+            RVal::Matrix(m) => (m.data.iter().map(|k| Some(*k as usize)).collect::<Vec<_>>(), Some(vec![m.nrow, m.ncol])),
+            other => (other.as_reals().ok()?.iter().map(|k| k.map(|k| k as usize)).collect(), None),
+        };
+        Some(select(obj, &keep).map(|v| match (v, dim) {
+            (RVal::Logical(x, _), Some(d)) => RVal::Logical(x, Attrs { dim: Some(d), ..Default::default() }),
+            (RVal::Character(x, _), Some(d)) => RVal::Character(x, Attrs { dim: Some(d), ..Default::default() }),
+            (RVal::Integer(x, _), Some(d)) => RVal::Integer(x, Attrs { dim: Some(d), ..Default::default() }),
+            (RVal::Numeric(x, _), Some(d)) => RVal::Numeric(x, Attrs { dim: Some(d), ..Default::default() }),
+            (v, _) => v,
+        }))
     }
     /// `df[cols]` — select columns by name / position / logical mask,
     /// returning a data.frame.

@@ -118,8 +118,8 @@ to be worse than documented and was fixed here rather than scheduled.
 - **A matrix holds doubles.** `is.integer(matrix(1:4, 2))` is FALSE and `m[0]` is
   `numeric(0)`, where R says TRUE and `integer(0)`. A logical or character result
   with two dimensions (`m > 2`) is a vector with `dim`, which prints, subsets and goes
-  through `apply`, `which(arr.ind = TRUE)` and `ifelse` as R's does; `t()` and
-  `m[i, j]` of one are not covered.
+  through `apply`, `which(arr.ind = TRUE)`, `ifelse` and `g[i, j]` as R's does; `t()` of
+  one is not covered.
 - **Dates print with R's layout but not its locale.** Date-times are UTC unless `tz`
   says otherwise, and `weekdays`/`months` are in English.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
