@@ -67,16 +67,28 @@ BLAS/LAPACK; R2 release build (no LTO). Reproduce:
 | `eigen(S, symmetric = TRUE)` | 1,060–1,070 | **372–430** | R2 2.5–2.9× |
 | `svd(A, nu = 0, nv = 0)` | 870–890 | **402–425** | R2 2.0–2.2× |
 | `svd(A)` | 2,610–2,640 | **794–806** | R2 3.2–3.3× |
-| `qr(A)` | 450–460 | — | not available in R2 yet |
+| `qr(A)` | 450–460 | not re-timed | `qr()` exists since 2026-11-05 |
 
 (An earlier version of this table, 2026-09-25, timed a rank-2 matrix —
 `matrix(sin(1:n^2), n)` — which made `qr` and `svd` atypical on both
 sides. R2's `svd` also now pays for accurate small singular values and an
 orthonormal `u`; see CHANGELOG, 2026-09-28.)
 
+**The `eigen` and `svd` rows predate 2026-11-07**, when both moved to divide and
+conquer, blocked reductions and a bidiagonal QR (CHANGELOG). Re-timing this table
+waits for a quiet machine: on 2026-11-09 an antivirus scan doubled MKL's own times.
+Old and new R2 builds interleaved on this script that day: `svd(A)` 822–927 ms against
+1,139–1,971, values only 459–486 against 585–782, `eigen` level.
+
 Against R built on an optimized BLAS (OpenBLAS, MKL) these gaps would be
-far smaller: R2's own routines are 0.15-0.43× of Intel MKL at this size
-(see `CHANGELOG.md`, 2026-09-25).
+far smaller. R2's own routines against Intel MKL (PyTorch 2.13 float64, six
+threads, `benchmarks/lapack_cases.py`, quiet machine, 2026-11-07):
+
+| n = 1000 | LU | Cholesky | QR | eigen, vectors | SVD values | SVD, vectors |
+|---|---:|---:|---:|---:|---:|---:|
+| R2 / MKL speed | 0.22× | 0.31× | 0.21× | 0.26× | 0.23× | 0.73× |
+
+At n = 500 the same six are 0.15×, 0.32×, 0.21×, 0.44×, 0.33× and 0.38×.
 
 ## 2. User statistical formulas — R2 JIT vs R interpreter
 
