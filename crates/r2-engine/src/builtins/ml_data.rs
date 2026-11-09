@@ -199,32 +199,25 @@ pub(crate) fn bi_rcond(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 }
 
 /// `kappa(z)` — 2-norm condition number `σ_max / σ_min` (R's
-/// `kappa(z, exact = TRUE)`; R's default is a cheaper estimate). The singular
-/// values are `√λ` of `AᵀA` via the accurate symmetric eigensolver (`dsyev`) —
-/// this avoids `dgesvd`'s current precision loss on the singular values. The
-/// normal-equations form squares the condition number internally, so for
-/// severely ill-conditioned `A` the estimate is optimistic; fine for the
-/// conditioning checks kappa is used for. `Inf` for a singular matrix.
+/// `kappa(z, exact = TRUE)`; R's default is a cheaper estimate), from the
+/// shared singular-value routine `svd()` uses. `Inf` for a singular matrix.
 pub(crate) fn bi_kappa(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let m = match &gv(a, 0) {
         RVal::Matrix(m) => m.clone(),
         _ => return err!(Runtime, "kappa: argument must be a matrix"),
     };
     let (rows, cols) = (m.nrow, m.ncol);
-    // G = AᵀA (cols×cols, symmetric PSD), column-major.
-    let mut g = vec![0.0f64; cols * cols];
-    for i in 0..cols {
-        for j in 0..cols {
-            let mut s = 0.0;
-            for k in 0..rows { s += m.data[i * rows + k] * m.data[j * rows + k]; }
-            g[j * cols + i] = s;
-        }
-    }
-    let eig = r2_linalg::dsyev(cols, &g)
-        .map_err(|e| R2Err { msg: format!("kappa: {}", e), kind: ErrKind::Runtime })?;
-    let lmax = eig.iter().cloned().fold(0.0f64, f64::max);
-    let lmin = eig.iter().cloned().fold(f64::INFINITY, f64::min).max(0.0);
-    let k = if lmin <= 0.0 { f64::INFINITY } else { (lmax / lmin).sqrt() };
+    // the routine wants at least as many rows as columns; the transpose has the same σ
+    let sigma = if rows >= cols {
+        r2_linalg::dgesvd(rows, cols, &m.data)
+    } else {
+        let mut t = vec![0.0f64; rows * cols];
+        for i in 0..rows { for j in 0..cols { t[i * cols + j] = m.data[j * rows + i]; } }
+        r2_linalg::dgesvd(cols, rows, &t)
+    }.map_err(|e| R2Err { msg: format!("kappa: {}", e), kind: ErrKind::Runtime })?;
+    let smax = sigma.first().copied().unwrap_or(0.0);
+    let smin = sigma.last().copied().unwrap_or(0.0);
+    let k = if smin <= 0.0 { f64::INFINITY } else { smax / smin };
     Ok(RVal::Numeric(vec![Some(k)].into(), Attrs::default()))
 }
 
@@ -588,21 +581,8 @@ pub(crate) fn bi_scale(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal
     };
     let center = gn(a,"center").and_then(|v| e.as_logicals(&v).ok()).map(|v| v[0] == Some(true)).unwrap_or(true);
     let do_scale = gn(a,"scale").and_then(|v| e.as_logicals(&v).ok()).map(|v| v[0] == Some(true)).unwrap_or(true);
-    let (m, n) = (mat.nrow, mat.ncol);
-    let mut x = mat.data.clone();
-    let means = mat.col_means();
-    for c in 0..n {
-        let col_start = c * m;
-        let mean = if center { means[c] } else { 0.0 };
-        let mut ss = 0.0;
-        for r in 0..m { ss += (x[col_start + r] - mean).powi(2); }
-        let sd = if do_scale { (ss / (m - 1).max(1) as f64).sqrt().max(1e-15) } else { 1.0 };
-        for r in 0..m {
-            if center { x[col_start + r] -= mean; }
-            if do_scale { x[col_start + r] /= sd; }
-        }
-    }
-    Ok(RVal::Matrix(Matrix::new(x, m, n)))
+    let (scaled, _, _) = mat.center_scale(center, do_scale, |sd| sd.max(1e-15));
+    Ok(RVal::Matrix(Matrix::new(scaled.data, scaled.nrow, scaled.ncol)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════

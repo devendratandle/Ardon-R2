@@ -11,6 +11,21 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### `try()`, `conditionMessage()`; `prcomp()` and `kappa()` on the SVD — 2026-11-09
+
+- **`try(expr, silent = FALSE)`** works as in R: the value, or on an error an invisible
+  string of class `"try-error"` with the condition in `attr(, "condition")`. R2's own
+  `try { } catch (e) { }` syntax still works beside it.
+- **A `tryCatch` handler gets a condition**, so `e$message` and `conditionMessage(e)` work;
+  `conditionCall(e)` is `NULL`, as R2 records no call. 534 built-in functions.
+- **`prcomp()` is computed as R computes it**, from the SVD of the centred (and scaled)
+  data rather than the eigenvectors of its covariance matrix, which squares the condition
+  number: a component near zero now keeps its digits. It returns the scores `$x`, and
+  `$rotation` carries the variable names. `scale = TRUE` without centring now scales.
+  `prcomp()` and `scale()` share one centring routine.
+- **`kappa(exact = TRUE)`** comes from the singular values too, not `XᵀX`.
+- New differential cases `conditions.R` and `prcomp.R`: 43 of 43 agree with R 4.5.3.
+
 ### Seeing into LLM training from a script — 2026-11-07
 
 - **`llm.train` and `llm.finetune` take `callback = function(step, loss)`**, called

@@ -1,6 +1,6 @@
 # Ardon-R2 Function Reference — 524 Built-in Functions and Operators
 
-## Core (84)
+## Core (87)
 ```
 seq(from,to,by=)   Regular sequence; also seq(along=x), seq_len(n)
 rep(x,times=,each=)   Repeat a vector
@@ -85,7 +85,11 @@ is.function(x)      Test if a function (closure)
 is.list(x)          Test if a list
 is.vector(x)        Test if an atomic vector
 is.element(el,set)  el %in% set
-tryCatch(expr,error=,finally=)  Function-form error handling
+tryCatch(expr,error=,finally=)  Function-form error handling; the handler gets a condition (e$message)
+try(expr, silent=FALSE)
+                    R's try: the value, or on an error an invisible "try-error" string with attr "condition"; try { } catch (e) { } is R2's own syntax
+conditionMessage(c) The message of a condition from tryCatch or try
+conditionCall(c)    The call of a condition: NULL, as R2 records none
 match.arg(arg,choices)  Match arg against choices (exact / unique prefix)
 nargs()             Number of arguments the enclosing call received
 ```
@@ -286,7 +290,8 @@ gbm(y~.,data,ntrees)    Gradient boosted trees
 kmeans(x,centers)       K-means clustering
 knn(train,test,labels,k) K-nearest neighbors
 naive.bayes(x,y)        Gaussian naive Bayes
-prcomp(x)               Principal component analysis
+prcomp(x, center=TRUE, scale.=FALSE)
+                    Principal component analysis from the SVD of the centred data, as R: sdev, rotation, x (scores), center, scale
 svd(x)                  Singular value decomposition (nu = 0, nv = 0: values only)
 chol(x)                 Upper Cholesky factor R, t(R) %*% R == x
 qr(x, tol, LAPACK)      QR decomposition, R's compact form: $qr, $rank, $qraux, $pivot

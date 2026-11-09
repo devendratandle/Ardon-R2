@@ -110,6 +110,32 @@ impl Matrix {
         }).collect()
     }
 
+    /// Centre and scale every column, as R's `scale(x, center, scale)`: the column
+    /// mean is subtracted when `center`; with `scale` each column is divided by its
+    /// standard deviation (n − 1), or when not centred by its root mean square
+    /// √(Σx²/(n − 1)). `floor` replaces a zero divisor, the caller's choice. Returns
+    /// the matrix, the centres (zeros when not centred) and the divisors (ones when
+    /// not scaled). `scale()` and `prcomp()` both stand on this.
+    pub fn center_scale(&self, center: bool, scale: bool, floor: impl Fn(f64) -> f64) -> (Matrix, Vec<f64>, Vec<f64>) {
+        let (m, n) = (self.nrow, self.ncol);
+        let centers = if center { self.col_means() } else { vec![0.0; n] };
+        let mut x = self.data.clone();
+        let mut divisors = vec![1.0; n];
+        for c in 0..n {
+            let col = &mut x[c * m..(c + 1) * m];
+            if center { for v in col.iter_mut() { *v -= centers[c]; } }
+            if scale {
+                let ss: f64 = col.iter().map(|v| v * v).sum();
+                divisors[c] = floor((ss / (m.max(2) - 1) as f64).sqrt());
+                for v in col.iter_mut() { *v /= divisors[c]; }
+            }
+        }
+        let mut out = Matrix::new(x, m, n);
+        out.col_names = self.col_names.clone();
+        out.row_names = self.row_names.clone();
+        (out, centers, divisors)
+    }
+
     /// Column sums
     pub fn col_sums(&self) -> Vec<f64> {
         (0..self.ncol).map(|c| self.col_slice(c).iter().sum()).collect()

@@ -466,79 +466,55 @@ pub fn bi_prcomp(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let scale = gn(a, "scale.").or_else(|| gn(a, "scale"))
         .and_then(|v| v.as_logicals().ok()).map(|v| v[0] == Some(true)).unwrap_or(false);
 
-    let (m, n) = (mat.nrow, mat.ncol);
-
-    let mut x = mat.data.clone();
-    let means = mat.col_means();
-    let mut sds = vec![1.0; n];
-    if scale {
-        for c in 0..n {
-            let col_start = c * m;
-            let mean = means[c];
-            let mut ss = 0.0;
-            for r in 0..m { ss += (x[col_start + r] - mean).powi(2); }
-            sds[c] = (ss / (m - 1) as f64).sqrt();
-            if sds[c] < 1e-15 { sds[c] = 1.0; }
-        }
-    }
-    if center {
-        for c in 0..n {
-            let col_start = c * m;
-            for r in 0..m {
-                x[col_start + r] -= means[c];
-                if scale { x[col_start + r] /= sds[c]; }
-            }
-        }
-    }
-
-    // Covariance via Kahan summation
-    let mut cov_data = vec![0.0; n * n];
-    for j in 0..n {
-        for i in j..n {
-            let mut sum = 0.0;
-            let mut comp = 0.0;
-            for r in 0..m {
-                let prod = x[i * m + r] * x[j * m + r];
-                let y_k = prod - comp;
-                let t = sum + y_k;
-                comp = (t - sum) - y_k;
-                sum = t;
-            }
-            let cov = sum / (m - 1) as f64;
-            cov_data[j * n + i] = cov;
-            cov_data[i * n + j] = cov;
-        }
-    }
-
-    // Tier 1: eigenvectors of the covariance matrix ARE the rotation matrix.
-    // Switch to dsyev_full so `$rotation` is now populated.
-    let (eigenvalues, rotation_data) = r2_linalg::dsyev_full(n, &cov_data)
-        .map_err(|e| R2Err { msg: format!("PCA failed: {}", e), kind: ErrKind::Runtime })?;
-
-    let eigenvalues: Vec<f64> = eigenvalues.iter()
-        .map(|v| if *v < 0.0 && v.abs() < 1e-10 { 0.0 } else { *v }).collect();
-    let sdev: Vec<f64> = eigenvalues.iter().map(|v| v.max(0.0).sqrt()).collect();
-    let total_var: f64 = eigenvalues.iter().filter(|v| **v > 0.0).sum();
+    // R's prcomp: the SVD of the centred (and scaled) data, never its covariance
+    // matrix, whose eigenvalues carry the square of the condition number and lose
+    // the small components' digits. Both steps are the shared routines: `scale()`'s
+    // centring and `svd()`'s decomposition.
+    let (x, centers, sds) = mat.center_scale(center, scale, |sd| if sd < 1e-15 { 1.0 } else { sd });
+    let (m, n) = (x.nrow, x.ncol);
+    let k = m.min(n);
+    // `dgesvd_full` wants at least as many rows as columns: a wide matrix goes
+    // through its transpose, which swaps the two sides.
+    let (sigma, u, v) = if m >= n {
+        let (s, u, vt) = r2_linalg::dgesvd_full(m, n, &x.data)
+            .map_err(|e| R2Err { msg: format!("prcomp: {}", e), kind: ErrKind::Runtime })?;
+        let mut v = vec![0.0; n * n];
+        for i in 0..n { for j in 0..n { v[j * n + i] = vt[i * n + j]; } }
+        (s, u, v)
+    } else {
+        let mut t = vec![0.0; m * n];
+        for i in 0..m { for j in 0..n { t[i * n + j] = x.data[j * m + i]; } }
+        let (s, u_t, vt_t) = r2_linalg::dgesvd_full(n, m, &t)
+            .map_err(|e| R2Err { msg: format!("prcomp: {}", e), kind: ErrKind::Runtime })?;
+        let mut u = vec![0.0; m * m];
+        for i in 0..m { for j in 0..m { u[j * m + i] = vt_t[i * m + j]; } }
+        (s, u, u_t)
+    };
+    let df = (m.max(2) - 1) as f64;
+    let sdev: Vec<f64> = sigma[..k].iter().map(|s| s / df.sqrt()).collect();
+    let eigenvalues: Vec<f64> = sdev.iter().map(|s| s * s).collect();
+    let total_var: f64 = eigenvalues.iter().sum();
     let prop_var: Vec<f64> = eigenvalues.iter()
-        .map(|v| if total_var > 0.0 { v.max(0.0) / total_var } else { 0.0 }).collect();
+        .map(|v| if total_var > 0.0 { v / total_var } else { 0.0 }).collect();
 
-    // No auto-print: R's `p <- prcomp(X)` is invisible. Users call
-    // `summary(p)` for the formatted importance-of-components table,
-    // or access `p$sdev` / `p$rotation` directly.
-    let _ = &sdev;
-    let _ = &prop_var;
-
-    let mut rotation_mat = Matrix::new(rotation_data, n, n);
-    rotation_mat.col_names = Some(
-        (0..n).map(|i| Arc::from(format!("PC{}", i + 1).as_str())).collect()
-    );
+    let pcs: Vec<Arc<str>> = (0..k).map(|i| Arc::from(format!("PC{}", i + 1).as_str())).collect();
+    let mut rotation_mat = Matrix::new(v[..n * k].to_vec(), n, k);
+    rotation_mat.col_names = Some(pcs.clone());
+    rotation_mat.row_names = Some(_col_labels.iter().map(|s| Arc::from(s.as_str())).collect());
+    // the scores: U·Σ, the data in the components' coordinates
+    let mut scores = vec![0.0; m * k];
+    for c in 0..k { for r in 0..m { scores[c * m + r] = u[c * m + r] * sigma[c]; } }
+    let mut x_mat = Matrix::new(scores, m, k);
+    x_mat.col_names = Some(pcs);
+    x_mat.row_names = mat.row_names.clone();
 
     let mut fields = HashMap::new();
     fields.insert(Arc::from("sdev"), rnums(&sdev));
     fields.insert(Arc::from("eigenvalues"), rnums(&eigenvalues));
     fields.insert(Arc::from("prop.variance"), rnums(&prop_var));
-    fields.insert(Arc::from("center"), rnums(&means));
+    fields.insert(Arc::from("center"), rnums(&centers));
     fields.insert(Arc::from("rotation"), RVal::Matrix(rotation_mat));
+    fields.insert(Arc::from("x"), RVal::Matrix(x_mat));
     if scale { fields.insert(Arc::from("scale"), rnums(&sds)); }
 
     Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("prcomp"), fields }))
