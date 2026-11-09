@@ -38,6 +38,7 @@ impl Engine {
             }
             "data.frame" => self.nse_data_frame(func, args, env)?,
             "tryCatch" => self.nse_try_catch(args, env)?,
+            "try" => self.nse_try(args, env)?,
             "missing" if args.len() == 1 => match &args[0].value {
                 Expr::Symbol(pn) => self.nse_missing(pn, env),
                 _ => return Ok(None),
@@ -217,12 +218,36 @@ impl Engine {
             Err(e) => {
                 if let Some(h) = args.iter().find(|a| a.name.as_deref() == Some("error")) {
                     let handler = self.eval_in(&h.value, env)?;
-                    self.call_fn(&handler, &[EvalArg { name: None, value: rstr(&e.msg) }], env)
+                    self.call_fn(&handler, &[EvalArg { name: None, value: condition(&e.msg) }], env)
                 } else { Err(e) }
             }
         };
         if let Some(fe) = finally { let _ = self.eval_in(&fe, env); }
         out
+    }
+
+    /// `try(expr, silent = FALSE)` — R's: the value of `expr`, or on an error its
+    /// message as an invisible string of class "try-error", with the condition in
+    /// `attr(, "condition")`. Unless silent, the message also goes to stderr.
+    fn nse_try(&mut self, args: &[CallArg], env: &EnvRef) -> Result<RVal, R2Err> {
+        let Some(expr) = args.iter().find(|a| a.name.is_none()) else { return Ok(RVal::Null) };
+        match self.eval_in(&expr.value, env) {
+            Err(e) if !matches!(e.kind, ErrKind::CtrlReturn(_) | ErrKind::CtrlBreak | ErrKind::CtrlNext | ErrKind::Interrupt) => {
+                let silent = match args.iter().find(|a| a.name.as_deref() == Some("silent")) {
+                    Some(s) => self.eval_in(&s.value, env)?.as_logicals().ok()
+                        .and_then(|v| v.first().copied().flatten()).unwrap_or(false),
+                    None => false,
+                };
+                let text = format!("Error : {}\n", e.msg);
+                if !silent { r2_types::out::rerr(&text); }
+                let mut attrs = Attrs::default();
+                attrs.class = Some(Arc::from("try-error"));
+                attrs.custom.insert(Arc::from("condition"), condition(&e.msg));
+                self.visible = false;
+                Ok(RVal::Character(vec![Some(Arc::from(text.as_str()))], attrs))
+            }
+            other => other,
+        }
     }
 
     /// `missing(arg)` — TRUE if the named parameter was not supplied in the
@@ -374,4 +399,15 @@ impl Engine {
             ..Default::default()
         }))
     }
+}
+
+/// An error condition as R hands it to a handler: a list with `message` and
+/// `call` (always NULL here: R2 does not record the call), class "simpleError".
+pub(crate) fn condition(msg: &str) -> RVal {
+    let mut attrs = Attrs::default();
+    attrs.class = Some(Arc::from("simpleError"));
+    RVal::List(vec![
+        (Some(Arc::from("message")), RVal::Character(vec![Some(Arc::from(msg))], Attrs::default())),
+        (Some(Arc::from("call")), RVal::Null),
+    ], attrs)
 }

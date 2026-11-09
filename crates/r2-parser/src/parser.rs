@@ -277,6 +277,11 @@ impl Parser {
             Token::Match => self.parse_match(),
             Token::Function => self.parse_function(),
             Token::Backslash => self.parse_lambda(),
+            // `try(expr, silent = TRUE)` is R's function; `try { } catch (e) { }` is R2's syntax.
+            Token::Try if matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::LParen)) => {
+                self.advance();
+                Ok(Expr::Symbol(Arc::from("try")))
+            }
             Token::Try => self.parse_try_catch(),
             Token::Return => { self.advance(); if matches!(self.peek(), Token::LParen) { self.advance(); self.skip_nl(); let v = if matches!(self.peek(), Token::RParen) { Expr::NullLit } else { self.parse_expr()? }; self.skip_nl(); self.expect(&Token::RParen)?; Ok(Expr::Return(Box::new(v))) } else { Ok(Expr::Return(Box::new(Expr::NullLit))) } }
             Token::Break => { self.advance(); Ok(Expr::Break) }

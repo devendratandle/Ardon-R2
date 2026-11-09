@@ -96,7 +96,7 @@ pub(crate) fn base_table() -> Vec<(&'static str, BuiltinFn)> {
         ("which.min",bi_which_min),("which.max",bi_which_max),("range",bi_range),
         ("prod",bi_prod),("any",bi_any),("all",bi_all),
         ("trimws",bi_trimws),("startsWith",bi_starts_with),("endsWith",bi_ends_with),
-        ("sprintf",bi_sprintf),("stop",bi_stop),("warning",bi_warning),("message",bi_message),
+        ("sprintf",bi_sprintf),("stop",bi_stop),("conditionMessage",bi_condition_message),("conditionCall",bi_condition_call),("warning",bi_warning),("message",bi_message),
         ("ls",bi_ls),("rm",bi_rm),("exists",bi_exists),
         // factor and data inspection
         ("levels",bi_levels),("nlevels",bi_nlevels),

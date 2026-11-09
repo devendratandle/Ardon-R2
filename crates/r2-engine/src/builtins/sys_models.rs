@@ -821,3 +821,22 @@ pub(crate) fn bi_confint(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RV
     }
 }
 
+
+/// `conditionMessage(c)` — the message of a condition from `tryCatch` or
+/// `attr(try(...), "condition")`; a plain string stands for itself.
+pub(crate) fn bi_condition_message(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match gv(a, 0) {
+        RVal::List(items, _) => items.into_iter().find(|(n, _)| n.as_deref() == Some("message")).map(|(_, v)| v)
+            .ok_or_else(|| R2Err { msg: "conditionMessage: not a condition (no message)".into(), kind: ErrKind::Runtime }),
+        v @ RVal::Character(..) => Ok(v),
+        other => err!(Runtime, "conditionMessage: not a condition: {}", other.type_name()),
+    }
+}
+
+/// `conditionCall(c)` — the call that raised the condition: NULL, as R2 keeps none.
+pub(crate) fn bi_condition_call(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(match gv(a, 0) {
+        RVal::List(items, _) => items.into_iter().find(|(n, _)| n.as_deref() == Some("call")).map(|(_, v)| v).unwrap_or(RVal::Null),
+        _ => RVal::Null,
+    })
+}
