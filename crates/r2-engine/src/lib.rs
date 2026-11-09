@@ -79,6 +79,7 @@ mod registry;
 mod registry_tables;
 mod packages;
 mod ops;
+mod ops_attrs;  // what operators carry besides values: names, dim, date arithmetic
 mod eval;
 mod indexing;
 mod assign;
@@ -315,6 +316,7 @@ impl Engine {
     }
 
     pub fn new() -> Self {
+        r2_types::set_class_text(ops_attrs::time_text);
         // As in R, the constants and datasets live OUTSIDE the workspace, in
         // a base environment that is the global environment's parent:
         // lookups find them, and `ls()` lists only what the user created.

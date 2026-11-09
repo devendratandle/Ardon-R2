@@ -215,14 +215,27 @@ pub fn bi_as_date(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
 /// `as.POSIXct(x, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")`
 pub fn bi_as_posixct(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let fmt = named(a, "format").and_then(as_str).unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
+    // Without a format, R tries these in turn (its `tryFormats`).
+    let given = named(a, "format").and_then(as_str);
+    let tries: Vec<String> = match &given {
+        Some(f) => vec![f.clone()],
+        None => ["%Y-%m-%d %H:%M:%OS", "%Y/%m/%d %H:%M:%OS", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"]
+            .iter().map(|f| f.replace("%OS", "%S")).collect(),
+    };
+    let fmt = tries[0].clone();
+    // c("POSIXct", "POSIXt"), with the time zone asked for, as R keeps them
+    let mut attrs = Attrs::default();
+    attrs.set_classes(vec![Arc::from("POSIXct"), Arc::from("POSIXt")]);
+    if let Some(tz) = named(a, "tz").and_then(as_str).filter(|t| !t.is_empty()) {
+        attrs.custom.insert(Arc::from("tzone"), RVal::Character(vec![Some(Arc::from(tz.as_str()))], Attrs::default()));
+    }
     match gv(a, 0) {
         RVal::Character(v, _) => {
             let mut out = Vec::with_capacity(v.len());
             for s in v {
                 match s.as_ref() {
                     None => out.push(None),
-                    Some(s) => match parse_datetime(s, &fmt) {
+                    Some(s) => match tries.iter().find_map(|f| parse_datetime(s, f)) {
                         Some((y, m, d, h, mi, se)) => {
                             let days = days_from_civil(y, m, d);
                             let secs = days * 86_400 + (h as i64) * 3600 + (mi as i64) * 60 + se as i64;
@@ -235,11 +248,9 @@ pub fn bi_as_posixct(a: &[EvalArg]) -> Result<RVal, R2Err> {
                     },
                 }
             }
-            Ok(RVal::Numeric(out.into(), Attrs { class: Some(Arc::from("POSIXct")), ..Default::default() }))
+            Ok(RVal::Numeric(out.into(), attrs))
         }
-        RVal::Numeric(v, _) => {
-            Ok(RVal::Numeric(v.clone(), Attrs { class: Some(Arc::from("POSIXct")), ..Default::default() }))
-        }
+        RVal::Numeric(v, _) => Ok(RVal::Numeric(v.clone(), attrs)),
         other => Err(R2Err {
             msg: format!("as.POSIXct(): cannot coerce object of type '{}'", other.type_name()),
             kind: ErrKind::Type,

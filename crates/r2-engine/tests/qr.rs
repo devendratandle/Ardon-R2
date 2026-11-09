@@ -66,9 +66,26 @@ fn k_and_ncol_are_checked() {
     assert!(err(&format!("{pivoted}qr.X(q, ncol = 2)")).contains("need larger value of 'ncol' as pivoting occurred"));
 }
 
+/// R2 chooses the routine itself; `LAPACK` only lets scripts that pass it run.
 #[test]
-fn lapack_says_it_is_not_implemented() {
-    assert!(err("qr(diag(2), LAPACK = TRUE)").contains("not implemented"));
+fn lapack_is_accepted_and_changes_nothing() {
+    let x = "x <- cbind(c(1, 2, 3, 5), c(1, 0, 1, 1)); ";
+    assert_eq!(run(&format!("{x}qr.R(qr(x, LAPACK = TRUE))")), run(&format!("{x}qr.R(qr(x))")));
+}
+
+/// A matrix large enough for the blocked QR gives the object the
+/// column-at-a-time one gives, and a rank-deficient one still pivots.
+#[test]
+fn the_routine_chosen_does_not_show() {
+    let big = "set.seed(1); n <- 1200; p <- 120; x <- matrix(rnorm(n * p), n, p); q <- qr(x); ";
+    assert_eq!(run(&format!("{big}q$rank")), vec![120.0]);
+    let resid = run(&format!("{big}max(abs(qr.Q(q) %*% qr.R(q) - x))"))[0];
+    assert!(resid < 1e-12, "Q R reproduces x: {resid}");
+    let orth = run(&format!("{big}max(abs(crossprod(qr.Q(q)) - diag(p)))"))[0];
+    assert!(orth < 1e-12, "Q is orthonormal: {orth}");
+    let def = "set.seed(2); n <- 1200; x <- matrix(rnorm(n * 120), n, 120); x[, 30] <- x[, 1] + x[, 2]; q <- qr(x); ";
+    assert_eq!(run(&format!("{def}q$rank")), vec![119.0]);
+    assert_eq!(run(&format!("{def}q$pivot[120]")), vec![30.0]);
 }
 
 #[test]

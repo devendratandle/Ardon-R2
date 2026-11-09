@@ -545,7 +545,7 @@ pub fn fmt_num(n: f64) -> String {
 // ── Display ──────────────────────────────────────────────────────────
 
 /// Attributes the type itself prints or R2 keeps for its own use.
-const QUIET_ATTRS: [&str; 9] = ["dnn", "tsp", "index", "index.class", "units", "match.length", "dimnames", "levels", ALL_CLASSES];
+const QUIET_ATTRS: [&str; 10] = ["dnn", "tsp", "index", "index.class", "units", "tzone", "match.length", "dimnames", "levels", ALL_CLASSES];
 /// Classes with their own way of printing, so `attr(,"class")` would be noise.
 const PRINTING_CLASSES: [&str; 8] = ["Date", "POSIXct", "difftime", "proc_time", "summaryDefault", "table", "ts", "xts"];
 
@@ -596,6 +596,19 @@ impl fmt::Display for RVal {
 
 impl RVal {
     fn fmt_value(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(text) = dim_text(self) { return write!(f, "{}", text); }
+        if let (RVal::Numeric(_, at), Some(hook)) = (self, CLASS_TEXT.get()) {
+            if matches!(at.class.as_deref(), Some("Date" | "POSIXct" | "difftime")) {
+                match hook(self) {
+                    Some(ClassText::Text(t)) => return write!(f, "{}", t),
+                    Some(ClassText::Elements(strs)) => {
+                        if let Some(r) = write_named(f, at, &strs) { return r; }
+                        return write_vec(f, &strs, |s| s.clone(), false, "Date of length 0");
+                    }
+                    None => {}
+                }
+            }
+        }
         match self {
             RVal::Numeric(v, at) if v.is_empty() && at.names.is_some() => write!(f, "named numeric(0)"),
             RVal::Integer(v, at) if v.is_empty() && at.names.is_some() => write!(f, "named integer(0)"),
@@ -860,6 +873,59 @@ fn write_named(f: &mut fmt::Formatter, attrs: &Attrs, strs: &[String]) -> Option
         }
         Ok(())
     })())
+}
+
+/// How a date, a date-time or a time difference prints. The calendar lives in
+/// r2-stats, so the engine installs the formatter (`set_class_text`).
+pub enum ClassText {
+    /// One string per element, laid out as a vector.
+    Elements(Vec<String>),
+    /// The whole printed form ("Time difference of 5 days").
+    Text(String),
+}
+
+static CLASS_TEXT: std::sync::OnceLock<fn(&RVal) -> Option<ClassText>> = std::sync::OnceLock::new();
+
+/// Install the formatter for dates, date-times and time differences. The
+/// first one installed stays.
+pub fn set_class_text(f: fn(&RVal) -> Option<ClassText>) { let _ = CLASS_TEXT.set(f); }
+
+/// An atomic vector with two dimensions, as R prints a matrix. Numbers go
+/// through `Matrix`'s own printing; logical and text cells are laid out here.
+fn dim_text(v: &RVal) -> Option<String> {
+    let at = match v {
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) => at,
+        _ => return None,
+    };
+    let (nrow, ncol) = match at.dim.as_deref() { Some(&[r, c]) => (r, c), _ => return None };
+    if nrow * ncol != rval_length(v) { return None; }
+    let (cells, left): (Vec<String>, bool) = match v {
+        RVal::Numeric(..) | RVal::Integer(..) => {
+            let data = v.as_reals().ok()?.iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            return Some(RVal::Matrix(Matrix::new(data, nrow, ncol)).to_string());
+        }
+        RVal::Logical(x, _) => (x.iter().map(|b| match b { Some(true) => "TRUE".into(), Some(false) => "FALSE".into(), None => "NA".into() }).collect(), false),
+        RVal::Character(x, _) => (x.iter().map(|s| match s { Some(s) => format!("\"{}\"", escape_string(s)), None => "NA".into() }).collect(), true),
+        _ => return None,
+    };
+    let label_w = format!("[{},]", nrow).len();
+    let mut out = format!("{:w$}", "", w = label_w);
+    let widths: Vec<usize> = (0..ncol).map(|j| {
+        let head = format!("[,{}]", j + 1).len();
+        cells[j * nrow..(j + 1) * nrow].iter().map(|c| c.len()).max().unwrap_or(0).max(head)
+    }).collect();
+    for (j, w) in widths.iter().enumerate() {
+        let head = format!("[,{}]", j + 1);
+        if left { out.push_str(&format!(" {:<w$}", head, w = w)); } else { out.push_str(&format!(" {:>w$}", head, w = w)); }
+    }
+    for i in 0..nrow {
+        out.push_str(&format!("\n{:>w$}", format!("[{},]", i + 1), w = label_w));
+        for (j, w) in widths.iter().enumerate() {
+            let c = &cells[j * nrow + i];
+            if left { out.push_str(&format!(" {:<w$}", c, w = w)); } else { out.push_str(&format!(" {:>w$}", c, w = w)); }
+        }
+    }
+    Some(out)
 }
 
 /// An unnamed vector as R's print.default writes it: every element padded

@@ -11,6 +11,33 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Dates that stay dates; operators keep names and shape — 2026-11-09
+
+- **Date arithmetic keeps the class.** `d + 1` and `d - 1` are dates, `d2 - d` is a
+  `difftime` in days ("Time difference of 5 days"), and a date-time difference picks
+  R's units (secs, mins, hours, days). `difftime` keeps its units through `+ - * /`.
+  All of these were plain numbers. `Date + Date` stops with R's error.
+- **Dates and date-times print as dates everywhere**, auto-printed, inside lists and
+  through `print`. Before, only `print(d)` showed a date and `d` alone showed 19797.
+  Date-times print their time zone, and their clock only when it is not midnight.
+- **`seq` of dates** (`by = "day"`, `"week"`, `"2 weeks"`, `"month"`, `"quarter"`,
+  `"year"`, a number of days, `to` or `length.out`) and **`diff` of dates** (a
+  `difftime`). `as.POSIXct("2024-03-15")` reads a date alone, as R's does, and keeps
+  `tz` and the class `c("POSIXct", "POSIXt")`.
+- **New: `as.difftime`, `weekdays`, `months`.** 534 built-in functions.
+- **Operators keep names and shape.** `x * 2` keeps `x`'s names; arithmetic keeps a
+  class (`class(y * 2)`); `-m` stays a matrix. `m > 2`, `m == 3` and `!g` give logical
+  matrices that print as R prints them and work in `which(g, arr.ind = TRUE)`,
+  `apply` and `ifelse`. `dim()` and `is.matrix()` read a `dim` attribute.
+- **`apply` over a matrix without column names gives an unnamed result**; it named
+  the results `V1`, `V2`, ...
+- **`qr()` picks its routine.** A large tall matrix that needs no pivoting goes to
+  the blocked, parallel QR that `lm` uses, and the result is converted to R's
+  `$qr`/`$qraux` form, so the object is the same: about 2x faster at 2000 x 500,
+  20% at 1000 x 200, and not used below n·p² = 2^24, where it measured slower.
+  `LAPACK = TRUE` is accepted and changes nothing.
+- Compared with R line by line in `tests/differential/output/dates_and_shapes.R`.
+
 ### Named vectors, list subscripts, and classes on lists — 2026-11-05
 
 - **`x["a"]` works.** A character subscript on a named vector stopped with an error.

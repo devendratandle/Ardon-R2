@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 531 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 534 Built-in Functions and Operators
 
 ## Core (91)
 ```
@@ -230,7 +230,7 @@ rexp(n, rate)                    Exponential random variates
 density(x)                       Gaussian kernel density estimate (list $x/$y)
 ```
 
-## Dates & Time Series (54)
+## Dates & Time Series (57)
 ```
 as.Date(s)         Parse a date string → Date (days since 1970-01-01)
 as.POSIXct(s)      Parse a date-time string → POSIXct (seconds since epoch)
@@ -240,6 +240,9 @@ Sys.Date()         Current date (class Date)
 Sys.time()         Current date-time (class POSIXct; seconds since 1970-01-01 UTC)
 format.Date(d,fmt) / format.POSIXct(d,fmt)   Method form of format() for dates
 difftime(a,b)      Difference between two dates (Date − Date also works)
+as.difftime(tim,units) A time difference of numbers in secs, mins, hours, days or weeks
+weekdays(x)         Day of the week of a date or date-time (abbreviate = TRUE: "Sat")
+months(x)           Month name of a date or date-time (abbreviate = TRUE: "Mar")
 ts(x, start=, frequency=)  Build a regular time series
 frequency(x)       Observations per cycle of a ts
 start(x)           First time point of a ts, as c(cycle, position)
@@ -296,7 +299,7 @@ naive.bayes(x,y)        Gaussian naive Bayes
 prcomp(x)               Principal component analysis
 svd(x)                  Singular value decomposition (nu = 0, nv = 0: values only)
 chol(x)                 Upper Cholesky factor R, t(R) %*% R == x
-qr(x, tol, LAPACK)      QR decomposition, R's compact form: $qr, $rank, $qraux, $pivot
+qr(x, tol)              QR decomposition, R's compact form: $qr, $rank, $qraux, $pivot (R2 picks the routine; LAPACK= is accepted)
 is.qr(x)                TRUE for the result of qr()
 qr.Q(qr, complete, Dvec) The orthogonal factor Q
 qr.R(qr, complete)      The upper-triangular factor R

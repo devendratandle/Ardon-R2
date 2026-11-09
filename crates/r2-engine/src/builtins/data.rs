@@ -137,7 +137,11 @@ pub(crate) fn bi_is_ordered(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
 }
 
 pub(crate) fn bi_is_matrix(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    Ok(rbool(matches!(gv(a, 0), RVal::Matrix(_))))
+    Ok(rbool(match gv(a, 0) {
+        RVal::Matrix(_) => true,
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) => at.dim.as_ref().is_some_and(|d| d.len() == 2),
+        _ => false,
+    }))
 }
 
 pub(crate) fn bi_mutate(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

@@ -7,7 +7,7 @@
 //!
 //! Extracted from lib.rs BUILTINS section (engine-split, opus-4.8
 //! session, content-anchored). Two module-private helpers
-//! (`quoted_vec`, `make_family`) live here too — used only by
+//! (`make_family`) live here too — used only by
 //! functions in this file.
 
 #![allow(clippy::needless_pass_by_value)]
@@ -51,13 +51,6 @@ fn print_value(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err>
     // r2-stats and we don't want r2-types depending on r2-stats.
     if let RVal::Numeric(xs, attrs) = &v {
         match attrs.class.as_deref() {
-            Some("Date") => {
-                let strs: Vec<String> = xs.iter()
-                    .map(|x| match x { Some(d) => format!("\"{}\"", r2_stats::time::format_date(*d, "%Y-%m-%d")), None => "NA".into() })
-                    .collect();
-                e.emit_output(&quoted_vec(&strs));
-                return Ok(v);
-            }
             Some("xts") => {
                 let dim = attrs.dim.as_ref();
                 let idx_v = attrs.custom.get(&std::sync::Arc::from("index"));
@@ -86,13 +79,6 @@ fn print_value(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err>
                     }
                 }
             }
-            Some("POSIXct") => {
-                let strs: Vec<String> = xs.iter()
-                    .map(|x| match x { Some(s) => format!("\"{}\"", r2_stats::time::format_posixct(*s, "%Y-%m-%d %H:%M:%S")), None => "NA".into() })
-                    .collect();
-                e.emit_output(&quoted_vec(&strs));
-                return Ok(v);
-            }
             _ => {}
         }
     }
@@ -100,15 +86,6 @@ fn print_value(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err>
     Ok(v)
 }
 
-// R-style `[1] "a" "b"` formatter for vector of already-quoted strings.
-pub(crate) fn quoted_vec(strs: &[String]) -> String {
-    let mut s = String::from("[1] ");
-    for (i, x) in strs.iter().enumerate() {
-        if i > 0 { s.push(' '); }
-        s.push_str(x);
-    }
-    s
-}
 /// One string per element as `cat` writes it: a matrix column by column
 /// (NA for its NaN cells), a factor as its codes, a list element by
 /// element, NULL as nothing.
@@ -205,6 +182,9 @@ pub(crate) fn bi_is_finite(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
     }
 }
 pub(crate) fn bi_seq(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    if matches!(&gv(a,0), RVal::Numeric(_, at) if at.class.as_deref() == Some("Date")) {
+        return crate::ops_attrs::seq_dates(e, a);
+    }
     let from = e.scalar_f64(&gv(a,0))?.unwrap_or(1.0);
     let to = e.scalar_f64(&gv(a,1))?.unwrap_or(1.0);
     // `length.out =` wins when supplied: exactly n evenly spaced points from
@@ -266,7 +246,23 @@ pub(crate) fn bi_rep(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
 // the pure `(&[EvalArg]) -> Result<RVal, R2Err>` signature to the local
 // `BuiltinFn` shape (which carries `&mut Engine` and `&EnvRef`).
 
-pub(crate) fn bi_which(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) { RVal::Logical(v,_) => Ok(RVal::Integer(v.iter().enumerate().filter_map(|(i,x)| if *x==Some(true) { Some(Some((i+1) as i32)) } else { None }).collect(), Attrs::default())), _ => err!(Type, "which requires logical") } }
+/// `which(x, arr.ind = FALSE)`: the positions of the TRUE elements, named as
+/// `x` is; with `arr.ind` and a matrix-shaped `x`, a (row, col) matrix.
+pub(crate) fn bi_which(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let x = gv(a,0);
+    let RVal::Logical(v, at) = &x else { return err!(Type, "which requires logical") };
+    let hits: Vec<usize> = v.iter().enumerate().filter(|(_, b)| **b == Some(true)).map(|(i, _)| i).collect();
+    let arr_ind = gn(a,"arr.ind").map(|b| matches!(b, RVal::Logical(ref l, _) if l.first() == Some(&Some(true)))).unwrap_or(false);
+    if let (true, Some(&[nrow, _])) = (arr_ind, at.dim.as_deref()) {
+        let mut data: Vec<f64> = hits.iter().map(|i| (i % nrow + 1) as f64).collect();
+        data.extend(hits.iter().map(|i| (i / nrow + 1) as f64));
+        let mut m = Matrix::new(data, hits.len(), 2);
+        m.col_names = Some(vec![Arc::from("row"), Arc::from("col")]);
+        return Ok(RVal::Matrix(m));
+    }
+    let names = at.names.as_ref().map(|n| hits.iter().map(|&i| n[i].clone()).collect());
+    Ok(RVal::Integer(hits.iter().map(|&i| Some(i as i32 + 1)).collect(), Attrs { names, ..Default::default() }))
+}
 // Phase K.2: map-kernel dispatch — Rayon decision lives below this layer.
 /// R "Math group" shape preservation: element-wise math keeps the input's
 /// structure. A matrix in → a matrix out (same nrow/ncol/dimnames); an

@@ -94,8 +94,10 @@ to be worse than documented and was fixed here rather than scheduled.
   generator; with a formula or vectors it is R2's random forest. A forest needs
   more than one row, so the two never collide.
 - Taking a column of a matrix (`m[, 4]`) drops the row names R keeps.
-- **`qr()` differs from R in three places.** `LAPACK = TRUE` stops with an error, and
-  so does `qr()` of a model fit, where R returns the fit's `$qr`. At rank 0,
+- **`qr()` differs from R in three places.** R2 chooses its own routine, so
+  `LAPACK = TRUE` is accepted and changes nothing; R's LAPACK object (full column
+  pivoting, `$rank` always `min(dim)`) is never returned. `qr()` of a model fit stops
+  with an error, where R returns the fit's `$qr`. At rank 0,
   `qr.fitted` returns 0, where R returns `y` as the fitted values and also as the
   residuals. On an ill-conditioned matrix the last `qraux` is a repeatedly downdated
   norm and differs from R's: for the Hilbert matrix of order 6 the truth is
@@ -113,10 +115,13 @@ to be worse than documented and was fixed here rather than scheduled.
   were set.
 - **A missing name is the text `<NA>`.** `x[5]` and `x["z"]` print as in R, but
   `names(x["z"])` is the string "<NA>" where R has `NA`.
-- **A matrix holds doubles and a comparison of one is flat.** `is.integer(matrix(1:4, 2))`
-  is FALSE and `m[0]` is `numeric(0)`, where R says TRUE and `integer(0)`. `m > 2` is a
-  logical vector with no `dim`: `m[m > 2]` works, `dim(m > 2)` is `NULL`.
-- **Arithmetic drops a date's class**: `as.Date("2024-03-15") + 1` is a number.
+- **A matrix holds doubles.** `is.integer(matrix(1:4, 2))` is FALSE and `m[0]` is
+  `numeric(0)`, where R says TRUE and `integer(0)`. A logical or character result
+  with two dimensions (`m > 2`) is a vector with `dim`, which prints, subsets and goes
+  through `apply`, `which(arr.ind = TRUE)` and `ifelse` as R's does; `t()` and
+  `m[i, j]` of one are not covered.
+- **Dates print with R's layout but not its locale.** Date-times are UTC unless `tz`
+  says otherwise, and `weekdays`/`months` are in English.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
 - **String collation follows R on Windows / English locales** (letters
   case- and accent-blind first, then accents, then lowercase first;

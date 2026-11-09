@@ -136,3 +136,50 @@ fn index_matrix(a: &[EvalArg], name: &str, of: fn(usize, usize) -> usize) -> Res
 
 pub(crate) fn bi_row(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { index_matrix(a, "row", |i, _| i) }
 pub(crate) fn bi_col(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { index_matrix(a, "col", |_, j| j) }
+
+/// `as.difftime(tim, units = )` for numbers: a time difference in `units`.
+pub(crate) fn bi_as_difftime(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let units = a.iter().find(|x| x.name.as_deref() == Some("units")).map(|x| str_vec(&x.value))
+        .and_then(|v| v.into_iter().next().flatten());
+    let Some(units) = units.filter(|u| u.as_ref() != "auto") else {
+        return err!(Runtime, "need explicit units for numeric conversion");
+    };
+    let Some(per) = crate::ops_attrs::unit_secs(&units) else { return err!(Runtime, "invalid units specified") };
+    let tim = a.iter().find(|x| x.name.as_deref() == Some("tim")).or_else(|| a.iter().find(|x| x.name.is_none()))
+        .map(|x| x.value.clone()).unwrap_or(RVal::Null);
+    let secs = e.as_reals(&tim)?.into_iter().map(|x| x.map(|v| v * per)).collect();
+    Ok(crate::ops_attrs::difftime_in(secs, &units))
+}
+
+const WEEKDAYS: [&str; 7] = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"];
+const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December"];
+
+/// The days since 1970-01-01 of each element of a date or a date-time.
+fn day_numbers(e: &Engine, v: &RVal, name: &str) -> Result<Vec<Option<i64>>, R2Err> {
+    let per_day = match v {
+        RVal::Numeric(_, at) if at.class.as_deref() == Some("Date") => 1.0,
+        RVal::Numeric(_, at) if at.class.as_deref() == Some("POSIXct") => 86400.0,
+        _ => return err!(Runtime, "no applicable method for '{}' applied to an object of class \"{}\"", name, v.type_name()),
+    };
+    Ok(e.as_reals(v)?.into_iter().map(|x| x.map(|d| (d / per_day).floor() as i64)).collect())
+}
+
+fn calendar_names(e: &Engine, a: &[EvalArg], name: &str, pick: impl Fn(i64) -> &'static str) -> Result<RVal, R2Err> {
+    let abbreviate = a.iter().find(|x| x.name.as_deref() == Some("abbreviate")).map(|x| e.truthy(&x.value)).transpose()?.unwrap_or(false);
+    let days = day_numbers(e, &gv(a, 0), name)?;
+    Ok(RVal::Character(days.into_iter().map(|d| d.map(|d| {
+        let full = pick(d);
+        Arc::from(if abbreviate { &full[..3] } else { full })
+    })).collect(), Attrs::default()))
+}
+
+/// `weekdays(x, abbreviate = FALSE)` of a date or a date-time.
+pub(crate) fn bi_weekdays(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    calendar_names(e, a, "weekdays", |d| WEEKDAYS[d.rem_euclid(7) as usize])
+}
+
+/// `months(x, abbreviate = FALSE)` of a date or a date-time.
+pub(crate) fn bi_months(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    calendar_names(e, a, "months", |d| MONTHS[r2_stats::time::civil_from_days(d).1 as usize - 1])
+}
