@@ -181,6 +181,11 @@ fn is_formula(v: &RVal) -> bool {
 
 pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let first = gv(a, 0);
+    // Which term each column of the design comes from (0 is the intercept),
+    // the terms' labels, and the response's name: what anova() needs.
+    let mut assign: Vec<i32> = vec![0];
+    let mut terms: Vec<String> = Vec::new();
+    let mut response = String::from("y");
 
     let (y_vec, x_mat, col_names) = if is_formula(&first) {
         let items: Vec<(Option<Arc<str>>, RVal)> = match &first { RVal::List(v, _) => v.clone(), _ => vec![] };
@@ -189,7 +194,10 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
         let rhs_raw = items.iter().find(|(n, _)| n.as_ref().map(|s| s.as_ref()) == Some("~rhs"))
             .map(|(_, v)| v.clone()).unwrap_or(RVal::Null);
         let lhs = match &lhs_raw {
-            RVal::List(items, _) if !items.is_empty() => items[0].1.clone(),
+            RVal::List(items, _) if !items.is_empty() => {
+                if let Some(n) = &items[0].0 { response = n.to_string(); }
+                items[0].1.clone()
+            }
             other => other.clone(),
         };
         let y_raw = lhs.as_reals()?;
@@ -200,6 +208,7 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
             RVal::List(cols, _) => {
                 for (col_name, col_val) in cols {
                     if col_name.as_ref().map(|s| s.starts_with("~")).unwrap_or(false) { continue; }
+                    let before = predictor_cols.len();
                     let (actual_name, actual_data) = match col_val {
                         RVal::List(inner, _) if !inner.is_empty() => {
                             let cname = inner[0].0.as_ref().map(|s| s.to_string())
@@ -231,6 +240,8 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
                             for n in col_names { names.push(n); }
                         }
                     }
+                    terms.push(actual_name);
+                    assign.extend(std::iter::repeat(terms.len() as i32).take(predictor_cols.len() - before));
                 }
             }
             RVal::Matrix(mat) => {
@@ -239,12 +250,16 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
                     predictor_cols.push(vals);
                     let cname = mat.col_names.as_ref().and_then(|cn| cn.get(c))
                         .map(|s| s.to_string()).unwrap_or(format!("x{}", c + 1));
+                    terms.push(cname.clone());
+                    assign.push(terms.len() as i32);
                     names.push(cname);
                 }
             }
             _ => {
                 // Phase S.1 — factor/character expansion on bare RHS too.
                 let (cols, col_names) = model_matrix_expand("x1", &rhs_raw)?;
+                terms.push("x1".into());
+                assign.extend(std::iter::repeat(1).take(cols.len()));
                 for c in cols { predictor_cols.push(c); }
                 for n in col_names { names.push(n); }
             }
@@ -261,6 +276,8 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
         let y_raw = gv(a, 0).as_reals()?;
         let x_raw_val = gv(a, 1);
         let (x_cols, x_names) = model_matrix_expand("x1", &x_raw_val)?;
+        terms.push("x1".into());
+        assign.extend(std::iter::repeat(1).take(x_cols.len()));
         let (y, x_cols) = complete_cases(&y_raw, &x_cols)?;
         let n = y.len();
         let p = x_cols.len() + 1;
@@ -276,6 +293,7 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // `estimable_columns`); with none, everything below is unchanged.
     let p_full = x_mat.ncol;
     let kept = estimable_columns(&x_mat);
+    let assign: Vec<i32> = kept.iter().map(|&j| assign.get(j).copied().unwrap_or(0)).collect();
     let x_mat = if kept.len() < p_full {
         let mut d = Vec::with_capacity(n * kept.len());
         for &j in &kept { d.extend_from_slice(&x_mat.data[j * n..(j + 1) * n]); }
@@ -358,6 +376,12 @@ pub fn bi_lm(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let coef_val = num(full(&coeffs), coef_attrs);
 
     let mut fields = HashMap::new();
+    // what anova() reads; the dot keeps it out of names(fit)
+    fields.insert(Arc::from(".x"), RVal::Matrix(x_mat.clone()));
+    fields.insert(Arc::from(".y"), rnums(&y_vec));
+    fields.insert(Arc::from(".assign"), RVal::Integer(assign.iter().map(|&k| Some(k)).collect(), Attrs::default()));
+    fields.insert(Arc::from(".terms"), RVal::Character(terms.iter().map(|t| Some(Arc::from(t.as_str()))).collect(), Attrs::default()));
+    fields.insert(Arc::from(".response"), RVal::Character(vec![Some(Arc::from(response.as_str()))], Attrs::default()));
     fields.insert(Arc::from("coefficients"), coef_val);
     fields.insert(Arc::from("residuals"), rnums(&residuals));
     fields.insert(Arc::from("fitted.values"), rnums(&fitted));
@@ -1064,6 +1088,10 @@ fn aov_repeated_measures(
 pub fn bi_anova(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let first = gv(a, 0);
     if let RVal::TypeInstance(inst) = &first {
+        // R's table, term by term, for a fit that carries its design
+        if inst.type_name.as_ref() == "lm" {
+            if let Some(table) = crate::anova_lm::sequential(inst) { return Ok(table); }
+        }
         if inst.type_name.as_ref() == "lm" || inst.type_name.as_ref() == "glm" {
             let residuals: Vec<f64> = inst.fields.get("residuals")
                 .and_then(|v| v.as_reals().ok())

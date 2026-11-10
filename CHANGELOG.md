@@ -11,6 +11,25 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Model tables as R gives them: coefficient names, `anova`, `cor.test` — 2026-11-10
+
+- **Coefficients of expression terms are named as written.** `lm(mpg ~ wt +
+  factor(cyl))` gives `factor(cyl)6` and `factor(cyl)8`, and `I(wt^2)` and `log(hp)`
+  keep their names; they were `x26`, `x28` and `x3`. **New: `I()`.** `deparse`
+  writes `x^2` and `1:3` without spaces, as R does.
+- **`anova(fit)` is R's table**: one row per term in formula order (sequential sums
+  of squares from the QR of the design), then Residuals, with `Df`, `Sum Sq`,
+  `Mean Sq`, `F value` and `Pr(>F)`, readable as `a$Df`, `a[["F value"]]` and
+  `rownames(a)`. It was one overall F test. A fit keeps its design for this, out
+  of `names(fit)`.
+- **`cor.test`** gives `parameter` (df), `conf.int` with its `conf.level` (Fisher's
+  z), `null.value`, `alternative` and `method`, takes `alternative` and `conf.level`,
+  and lists them in R's order; `df` is now `parameter`, as in R.
+- **New: `dimnames()`, `nobs()`.** `matrix(..., dimnames = list(...))` keeps the
+  names it was ignoring. `[[` on a result reads its fields by name or position, and
+  `print()` of a list ends with R's blank line. 543 built-in functions.
+- Compared with R line by line in `tests/differential/output/studio_tables.R`.
+
 ### Editing data frames as Ardon Studio's Data tab does — 2026-11-10
 
 - **Every `d[i, j] <- value` works.** Text into a factor or text column

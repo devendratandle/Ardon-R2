@@ -112,6 +112,19 @@ impl Engine {
                 df.columns.get(i.wrapping_sub(1)).map(|(_, v)| v.clone())
                     .ok_or_else(|| R2Err { msg: "subscript out of bounds".into(), kind: ErrKind::Runtime })
             }
+            // a result read as the list it is in R: `a[["F value"]]`, `fit[[1]]`
+            RVal::TypeInstance(inst) => {
+                let names = crate::builtins::attrs::field_names(inst);
+                let name = match idx {
+                    RVal::Character(cv, _) => cv.first().cloned().flatten(),
+                    _ => {
+                        let i = self.as_reals(idx)?.first().copied().flatten().unwrap_or(0.0) as usize;
+                        names.get(i.wrapping_sub(1)).cloned()
+                    }
+                };
+                name.and_then(|n| inst.fields.get(&n).cloned())
+                    .ok_or_else(|| R2Err { msg: "subscript out of bounds".into(), kind: ErrKind::Runtime })
+            }
             _ => {
                 // `v[["name"]]` on a named atomic vector: resolve the name
                 // against the names attribute (R drops names on `[[`).

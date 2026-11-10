@@ -20,7 +20,7 @@ Modern data science wastes enormous computational resources:
 **One language. Minimal glue. Direct to hardware.**
 
 ### V0.4.1 — Current Release (2026-11)
-- **540 built-in functions and operators** across 29 crates — no packages
+- **543 built-in functions and operators** across 29 crates — no packages
   to install; every one has `?help`, enforced by a test
 - Accuracy **matches CRAN R on 44/44 differential cases**, now including a
   555-value grid of distribution functions (far tails, `log.p`), SVD

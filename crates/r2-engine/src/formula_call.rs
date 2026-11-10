@@ -211,10 +211,13 @@ impl Engine {
         let (rhs_no_err, error_stratum_expr) = split_error_term(rhs);
         let (rhs_fixed, random_grouping_exprs) = split_random_effects(&rhs_no_err);
         let lhs_val = self.resolve_formula_term(lhs, df, env)?;
-        let rhs_val = if matches!(rhs_fixed, Expr::NullLit) {
-            RVal::Null
-        } else {
-            self.resolve_formula_term(&rhs_fixed, df, env)?
+        let rhs_val = match self.resolve_formula_term(&rhs_fixed, df, env)? {
+            // a single expression term (`y ~ factor(cyl)`) is named as written
+            v @ (RVal::Numeric(..) | RVal::Integer(..) | RVal::Factor(..) | RVal::Character(..) | RVal::Logical(..))
+                if !matches!(rhs_fixed, Expr::NullLit) =>
+                RVal::list(vec![(Some(Arc::from(crate::formula::fmt_expr(&rhs_fixed).as_str())), v)]),
+            _ if matches!(rhs_fixed, Expr::NullLit) => RVal::Null,
+            other => other,
         };
         let mut formula_items = vec![
             (Some(Arc::from("~lhs")), lhs_val),

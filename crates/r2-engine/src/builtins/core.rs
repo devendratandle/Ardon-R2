@@ -82,7 +82,9 @@ fn print_value(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err>
             _ => {}
         }
     }
-    e.emit_output(&format!("{}", v));
+    // one line end after the value, as auto-print gives it: a list's last
+    // blank line is part of what R prints
+    e.emit_output(&format!("{}\n", v));
     Ok(v)
 }
 

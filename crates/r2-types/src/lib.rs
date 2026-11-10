@@ -459,7 +459,12 @@ pub fn deparse(e: &Expr) -> String {
                 BinOp::Tilde => "~", BinOp::MatMul => "%*%",
                 BinOp::Colon => ":",
             };
-            format!("{} {} {}", deparse(lhs), opstr, deparse(rhs))
+            // R writes `^` and `:` without spaces (`x^2`, `1:3`)
+            if matches!(op, BinOp::Pow | BinOp::Colon) {
+                format!("{}{}{}", deparse(lhs), opstr, deparse(rhs))
+            } else {
+                format!("{} {} {}", deparse(lhs), opstr, deparse(rhs))
+            }
         }
         Expr::Call { func, args } if matches!(func.as_ref(), Expr::Symbol(s) if s.as_ref() == "(") && args.len() == 1 => {
             format!("({})", deparse(&args[0].value))

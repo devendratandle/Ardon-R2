@@ -105,7 +105,19 @@ pub fn bi_matrix(a: &[EvalArg]) -> Result<RVal, R2Err> {
         else { (0..nr * nc).map(|k| data[k % data.len()]).collect() }
     };
 
-    Ok(RVal::Matrix(Matrix::new(d, nr, nc)))
+    let mut m = Matrix::new(d, nr, nc);
+    // dimnames = list(rows, cols); either may be NULL
+    if let Some(RVal::List(dn, _)) = gn(a, "dimnames") {
+        let names = |v: Option<&(Option<Arc<str>>, RVal)>, len: usize| -> Option<Vec<Arc<str>>> {
+            match v.map(|x| &x.1) {
+                Some(RVal::Character(s, _)) if s.len() == len => Some(s.iter().map(|x| x.clone().unwrap_or_else(|| Arc::from("NA"))).collect()),
+                _ => None,
+            }
+        };
+        m.row_names = names(dn.first(), nr);
+        m.col_names = names(dn.get(1), nc);
+    }
+    Ok(RVal::Matrix(m))
 }
 
 /// `tensor(data, shape=)` — n-dimensional tensor constructor.

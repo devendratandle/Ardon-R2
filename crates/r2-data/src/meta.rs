@@ -90,6 +90,8 @@ pub fn bi_rownames(a: &[EvalArg]) -> Result<RVal, R2Err> {
             Some(rn) => RVal::Character(rn.iter().map(|n| Some(n.clone())).collect(), Attrs::default()),
             None => RVal::Null,
         }),
+        // a table result (anova) keeps its row names with it
+        RVal::TypeInstance(inst) => Ok(inst.fields.get(".rownames").cloned().unwrap_or(RVal::Null)),
         _ => Ok(RVal::Null),
     }
 }

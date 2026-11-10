@@ -27,8 +27,19 @@ pub(crate) fn field_names(inst: &TypeInstance) -> Vec<Arc<str>> {
     if inst.type_name.as_ref() == "qr" {
         return ["qr", "rank", "qraux", "pivot"].iter().map(|s| Arc::from(*s)).collect();
     }
+    // a result that knows R's order for its fields says so
+    if let Some(RVal::Character(order, _)) = inst.fields.get(".order") {
+        return order.iter().flatten().filter(|n| inst.fields.contains_key(n.as_ref())).cloned().collect();
+    }
+    if inst.type_name.as_ref() == "anova" && inst.fields.contains_key("Df") {
+        return ["Df", "Sum Sq", "Mean Sq", "F value", "Pr(>F)"].iter().map(|s| Arc::from(*s)).collect();
+    }
+    // R's order for a test result; any other field follows, sorted
+    const HTEST: [&str; 10] = ["statistic", "parameter", "p.value", "conf.int", "estimate", "null.value",
+        "stderr", "alternative", "method", "data.name"];
+    let rank = |k: &str| HTEST.iter().position(|h| *h == k).unwrap_or(HTEST.len());
     let mut names: Vec<Arc<str>> = inst.fields.keys().filter(|k| !k.starts_with('.')).cloned().collect();
-    names.sort();
+    names.sort_by(|x, y| rank(x).cmp(&rank(y)).then_with(|| x.cmp(y)));
     names
 }
 
@@ -204,4 +215,49 @@ pub(crate) fn bi_get(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal
     if let Some(v) = env.lookup(&name).or_else(|| e.global_env.lookup(&name)) { return Ok(v); }
     if e.registry.resolve(&name).is_some() { return Ok(RVal::BuiltinFn(name)); }
     err!(Runtime, "object '{}' not found", name)
+}
+
+/// `I(x)`: `x` as it is, so a model formula takes `I(wt^2)` as arithmetic.
+pub(crate) fn bi_asis(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(gv(a, 0))
+}
+
+fn names_or_null(n: Option<Vec<Arc<str>>>) -> RVal {
+    match n {
+        Some(n) => RVal::Character(n.into_iter().map(Some).collect(), Attrs::default()),
+        None => RVal::Null,
+    }
+}
+
+/// `dimnames(x)`: the row and column names of a matrix, a data frame or a
+/// table result such as `anova(fit)`, as a list of two; `NULL` when neither has any.
+pub(crate) fn bi_dimnames(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let pair = |r: RVal, c: RVal| -> RVal {
+        if matches!((&r, &c), (RVal::Null, RVal::Null)) { RVal::Null } else { RVal::list(vec![(None, r), (None, c)]) }
+    };
+    Ok(match gv(a, 0) {
+        RVal::Matrix(m) => pair(names_or_null(m.row_names.clone()), names_or_null(m.col_names.clone())),
+        RVal::DataFrame(df) => {
+            let rows = df.row_names.clone().unwrap_or_else(|| (1..=df.nrow()).map(|i| Arc::from(i.to_string().as_str())).collect());
+            pair(names_or_null(Some(rows)), names_or_null(Some(df.columns.iter().map(|(n, _)| n.clone()).collect())))
+        }
+        RVal::TypeInstance(inst) if inst.fields.contains_key(".rownames") => {
+            pair(inst.fields[".rownames"].clone(), names_or_null(Some(field_names(&inst))))
+        }
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) =>
+            at.custom.get("dimnames").cloned().unwrap_or(RVal::Null),
+        _ => RVal::Null,
+    })
+}
+
+/// `nobs(fit)`: the number of observations a model was fitted to.
+pub(crate) fn bi_nobs(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    match gv(a, 0) {
+        RVal::TypeInstance(inst) => match inst.fields.get("residuals") {
+            Some(r) => Ok(rint(rval_length(r) as i32)),
+            None => err!(Runtime, "no 'nobs' method is available for an object of class \"{}\"", inst.type_name),
+        },
+        RVal::Numeric(..) | RVal::Integer(..) | RVal::Logical(..) => Ok(rint(gv(a, 0).as_reals()?.iter().filter(|x| x.is_some()).count() as i32)),
+        other => err!(Runtime, "no 'nobs' method is available for an object of class \"{}\"", other.type_name()),
+    }
 }

@@ -597,6 +597,11 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
+/// The first string of a character argument.
+fn text_of(v: &RVal) -> String {
+    match v { RVal::Character(s, _) => s.first().cloned().flatten().map(|x| x.to_string()).unwrap_or_default(), _ => String::new() }
+}
+
 pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
@@ -616,21 +621,54 @@ pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let t_stat = if (1.0 - r * r).abs() > 1e-15 { r * (df / (1.0 - r * r)).sqrt() } else { f64::INFINITY };
     // R: pt(-|t|, df)*2 — the t distribution, not the normal. The normal
     // shortcut understates p at small n (n=10: 0.0128 vs R's 0.0264).
-    let p_value = 2.0 * t_cdf(-t_stat.abs(), df);   // the tail itself: 1 - cdf cancels small p to 0
+    let alternative = arg_named(a, "alternative").map(|v| text_of(&v)).unwrap_or_else(|| "two.sided".into());
+    let conf_level = arg_named(a, "conf.level").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(0.95);
+    // the tail itself: 1 - cdf cancels small p to 0
+    let p_value = match alternative.as_str() {
+        "less" => t_cdf(t_stat, df),
+        "greater" => t_cdf(-t_stat, df),
+        _ => 2.0 * t_cdf(-t_stat.abs(), df),
+    };
+    // Fisher's z interval, as R's cor.test gives it (n > 3)
+    let conf_int = (n > 3).then(|| {
+        let (z, se) = (r.atanh(), 1.0 / ((n - 3) as f64).sqrt());
+        match alternative.as_str() {
+            "less" => (-1.0, (z + qnorm_approx(conf_level) * se).tanh()),
+            "greater" => ((z - qnorm_approx(conf_level) * se).tanh(), 1.0),
+            _ => { let q = qnorm_approx((1.0 + conf_level) / 2.0); ((z - q * se).tanh(), (z + q * se).tanh()) }
+        }
+    });
+    let sided = match alternative.as_str() { "less" => "less than", "greater" => "greater than", _ => "not equal to" };
 
     soutln!("\n  Pearson's product-moment correlation\n");
     soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), n - 2, fmt_pval(p_value));
-    soutln!("alternative hypothesis: true correlation is not equal to 0");
-    soutln!("sample estimate:");
+    soutln!("alternative hypothesis: true correlation is {} 0", sided);
+    if let Some((lo, hi)) = conf_int {
+        soutln!("{} percent confidence interval:", fmt_n(conf_level * 100.0));
+        soutln!(" {} {}", fmt_n(lo), fmt_n(hi));
+    }
+    soutln!("sample estimates:");
     soutln!("      cor");
     soutln!("{:>9}", fmt_n(r));
 
     let mut fields = HashMap::new();
-    fields.insert(Arc::from("estimate"), named(&[r], &["cor"]));
-    fields.insert(Arc::from("statistic"), rnum(t_stat));
+    fields.insert(Arc::from("statistic"), named(&[t_stat], &["t"]));
+    fields.insert(Arc::from("parameter"), named(&[df], &["df"]));
     fields.insert(Arc::from("p.value"), rnum(p_value));
-    fields.insert(Arc::from("df"), rnum(df));
-    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("cor.test"), fields }))
+    fields.insert(Arc::from("estimate"), named(&[r], &["cor"]));
+    fields.insert(Arc::from("null.value"), named(&[0.0], &["correlation"]));
+    fields.insert(Arc::from("alternative"), rstr(&alternative));
+    fields.insert(Arc::from("method"), rstr("Pearson's product-moment correlation"));
+    fields.insert(Arc::from("data.name"), rstr("x and y"));
+    // R's order for cor.test, which puts conf.int last
+    let order = ["statistic", "parameter", "p.value", "estimate", "null.value", "alternative", "method", "data.name", "conf.int"];
+    fields.insert(Arc::from(".order"), RVal::Character(order.iter().map(|s| Some(Arc::from(*s))).collect(), Attrs::default()));
+    if let Some((lo, hi)) = conf_int {
+        let mut at = Attrs::default();
+        at.custom.insert(Arc::from("conf.level"), rnum(conf_level));
+        fields.insert(Arc::from("conf.int"), RVal::Numeric(vec![Some(lo), Some(hi)].into(), at));
+    }
+    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("htest"), fields }))
 }
 
 pub fn bi_shapiro_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
