@@ -229,7 +229,8 @@ if "fp16" in STAGES:
     sh(f"cd /tmp/r2 && {CARGO} build --release -p r2-gpu --features cuda --example cuda_ceiling 2>&1 | tail -1; "
        "cp target/release/examples/cuda_ceiling /tmp/ceiling")
     PICKC = "grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'"
-    sh(f"CUBLAS_LOGINFO_DBG=1 CUBLAS_LOGDEST_DBG=stdout CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -vE '^ *$' | tail -40")
+    sh(f"CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -E '^CEILING|refused|rror|panicked'")
+    sh(f"CUBLAS_LOGINFO_DBG=1 CUBLAS_LOGDEST_DBG=stdout CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -E 'refused|Atype|computeType' | tail -12")
     for round_ in range(2):
         for kind in ("gemm_ex_f32", "torch_f32", "gemm_ex_fast16", "gemm_ex_f16", "torch_f16"):
             print(f"\n=== sustain {kind} card 0 round {round_ + 1}", flush=True)
