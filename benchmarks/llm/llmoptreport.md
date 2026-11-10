@@ -389,3 +389,24 @@ All CUDA tests pass and the PTX is up to date. cuBLAS's log now shows `CUDA_R_16
 **Fast-16** (f32 in and out, f16 tensor cores) reaches 2.6× f32 at an error close to PyTorch's f16 (2.6e-4 against 2.1e-4), with no change to how R2 stores anything.
 
 Next: the like-for-like form, f16 operands with f32 sums (`CUBLAS_COMPUTE_32F` on `CUDA_R_16F`), timed against PyTorch's 22.2 TFLOP/s.
+
+### Run 37 (72b3950 as a patch on 4089a5b): f16 with f32 sums, like for like
+
+All CUDA tests pass and the PTX is up to date. Same shape and sampler, two rounds in fair order, every round at the 70 W cap.
+
+| GFLOP/s, sustained | Round 1 | Round 2 | Error, relative rms |
+|---|---:|---:|---:|
+| R2 f32 | 4,246 | 4,013 | exact |
+| PyTorch f32 | 4,122 | 3,960 | exact |
+| R2 f32-fast-16 | 10,792 | 10,511 | 2.6e-4 |
+| **R2 f16, f32 sums** | **21,663** | **21,184** | 3.3e-4 |
+| **PyTorch f16, f32 sums** | **22,060** | **21,798** | 2.1e-4 * |
+| R2 f16, f16 sums | 24,428 | 24,193 | 1.5e-3 |
+
+**Speed:** R2's like-for-like f16 trails PyTorch by 1.8% and 2.8%. That is within the round-to-round spread and around the 2.5% line, so the two are level: same cuBLAS call, same card.
+
+\* **Error:** the two columns are not the same measure. PyTorch's reference is the f32 product of the operands *already rounded to f16*, so it leaves out the rounding of the inputs. R2's reference is the product of the original f32 values, so R2's 3.3e-4 includes that rounding, and it is the stricter figure.
+
+**What the T4 offers R2, by form:** f32 4.0-4.2 TFLOP/s exact; fast-16 10.5-10.8 (2.6×) at 2.6e-4, with all storage still f32; f16 with f32 sums 21.2-21.7 (5.2×) at 3.3e-4 with half the memory. f16 sums gain another 12% for 4.5× the error, which the accuracy rule rules out.
+
+Closed for the probe. Using fast-16 or f16 in training is a separate decision: it changes the losses, so it needs the loss-gap check first.
