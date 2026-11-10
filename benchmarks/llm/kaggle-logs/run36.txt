@@ -1,0 +1,297 @@
+﻿$ curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+info: downloading installer
+info: profile set to minimal
+info: default host tuple is x86_64-unknown-linux-gnu
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+info: downloading 3 components
+info: default toolchain set to stable-x86_64-unknown-linux-gnu
+
+  stable-x86_64-unknown-linux-gnu installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+
+
+Rust is installed now. Great!
+
+To get started you may need to restart your current shell.
+This would reload your PATH environment variable to include
+Cargo's bin directory ($HOME/.cargo/bin).
+
+To configure your current shell, you need to source the
+corresponding env file under $HOME/.cargo.
+
+Consider running the right command for your shell (note the leading DOT):
+. "$HOME/.cargo/env" # For sh/ash/dash/pdksh/bash
+cargo:rerun-if-env-changed=CC_x86_64-unknown-linux-gnu
+CC_x86_64-unknown-linux-gnu = None
+cargo:rerun-if-env-changed=CC_x86_64_unknown_linux_gnu
+CC_x86_64_unknown_linux_gnu = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CPATH
+cargo:rerun-if-env-changed=C_INCLUDE_PATH
+cargo:rerun-if-env-changed=CPLUS_INCLUDE_PATH
+cargo:rerun-if-env-changed=OBJC_INCLUDE_PATH
+cargo:rerun-if-env-changed=OBJCPLUS_INCLUDE_PATH
+cargo:rerun-if-env-changed=COMPILER_PATH
+cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH
+cargo:rerun-if-env-changed=GCC_EXEC_PREFIX
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_unknown_linux_gnu
+CFLAGS_x86_64_unknown_linux_gnu = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-unknown-linux-gnu
+CFLAGS_x86_64-unknown-linux-gnu = None
+
+[exit 0]
+$ rm -rf /tmp/r2 && git clone --depth 1 --branch cuda-backend https://github.com/devendratandle/Ardon-R2.git /tmp/r2
+Cloning into '/tmp/r2'...
+
+[exit 0]
+$ cd /tmp/r2 && git log --oneline -1
+4089a5b Merge branch 'gpu-linalg-leads' into merge-into-cuda
+
+[exit 0]
+$ cd /tmp/r2 && git apply --whitespace=nowarn /tmp/unpushed.patch && git status --short | wc -l
+59
+
+[exit 0]
+$ nvidia-smi -L; nvcc --version | tail -2
+GPU 0: Tesla T4 (UUID: GPU-b911fd0e-e6b2-5b49-8a41-2b752d058fbe)
+GPU 1: Tesla T4 (UUID: GPU-8db12c89-1dc2-a085-ef5d-fdd52d480c08)
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+
+[exit 0]
+$ cd /tmp/r2/crates/r2-gpu/src/cuda/kernels && sh build.sh && mkdir -p /kaggle/working/ptx && cp *.ptx /kaggle/working/ptx/
+
+[exit 0]
+$ cd /tmp/r2 && git add -N crates/r2-gpu/src/cuda/kernels && if git diff --quiet -- crates/r2-gpu/src/cuda/kernels; then echo PTX up to date; else echo STALE; git diff --stat -- crates/r2-gpu/src/cuda/kernels; fi
+PTX up to date
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-gpu --features cuda 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running unittests src/lib.rs (target/release/deps/r2_gpu-0884bc79b6e177e3)
+test cuda::attention::tests::unsupported_shapes_are_refused ... ok
+test cuda::attention::tests::fused_scores_give_the_stored_forms_bits ... ok
+test cuda::cluster::tests::disagreement_is_reported_to_every_rank ... ok
+test cuda::cluster::tests::every_rank_gets_the_same_mean ... ok
+test cuda::cluster::tests::two_ranks_share_memory_and_agree ... ok
+test cuda::cluster::tests::missing_ranks_fail_and_do_not_hang ... ok
+test cuda::elementwise::tests::rope_table_matches_the_cpu ... ok
+test cuda::elementwise::tests::short_buffers_are_refused ... ok
+test cuda::elementwise::tests::kernels_match_the_tape ... ok
+test cuda::gemm::tests::operands_too_small_are_refused ... ok
+test cuda::gemm::tests::resident_matmul_matches_matmul ... ok
+test cuda::gemm::tests::tiled_is_bit_reproducible ... ok
+test cuda::attention::tests::backward_is_bit_reproducible ... ok
+test cuda::optim::tests::adam_is_bit_identical_to_the_cpu ... ok
+test cuda::optim::tests::adamw_is_bit_identical_to_the_cpu ... ok
+test cuda::optim::tests::grad_norm_matches_f64_on_the_host ... ok
+test cuda::optim::tests::short_buffers_are_refused ... ok
+test cuda::tests::a_wrong_argument_count_is_refused ... ok
+test cuda::tests::device_buffer_round_trips_and_checks_bounds ... ok
+test cuda::tests::empty_and_one_element_inputs ... ok
+test cuda::tests::every_op_matches_the_cpu_reference ... ok
+test tests::cpu_reference_kernels_correct ... ok
+test tests::dispatch_below_threshold_uses_cpu_even_if_enabled ... ok
+test tests::statistics_ops_are_not_in_the_f32_safe_set ... ok
+test cuda::attention::tests::matches_the_tape ... ok
+test cuda::gemm::tests::tiled_matches_the_cpu_kernel ... ok
+test cuda::gemm::tests::cublas_matches_the_cpu_kernel ... ok
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.26s
+     Running tests/cuda_dispatch.rs (target/release/deps/cuda_dispatch-38951213de272ba2)
+test dispatch_and_matmul_report_where_they_ran ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-train --features cuda --lib gpu_llm 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running unittests src/lib.rs (target/release/deps/r2_train-88110dec8aa07a2b)
+test gpu_llm::tests::gpu_ignores_prompts_and_padding_as_the_tape_does ... ok
+test gpu_llm::tests::gpu_steps_track_the_cpu_trainer_and_round_trip_the_state ... ok
+test gpu_llm::tests::mixed_precision_tracks_f32_and_reproduces_itself ... ok
+test gpu_llm::tests::gpu_loss_and_gradients_match_the_tape_block_by_block ... ok
+test gpu_llm::tests::mixed_precision_is_refused_on_cuda ... ok
+test gpu_llm::tests::gpu_adamw_clipping_and_schedule_track_the_cpu_trainer ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 80 filtered out; finished in 0.56s
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-engine --features cuda --test cuda_wiring 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running tests/cuda_wiring.rs (target/release/deps/cuda_wiring-c6925df860e2d120)
+test gpu_map_runs_on_the_device_and_status_reports_it ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+[exit 0]
+$ cd /tmp/r2 && R2_REQUIRE_CUDA=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-engine --features cuda --test llm_finetune 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running tests/llm_finetune.rs (target/release/deps/llm_finetune-3e852c75ade0736e)
+test a_model_learns_what_follows_each_prompt ... ok
+test accumulation_is_the_same_update_in_less_memory ... ok
+test an_unknown_device_is_refused ... ok
+test a_frozen_block_does_not_train ... ok
+test bad_examples_are_refused_by_name ... ok
+test a_fine_tune_resumes_on_its_base ... ok
+test lora_trains_small_adapters_and_they_travel_two_ways ... ok
+test settings_reach_the_trainer ... ok
+test lora_on_the_gpu_is_refused_by_name ... ok
+test the_gpu_runs_the_same_recipe ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES= CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --release -p r2-engine --features cuda --test cuda_wiring 2>&1 | grep -E '^test |test result|panicked|^error|Running' | tail -40
+     Running tests/cuda_wiring.rs (target/release/deps/cuda_wiring-c6925df860e2d120)
+test gpu_map_runs_on_the_device_and_status_reports_it ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+[exit 0]
+$ cd /tmp/r2 && curl -sSfL -r 0-19447281 -o corpus.txt https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt; ls -la corpus.txt; sha256sum corpus.txt
+-rw-r--r-- 1 root root 19447282 Nov 10 15:06 corpus.txt
+94e431816c4cce81ff71e4408ff8d3bda9a42e8d2663986697c3954288cb38b4  corpus.txt
+
+[exit 0]
+$ python3 -c 'import numpy, tokenizers, torch; print(torch.__version__, torch.cuda.get_device_name(0))' || pip install -q numpy tokenizers
+2.11.0+cu130 Tesla T4
+
+[exit 0]
+$ cd /tmp/r2 && CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build --release -p r2-train --features cuda --example tinystories_train 2>&1 | tail -1
+    Finished `release` profile [optimized] target(s) in 18.02s
+
+[exit 0]
+$ cd /tmp/r2 && CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build --release -p r2-gpu --features cuda --example cuda_ceiling 2>&1 | tail -1; cp target/release/examples/cuda_ceiling /tmp/ceiling
+    Finished `release` profile [optimized] target(s) in 8.41s
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -E '^CEILING|refused|rror|panicked'
+CEILING accuracy_fast16 rms 2.610e-4 worst 3.246e-3 of rms value 2.311e0
+CEILING accuracy_f16 rms 1.469e-3 worst 5.089e-2 of rms value 2.311e0
+
+[exit 0]
+$ CUBLAS_LOGINFO_DBG=1 CUBLAS_LOGDEST_DBG=stdout CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -E 'refused|Atype|computeType' | tail -12
+i!  Atype: type=cudaDataType_t; val=CUDA_R_32F(0)
+i!  computeType: type=cublasComputeType_t; val=UNKNOWN cublasComputeType_t TYPE(0)
+i!  Atype: type=cudaDataType_t; val=CUDA_R_32F(0)
+i!  computeType: type=cublasComputeType_t; val=CUBLAS_COMPUTE_32F_FAST_16F(74)
+i!  Atype: type=cudaDataType_t; val=CUDA_R_16F(2)
+i!  computeType: type=cublasComputeType_t; val=CUBLAS_COMPUTE_16F(64)
+
+[exit 0]
+
+=== sustain gemm_ex_f32 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_gemm_ex_f32 4176.3 GFLOP/s
+
+[exit 0]
+card 0: 29 s busy, median clock 855 MHz, memory 5000 MHz, 46 C, 70 W, throttle ['0x0000000000000004']
+
+=== sustain torch_f32 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 python3 kaggle/torch_sustain.py f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_torch_f32 4105.0 GFLOP/s
+CEILING accuracy_torch_f32 rms 0.000e+00
+
+[exit 0]
+card 0: 28 s busy, median clock 840 MHz, memory 5000 MHz, 51 C, 70 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_fast16 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_fast16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_gemm_ex_fast16 10741.5 GFLOP/s
+
+[exit 0]
+card 0: 28 s busy, median clock 900 MHz, memory 5000 MHz, 54 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_f16 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_gemm_ex_f16 24685.9 GFLOP/s
+
+[exit 0]
+card 0: 28 s busy, median clock 810 MHz, memory 5000 MHz, 55 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain torch_f16 card 0 round 1
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 python3 kaggle/torch_sustain.py f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_torch_f16 22213.4 GFLOP/s
+CEILING accuracy_torch_f16 rms 2.077e-04
+
+[exit 0]
+card 0: 28 s busy, median clock 720 MHz, memory 5000 MHz, 55 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_f32 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_gemm_ex_f32 4023.7 GFLOP/s
+
+[exit 0]
+card 0: 29 s busy, median clock 840 MHz, memory 5000 MHz, 56 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain torch_f32 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 python3 kaggle/torch_sustain.py f32 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_torch_f32 4007.1 GFLOP/s
+CEILING accuracy_torch_f32 rms 0.000e+00
+
+[exit 0]
+card 0: 29 s busy, median clock 825 MHz, memory 5000 MHz, 55 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_fast16 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_fast16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_gemm_ex_fast16 10653.3 GFLOP/s
+
+[exit 0]
+card 0: 29 s busy, median clock 885 MHz, memory 5000 MHz, 55 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain gemm_ex_f16 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ CUDA_VISIBLE_DEVICES=0 /tmp/ceiling sustain gemm_ex_f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_gemm_ex_f16 24635.8 GFLOP/s
+
+[exit 0]
+card 0: 28 s busy, median clock 795 MHz, memory 5000 MHz, 55 C, 69 W, throttle ['0x0000000000000004']
+
+=== sustain torch_f16 card 0 round 2
+$ sleep 45
+
+[exit 0]
+$ cd /tmp/r2 && CUDA_VISIBLE_DEVICES=0 python3 kaggle/torch_sustain.py f16 2>&1 | grep -E '^CEILING|refused|no cuBLAS|rror|panicked|Traceback'
+CEILING sustained_torch_f16 22187.8 GFLOP/s
+CEILING accuracy_torch_f16 rms 2.077e-04
+
+[exit 0]
+card 0: 28 s busy, median clock 720 MHz, memory 5000 MHz, 56 C, 69 W, throttle ['0x0000000000000004']
+$ nvidia-smi --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader -i 0
+1410 MHz, 58
+
+[exit 0]
+/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\|'
+  cells[i][c] = re.sub('\\\\\|', '|', cell)
+/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\_'
+  text = re.sub(r'_', '\_', text) # Escape underscores in display text
+[NbConvertApp] Converting notebook __script__.ipynb to html
+[NbConvertApp] Writing 438009 bytes to __results__.html

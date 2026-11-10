@@ -371,3 +371,21 @@ All CUDA tests pass and the PTX is up to date. One T4, 4096 × 768 × 3072, sust
 **f16 was refused for an R2 bug, not the hardware:** cuBLAS's log shows R2 passed data type 6, which is `CUDA_C_16F` (complex half); real half is `CUDA_R_16F`, 2. Status 15 is "not supported". Fixed after this run. PyTorch's f16 product runs at 21-22 TFLOP/s, 5.2-5.6× f32, rms error 2.1e-4 against f32 on this shape: that is the reachable ceiling for R2's f16 path.
 
 Next: rerun the probe with the fixed type to get R2's f16 rate and the fast-16 and f16 error.
+
+### Run 36 (ecc5f3a as a patch on 4089a5b): f16 with the real half type
+
+All CUDA tests pass and the PTX is up to date. cuBLAS's log now shows `CUDA_R_16F(2)`. Same shape, sampler and fair order as run 34, every round at the 70 W cap.
+
+| GFLOP/s, sustained | Round 1 | Round 2 | Error vs f32, relative rms |
+|---|---:|---:|---:|
+| R2 f32 | 4,176 | 4,024 | exact |
+| PyTorch f32 | 4,105 | 4,007 | exact |
+| R2 f32-fast-16 | 10,742 | 10,653 | 2.6e-4 |
+| R2 f16, f16 sums | 24,686 | 24,636 | 1.5e-3 |
+| PyTorch f16, f32 sums | 22,213 | 22,188 | 2.1e-4 |
+
+**Speed:** R2's f16 runs 11% above PyTorch's in both rounds (spread 0.2%), but the two are not the same product: R2 sums in f16 (`CUBLAS_COMPUTE_16F`), PyTorch in f32. That costs R2 7× the error, so the 11% is not a win under the accuracy rule.
+
+**Fast-16** (f32 in and out, f16 tensor cores) reaches 2.6× f32 at an error close to PyTorch's f16 (2.6e-4 against 2.1e-4), with no change to how R2 stores anything.
+
+Next: the like-for-like form, f16 operands with f32 sums (`CUBLAS_COMPUTE_32F` on `CUDA_R_16F`), timed against PyTorch's 22.2 TFLOP/s.
