@@ -1,4 +1,4 @@
-# Ardon-R2 Function Reference — 538 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 540 Built-in Functions and Operators
 
 ## Core (95)
 ```
@@ -428,7 +428,7 @@ Filter(f,x)         Keep elements where f(x) is TRUE
 Map(f,...)          Apply f element-wise across vectors → list
 ```
 
-## I/O (14)
+## I/O (16)
 ```
 read.csv(file, header=TRUE, sep=",", check.names=TRUE)   Read a CSV; header names go through make.names (a b -> a.b, 1x -> X1x, duplicates .1/.2) unless check.names=FALSE
 make.names(x, unique=FALSE)   R's valid-name rule: X prefix for a bad start, invalid characters to ".", reserved words get "."; unique=TRUE appends .1, .2 to duplicates
@@ -441,9 +441,11 @@ read.table(file)    Read delimited file
 write.table(x,file) Write delimited file
 read.delim(file)    Read tab-delimited
 source(file)        Run R2 script
-save(file)          Save session
-load(file)          Load session
+save(..., list=, file=) Save objects under their names (save(file) alone: the session)
+load(file)          Restore saved objects under their names, where load is called
 file.exists(path)   Check if file exists
+tempfile(pattern, fileext=) A file name in the session's temporary folder
+tempdir()           The session's temporary folder
 list.files(path, pattern, full.names, recursive, ignore.case)   Files in a folder (pattern: regex on the name)
 dir(path, ...)      Same as list.files
 file.path(...)      Join path parts with "/"

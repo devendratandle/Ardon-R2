@@ -442,7 +442,7 @@ pub(crate) fn is_htest_builtin(name: &str) -> bool {
 /// once). `str` is here because R's `str` prints and returns NULL.
 pub(crate) fn is_invisible_builtin(name: &str) -> bool {
     matches!(name,
-        "invisible" | "print" | "cat" | "message" | "warning" | "writeLines" |
+        "invisible" | "print" | "cat" | "message" | "warning" | "writeLines" | "load" |
         "library" | "require" | "detach" | "data" | "help" |
         "set.seed" | "Sys.sleep" | "Sys.setenv" | "setwd" |
         "assign" | "rm" | "remove" | "stopifnot" |

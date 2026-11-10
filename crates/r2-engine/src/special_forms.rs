@@ -29,6 +29,7 @@ impl Engine {
                 .map(|a| RVal::Lang(Arc::new(a.value.clone())))
                 .unwrap_or(RVal::Null),
             "rm" => self.nse_rm(args, env),
+            "save" => return self.nse_save(args, env),
             // S3 dispatch (s3.rs): UseMethod needs the generic's call, and
             // both need the dispatch in progress.
             "UseMethod" => return self.use_method(args, env).map(Some),
@@ -114,6 +115,34 @@ impl Engine {
 
     /// rm(x, y, ...) / rm("x") / rm(list=c("a","b")): take the UNEVALUATED
     /// symbol/string names and delete the bindings.
+    /// `save(a, b, list = c("x"), file = "f")`: the objects under the names in
+    /// the call, as R saves them. Without `file =`, the call is R2's older
+    /// `save("session.r2s")` / `save(object, "file.r2d")` and goes to the builtin.
+    fn nse_save(&mut self, args: &[CallArg], env: &EnvRef) -> Result<Option<RVal>, R2Err> {
+        let Some(file_arg) = args.iter().find(|a| a.name.as_deref() == Some("file")) else { return Ok(None) };
+        let file = crate::val_to_str(&self.eval_in(&file_arg.value, env)?);
+        let mut names: Vec<Arc<str>> = Vec::new();
+        for a in args {
+            match (a.name.as_deref(), &a.value) {
+                (Some("list"), e) => if let RVal::Character(v, _) = self.eval_in(e, env)? { names.extend(v.into_iter().flatten()); },
+                (Some(_), _) => {}
+                (None, Expr::Symbol(s)) => names.push(s.clone()),
+                (None, Expr::StrLit(s)) => names.push(Arc::from(s.as_str())),
+                (None, _) => return Err(R2Err { msg: "objects to save must be given by name".into(), kind: ErrKind::Runtime }),
+            }
+        }
+        let mut items = Vec::with_capacity(names.len());
+        for n in names {
+            let Some(v) = env.lookup(&n).or_else(|| self.global_env.lookup(&n)) else {
+                return Err(R2Err { msg: format!("object '{}' not found", n), kind: ErrKind::Runtime });
+            };
+            items.push((n, v));
+        }
+        builtins::session::save_named(&items, &file)?;
+        self.visible = false;
+        Ok(Some(RVal::Null))
+    }
+
     fn nse_rm(&mut self, args: &[CallArg], env: &EnvRef) -> RVal {
         let mut to_remove: Vec<Arc<str>> = Vec::new();
         for arg in args {

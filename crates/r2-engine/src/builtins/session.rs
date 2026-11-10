@@ -10,7 +10,6 @@ use r2_types::*;
 
 use crate::{gv, gn, val_to_str, Engine};
 use crate::err;
-use crate::env_insert;
 
 // ── working directory ────────────────────────────────────────────────
 
@@ -124,32 +123,37 @@ pub(crate) fn bi_save(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     Ok(RVal::Null)
 }
 
-pub(crate) fn bi_load(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+/// `save(a, b, list = , file = )` as R: the objects under their names, and
+/// nothing printed. The names come from the call (`special_forms.rs`).
+pub(crate) fn save_named(items: &[(Arc<str>, RVal)], path: &str) -> Result<(), R2Err> {
+    let mut out = String::from("#R2 v0.1.1\n");
+    for (name, val) in items {
+        let serialized = serialize_rval(val);
+        if serialized.is_empty() { return err!(Runtime, "cannot save '{}': a {} cannot be saved", name, val.type_name()); }
+        out.push_str(&format!("{}={}\n", name, serialized));
+    }
+    std::fs::write(path, &out).map_err(|e| R2Err{msg:format!("cannot open file '{}': {}", path, e),kind:ErrKind::Runtime})
+}
+
+/// `load(file)`: each saved object back under its name where `load` is
+/// called, returning the names, as R does. A file written by the old
+/// single-object `save(object, "file.r2d")` still returns its object.
+pub(crate) fn bi_load(_e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let path = gn(a,"file").or(Some(gv(a,0))).map(|v| val_to_str(&v)).unwrap_or("session.r2s".into());
-    let content = std::fs::read_to_string(&path).map_err(|e| R2Err{msg:format!("cannot load '{}': {}", path, e),kind:ErrKind::Runtime})?;
-
-    let ext = path.rsplit('.').next().unwrap_or("");
-    let mut count = 0;
-
+    let content = std::fs::read_to_string(&path).map_err(|e| R2Err{msg:format!("cannot open file '{}': {}", path, e),kind:ErrKind::Runtime})?;
+    let mut names = Vec::new();
     for line in content.lines() {
         if line.is_empty() || line.starts_with('#') { continue; }
         if let Some(eq_pos) = line.find('=') {
             let name = &line[..eq_pos];
-            let val_str = &line[eq_pos+1..];
-            if let Some(val) = deserialize_rval(val_str) {
-                if name == "_obj" {
-                    // Single-object file — return immediately with the value.
-                    let kind = match ext { "r2m" => "model", "r2d" => "data", _ => "object" };
-                    soutln!("Loaded {} ({}) from '{}'", kind, val.type_name(), path);
-                    return Ok(val);
-                }
-                env_insert(&mut e.global_env, Arc::from(name), val);
-                count += 1;
+            if let Some(val) = deserialize_rval(&line[eq_pos+1..]) {
+                if name == "_obj" { return Ok(val); }
+                env.set(Arc::from(name), val);
+                names.push(Some(Arc::from(name)));
             }
         }
     }
-    soutln!("Loaded {} objects from '{}'", count, path);
-    Ok(RVal::Null)
+    Ok(RVal::Character(names, Attrs::default()))
 }
 
 fn serialize_rval(val: &RVal) -> String {
@@ -169,6 +173,12 @@ fn serialize_rval(val: &RVal) -> String {
         RVal::Logical(v, _) => {
             let vals: Vec<String> = v.iter().map(|x| match x { Some(true) => "T".into(), Some(false) => "F".into(), None => "NA".into() }).collect();
             format!("L:{}", vals.join(","))
+        }
+        RVal::Factor(f) => {
+            // F:levels (tab-separated) \x1e codes (1-based, comma-separated) \x1e ordered
+            let levels: Vec<&str> = f.levels.iter().map(|l| l.as_ref()).collect();
+            let codes: Vec<String> = f.codes.iter().map(|c| c.map_or("NA".into(), |c| (c + 1).to_string())).collect();
+            format!("F:{}\x1e{}\x1e{}", levels.join("\t"), codes.join(","), if f.ordered { "T" } else { "F" })
         }
         RVal::DataFrame(df) => {
             // Serialize DataFrame: D:ncol\tcol1_name\ttype:data\tcol2_name\ttype:data...
@@ -217,6 +227,14 @@ fn deserialize_rval(s: &str) -> Option<RVal> {
         'L' => {
             let vals: Vec<Logical> = data.split(',').map(|s| match s { "T" => Some(true), "F" => Some(false), _ => None }).collect();
             Some(RVal::Logical(vals.into(), Attrs::default()))
+        }
+        'F' => {
+            let mut parts = data.split('\x1e');
+            let levels: Vec<Arc<str>> = parts.next()?.split('\t').filter(|l| !l.is_empty()).map(Arc::from).collect();
+            let codes = parts.next()?.split(',').filter(|c| !c.is_empty())
+                .map(|c| c.parse::<u32>().ok().map(|k| k - 1)).collect();
+            let ordered = parts.next() == Some("T");
+            Some(RVal::Factor(Factor { codes, levels, ordered }))
         }
         'M' => {
             // Matrix: M:nrow:ncol:data
@@ -282,4 +300,42 @@ pub(crate) fn bi_version(e: &mut Engine, _a: &[EvalArg], _: &EnvRef) -> Result<R
     soutln!("License: AGPL v3");
     soutln!();
     Ok(RVal::Null)
+}
+
+// ── tempdir() / tempfile() ───────────────────────────────────────────
+
+/// The session's own folder under the system temp folder, made on first use,
+/// as R's `RtmpXXXX`.
+fn session_tempdir() -> Result<std::path::PathBuf, R2Err> {
+    let dir = std::env::temp_dir().join(format!("R2tmp{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| R2Err { msg: format!("cannot create the temporary folder: {}", e), kind: ErrKind::Runtime })?;
+    Ok(dir)
+}
+
+fn path_text(p: &std::path::Path) -> RVal {
+    RVal::Character(vec![Some(Arc::from(p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/").as_str()))], Attrs::default())
+}
+
+pub(crate) fn bi_tempdir(_: &mut Engine, _: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(path_text(&session_tempdir()?))
+}
+
+/// `tempfile(pattern = "file", tmpdir = tempdir(), fileext = "")`: a name for
+/// a file that does not exist yet.
+pub(crate) fn bi_tempfile(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let text = |name: &str, pos: usize, default: &str| -> String {
+        gn(a, name).or_else(|| a.iter().filter(|x| x.name.is_none()).nth(pos).map(|x| x.value.clone()))
+            .map(|v| val_to_str(&v)).unwrap_or_else(|| default.to_string())
+    };
+    let pattern = text("pattern", 0, "file");
+    let dir = match gn(a, "tmpdir") { Some(v) => std::path::PathBuf::from(val_to_str(&v)), None => session_tempdir()? };
+    let ext = text("fileext", 2, "");
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    loop {
+        let tag = (nanos ^ (std::process::id() as u64) << 20).wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e37_79b9));
+        let path = dir.join(format!("{}{:x}{}", pattern, tag & 0xffff_ffff_ffff, ext));
+        if !path.exists() { return Ok(path_text(&path)); }
+    }
 }

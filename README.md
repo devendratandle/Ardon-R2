@@ -74,7 +74,7 @@ fit <- mmap.lm(cols, "y", c("x1", "x2"))          # least squares in one streami
 
 **Also built in:**
 
-- **538 built-in functions and operators**, every one with `?help`.
+- **540 built-in functions and operators**, every one with `?help`.
 - **Statistics:** `lm`/`glm`/`aov` (including repeated-measures `Error()`),
   `t.test`, `cor.test`, `chisq.test`, `shapiro.test`, Hotelling's T², MANOVA.
 - **Machine learning:** decision tree, random forest, gradient boosting, KNN,

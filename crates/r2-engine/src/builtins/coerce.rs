@@ -787,7 +787,9 @@ pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     let v = gv(a,0);
     match &v {
         RVal::DataFrame(df) => {
-            soutln!("'data.frame':  {} obs. of  {} variables:", df.nrow(), df.ncol());
+            // R pads the names to the longest one and separates with a tab
+            soutln!("'data.frame':\t{} obs. of  {} variable{}:", df.nrow(), df.ncol(), if df.ncol() == 1 { "" } else { "s" });
+            let width = df.columns.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
             for (n, c) in &df.columns {
                 let preview = match c {
                     RVal::Numeric(v, _) => {
@@ -808,11 +810,15 @@ pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
                     }
                     RVal::Factor(f) => {
                         let vals: Vec<String> = f.codes.iter().take(6).map(|x| match x { Some(c) => format!("{}", c + 1), None => "NA".into() }).collect();
-                        format!(" Factor w/ {} levels {:?}: {}", f.levels.len(), f.levels.iter().take(4).map(|s| s.to_string()).collect::<Vec<_>>(), vals.join(" "))
+                        let levels: Vec<String> = f.levels.iter().take(4).map(|s| format!("\"{}\"", s)).collect();
+                        let more = if f.levels.len() > 4 { ",.." } else { "" };
+                        let kind = if f.ordered { "Ord.factor" } else { "Factor" };
+                        format!(" {} w/ {} level{} {}{}: {}", kind, f.levels.len(), if f.levels.len() == 1 { "" } else { "s" },
+                            levels.join(","), more, vals.join(" "))
                     }
                     _ => format!(" {}", c.type_name()),
                 };
-                soutln!(" $ {:15}:{}", n, preview);
+                soutln!(" $ {:w$}:{}", n, preview, w = width);
             }
         }
         RVal::Numeric(v, _) => { let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect(); soutln!(" num [1:{}] {}", v.len(), vals.join(" ")); }

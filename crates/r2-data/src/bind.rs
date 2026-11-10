@@ -77,6 +77,28 @@ fn recycled(v: &RVal, extent: usize, call: &str, side: &str, arg: usize) -> Resu
 
 /// rbind — stack rows. data.frame path stacks per-column with type checks;
 /// matrix path stacks blocks (vectors become 1-row 1-col-per-element matrices).
+/// A column's values as text: a factor's labels, numbers as R prints them.
+fn labels_of(v: &RVal) -> Vec<Option<Arc<str>>> {
+    match v {
+        RVal::Factor(f) => f.codes.iter().map(|c| c.and_then(|k| f.levels.get(k as usize).cloned())).collect(),
+        RVal::Character(c, _) => c.clone(),
+        other => (0..rval_length(other)).map(|i| Some(Arc::from(take(other, &[i]).to_string().trim_start_matches("[1] ")))).collect(),
+    }
+}
+
+/// `f` followed by `more`; a label it has not seen becomes a new level.
+fn extend_factor(f: &Factor, more: &[Option<Arc<str>>]) -> Factor {
+    let mut out = f.clone();
+    for label in more {
+        let code = label.as_ref().map(|l| match out.levels.iter().position(|x| x == l) {
+            Some(k) => k as u32,
+            None => { out.levels.push(l.clone()); (out.levels.len() - 1) as u32 }
+        });
+        out.codes.push(code);
+    }
+    out
+}
+
 pub fn bi_rbind(a: &[EvalArg]) -> Result<RVal, R2Err> {
     if a.is_empty() {
         return Err(R2Err { msg: "rbind: needs at least one argument".into(), kind: ErrKind::Runtime });
@@ -101,13 +123,33 @@ pub fn bi_rbind(a: &[EvalArg]) -> Result<RVal, R2Err> {
                     kind: ErrKind::Runtime,
                 });
             }
-            for (i, (name, col2)) in df.columns.iter().enumerate() {
+            // R matches the columns by name when both frames have the same names
+            let same_names = columns.iter().all(|(n, _)| df.columns.iter().any(|(m, _)| m == n));
+            for i in 0..ncol {
                 let (cur_name, cur_col) = columns[i].clone();
+                let (name, col2) = if same_names {
+                    df.columns.iter().find(|(m, _)| *m == cur_name).expect("checked above")
+                } else {
+                    &df.columns[i]
+                };
                 let merged = match (&cur_col, col2) {
                     (RVal::Numeric(v1, _),   RVal::Numeric(v2, _))   => { let mut v = v1.as_vec().clone(); v.extend(v2.as_vec()); RVal::Numeric(v.into(), Attrs::default()) }
                     (RVal::Integer(v1, _),   RVal::Integer(v2, _))   => { let mut v = v1.as_vec().clone(); v.extend(v2.as_vec()); RVal::Integer(v.into(), Attrs::default()) }
+                    (RVal::Numeric(_, _) | RVal::Integer(_, _), RVal::Numeric(_, _) | RVal::Integer(_, _)) => {
+                        let mut v = cur_col.as_reals()?; v.extend(col2.as_reals()?); RVal::Numeric(v.into(), Attrs::default())
+                    }
                     (RVal::Character(v1, _), RVal::Character(v2, _)) => { let mut v = v1.clone(); v.extend(v2.clone());  RVal::Character(v, Attrs::default()) }
                     (RVal::Logical(v1, _),   RVal::Logical(v2, _))   => { let mut v = v1.as_vec().clone(); v.extend(v2.as_vec()); RVal::Logical(v.into(), Attrs::default()) }
+                    // a factor takes the other factor's levels after its own, or
+                    // new text values as levels in order of appearance
+                    (RVal::Factor(f), other) => {
+                        let mut f = f.clone();
+                        if let RVal::Factor(g) = other {
+                            for l in &g.levels { if !f.levels.contains(l) { f.levels.push(l.clone()); } }
+                        }
+                        RVal::Factor(extend_factor(&f, &labels_of(other)))
+                    }
+                    (RVal::Character(v1, _), RVal::Factor(_)) => { let mut v = v1.clone(); v.extend(labels_of(col2)); RVal::Character(v, Attrs::default()) }
                     _ => return Err(R2Err {
                         msg: format!("rbind: incompatible column types at '{}'", name),
                         kind: ErrKind::Type,

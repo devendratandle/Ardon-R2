@@ -11,6 +11,28 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Editing data frames as Ardon Studio's Data tab does — 2026-11-10
+
+- **Every `d[i, j] <- value` works.** Text into a factor or text column
+  (`d[1, 2] <- "b"`) stopped with "cannot convert character to numeric", and
+  `d[1, ] <- list(5, "b", "z")` gave each column the whole list.
+- **`rbind` of data frames with factor columns** adds rows: a new value becomes a new
+  level, two factors join their levels, numbers and integers mix, and columns are
+  matched by name as R matches them. It stopped with "incompatible column types".
+- **`cut()` returns a factor**, as in R; it returned text. A single `breaks` is a
+  number of intervals over the range, and `labels`, `labels = FALSE`, `right`,
+  `include.lowest` and `ordered_result` work, with R's labels ("(0.992,3.67]").
+- **`save(d, file = f)` and `load(f)` work as R's.** Objects are saved under their
+  names, factors included, and `load()` puts them back where it is called and
+  returns their names, silently. Factor columns were dropped and `load()` printed a
+  message. R2's older `save("session.r2s")` and `save(obj, "file.r2d")` still work.
+- **`read.csv` honours `na.strings`, `dec` and `sep`** (`read.csv(f, sep = ";", dec =
+  ",", na.strings = "-")`); all three were ignored. `write.csv` no longer prints
+  "Written to ...".
+- **New: `tempfile()`, `tempdir()`.** `str()` of a data frame lays out names and
+  factor levels as R does. 540 built-in functions.
+- Compared with R line by line in `tests/differential/output/studio_data.R`.
+
 ### Numbers as text, as R writes them — 2026-11-09
 
 - **`as.character()` and `paste()` write a number with up to 15 significant digits**, as R

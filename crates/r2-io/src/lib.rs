@@ -178,7 +178,29 @@ fn escape_csv_field(s: &str, sep: &str) -> String {
     }
 }
 
-fn columns_from_rows(raw_cols: &[Vec<String>], col_names: &[String]) -> Vec<(Arc<str>, RVal)> {
+/// How a reader reads a field: which strings are missing (`na.strings`) and
+/// the decimal mark (`dec`).
+struct Fields { na: Vec<String>, dec: char }
+
+impl Fields {
+    fn from_args(a: &[EvalArg]) -> Fields {
+        let na = match gn(a, "na.strings") {
+            Some(RVal::Character(s, _)) => s.iter().flatten().map(|x| x.to_string()).collect(),
+            _ => vec!["NA".to_string()],
+        };
+        let dec = match gn(a, "dec") {
+            Some(RVal::Character(s, _)) => s.first().cloned().flatten().and_then(|d| d.chars().next()).unwrap_or('.'),
+            _ => '.',
+        };
+        Fields { na, dec }
+    }
+    fn is_na(&self, s: &str) -> bool { self.na.iter().any(|n| n == s) }
+    fn number(&self, s: &str) -> Option<f64> {
+        if self.dec == '.' { s.trim().parse().ok() } else { s.trim().replace(self.dec, ".").parse().ok() }
+    }
+}
+
+fn columns_from_rows(raw_cols: &[Vec<String>], col_names: &[String], f: &Fields) -> Vec<(Arc<str>, RVal)> {
     let mut columns = Vec::with_capacity(raw_cols.len());
     for (i, col_data) in raw_cols.iter().enumerate() {
         let name = if i < col_names.len() {
@@ -186,16 +208,16 @@ fn columns_from_rows(raw_cols: &[Vec<String>], col_names: &[String]) -> Vec<(Arc
         } else {
             Arc::from(format!("V{}", i + 1).as_str())
         };
-        let all_num = col_data.iter().all(|s| s.is_empty() || s == "NA" || s.parse::<f64>().is_ok());
-        let has_num = col_data.iter().any(|s| s.parse::<f64>().is_ok());
+        let all_num = col_data.iter().all(|s| s.is_empty() || f.is_na(s) || f.number(s).is_some());
+        let has_num = col_data.iter().any(|s| f.number(s).is_some());
         if all_num && has_num {
             let nums: Vec<Real> = col_data.iter()
-                .map(|s| if s.is_empty() || s == "NA" { None } else { s.parse().ok() })
+                .map(|s| if s.is_empty() || f.is_na(s) { None } else { f.number(s) })
                 .collect();
             columns.push((name, RVal::Numeric(nums.into(), Attrs::default())));
         } else {
             let strs: Vec<Character> = col_data.iter()
-                .map(|s| if s == "NA" { None } else { Some(Arc::from(s.as_str())) })
+                .map(|s| if f.is_na(s) { None } else { Some(Arc::from(s.as_str())) })
                 .collect();
             columns.push((name, RVal::Character(strs, Attrs::default())));
         }
@@ -352,7 +374,7 @@ pub fn check_names_arg(a: &[EvalArg]) -> bool {
         .unwrap_or(true)
 }
 
-fn read_delimited(path: &str, sep: &str, header: bool, check_names: bool,
+fn read_delimited(path: &str, sep: &str, header: bool, check_names: bool, fields: &Fields,
                   encoding: Option<&str>) -> Result<RVal, R2Err> {
     let content = read_text_file(path, encoding)?;
     let mut rows = parse_csv(&content, sep);
@@ -369,7 +391,7 @@ fn read_delimited(path: &str, sep: &str, header: bool, check_names: bool,
             if i < raw_cols.len() { raw_cols[i].push(field.clone()); }
         }
     }
-    let columns = columns_from_rows(&raw_cols, &col_names);
+    let columns = columns_from_rows(&raw_cols, &col_names, fields);
     Ok(RVal::DataFrame(DataFrame { columns, row_names: None }))
 }
 
@@ -398,14 +420,15 @@ fn sep_arg(a: &[EvalArg], default: &str) -> String {
 pub fn bi_read_csv(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let path = require_path(&gv(a, 0), "read.csv")?;
     let header = header_arg(a);
-    read_delimited(&path, ",", header, check_names_arg(a), encoding_arg(a).as_deref())
+    let sep = sep_arg(a, ",");
+    read_delimited(&path, &sep, header, check_names_arg(a), &Fields::from_args(a), encoding_arg(a).as_deref())
 }
 
 pub fn bi_read_table(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let path = require_path(&gv(a, 0), "read.table")?;
     let header = header_arg(a);
     let sep = sep_arg(a, "\t");
-    read_delimited(&path, &sep, header, check_names_arg(a), encoding_arg(a).as_deref())
+    read_delimited(&path, &sep, header, check_names_arg(a), &Fields::from_args(a), encoding_arg(a).as_deref())
 }
 
 pub fn bi_read_delim(a: &[EvalArg]) -> Result<RVal, R2Err> {
@@ -462,7 +485,7 @@ fn write_delimited(df: &DataFrame, path: &str, sep: &str, csv_style: bool) -> Re
         msg: format!("cannot write: {}", e),
         kind: ErrKind::Runtime,
     })?;
-    println!("Written to {}", path);
+    // silent, as R's write.csv is
     Ok(())
 }
 
