@@ -895,6 +895,36 @@ static CLASS_TEXT: std::sync::OnceLock<fn(&RVal) -> Option<ClassText>> = std::sy
 /// first one installed stays.
 pub fn set_class_text(f: fn(&RVal) -> Option<ClassText>) { let _ = CLASS_TEXT.set(f); }
 
+/// A two-way table as R prints one: the column variable's name over the
+/// column labels, the row variable's name heading the row labels, which are
+/// indented two spaces and left-aligned; counts right-aligned per column.
+fn table_text(v: &RVal, nrow: usize, ncol: usize, dn: &[(Option<Arc<str>>, RVal)]) -> String {
+    let labels = |k: usize| -> Vec<String> {
+        match dn.get(k).map(|x| &x.1) {
+            Some(RVal::Character(s, _)) => s.iter().map(|x| x.as_deref().unwrap_or("NA").to_string()).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let name = |k: usize| dn.get(k).and_then(|x| x.0.as_deref()).unwrap_or("").to_string();
+    let (rows, cols) = (labels(0), labels(1));
+    let cells: Vec<String> = match v.as_reals() {
+        Ok(x) => x.iter().map(|c| c.map(fmt_num).unwrap_or_else(|| "NA".into())).collect(),
+        Err(_) => return String::new(),
+    };
+    let w = rows.iter().map(|r| r.len() + 2).max().unwrap_or(2).max(name(0).len());
+    // the counts share one width, a column widens only for a longer label
+    let cell_w = cells.iter().map(|c| c.len()).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..ncol).map(|j| cols.get(j).map_or(0, |c| c.len()).max(cell_w)).collect();
+    let mut out = format!("{:w$}{}", "", name(1), w = w);
+    out.push_str(&format!("\n{:<w$}", name(0), w = w));
+    for (j, cw) in widths.iter().enumerate() { out.push_str(&format!(" {:>cw$}", cols.get(j).map_or("", |c| c.as_str()), cw = cw)); }
+    for i in 0..nrow {
+        out.push_str(&format!("\n{:<w$}", format!("  {}", rows.get(i).map_or("", |r| r.as_str())), w = w));
+        for (j, cw) in widths.iter().enumerate() { out.push_str(&format!(" {:>cw$}", cells[j * nrow + i], cw = cw)); }
+    }
+    out
+}
+
 /// An atomic vector with two dimensions, as R prints a matrix. Numbers go
 /// through `Matrix`'s own printing; logical and text cells are laid out here.
 fn dim_text(v: &RVal) -> Option<String> {
@@ -904,6 +934,9 @@ fn dim_text(v: &RVal) -> Option<String> {
     };
     let (nrow, ncol) = match at.dim.as_deref() { Some(&[r, c]) => (r, c), _ => return None };
     if nrow * ncol != rval_length(v) { return None; }
+    if let (Some("table"), Some(RVal::List(dn, _))) = (at.class.as_deref(), at.custom.get("dimnames")) {
+        return Some(table_text(v, nrow, ncol, dn));
+    }
     let (cells, left): (Vec<String>, bool) = match v {
         RVal::Numeric(..) | RVal::Integer(..) => {
             let data = v.as_reals().ok()?.iter().map(|x| x.unwrap_or(f64::NAN)).collect();

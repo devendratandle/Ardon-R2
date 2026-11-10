@@ -11,6 +11,28 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Two-way tables, `wilcox.test` and `airquality` as in R — 2026-11-11
+
+- **`table(a, b)` counts both variables.** It ignored `b` and gave a one-way table.
+  The result is an integer matrix of class "table" with named dimnames, printed in
+  R's layout, readable as `t["6", "4"]`; `table(am, vs)` names its dimensions from
+  the call, as R does.
+- **`wilcox.test` gives R's p-values.** With fewer than 50 values a side and no ties
+  (and no zero differences when paired) the p-value is exact; otherwise it is the
+  normal approximation with R's tie and continuity corrections. It was always an
+  uncorrected normal approximation (0.149 where R gives 0.2). `paired`,
+  `alternative`, `exact`, `correct`, the formula form `wilcox.test(mpg ~ am, data =
+  mtcars)`, and the statistic named `W` or `V` all work.
+- **`airquality` has all 153 rows of R's**, with integer columns; it had the first 30.
+- **Also found and fixed:** a matrix indexed by row or column names
+  (`m["r1", "c2"]`) stopped with an error, and a row or column taken from a named
+  matrix lost its names. `x$method`, `x$type` and other R2 keywords after `$` did not
+  parse. `numeric(0) + 1:3` crashed R2; it is `numeric(0)`. `df[153, ]` keeps its row
+  name. `colSums`, `colMeans`, `rowSums` and `rowMeans` give NA for a missing value
+  unless `na.rm = TRUE` (they skipped it, and `colMeans` still divided by every row),
+  and name their result as R does.
+- Compared with R line by line in `tests/differential/output/studio_checks.R`.
+
 ### Model tables as R gives them: coefficient names, `anova`, `cor.test` — 2026-11-10
 
 - **Coefficients of expression terms are named as written.** `lm(mpg ~ wt +

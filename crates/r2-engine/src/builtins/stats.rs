@@ -215,91 +215,55 @@ pub(crate) fn bi_set_seed(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<
 
 // ── rowSums(), colSums(), rowMeans(), colMeans() ─────────────────────
 
-pub(crate) fn bi_rowSums(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    match &gv(a,0) {
+/// The numeric columns of a data frame or matrix, with their names and the
+/// row names: what rowSums, colSums, rowMeans and colMeans reduce over. A
+/// non-numeric data-frame column stops them, as in R.
+fn margin_columns(e: &mut Engine, x: &RVal, fname: &str)
+    -> Result<(Vec<Vec<Option<f64>>>, Option<Vec<Arc<str>>>, Option<Vec<Arc<str>>>), R2Err> {
+    match x {
         RVal::DataFrame(df) => {
-            let nrow = df.nrow();
-            let mut sums = vec![0.0f64; nrow];
-            for (_, col) in &df.columns {
-                if let Ok(vals) = e.as_reals(col) {
-                    for (i, v) in vals.iter().enumerate() { if let Some(n) = v { sums[i] += n; } }
+            let mut cols = Vec::with_capacity(df.ncol());
+            for (n, c) in &df.columns {
+                if matches!(c, RVal::Character(..) | RVal::Factor(..)) {
+                    return err!(Runtime, "'x' must be numeric (column '{}' of the data frame is not), in {}", n, fname);
                 }
+                cols.push(e.as_reals(c)?);
             }
-            Ok(rnums(&sums))
+            Ok((cols, Some(df.columns.iter().map(|(n, _)| n.clone()).collect()), df.row_names.clone()))
         }
-        RVal::Matrix(m) => {
-            let sums: Vec<f64> = (0..m.nrow).map(|r| (0..m.ncol).map(|c| m.get(r, c)).sum()).collect();
-            Ok(rnums(&sums))
-        }
-        _ => err!(Runtime, "rowSums needs data.frame or matrix"),
+        RVal::Matrix(m) => Ok((
+            (0..m.ncol).map(|j| m.data[j * m.nrow..(j + 1) * m.nrow].iter().map(|v| if v.is_nan() { None } else { Some(*v) }).collect()).collect(),
+            m.col_names.clone(), m.row_names.clone(),
+        )),
+        _ => err!(Runtime, "'x' must be an array of at least two dimensions, in {}", fname),
     }
 }
 
-pub(crate) fn bi_colSums(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    match &gv(a,0) {
-        RVal::DataFrame(df) => {
-            let mut results = Vec::new();
-            for (_name, col) in &df.columns {
-                if let Ok(vals) = e.as_reals(col) {
-                    let s: f64 = vals.iter().filter_map(|x| *x).sum();
-                    results.push(s);
-                }
-            }
-            let mut attrs = Attrs::default();
-            attrs.names = Some(df.columns.iter().filter_map(|(n, col)| {
-                if e.as_reals(col).is_ok() { Some(n.clone()) } else { None }
-            }).collect());
-            Ok(RVal::Numeric(results.iter().map(|x| Some(*x)).collect(), attrs))
-        }
-        RVal::Matrix(m) => {
-            let sums: Vec<f64> = (0..m.ncol).map(|c| (0..m.nrow).map(|r| m.get(r, c)).sum()).collect();
-            Ok(rnums(&sums))
-        }
-        _ => err!(Runtime, "colSums needs data.frame or matrix"),
-    }
+/// Sum or mean of each group of values: NA when one is missing unless
+/// `na.rm = TRUE` drops them (a mean of nothing is NaN), named as R names it.
+fn margins(e: &mut Engine, a: &[EvalArg], by_row: bool, mean: bool, fname: &str) -> Result<RVal, R2Err> {
+    let na_rm = gn(a, "na.rm").map(|v| matches!(v, RVal::Logical(ref l, _) if l.first() == Some(&Some(true)))).unwrap_or(false);
+    let (cols, col_names, row_names) = margin_columns(e, &gv(a, 0), fname)?;
+    let nrow = cols.first().map_or(0, |c| c.len());
+    let groups: Vec<Vec<Option<f64>>> = if by_row {
+        (0..nrow).map(|i| cols.iter().map(|c| c[i]).collect()).collect()
+    } else {
+        cols
+    };
+    let out: Vec<Option<f64>> = groups.iter().map(|g| {
+        if !na_rm && g.iter().any(|v| v.is_none()) { return None; }
+        let vals: Vec<f64> = g.iter().flatten().copied().collect();
+        let s: f64 = vals.iter().sum();
+        Some(if mean { s / vals.len() as f64 } else { s })
+    }).collect();
+    let names = if by_row { row_names } else { col_names };
+    Ok(RVal::Numeric(out.into(), Attrs { names, ..Default::default() }))
 }
 
-pub(crate) fn bi_rowMeans(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    match &gv(a,0) {
-        RVal::DataFrame(df) => {
-            let nrow = df.nrow();
-            let ncol_num = df.columns.iter().filter(|(_, col)| e.as_reals(col).is_ok()).count();
-            let mut sums = vec![0.0f64; nrow];
-            for (_, col) in &df.columns {
-                if let Ok(vals) = e.as_reals(col) {
-                    for (i, v) in vals.iter().enumerate() { if let Some(n) = v { sums[i] += n; } }
-                }
-            }
-            Ok(rnums(&sums.iter().map(|s| s / ncol_num as f64).collect::<Vec<_>>()))
-        }
-        _ => err!(Runtime, "rowMeans needs data.frame or matrix"),
-    }
-}
-
-pub(crate) fn bi_colMeans(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    match &gv(a,0) {
-        RVal::DataFrame(df) => {
-            let nrow = df.nrow() as f64;
-            let mut results = Vec::new();
-            for (_, col) in &df.columns {
-                if let Ok(vals) = e.as_reals(col) {
-                    let s: f64 = vals.iter().filter_map(|x| *x).sum();
-                    results.push(s / nrow);
-                }
-            }
-            Ok(rnums(&results))
-        }
-        RVal::Matrix(m) => {
-            let nrow = m.nrow;
-            let results: Vec<f64> = (0..m.ncol).map(|j| {
-                let s: f64 = (0..nrow).map(|i| m.data[j * nrow + i]).sum();
-                s / nrow as f64
-            }).collect();
-            Ok(rnums(&results))
-        }
-        _ => err!(Runtime, "colMeans needs data.frame or matrix"),
-    }
-}
+pub(crate) fn bi_rowSums(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { margins(e, a, true, false, "rowSums") }
+pub(crate) fn bi_colSums(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { margins(e, a, false, false, "colSums") }
+pub(crate) fn bi_rowMeans(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { margins(e, a, true, true, "rowMeans") }
+pub(crate) fn bi_colMeans(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { margins(e, a, false, true, "colMeans") }
 
 // ── confusion.matrix() — classification evaluation ───────────────────
 

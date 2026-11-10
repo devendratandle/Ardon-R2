@@ -58,7 +58,7 @@ pub fn mtcars() -> RVal {
     load(BYTES, "mtcars")
 }
 
-/// New York air quality, May–September 1973 — first 30 rows, with NAs.
+/// New York air quality, May–September 1973 — all 153 rows of R's, with NAs.
 pub fn airquality() -> RVal {
     static BYTES: &[u8] = include_bytes!("../datasets/airquality.r2d");
     load(BYTES, "airquality")

@@ -30,6 +30,7 @@ impl Engine {
                 .unwrap_or(RVal::Null),
             "rm" => self.nse_rm(args, env),
             "save" => return self.nse_save(args, env),
+            "table" => return self.nse_table(args, env).map(Some),
             // S3 dispatch (s3.rs): UseMethod needs the generic's call, and
             // both need the dispatch in progress.
             "UseMethod" => return self.use_method(args, env).map(Some),
@@ -53,19 +54,9 @@ impl Engine {
             "with" if args.len() >= 2 => self.nse_with(args, env)?,
             "switch" if !args.is_empty() => self.nse_switch(args, env)?,
             "curve" if !args.is_empty() => self.nse_curve(args, env)?,
-            "lm" | "glm" | "t.test" | "rpart" | "rf" | "gbm" | "cv" | "aov" | "manova"
+            "lm" | "glm" | "t.test" | "wilcox.test" | "rpart" | "rf" | "gbm" | "cv" | "aov" | "manova"
                 | "lmer" | "aggregate" | "boxplot" => return self.formula_call(fname, func, args, env),
             "system.time" if !args.is_empty() => self.nse_system_time(&args[0].value, env)?,
-            // table(x) prints `x` as its header line (R's deparse.level = 1):
-            // a bare variable passes its name on as `dnn`.
-            "table" if args.len() == 1 && args[0].name.is_none() && matches!(args[0].value, Expr::Symbol(_)) => {
-                let Expr::Symbol(name) = &args[0].value else { return Ok(None) };
-                let ea = vec![
-                    EvalArg { name: None, value: self.eval_in(&args[0].value, env)? },
-                    EvalArg { name: Some(Arc::from("dnn")), value: RVal::Character(vec![Some(name.clone())], Attrs::default()) },
-                ];
-                self.call_fn(&RVal::BuiltinFn(Arc::from("table")), &ea, env)?
-            }
             _ => return Ok(None),
         };
         Ok(Some(v))
@@ -141,6 +132,23 @@ impl Engine {
         builtins::session::save_named(&items, &file)?;
         self.visible = false;
         Ok(Some(RVal::Null))
+    }
+
+    /// `table(am, vs)`: a variable given by its bare name names its dimension,
+    /// as R's `deparse.level = 1` does; then the builtin counts.
+    fn nse_table(&mut self, args: &[CallArg], env: &EnvRef) -> Result<RVal, R2Err> {
+        let mut ea = Vec::with_capacity(args.len());
+        for a in args {
+            if matches!(a.value, Expr::Dots) {
+                if let Some(RVal::List(dots, _)) = env.lookup("...") {
+                    for (n, v) in dots { ea.push(EvalArg { name: n, value: v }); }
+                }
+                continue;
+            }
+            let name = a.name.clone().or_else(|| match &a.value { Expr::Symbol(s) => Some(s.clone()), _ => None });
+            ea.push(EvalArg { name, value: self.eval_in(&a.value, env)? });
+        }
+        self.call_fn(&RVal::BuiltinFn(Arc::from("table")), &ea, env)
     }
 
     fn nse_rm(&mut self, args: &[CallArg], env: &EnvRef) -> RVal {

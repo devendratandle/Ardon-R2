@@ -25,6 +25,33 @@ fn dump(name: &str, v: RVal) {
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
 }
 
+/// Rebuilds `airquality.r2d`, all 153 rows, from R's own data written as CSV:
+///   Rscript -e "write.csv(airquality, 'aq.csv', row.names = FALSE)"
+///   R2_AIRQUALITY_CSV=aq.csv cargo test -p r2-base --release --test gen_datasets -- --ignored airquality_from_csv
+/// Wind is numeric and the other columns integer, as in R.
+#[test]
+#[ignore]
+fn airquality_from_csv() {
+    use r2_types::{Attrs, DataFrame};
+    use std::sync::Arc;
+    let path = std::env::var("R2_AIRQUALITY_CSV").expect("set R2_AIRQUALITY_CSV to R's airquality as CSV");
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines();
+    let names: Vec<String> = lines.next().unwrap().split(',').map(|s| s.trim_matches('"').to_string()).collect();
+    let rows: Vec<Vec<&str>> = lines.filter(|l| !l.trim().is_empty()).map(|l| l.split(',').collect()).collect();
+    assert_eq!(rows.len(), 153, "R's airquality has 153 rows");
+    let columns = names.iter().enumerate().map(|(j, name)| {
+        let cells = rows.iter().map(|r| r[j].trim());
+        let col = if name == "Wind" {
+            RVal::Numeric(cells.map(|c| c.parse::<f64>().ok()).collect::<Vec<_>>().into(), Attrs::default())
+        } else {
+            RVal::Integer(cells.map(|c| c.parse::<i32>().ok()).collect::<Vec<_>>().into(), Attrs::default())
+        };
+        (Arc::from(name.as_str()), col)
+    }).collect();
+    dump("airquality", RVal::DataFrame(DataFrame { columns, row_names: None }));
+}
+
 #[test]
 #[ignore]
 fn generate_all() {
