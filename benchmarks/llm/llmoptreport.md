@@ -351,3 +351,23 @@ All tests pass, including fused scores against the stored form's bits. Weights m
 **Launches at 7.2M:** 161 per step at 2.6 us queued is about 0.4 ms of 24.5 ms, 1.7%. CUDA Graphs could save at most that. Closed unless a later run shows otherwise.
 
 **f16: no answer yet.** `cublasGemmEx` returned status 7 for both f16 and f32-fast-16 with algorithm 160, so there are no f16 rates or accuracy figures. The f32 control ran at 3,491-3,829 GFLOP/s against plain cuBLAS at 3,674-4,018. Next: algorithm -1, cuBLAS logging, and PyTorch's own f16 `matmul` under the same sampler.
+
+### Run 34 (3e2f8b7 as a patch on 4089a5b): fp16 retry with the default algorithm
+
+All CUDA tests pass and the PTX is up to date. One T4, 4096 × 768 × 3072, sustained 30 s per form, two rounds in fair order; every round sits at the 70 W cap (throttle reason 0x4, power).
+
+| GFLOP/s, sustained | Round 1 | Round 2 |
+|---|---:|---:|
+| R2 `gemm_ex` f32 | 4,247 | 3,863 |
+| PyTorch f32 | 4,113 | 3,778 |
+| R2 `gemm_ex` f32-fast-16 | 10,540 | 9,977 |
+| R2 `gemm_ex` f16 | refused | refused |
+| PyTorch f16 | 22,037 | 21,135 |
+
+**f32:** R2 and PyTorch are level (R2 +3% and +2%, within the 9% round-to-round spread), both cuBLAS.
+
+**f32-fast-16 works with the default algorithm:** 2.5-2.6× plain f32, inputs kept in f32. Its accuracy line fell outside the logged tail, so its error is not yet measured.
+
+**f16 was refused for an R2 bug, not the hardware:** cuBLAS's log shows R2 passed data type 6, which is `CUDA_C_16F` (complex half); real half is `CUDA_R_16F`, 2. Status 15 is "not supported". Fixed after this run. PyTorch's f16 product runs at 21-22 TFLOP/s, 5.2-5.6× f32, rms error 2.1e-4 against f32 on this shape: that is the reachable ceiling for R2's f16 path.
+
+Next: rerun the probe with the fixed type to get R2's f16 rate and the fast-16 and f16 error.

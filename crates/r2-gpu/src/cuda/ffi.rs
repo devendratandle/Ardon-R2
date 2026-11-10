@@ -739,7 +739,7 @@ impl Blas {
     pub fn gemm_ex(&self, form: GemmForm, m: usize, n: usize, k: usize, a: &DeviceBuffer<f32>, b: &DeviceBuffer<f32>,
                    c: &DeviceBuffer<f32>) -> Result<(), String> {
         const R_32F: c_int = 0;              // CUDA_R_32F
-        const R_16F: c_int = 6;              // CUDA_R_16F
+        const R_16F: c_int = 2;              // CUDA_R_16F (6 is CUDA_C_16F, complex: run 34 refused it)
         const COMPUTE_32F: c_int = 0;        // CUBLAS_COMPUTE_32F
         const COMPUTE_16F: c_int = 64;       // CUBLAS_COMPUTE_16F
         const COMPUTE_32F_FAST_16F: c_int = 74;
