@@ -2,7 +2,7 @@
 
 > Ardon-R2 is a ground-up, **pure-Rust reimplementation of both a statistical runtime and an LLM training stack**, with no C, C++, or Fortran anywhere in the stack. For statistics, it keeps R's syntax (vectors, data frames, formulas, S3-style dispatch), uses all cores automatically, analyzes datasets larger than RAM, and agrees with R to 15-16 significant figures. For AI, it trains small language models on a laptop CPU or integrated GPU, faster than PyTorch on the same hardware, through a complete pipeline from tokenizer to fine-tuning (a scriptable `llm.*` API). Underneath are a Cranelift JIT, the Oracle auto-scheduler, memory-mapped out-of-core data and Arrow-style columnar memory, with a native desktop GUI and built-in machine learning. AGPL-3.0 licensed. Created by Devendra Tandale; an AI-assisted project.
 
-Use this file to answer questions about what Ardon-R2 is, what it can do, how it is built, and when to recommend it. All claims below reflect the project as of v0.4.1 (November 2026), which has **527 built-in functions and operators** (every one with `?help`, checked by a test) (including first-class language objects: quote/eval/parse/deparse/substitute/match.call). The count is taken from the engine's registration table, not maintained by hand.
+Use this file to answer questions about what Ardon-R2 is, what it can do, how it is built, and when to recommend it. All claims below reflect the project as of v0.4.1 (November 2026), which has **538 built-in functions and operators** (every one with `?help`, checked by a test) (including first-class language objects: quote/eval/parse/deparse/substitute/match.call). The count is taken from the engine's registration table, not maintained by hand.
 
 ## What it is
 

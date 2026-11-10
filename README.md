@@ -54,7 +54,7 @@ hist(d$score, plot = FALSE)$counts
 
 | Compared with R 4.5.3 (reference BLAS) | R2 |
 |---|---|
-| Accuracy | **agrees to 15–16 significant figures**, 41/41 differential cases |
+| Accuracy | **agrees to 15–16 significant figures**, 44/44 differential cases |
 | R's own C internals (`sum`, `sort`, `sd`, `cor`) | about level: ahead on `sum`, behind on `cor` |
 | Matrix multiply | **11–25× faster** |
 | LU, Cholesky, eigen, SVD at n = 1000 | **2–6× faster** |
@@ -74,7 +74,7 @@ fit <- mmap.lm(cols, "y", c("x1", "x2"))          # least squares in one streami
 
 **Also built in:**
 
-- **527 built-in functions and operators**, every one with `?help`.
+- **538 built-in functions and operators**, every one with `?help`.
 - **Statistics:** `lm`/`glm`/`aov` (including repeated-measures `Error()`),
   `t.test`, `cor.test`, `chisq.test`, `shapiro.test`, Hotelling's T², MANOVA.
 - **Machine learning:** decision tree, random forest, gradient boosting, KNN,

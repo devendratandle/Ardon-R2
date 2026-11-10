@@ -55,7 +55,14 @@ pub(crate) fn bi_cumprod(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<R
     r2_stats::summary::bi_cumprod(a)
 }
 pub(crate) fn bi_diff(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    r2_stats::summary::bi_diff(a)
+    let class = match a.first().map(|x| &x.value) { Some(RVal::Numeric(_, at)) => at.class.clone(), _ => None };
+    let out = r2_stats::summary::bi_diff(a)?;
+    let RVal::Numeric(d, _) = &out else { return Ok(out) };
+    Ok(match class.as_deref() {
+        Some("Date") => crate::ops_attrs::difftime_in(d.iter().map(|x| x.map(|v| v * 86400.0)).collect(), "days"),
+        Some("POSIXct") => crate::ops_attrs::difftime_auto(d.iter().copied().collect()),
+        _ => out,
+    })
 }
 pub(crate) fn bi_rollsum(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     r2_stats::summary::bi_rollsum(a)

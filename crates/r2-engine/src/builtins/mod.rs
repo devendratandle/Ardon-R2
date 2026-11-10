@@ -14,6 +14,7 @@
 pub(crate) mod core;
 pub(crate) mod data_apply;
 pub(crate) mod sys_models;
+pub(crate) mod attrs;
 pub(crate) mod ml_data;
 pub(crate) mod qr;
 pub(crate) mod help;

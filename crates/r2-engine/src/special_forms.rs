@@ -29,6 +29,10 @@ impl Engine {
                 .map(|a| RVal::Lang(Arc::new(a.value.clone())))
                 .unwrap_or(RVal::Null),
             "rm" => self.nse_rm(args, env),
+            // S3 dispatch (s3.rs): UseMethod needs the generic's call, and
+            // both need the dispatch in progress.
+            "UseMethod" => return self.use_method(args, env).map(Some),
+            "NextMethod" => return self.next_method(env).map(Some),
             "substitute" => self.nse_substitute(args),
             // bquote(e) — quote e, but splice in any `.(x)` evaluated in
             // the current environment (quasiquotation). (Phase L.3.)
@@ -405,7 +409,7 @@ impl Engine {
 /// `call` (always NULL here: R2 does not record the call), class "simpleError".
 pub(crate) fn condition(msg: &str) -> RVal {
     let mut attrs = Attrs::default();
-    attrs.class = Some(Arc::from("simpleError"));
+    attrs.set_classes(["simpleError", "error", "condition"].iter().map(|c| Arc::from(*c)).collect());
     RVal::List(vec![
         (Some(Arc::from("message")), RVal::Character(vec![Some(Arc::from(msg))], Attrs::default())),
         (Some(Arc::from("call")), RVal::Null),

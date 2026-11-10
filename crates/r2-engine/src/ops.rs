@@ -19,7 +19,7 @@ impl Engine {
         }
     }
 
-    pub(crate) fn binary_op(&mut self, op: BinOp, lhs: &RVal, rhs: &RVal) -> Result<RVal, R2Err> {
+    pub(crate) fn binary_values(&mut self, op: BinOp, lhs: &RVal, rhs: &RVal) -> Result<RVal, R2Err> {
         // Matrix multiply: %*%
         if op == BinOp::MatMul {
             return match (lhs, rhs) {
@@ -283,7 +283,7 @@ impl Engine {
             }
         }
     }
-    pub(crate) fn unary_op(&self, op: UnOp, v: &RVal) -> Result<RVal, R2Err> { match op { UnOp::Neg => { let r = self.as_reals(v)?; Ok(RVal::Numeric(r.into_iter().map(|x| x.map(|n| -n)).collect(), Attrs::default())) } UnOp::Pos => Ok(v.clone()), UnOp::Not => { let r = self.as_logicals(v)?; Ok(RVal::Logical(r.into_iter().map(|x| x.map(|b| !b)).collect(), Attrs::default())) } } }
+    pub(crate) fn unary_values(&self, op: UnOp, v: &RVal) -> Result<RVal, R2Err> { match op { UnOp::Neg => { let r = self.as_reals(v)?; Ok(RVal::Numeric(r.into_iter().map(|x| x.map(|n| -n)).collect(), Attrs::default())) } UnOp::Pos => Ok(v.clone()), UnOp::Not => { let r = self.as_logicals(v)?; Ok(RVal::Logical(r.into_iter().map(|x| x.map(|b| !b)).collect(), Attrs::default())) } } }
     // `a:b` — columnar-first: ranges are dense i32 with no NAs, so build
     // ColumnarI32 directly; the boxed Vec<Option<i32>> view materialises
     // only if a caller walks elements.

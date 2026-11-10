@@ -78,7 +78,7 @@ pub(crate) fn bi_parse(_e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
 /// that closure needs an NSE frame. Does NOT descend into nested function
 /// definitions — an inner function gets its own gate when it is called.
 pub(crate) fn expr_uses_nse(e: &Expr) -> bool {
-    fn is_nse(s: &str) -> bool { matches!(s, "substitute" | "match.call" | "sys.call" | "bquote") }
+    fn is_nse(s: &str) -> bool { matches!(s, "substitute" | "match.call" | "sys.call" | "bquote" | "UseMethod") }
     match e {
         Expr::Call { func, args } => {
             if let Expr::Symbol(s) = func.as_ref() { if is_nse(s) { return true; } }

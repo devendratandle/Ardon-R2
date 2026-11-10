@@ -321,6 +321,12 @@ fn explicit_help(topic: &str) -> Option<&'static str> {
         "==" | "!=" | "<" | "<=" | ">" | ">=" => "x == y, x != y, x < y, x <= y, x > y, x >= y\n  Comparison, element-wise, giving a logical vector; NA gives NA.\n  Strings compare in R's collation order.\n  Example: c(1, 5, 3) > 2",
         "%in%" => "x %in% table\n  TRUE for each element of x found in table (match(x, table) > 0).\n  Example: c(\"a\", \"z\") %in% letters[1:5]",
         "(" => "(expr)\n  Parentheses: group an expression. Around an assignment they also\n  print its value: (x <- 5)",
+        "class<-" => "class(x) <- value
+  Set the class vector of x; NULL removes it.
+  Example: k <- list(a = 1); class(k) <- \"foo\"",
+        "attr<-" => "attr(x, which) <- value
+  Set one attribute of x; NULL removes it.
+  Example: y <- 1; attr(y, \"note\") <- \"hello\"",
         "names<-" | "colnames<-" | "rownames<-" => "names(x) <- value, colnames(x) <- value, rownames(x) <- value\n  Replacement forms: set names on a vector/list, or the column/row\n  names of a data frame or matrix. Nested use works: names(x)[2] <- \"b\"",
         "chol" => "chol(x)\n  Cholesky factor of a symmetric positive-definite matrix: the upper\n  triangular R with t(R) %*% R == x.\n  Example: chol(crossprod(matrix(c(2, 1, 1, 3), 2)))",
         "is.ordered" =>"is.ordered(x)\n  TRUE for an ordered factor (factor(..., ordered = TRUE)).\n  Example: is.ordered(factor(c(\"s\", \"m\"), ordered = TRUE))",

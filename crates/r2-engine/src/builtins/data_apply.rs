@@ -213,7 +213,7 @@ pub(crate) fn bi_ifelse(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
             Some(false) => no.get(i % nl).cloned().flatten(),
             None => None,
         }).collect();
-        return Ok(RVal::Character(result, Attrs::default()));
+        return Ok(crate::ops_attrs::shaped_like(&gv(a,0), RVal::Character(result, Attrs::default())));
     }
 
     let yes = e.as_reals(&yes_val)?;
@@ -226,7 +226,7 @@ pub(crate) fn bi_ifelse(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
             None => None,
         }
     }).collect();
-    Ok(RVal::Numeric(result.into(), Attrs::default()))
+    Ok(crate::ops_attrs::shaped_like(&gv(a,0), RVal::Numeric(result.into(), Attrs::default())))
 }
 
 /// String view of a branch value for `ifelse` (character result path).
@@ -246,7 +246,7 @@ fn ifelse_char_vec(v: &RVal) -> Vec<Character> {
 // APPLY FAMILY: apply, tapply, aggregate, do.call
 // ═══════════════════════════════════════════════════════════════════════
 
-pub(crate) fn bi_apply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> { return r2_data::apply::bi_apply(e, a, env);
+pub(crate) fn bi_apply(e: &mut Engine, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> { return r2_data::apply::bi_apply(e, &crate::ops_attrs::matrix_first(a), env);
     #[allow(unreachable_code)] {
     // [DEAD: original body kept for safe rollback — Phase R.2 step 6]
     let df = match &gv(a,0) { RVal::DataFrame(df) => df.clone(), _ => return err!(Type, "apply needs data.frame or matrix") };

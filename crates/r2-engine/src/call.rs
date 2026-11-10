@@ -40,6 +40,11 @@ impl Engine {
             self.after_builtin(fname);
             return r;
         }
+        // A user's S3 method for this builtin on a classed object (s3.rs).
+        if !matches!(bare, "class" | "oldClass" | "unclass" | "inherits" | "attr" | "attributes" | "structure"
+            | "invisible" | "is.list" | "identical" | "stop" | "warning") {
+            if let Some(r) = self.builtin_method(bare, args, env) { return r; }
+        }
         // Normal resolution through search order
         let Some((f, _pkg)) = self.registry.resolve(name.as_ref()) else {
             return err!(Runtime, "unknown function '{}'", name);

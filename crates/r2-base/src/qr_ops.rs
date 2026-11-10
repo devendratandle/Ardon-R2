@@ -8,6 +8,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const DEFAULT_TOL: f64 = 1e-7;
+/// n·p² at which the blocked QR starts to pay for its extra copy and check.
+/// Measured 2026-11-09 on the AMD laptop, other work running: 300 x 60 was
+/// slower blocked (1.68 ms against ~1.3), 1000 x 200 about 20% faster (40 ms),
+/// 2000 x 500 about 2x (164 ms against 345).
+const BLOCKED_FROM: usize = 1 << 24;
 const NOT_QR: &str = "argument is not a QR decomposition";
 
 fn fail<T>(msg: impl Into<String>) -> Result<T, R2Err> {
@@ -133,10 +138,11 @@ impl Rhs<'_> {
     }
 }
 
-/// `qr(x, tol = 1e-07, LAPACK = FALSE, ...)`.
+/// `qr(x, tol = 1e-07, LAPACK = FALSE, ...)`. `LAPACK` chooses an
+/// implementation in R; R2 chooses its own (see `decompose`), so the argument
+/// is accepted for scripts that pass it and has no effect.
 pub fn bi_qr(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let args = matched(a, &["x", "tol", "LAPACK"], true)?;
-    if flag(args[2]) { return fail("qr: LAPACK = TRUE is not implemented; the default LINPACK form is"); }
     let tol = match args[1] { Some(t) => t.scalar_f64()?.unwrap_or(DEFAULT_TOL), None => DEFAULT_TOL };
     let Some(x) = args[0] else { return fail("argument \"x\" is missing, with no default") };
     let Some(m) = to_matrix(x)? else { return fail("qr: 'x' must be a numeric matrix") };
@@ -147,7 +153,13 @@ fn decompose(mut m: Matrix, tol: f64) -> Result<RVal, R2Err> {
     if !m.data.iter().all(|x| x.is_finite()) {
         return fail("NA/NaN/Inf in foreign function call (arg 1)");
     }
-    let d = linpack::dqrdc2(&mut m.data, m.nrow, m.ncol, tol);
+    // A large tall matrix goes to the blocked, parallel QR, which returns the
+    // same object when no column needs pivoting and declines otherwise.
+    let large = m.nrow * m.ncol * m.ncol >= BLOCKED_FROM;
+    let d = match large.then(|| linpack::dqrdc2_blocked(&mut m.data, m.nrow, m.ncol, tol)).flatten() {
+        Some(d) => d,
+        None => linpack::dqrdc2(&mut m.data, m.nrow, m.ncol, tol),
+    };
     if let Some(cn) = &m.col_names {
         m.col_names = Some(d.pivot.iter().map(|&j| cn[j as usize - 1].clone()).collect());
     }

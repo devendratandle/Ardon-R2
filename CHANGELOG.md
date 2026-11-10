@@ -28,7 +28,7 @@ development; that number was never released.)
   string of class `"try-error"` with the condition in `attr(, "condition")`. R2's own
   `try { } catch (e) { }` syntax still works beside it.
 - **A `tryCatch` handler gets a condition**, so `e$message` and `conditionMessage(e)` work;
-  `conditionCall(e)` is `NULL`, as R2 records no call. 527 built-in functions.
+  `conditionCall(e)` is `NULL`, as R2 records no call. 538 built-in functions with the S3 work merged.
 - **`prcomp()` is computed as R computes it**, from the SVD of the centred (and scaled)
   data rather than the eigenvectors of its covariance matrix, which squares the condition
   number: a component near zero now keeps its digits. It returns the scores `$x`, and
@@ -36,6 +36,55 @@ development; that number was never released.)
   `prcomp()` and `scale()` share one centring routine.
 - **`kappa(exact = TRUE)`** comes from the singular values too, not `XᵀX`.
 - New differential cases `conditions.R` and `prcomp.R`: 43 of 43 agree with R 4.5.3.
+
+### S3 methods: `UseMethod`, `NextMethod`, `print.foo` — 2026-11-09
+
+- **`UseMethod("g")`** in a generic calls `g.<class>` for the first class of the
+  object (its class attribute, else R's implicit class: `numeric`, `character`,
+  `function`, ...), else `g.default`, else the builtin of that name, and returns
+  its value from the generic. `UseMethod("g", obj)` dispatches on another argument.
+  With no method it stops with R's "no applicable method" message.
+- **`NextMethod()`** calls the next class's method, then the default, then the
+  builtin, so a `print.foo` can add a line and hand over to the ordinary print.
+- **A builtin dispatches to a user's method**: `print.money`, `format.temp`,
+  `length.stack`, `summary.stack`, `toString.money`, and auto-print uses
+  `print.<class>`. **Operators too**: `"+.money" <- function(e1, e2)`, or one
+  `Ops.temp` for all of them, reading `.Generic`.
+- **`get("name")`** returns a variable, a builtin or an operator (`get("+")(1, 2)`).
+  **`conditionMessage(e)`**, and `tryCatch` hands its error handler R's condition
+  object, so `e$message` works; it was a bare string. A quoted name can be assigned
+  (`"+.money" <- ...`). 536 built-in functions.
+- Nothing is looked up until a function with a dot in its name is defined, so code
+  without methods pays nothing. Compared with R line by line in
+  `tests/differential/output/s3_dispatch.R`; what is not covered is in
+  `docs/KNOWN_LIMITATIONS.md`.
+
+### Dates that stay dates; operators keep names and shape — 2026-11-09
+
+- **Date arithmetic keeps the class.** `d + 1` and `d - 1` are dates, `d2 - d` is a
+  `difftime` in days ("Time difference of 5 days"), and a date-time difference picks
+  R's units (secs, mins, hours, days). `difftime` keeps its units through `+ - * /`.
+  All of these were plain numbers. `Date + Date` stops with R's error.
+- **Dates and date-times print as dates everywhere**, auto-printed, inside lists and
+  through `print`. Before, only `print(d)` showed a date and `d` alone showed 19797.
+  Date-times print their time zone, and their clock only when it is not midnight.
+- **`seq` of dates** (`by = "day"`, `"week"`, `"2 weeks"`, `"month"`, `"quarter"`,
+  `"year"`, a number of days, `to` or `length.out`) and **`diff` of dates** (a
+  `difftime`). `as.POSIXct("2024-03-15")` reads a date alone, as R's does, and keeps
+  `tz` and the class `c("POSIXct", "POSIXt")`.
+- **New: `as.difftime`, `weekdays`, `months`.**
+- **Operators keep names and shape.** `x * 2` keeps `x`'s names; arithmetic keeps a
+  class (`class(y * 2)`); `-m` stays a matrix. `m > 2`, `m == 3` and `!g` give logical
+  matrices that print as R prints them and work in `which(g, arr.ind = TRUE)`,
+  `apply` and `ifelse`. `dim()` and `is.matrix()` read a `dim` attribute.
+- **`apply` over a matrix without column names gives an unnamed result**; it named
+  the results `V1`, `V2`, ...
+- **`qr()` picks its routine.** A large tall matrix that needs no pivoting goes to
+  the blocked, parallel QR that `lm` uses, and the result is converted to R's
+  `$qr`/`$qraux` form, so the object is the same: about 2x faster at 2000 x 500,
+  20% at 1000 x 200, and not used below n·p² = 2^24, where it measured slower.
+  `LAPACK = TRUE` is accepted and changes nothing.
+- Compared with R line by line in `tests/differential/output/dates_and_shapes.R`.
 
 ### Seeing into LLM training from a script — 2026-11-07
 
@@ -82,6 +131,33 @@ development; that number was never released.)
 - **Fixed:** `gpu.enable()` never reached the part of R2 that routes the training
   tape's f32 matrix products, so they stayed on the CPU. They now go to the GPU
   above 64M operations once it is enabled. `%*%` works in f64 and stays on the CPU.
+### Named vectors, list subscripts, and classes on lists — 2026-11-05
+
+- **`x["a"]` works.** A character subscript on a named vector stopped with an error.
+  It now gives the first element of that name, and `NA` named `<NA>` for a name that
+  is not there.
+- **`[` keeps names.** `x[2]`, `x[2:3]`, `x[-1]` and `x[c(TRUE, FALSE)]` dropped them.
+  An empty selection prints `named numeric(0)`.
+- **`[` works on lists**, by position, name, mask and negative position. It stopped
+  with an error for all of them; only `[[` and `$` worked.
+- **Subscripts that R allows no longer stop the script.** `c(1, 2)[5]` is `NA` and
+  `c(1, 2)[0]` is empty; both were errors for numeric vectors in the default mode. A
+  logical mask recycles and an `NA` in it gives `NA`.
+- **`m[m > 2]`, `m[-1]` and `m[0]` work on a matrix.** A logical mask was read as the
+  positions 0 and 1 and stopped with an error at the first 0.
+- **Lists and vectors carry classes and attributes.** `RVal::List` now has the same
+  attributes as the atomic vectors. New: `class<-`, `oldClass`, `unclass`, `attr<-`.
+  `structure(list(...), class = "foo")` used to drop the class silently, and a class
+  vector like `c("foo", "bar")` was flattened into one string; both are kept now.
+  `inherits` reads the whole vector, and `attr(,"class")` prints as in R.
+- **A classed result reads as a list**: `is.list(fit)` is TRUE, and `names` and
+  `length` report its fields. A type declared with `type` is unchanged.
+- **Lists print as R prints them**, with a blank line between elements, `$a$b` tags
+  for nested lists, and `list()` when empty.
+- **New: `is.integer`, `row`, `col`.** 531 built-in functions.
+- Compared with R line by line in `tests/differential/output/names_and_classes.R`.
+  Dispatch on class (`UseMethod`, `print.foo`) does not exist yet
+  (`docs/KNOWN_LIMITATIONS.md`).
 
 ### `qr()` and its accessors; `cbind` and `rbind` recycle — 2026-11-05
 

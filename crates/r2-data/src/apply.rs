@@ -274,6 +274,8 @@ pub fn bi_mapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
 
 pub fn bi_apply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef) -> Result<RVal, R2Err> {
     let arg0 = first_arg(a);
+    // A matrix's results are named only when its columns are, as in R.
+    let named = !matches!(&arg0, RVal::Matrix(m) if m.col_names.is_none());
     let df = match arg0 {
         RVal::DataFrame(df) => df,
         // A matrix is handled as a data.frame of its columns, so the existing
@@ -283,7 +285,8 @@ pub fn bi_apply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef)
                 let col: Vec<Real> = (0..m.nrow)
                     .map(|i| { let v = m.data[j * m.nrow + i]; if v.is_nan() { None } else { Some(v) } })
                     .collect();
-                (Arc::from(format!("V{}", j + 1).as_str()), RVal::Numeric(col.into(), Attrs::default()))
+                let name = m.col_names.as_ref().map(|n| n[j].clone()).unwrap_or_else(|| Arc::from(format!("V{}", j + 1).as_str()));
+                (name, RVal::Numeric(col.into(), Attrs::default()))
             }).collect();
             DataFrame { columns, row_names: None }
         }
@@ -306,7 +309,7 @@ pub fn bi_apply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef)
         }
         if all_scalar {
             let mut attrs = Attrs::default();
-            attrs.names = Some(df.columns.iter().map(|(n, _)| n.clone()).collect());
+            if named { attrs.names = Some(df.columns.iter().map(|(n, _)| n.clone()).collect()); }
             Ok(RVal::Numeric(nums.into(), attrs))
         } else {
             Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect()))

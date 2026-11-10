@@ -62,6 +62,45 @@ pub fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> Decomposition {
     Decomposition { rank: kept.min(n), qraux, pivot }
 }
 
+/// The same factorisation by the blocked, parallel QR (`dgeqrf`), when it is
+/// sure to be the one `dqrdc2` would give: a tall matrix (n >= p) on which
+/// `dqrdc2` would move no column, because every diagonal of R keeps well over
+/// `tol` of its column's norm. `None` otherwise, and the caller runs `dqrdc2`.
+///
+/// The two agree on the sign of R, and their reflectors differ only in
+/// scaling: LINPACK's vector u with u[0] = qraux is LAPACK's v (v[0] = 1) times
+/// tau, so `qraux = tau` and the stored part is `tau * v`. A square matrix's
+/// last column has no reflector in LINPACK, where `dgeqrf` reflects it to the
+/// sign of its norm; that one is undone.
+pub fn dqrdc2_blocked(x: &mut [f64], n: usize, p: usize, tol: f64) -> Option<Decomposition> {
+    if n < p || p == 0 { return None; }
+    let norms: Vec<f64> = (0..p).map(|j| dnrm2(&x[j * n..(j + 1) * n])).collect();
+    let mut a = x.to_vec();
+    let tau = crate::dgeqrf(n, p, &mut a).ok()?;
+    // dqrdc2 judges a column by a downdated estimate of its norm; the margin
+    // keeps clear of the cases where estimate and exact value could disagree.
+    const MARGIN: f64 = 100.0;
+    for j in 0..p {
+        let d = a[j * n + j].abs();
+        if norms[j] == 0.0 || d < MARGIN * tol * norms[j] || !d.is_finite() { return None; }
+        // dgeqrf skips a column whose remaining norm is below 1e-15 in absolute
+        // terms, which is not a rank decision on a finely scaled matrix.
+        if tau[j] == 0.0 && !(n == p && j + 1 == p) { return None; }
+    }
+    let mut qraux = tau;
+    for j in 0..p {
+        let t = qraux[j];
+        for v in &mut a[j * n + j + 1..(j + 1) * n] { *v *= t; }
+    }
+    if n == p {
+        let last = (p - 1) * n + p - 1;
+        if qraux[p - 1] != 0.0 { a[last] = -a[last]; }
+        qraux[p - 1] = a[last].abs();
+    }
+    x.copy_from_slice(&a);
+    Some(Decomposition { rank: p, qraux, pivot: (1..=p as i32).collect() })
+}
+
 /// Apply the reflector H_j to `y`.
 #[inline]
 fn reflect(qr: &[f64], n: usize, j: usize, aux: f64, y: &mut [f64]) {
@@ -168,6 +207,47 @@ mod tests {
         let d = dqrdc2(&mut x, 1, 2, 1e-7);
         assert_eq!(d.rank, 1);
         assert_eq!(coef(&x, 1, 1, &d.qraux, &[4.0]), Ok(vec![2.0]));
+    }
+
+    /// A full-rank n x p matrix: uniform values from a linear congruential generator.
+    fn wave(n: usize, p: usize) -> Vec<f64> {
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        (0..n * p).map(|_| {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        }).collect()
+    }
+
+    #[test]
+    fn the_blocked_route_gives_dqrdc2_s_object() {
+        for (n, p) in [(300, 120), (130, 130), (70, 1), (200, 199)] {
+            let a = wave(n, p);
+            let (mut x, mut y) = (a.clone(), a.clone());
+            let d = dqrdc2(&mut x, n, p, 1e-7);
+            let b = dqrdc2_blocked(&mut y, n, p, 1e-7).expect("full rank");
+            assert_eq!((b.rank, &b.pivot), (d.rank, &d.pivot), "{n}x{p}");
+            let scale = x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            for (i, (u, v)) in x.iter().zip(&y).enumerate() {
+                assert!((u - v).abs() <= 1e-10 * scale, "{n}x{p} element {i}: {u} vs {v}");
+            }
+            for (u, v) in d.qraux.iter().zip(&b.qraux) { assert!((u - v).abs() <= 1e-10, "{n}x{p} qraux {u} vs {v}"); }
+        }
+    }
+
+    #[test]
+    fn the_blocked_route_declines_what_dqrdc2_would_pivot() {
+        let mut a = wave(50, 4);
+        for i in 0..50 { a[2 * 50 + i] = a[i] + a[50 + i]; }
+        assert!(dqrdc2_blocked(&mut a.clone(), 50, 4, 1e-7).is_none(), "collinear");
+        assert!(dqrdc2_blocked(&mut wave(4, 6), 4, 6, 1e-7).is_none(), "wide");
+        let tiny: Vec<f64> = wave(40, 3).iter().map(|v| v * 1e-20).collect();
+        let mut t = tiny.clone();
+        if let Some(b) = dqrdc2_blocked(&mut t, 40, 3, 1e-7) {
+            let mut u = tiny.clone();
+            let d = dqrdc2(&mut u, 40, 3, 1e-7);
+            assert_eq!(b.rank, d.rank);
+            for (x, y) in t.iter().zip(&u) { assert!((x - y).abs() <= 1e-10 * 1e-20); }
+        }
     }
 
     #[test]

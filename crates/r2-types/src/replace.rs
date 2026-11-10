@@ -132,12 +132,12 @@ pub fn replace_elems(obj: &RVal, idx: &RVal, val: &RVal) -> Result<RVal, R2Err> 
     if pos.is_empty() { return Ok(obj.clone()); }
 
     match obj {
-        RVal::List(items, _) => {
+        RVal::List(items, at) => {
             let mut items = items.clone();
             if matches!(val, RVal::Null) {
                 // `l[i] <- NULL` removes those elements.
                 let drop: std::collections::HashSet<usize> = pos.into_iter().collect();
-                return Ok(RVal::list(items.into_iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, e)| e).collect()));
+                return Ok(RVal::List(items.into_iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, e)| e).collect(), at.clone()));
             }
             if vlen == 0 { return Err(rerr("replacement has length zero")); }
             let top = pos.iter().map(|p| p + 1).max().unwrap_or(0);
@@ -149,7 +149,7 @@ pub fn replace_elems(obj: &RVal, idx: &RVal, val: &RVal) -> Result<RVal, R2Err> 
                 };
             }
             for (p, nm) in new_names { items[p].0 = Some(nm); }
-            return Ok(RVal::list(items));
+            return Ok(RVal::List(items, at.clone()));
         }
         RVal::Factor(f) => {
             if vlen == 0 { return Err(rerr("replacement has length zero")); }

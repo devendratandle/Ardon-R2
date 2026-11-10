@@ -53,6 +53,10 @@ pub fn bi_dim(a: &[EvalArg]) -> Result<RVal, R2Err> {
             vec![Some(m.nrow as i32), Some(m.ncol as i32)].into(),
             Attrs::default().into(),
         )),
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) => Ok(match &at.dim {
+            Some(d) => RVal::Integer(d.iter().map(|&k| Some(k as i32)).collect(), Attrs::default()),
+            None => RVal::Null,
+        }),
         _ => Ok(RVal::Null),
     }
 }

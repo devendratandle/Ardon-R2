@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 527 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 538 Built-in Functions and Operators
 
-## Core (87)
+## Core (95)
 ```
 seq(from,to,by=)   Regular sequence; also seq(along=x), seq_len(n)
 rep(x,times=,each=)   Repeat a vector
@@ -12,10 +12,13 @@ which.max(x) / which.min(x)   Index of the first maximum / minimum
 all(x) / any(x)    TRUE if all / any elements are TRUE (na.rm= honoured)
 isTRUE(x) / isFALSE(x)   TRUE only for a length-1, non-NA logical of that value
 nrow(x) / ncol(x)  Row / column count of a matrix or data frame
+row(x)              Matrix of row indices, the shape of x
+col(x)              Matrix of column indices, the shape of x
 rowSums(x) / colSums(x)     Row / column totals of a matrix
 rowMeans(x) / colMeans(x)   Row / column means
 t(x)               Matrix transpose
 exists(name)       TRUE if a variable of that name is defined
+get(name)          The value of that name: a variable, a builtin or an operator (get("+"))
 ls()               Names of objects in the current environment
 rm(x)              Remove objects from the environment
 stop(msg)          Raise an error (caught by tryCatch)
@@ -35,6 +38,9 @@ clear() / cls()     Clear the console (GUI buffer / terminal)
 View(x, title)      Open a data frame, matrix or vector in the GUI's data viewer (prints x in the CLI)
 typeof(x)           Type name: "numeric", "character", etc.
 class(x)            Class of object
+class(x) <- value   Set the class vector; NULL removes it
+oldClass(x)         The class attribute only, NULL for an implicit class
+unclass(x)          x without its class; a classed result becomes a list
 list(...)           Create named list
 data.frame(...)     Create data frame: data.frame(x=1:3, y=c("a","b","c"))
 matrix(data,nrow,ncol) Create matrix
@@ -48,6 +54,7 @@ is.nan(x)           Test for NaN (FALSE for NA)
 is.infinite(x)      Test for Inf/-Inf
 is.finite(x)        Test for finite values (NA/NaN/Inf are FALSE)
 is.numeric(x)       Test if numeric
+is.integer(x)       Test if integer (a matrix stores doubles, so FALSE for one)
 is.character(x)     Test if character
 is.logical(x)       Test if logical
 is.null(x)          Test if NULL
@@ -70,6 +77,7 @@ switch(expr,...)    Select a branch by name or position
 with(data,expr)     Evaluate expr in data's column/element scope
 stopifnot(...)      Error unless all arguments are TRUE
 attr(x,which)       Get one attribute (names/class/dim/custom)
+attr(x,which) <- value  Set one attribute; NULL removes it
 attributes(x)       Get all attributes as a named list
 structure(x,...)    Return x with attributes set (class=, names=, dim=, …)
 inherits(x,what)    TRUE if `what` is in class(x)
@@ -227,7 +235,7 @@ rexp(n, rate)                    Exponential random variates
 density(x)                       Gaussian kernel density estimate (list $x/$y)
 ```
 
-## Dates & Time Series (54)
+## Dates & Time Series (57)
 ```
 as.Date(s)         Parse a date string → Date (days since 1970-01-01)
 as.POSIXct(s)      Parse a date-time string → POSIXct (seconds since epoch)
@@ -237,6 +245,9 @@ Sys.Date()         Current date (class Date)
 Sys.time()         Current date-time (class POSIXct; seconds since 1970-01-01 UTC)
 format.Date(d,fmt) / format.POSIXct(d,fmt)   Method form of format() for dates
 difftime(a,b)      Difference between two dates (Date − Date also works)
+as.difftime(tim,units) A time difference of numbers in secs, mins, hours, days or weeks
+weekdays(x)         Day of the week of a date or date-time (abbreviate = TRUE: "Sat")
+months(x)           Month name of a date or date-time (abbreviate = TRUE: "Mar")
 ts(x, start=, frequency=)  Build a regular time series
 frequency(x)       Observations per cycle of a ts
 start(x)           First time point of a ts, as c(cycle, position)
@@ -294,7 +305,7 @@ prcomp(x, center=TRUE, scale.=FALSE)
                     Principal component analysis from the SVD of the centred data, as R: sdev, rotation, x (scores), center, scale
 svd(x)                  Singular value decomposition (nu = 0, nv = 0: values only)
 chol(x)                 Upper Cholesky factor R, t(R) %*% R == x
-qr(x, tol, LAPACK)      QR decomposition, R's compact form: $qr, $rank, $qraux, $pivot
+qr(x, tol)              QR decomposition, R's compact form: $qr, $rank, $qraux, $pivot (R2 picks the routine; LAPACK= is accepted)
 is.qr(x)                TRUE for the result of qr()
 qr.Q(qr, complete, Dvec) The orthogonal factor Q
 qr.R(qr, complete)      The upper-triangular factor R
@@ -596,7 +607,7 @@ llm.inspect(m, text, seq=16, batch=8)
 llm.free(m)         Release a handle's memory
 ```
 
-## Language / Metaprogramming (10)
+## Language / Metaprogramming (15)
 ```
 quote(expr)        Capture an expression unevaluated (a language object)
 eval(expr)         Evaluate a language object (e.g. eval(parse(text=...)))
@@ -611,6 +622,8 @@ substitute(expr)   Replace a function's params with the caller's expressions
 match.call()       Current call with args matched to formal names
 sys.call()         Current call exactly as written
 bquote(expr)       Quote expr, splicing in any .(x) evaluated inline
+UseMethod("g")     In a generic: call g.<class> of the first argument (S3), else g.default
+NextMethod()       In a method: call the next class's method, the default, or the builtin
 ```
 Note: arguments are evaluated eagerly (no lazy promises), so `substitute`
 captures the caller's expression for labeling/deparse but the argument must

@@ -58,6 +58,7 @@ use builtins::data_apply::*;
 use builtins::sys_models::*;
 use builtins::ml_data::*;
 use builtins::qr::*;
+use builtins::attrs::*;
 use builtins::help::*;
 use builtins::session::*;
 use builtins::internal::*;
@@ -79,6 +80,7 @@ mod registry;
 mod registry_tables;
 mod packages;
 mod ops;
+mod ops_attrs;  // what operators carry besides values: names, dim, date arithmetic
 mod eval;
 mod indexing;
 mod assign;
@@ -86,6 +88,7 @@ mod fusion;
 mod formula_eval;
 mod formula_call;  // lm(y ~ x, data = df) and friends: the formula interface
 mod special_forms; // NSE calls intercepted before argument evaluation
+mod s3;            // UseMethod, NextMethod, and methods for builtins and operators
 mod call;          // call_fn: builtins, closures, type constructors
 mod jit_call;      // the compiled fast path of a closure call
 use packages::*;
@@ -162,6 +165,11 @@ pub struct Engine {
     /// The Arc is retained to defeat pointer recycling (same fix as
     /// `jit_cache`). Computed once per unique closure body.
     nse_cache: HashMap<usize, (Arc<Expr>, bool)>,
+    /// Names of functions that could be S3 methods (`print.money`), so a
+    /// builtin or an operator looks for one only when one could exist.
+    pub(crate) s3_names: std::collections::HashSet<Arc<str>>,
+    /// The dispatches in progress, for `NextMethod` and `.Generic`.
+    pub(crate) s3_stack: Vec<s3::S3Call>,
 }
 
 /// One NSE call frame (Phase L.3). Captures the UNEVALUATED call so that
@@ -172,6 +180,8 @@ pub(crate) struct NseFrame {
     pub(crate) call: Arc<Expr>,
     /// The called closure's formals — for R-style arg→param matching.
     pub(crate) params: Vec<r2_types::Param>,
+    /// The evaluated arguments of the call, which `UseMethod` passes on.
+    pub(crate) args: Vec<EvalArg>,
 }
 
 /// Does this expression define or return a closure anywhere? Used to keep
@@ -243,6 +253,9 @@ impl r2_types::EngineCtx for Engine {
 }
 
 impl Engine {
+    /// A type the script declared with `type`.
+    pub(crate) fn is_user_type(&self, name: &str) -> bool { self.types.contains_key(name) }
+
     /// Phase P — a per-worker engine for parallel `apply`. Shares the
     /// read-only registry / global env / installed packages (cloned; the
     /// heavy inner data is `Arc`), with FRESH per-eval scratch (scopes,
@@ -269,6 +282,8 @@ impl Engine {
             jit_enabled: self.jit_enabled,
             nse_stack: Vec::new(),
             nse_cache: HashMap::new(),
+            s3_names: self.s3_names.clone(),
+            s3_stack: Vec::new(),
         }
     }
 
@@ -312,6 +327,7 @@ impl Engine {
     }
 
     pub fn new() -> Self {
+        r2_types::set_class_text(ops_attrs::time_text);
         // As in R, the constants and datasets live OUTSIDE the workspace, in
         // a base environment that is the global environment's parent:
         // lookups find them, and `ls()` lists only what the user created.
@@ -343,6 +359,8 @@ impl Engine {
             jit_enabled: std::env::var("R2_JIT").map(|v| v != "0").unwrap_or(true),
             nse_stack: Vec::new(),
             nse_cache: HashMap::new(),
+            s3_names: Default::default(),
+            s3_stack: Vec::new(),
         };
 
         // Built-in package layers. The tables live in `registry_tables`
