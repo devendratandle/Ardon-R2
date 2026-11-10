@@ -183,17 +183,27 @@ pub fn bi_sapply<C: EngineCtx + ?Sized>(ctx: &mut C, a: &[EvalArg], env: &EnvRef
     // R's simplification: length-1 atomic results combine as c() would
     // (logical < integer < double < character), named by a character X.
     let use_names = !matches!(arg_named(a, "USE.NAMES"), Some(RVal::Logical(v, _)) if v.first() == Some(&Some(false)));
+    // the result is named by X's names: a data frame's columns, a list's or a
+    // vector's names, or a character X's own values
+    let x_names: Option<Vec<Arc<str>>> = if !use_names { None } else {
+        match &x {
+            RVal::DataFrame(df) => Some(df.columns.iter().map(|(n, _)| n.clone()).collect()),
+            RVal::List(items, _) if items.iter().any(|(n, _)| n.is_some()) =>
+                Some(items.iter().map(|(n, _)| n.clone().unwrap_or_else(|| Arc::from(""))).collect()),
+            RVal::Character(xs, at) => at.names.clone().or_else(|| Some(xs.iter().map(|s| s.clone().unwrap_or_else(|| Arc::from("NA"))).collect())),
+            RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) => at.names.clone(),
+            _ => None,
+        }
+    }.filter(|n| n.len() == results.len());
     match simplify_scalars(&results)? {
         Some(mut v) => {
-            if let (true, RVal::Character(xs, _)) = (use_names, &x) {
-                let ns: Vec<Arc<str>> = xs.iter().map(|s| s.clone().unwrap_or_else(|| Arc::from("NA"))).collect();
-                if let RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at) = &mut v {
-                    if at.names.is_none() { at.names = Some(ns); }
-                }
+            if let (Some(ns), RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) | RVal::Character(_, at)) = (&x_names, &mut v) {
+                if at.names.is_none() { at.names = Some(ns.clone()); }
             }
             Ok(v)
         }
-        None => Ok(RVal::list(results.into_iter().map(|v| (None, v)).collect())),
+        None => Ok(RVal::list(results.into_iter().enumerate()
+            .map(|(i, v)| (x_names.as_ref().map(|n| n[i].clone()), v)).collect())),
     }
 }
 

@@ -72,6 +72,8 @@ mod tests_impl;
 pub use probability::*;
 pub(crate) use probability::{bd0, ln_dpois_raw, stirlerr};
 pub use tests_impl::*;
+mod wilcox;
+pub use wilcox::*;
 
 #[cfg(test)]
 mod test_suite {

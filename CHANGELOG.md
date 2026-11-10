@@ -11,6 +11,102 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Plots an editor can read: whole pictures, marked parts, R's geometry — 2026-11-11
+
+- **`r2 --ide` replies carry the whole plot.** After `plot()` then `lines()`,
+  `points()`, `abline()`, `text()` or `title()`, the reply's `plot` is the complete
+  picture; it held only the first drawing, so overlays (and `title(sub =)` and
+  `text()`, which are overlays) seemed to be ignored.
+- **The SVG's parts are marked**: `class="main"`, `"sub"`, `"xlab"`, `"ylab"` on the
+  titles and axis names, and `class="plot-region"` with `data-usr="x1 x2 y1 y2"` (R's
+  `par("usr")`) on the plotting area, so an editor can pick and edit them.
+- **`xlim` and `ylim`** set the axes of `plot()` and `hist()`, padded 4 % as R pads
+  them; both were ignored.
+- **`barplot` draws as R does**: bars of width 1 at 0.7, 1.9, ..., returned as R
+  returns them; `horiz = TRUE` (it drew vertical bars); names from the vector; no
+  "Barplot" title R does not draw; negative bars. **`hist`, `boxplot` and
+  `barplot` record their coordinates**, so `lines(density(x))` over a histogram lands
+  where it should. `boxplot` uses Tukey's hinges and whiskers and draws outliers.
+- **`density()`** has R's bandwidth (`bw.nrd0`: the smaller of the sd and IQR/1.34; it
+  used the sd alone), takes `bw` and `n`, and returns `bw`, `n`, `call`, `data.name`
+  and `has.na` with class "density". `plot(density(x))` draws R's line, title and
+  "N = 5   Bandwidth = 0.9736" label; `lines(density(x))` adds the curve.
+- **The datasets are R's.** `iris` was a variant with two rows differing from R's,
+  and `faithful` was not R's data; both are now R's, and `ToothGrowth$supp` is a factor.
+- **Also:** `round()` is R 4's (`round(3.5965625, 6)` is 3.596562; it gave 3.596563);
+  `sapply()` names its result after a data frame's columns or a list's names;
+  `pdf(NULL)` draws without writing; `pdf()`, `png()` and `svg()` are invisible; `str()`
+  shows ten values and "...".
+- **`interrupt` in `r2 --ide` is no longer lost.** One sent while its request was still
+  waiting to run (R2 starting, or busy) was cleared when the request began, so a
+  runaway loop could not be stopped. An interrupt now stops the request it followed,
+  even one that has not started yet, and only that one.
+- Checked in the `--ide` reply itself (`crates/r2-repl/tests/ide_protocol.rs`), and the
+  values compared with R in `tests/differential/output/studio_graphics.R`.
+
+### Two-way tables, `wilcox.test` and `airquality` as in R — 2026-11-11
+
+- **`table(a, b)` counts both variables.** It ignored `b` and gave a one-way table.
+  The result is an integer matrix of class "table" with named dimnames, printed in
+  R's layout, readable as `t["6", "4"]`; `table(am, vs)` names its dimensions from
+  the call, as R does.
+- **`wilcox.test` gives R's p-values.** With fewer than 50 values a side and no ties
+  (and no zero differences when paired) the p-value is exact; otherwise it is the
+  normal approximation with R's tie and continuity corrections. It was always an
+  uncorrected normal approximation (0.149 where R gives 0.2). `paired`,
+  `alternative`, `exact`, `correct`, the formula form `wilcox.test(mpg ~ am, data =
+  mtcars)`, and the statistic named `W` or `V` all work.
+- **`airquality` has all 153 rows of R's**, with integer columns; it had the first 30.
+- **Also found and fixed:** a matrix indexed by row or column names
+  (`m["r1", "c2"]`) stopped with an error, and a row or column taken from a named
+  matrix lost its names. `x$method`, `x$type` and other R2 keywords after `$` did not
+  parse. `numeric(0) + 1:3` crashed R2; it is `numeric(0)`. `df[153, ]` keeps its row
+  name. `colSums`, `colMeans`, `rowSums` and `rowMeans` give NA for a missing value
+  unless `na.rm = TRUE` (they skipped it, and `colMeans` still divided by every row),
+  and name their result as R does.
+- Compared with R line by line in `tests/differential/output/studio_checks.R`.
+
+### Model tables as R gives them: coefficient names, `anova`, `cor.test` — 2026-11-10
+
+- **Coefficients of expression terms are named as written.** `lm(mpg ~ wt +
+  factor(cyl))` gives `factor(cyl)6` and `factor(cyl)8`, and `I(wt^2)` and `log(hp)`
+  keep their names; they were `x26`, `x28` and `x3`. **New: `I()`.** `deparse`
+  writes `x^2` and `1:3` without spaces, as R does.
+- **`anova(fit)` is R's table**: one row per term in formula order (sequential sums
+  of squares from the QR of the design), then Residuals, with `Df`, `Sum Sq`,
+  `Mean Sq`, `F value` and `Pr(>F)`, readable as `a$Df`, `a[["F value"]]` and
+  `rownames(a)`. It was one overall F test. A fit keeps its design for this, out
+  of `names(fit)`.
+- **`cor.test`** gives `parameter` (df), `conf.int` with its `conf.level` (Fisher's
+  z), `null.value`, `alternative` and `method`, takes `alternative` and `conf.level`,
+  and lists them in R's order; `df` is now `parameter`, as in R.
+- **New: `dimnames()`, `nobs()`.** `matrix(..., dimnames = list(...))` keeps the
+  names it was ignoring. `[[` on a result reads its fields by name or position, and
+  `print()` of a list ends with R's blank line. 543 built-in functions.
+- Compared with R line by line in `tests/differential/output/studio_tables.R`.
+
+### Editing data frames as Ardon Studio's Data tab does — 2026-11-10
+
+- **Every `d[i, j] <- value` works.** Text into a factor or text column
+  (`d[1, 2] <- "b"`) stopped with "cannot convert character to numeric", and
+  `d[1, ] <- list(5, "b", "z")` gave each column the whole list.
+- **`rbind` of data frames with factor columns** adds rows: a new value becomes a new
+  level, two factors join their levels, numbers and integers mix, and columns are
+  matched by name as R matches them. It stopped with "incompatible column types".
+- **`cut()` returns a factor**, as in R; it returned text. A single `breaks` is a
+  number of intervals over the range, and `labels`, `labels = FALSE`, `right`,
+  `include.lowest` and `ordered_result` work, with R's labels ("(0.992,3.67]").
+- **`save(d, file = f)` and `load(f)` work as R's.** Objects are saved under their
+  names, factors included, and `load()` puts them back where it is called and
+  returns their names, silently. Factor columns were dropped and `load()` printed a
+  message. R2's older `save("session.r2s")` and `save(obj, "file.r2d")` still work.
+- **`read.csv` honours `na.strings`, `dec` and `sep`** (`read.csv(f, sep = ";", dec =
+  ",", na.strings = "-")`); all three were ignored. `write.csv` no longer prints
+  "Written to ...".
+- **New: `tempfile()`, `tempdir()`.** `str()` of a data frame lays out names and
+  factor levels as R does. 540 built-in functions.
+- Compared with R line by line in `tests/differential/output/studio_data.R`.
+
 ### Numbers as text, as R writes them — 2026-11-09
 
 - **`as.character()` and `paste()` write a number with up to 15 significant digits**, as R

@@ -224,7 +224,8 @@ pub fn bi_dev_off(a: &[EvalArg]) -> Result<RVal, R2Err> {
     // Make the closing device current so the flush reads the right one.
     if let Some(t) = target { crate::device::set_device(t); }
     // If it's a file device (pdf/png/svg), write its accumulated plot now.
-    if let Some(ft) = crate::device::current_file_target() {
+    // pdf(NULL) and the like draw into nothing: there is no file to write
+    if let Some(ft) = crate::device::current_file_target().filter(|ft| !ft.path.is_empty()) {
         match crate::device::save_plot(&ft.path, ft.width, ft.height) {
             Ok(abs) => {
                 let d = abs.to_string_lossy();
@@ -241,6 +242,9 @@ pub fn bi_dev_off(a: &[EvalArg]) -> Result<RVal, R2Err> {
 
 /// First positional path, else `file=`/`filename=`, else `default`.
 fn file_arg(a: &[EvalArg], default: &str) -> String {
+    // pdf(NULL): R's device that draws but writes nothing
+    let given = a.iter().find(|e| e.name.is_none() || matches!(e.name.as_deref(), Some("file" | "filename")));
+    if matches!(given.map(|e| &e.value), Some(RVal::Null)) { return String::new(); }
     if let Some(e) = a.iter().find(|e| e.name.is_none()) {
         let s = val_to_str(&e.value);
         if !s.is_empty() { return s; }

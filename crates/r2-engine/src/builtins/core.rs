@@ -82,7 +82,9 @@ fn print_value(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err>
             _ => {}
         }
     }
-    e.emit_output(&format!("{}", v));
+    // one line end after the value, as auto-print gives it: a list's last
+    // blank line is part of what R prints
+    e.emit_output(&format!("{}\n", v));
     Ok(v)
 }
 
@@ -304,8 +306,36 @@ pub(crate) fn bi_sqrt(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal,
     let v = e.as_reals(&gv(a,0))?;
     Ok(math1_wrap(&gv(a,0), r2_kernel::map(r2_kernel::MapOp::Sqrt, &v)))
 }
-// R rounds half to EVEN (IEC 60559 banker's rounding): round(2.5)=2, round(3.5)=4.
-pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { let v = e.as_reals(&gv(a,0))?; let d = if a.len() > 1 { e.scalar_f64(&gv(a,1))?.unwrap_or(0.0) } else { 0.0 } as i32; let f = 10f64.powi(d); let out: Vec<Option<f64>> = v.into_iter().map(|x| x.map(|n| (n*f).round_ties_even()/f)).collect(); Ok(math1_wrap(&gv(a,0), out)) }
+/// R 4's `fround`: of the two candidates `floor(x 10^d) / 10^d` and
+/// `ceil(x 10^d) / 10^d`, the one nearer `x` as it is stored, an exact tie
+/// going to the even last digit. Rounding `x 10^d` itself, as R2 did, rounds
+/// a product that has already been rounded: round(3.5965625, 6) came out
+/// 3.596563 where R gives 3.596562.
+fn r_round(x: f64, d: i32) -> f64 {
+    if !x.is_finite() { return x; }
+    let (sgn, x) = if x < 0.0 { (-1.0, -x) } else { (1.0, x) };
+    if d == 0 { return sgn * x.round_ties_even(); }
+    if d < 0 {
+        let p = 10f64.powi(-d);
+        return sgn * (x / p).round_ties_even() * p;
+    }
+    // past the digits a double holds there is nothing to round
+    if x > 0.0 && x.log10() + d as f64 > 15.0 { return sgn * x; }
+    let p = 10f64.powi(d);
+    let x10 = p * x;
+    let i10 = x10.floor();
+    let (xd, xu) = (i10 / p, x10.ceil() / p);
+    let (du, dd) = (xu - x, x - xd);
+    sgn * if du < dd || (du == dd && i10 % 2.0 == 1.0) { xu } else { xd }
+}
+
+pub(crate) fn bi_round(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    let v = e.as_reals(&gv(a,0))?;
+    let d = gn(a, "digits").or_else(|| a.get(1).filter(|x| x.name.is_none()).map(|x| x.value.clone()))
+        .map(|v| e.scalar_f64(&v)).transpose()?.flatten().unwrap_or(0.0) as i32;
+    let out: Vec<Option<f64>> = v.into_iter().map(|x| x.map(|n| r_round(n, d))).collect();
+    Ok(math1_wrap(&gv(a,0), out))
+}
 pub(crate) fn bi_sort(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { r2_data::order::bi_sort(a) }
 pub(crate) fn bi_rev(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { match &gv(a,0) {
     RVal::Numeric(v,_)   => Ok(RVal::Numeric(v.iter().rev().cloned().collect(), Attrs::default())),
@@ -510,18 +540,69 @@ pub(crate) fn bi_unlist(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
     }
 }
 
+/// A break as `cut` labels it: `digits` significant digits, no trailing zeros
+/// (R's `formatC(x, digits, format = "g")`).
+fn cut_label(x: f64, digits: usize) -> String {
+    if x == 0.0 || !x.is_finite() { return fmt_f64(x); }
+    let decimals = (digits as i32 - 1 - x.abs().log10().floor() as i32).max(0) as usize;
+    let s = format!("{:.*}", decimals, x);
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
+/// `cut(x, breaks, labels = NULL, right = TRUE, include.lowest = FALSE)`: a
+/// factor of the interval each value falls in. A single `breaks` is a number
+/// of equal intervals over the range, widened by 0.1% at each end, as in R.
 pub(crate) fn bi_cut(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
     let xs = e.as_reals(&gv(a,0))?;
-    let mut br: Vec<f64> = e.as_reals(&gv(a,1))?.into_iter().flatten().collect();
-    if br.len() < 2 { return err!(Runtime, "cut(): 'breaks' needs at least 2 values"); }
+    let breaks_arg = gn(a, "breaks").unwrap_or_else(|| gv(a,1));
+    let mut br: Vec<f64> = e.as_reals(&breaks_arg)?.into_iter().flatten().collect();
+    if br.len() == 1 {
+        let n = br[0].floor();
+        if n < 2.0 { return err!(Runtime, "invalid number of intervals"); }
+        let finite: Vec<f64> = xs.iter().flatten().copied().filter(|x| x.is_finite()).collect();
+        let (lo, hi) = finite.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| (l.min(x), h.max(x)));
+        let (lo, hi) = if lo == hi { (lo - lo.abs() / 1000.0, hi + hi.abs() / 1000.0) } else { (lo, hi) };
+        let n = n as usize;
+        br = (0..=n).map(|k| lo + (hi - lo) * k as f64 / n as f64).collect();
+        let dx = hi - lo;
+        br[0] = lo - dx / 1000.0;
+        br[n] = hi + dx / 1000.0;
+    }
+    if br.len() < 2 { return err!(Runtime, "invalid number of intervals"); }
     br.sort_by(|a,b| a.partial_cmp(b).unwrap());
-    let labels: Vec<Arc<str>> = (0..br.len()-1)
-        .map(|i| Arc::from(format!("({},{}]", fmt_f64(br[i]), fmt_f64(br[i+1])).as_str()))
-        .collect();
-    let out: Vec<Option<Arc<str>>> = xs.into_iter().map(|o| o.and_then(|x| {
-        (0..br.len()-1).find(|&i| x > br[i] && x <= br[i+1]).map(|i| labels[i].clone())
+    let flag = |name: &str, default: bool| gn(a, name).map(|v| matches!(v, RVal::Logical(ref l, _) if l.first() == Some(&Some(true)))).unwrap_or(default);
+    let right = flag("right", true);
+    let lowest = flag("include.lowest", false);
+    let k = br.len() - 1;
+    let levels: Vec<Arc<str>> = match gn(a, "labels") {
+        Some(RVal::Character(l, _)) => {
+            if l.len() != k { return err!(Runtime, "number of intervals and length of 'labels' differ"); }
+            l.iter().map(|s| s.clone().unwrap_or_else(|| Arc::from("NA"))).collect()
+        }
+        _ => {
+            // as many digits as it takes to tell the breaks apart, from 3
+            let digits = (3..=15).find(|&d| {
+                let s: Vec<String> = br.iter().map(|&b| cut_label(b, d)).collect();
+                s.windows(2).all(|w| w[0] != w[1])
+            }).unwrap_or(15);
+            (0..k).map(|i| {
+                let (l, r) = (cut_label(br[i], digits), cut_label(br[i + 1], digits));
+                let open = if right { if lowest && i == 0 { "[" } else { "(" } } else { "[" };
+                let close = if right { "]" } else if lowest && i == k - 1 { "]" } else { ")" };
+                Arc::from(format!("{open}{l},{r}{close}").as_str())
+            }).collect()
+        }
+    };
+    let codes: Vec<Option<u32>> = xs.into_iter().map(|o| o.and_then(|x| {
+        (0..k).find(|&i| {
+            if right { (x > br[i] || (lowest && i == 0 && x == br[i])) && x <= br[i + 1] }
+            else { x >= br[i] && (x < br[i + 1] || (lowest && i == k - 1 && x == br[i + 1])) }
+        }).map(|i| i as u32)
     })).collect();
-    Ok(RVal::Character(out, Attrs::default()))
+    if matches!(gn(a, "labels"), Some(RVal::Logical(ref l, _)) if l.first() == Some(&Some(false))) {
+        return Ok(RVal::Integer(codes.iter().map(|c| c.map(|i| i as i32 + 1)).collect(), Attrs::default()));
+    }
+    Ok(RVal::Factor(Factor { codes, levels, ordered: flag("ordered_result", false) }))
 }
 
 // ── Tier-1 functional / control builtins ───────────────────────────

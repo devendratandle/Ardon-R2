@@ -24,14 +24,16 @@ impl Engine {
             Expr::Binary { op: BinOp::Add, lhs, rhs } => {
                 let l = self.resolve_formula_term(lhs, df, env)?;
                 let r = self.resolve_formula_term(rhs, df, env)?;
+                // a term that is an expression is named as written, so
+                // `factor(cyl)` gives coefficients `factor(cyl)6`, as in R
                 let mut cols = Vec::new();
                 match l {
                     RVal::List(items, _) => cols.extend(items),
-                    other => cols.push((None, other)),
+                    other => cols.push((Some(Arc::from(fmt_expr(lhs).as_str())), other)),
                 }
                 match r {
                     RVal::List(items, _) => cols.extend(items),
-                    other => cols.push((None, other)),
+                    other => cols.push((Some(Arc::from(fmt_expr(rhs).as_str())), other)),
                 }
                 Ok(RVal::list(cols))
             }

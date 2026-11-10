@@ -474,6 +474,20 @@ pub fn device_full_svg(id: DeviceId) -> Option<String> {
 
 /// Has any plot been opened in this device? Source of truth for overlay
 /// preconditions — replaces the previous file-existence check.
+/// The plotting region's user coordinates as R's `par("usr")` gives them,
+/// "x1 x2 y1 y2", for the `data-usr` of the region's SVG rectangle.
+pub fn usr_text() -> String {
+    with_device(|d| d.coords).map(|c| format!("{} {} {} {}", c.xmin, c.xmax, c.ymin, c.ymax)).unwrap_or_default()
+}
+
+/// The current device's whole picture as SVG: the last high-level plot with
+/// every `lines()`, `points()`, `abline()` and `text()` drawn on it since.
+/// `None` before any plot or while a file device is collecting one.
+pub fn current_svg() -> Option<String> {
+    if !current_has_plot() || with_device(|d| d.file_target.is_some()) { return None; }
+    Some(with_device(|d| d.full_svg()))
+}
+
 pub fn current_has_plot() -> bool {
     DEVICE_TABLE.with(|t| {
         let tbl = t.borrow();

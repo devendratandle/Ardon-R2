@@ -126,6 +126,15 @@ to be worse than documented and was fixed here rather than scheduled.
   one is not covered.
 - **Dates print with R's layout but not its locale.** Date-times are UTC unless `tz`
   says otherwise, and `weekdays`/`months` are in English.
+- **`density()`'s `y` is the exact kernel sum**, where R bins the data and uses the
+  FFT; the two differ in the third or fourth digit. `bw`, `n` and the grid `x` are R's.
+  `d$call` is text, where R keeps a language object; it prints the same inside quotes.
+- **`wilcox.test` gives R's p-value but not R's warning** "cannot compute exact p-value
+  with ties"; with ties it takes the normal approximation, as R does. No `conf.int`.
+- **`anova()` and `cor.test()` print in R2's own layout**; their values are R's.
+  `anova()` handles one `lm`; two models (`anova(m1, m2)`) and `glm` fits give R2's
+  older single test.
+- **Points outside `xlim`/`ylim` are drawn outside the frame**, where R clips them.
 - `sprintf`: no `*` widths, `%o`, `%a`, or `%5$s` argument positions.
 - **String collation follows R on Windows / English locales** (letters
   case- and accent-blind first, then accents, then lowercase first;

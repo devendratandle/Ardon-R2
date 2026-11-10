@@ -87,3 +87,31 @@ fn a_plot_comes_back_as_svg_and_only_when_it_changes() {
     assert!(reply(&out, 3).contains("\"values\":[1.0,2.0,0.0,1.0]"), "GNU R: hist(c(1,2,2,3))$counts is 1 2 0 1");
     assert!(!out.iter().any(|l| l.contains("browser")), "no browser viewer under an IDE");
 }
+
+/// Ardon Studio's Gview reads the reply's plot: it must be the whole picture,
+/// overlays included, with the title, subtitle, axis names and plotting region
+/// marked so they can be picked and edited.
+#[test]
+fn the_reply_plot_is_the_whole_picture_with_its_parts_marked() {
+    let out = session(&[
+        Some(r#"{"id":1,"op":"eval","code":"plot(1:10, main = \"Main title\", xlab = \"The x\", ylab = \"The y\", xlim = c(0, 20))"}"#),
+        Some(r#"{"id":2,"op":"eval","code":"lines(1:10, 10:1)"}"#),
+        Some(r#"{"id":3,"op":"eval","code":"abline(h = 5); points(3, 3); text(5, 8, \"LABEL\"); title(sub = \"Sub title\")"}"#),
+        Some(r#"{"id":4,"op":"eval","code":"hist(c(1, 2, 2, 3, 9))"}"#),
+        Some(r#"{"id":5,"op":"eval","code":"lines(density(c(1, 2, 2, 3, 9)))"}"#),
+        Some(r#"{"id":6,"op":"quit"}"#),
+    ]);
+    let first = reply(&out, 1);
+    assert!(first.contains(r#"class=\"main\""#) && first.contains("Main title"));
+    assert!(first.contains(r#"class=\"xlab\""#) && first.contains(r#"class=\"ylab\""#));
+    // xlim = c(0, 20), padded 4 % on each side as R's par("usr") is
+    assert!(first.contains(r#"class=\"plot-region\" data-usr=\"-0.8 20.8"#), "{first}");
+    let after_lines = reply(&out, 2);
+    assert!(after_lines.contains("\"plot\":") && after_lines.len() > first.len(), "an overlay sends the whole picture again");
+    let after_text = reply(&out, 3);
+    assert!(after_text.contains("LABEL") && after_text.contains("Sub title"), "text() and title(sub =) are in the reply");
+    assert!(after_text.contains("Main title"), "the plot under the overlays is still there");
+    let hist = reply(&out, 5);
+    assert!(hist.contains(r#"class=\"plot-region\""#) && hist.contains("<path"),
+        "lines(density()) draws over the histogram");
+}

@@ -58,7 +58,7 @@ pub fn mtcars() -> RVal {
     load(BYTES, "mtcars")
 }
 
-/// New York air quality, May–September 1973 — first 30 rows, with NAs.
+/// New York air quality, May–September 1973 — all 153 rows of R's, with NAs.
 pub fn airquality() -> RVal {
     static BYTES: &[u8] = include_bytes!("../datasets/airquality.r2d");
     load(BYTES, "airquality")
@@ -67,7 +67,8 @@ pub fn airquality() -> RVal {
 /// Effect of vitamin C on tooth growth in guinea pigs — 60 obs, 3 vars.
 pub fn tooth_growth() -> RVal {
     static BYTES: &[u8] = include_bytes!("../datasets/tooth_growth.r2d");
-    load(BYTES, "tooth_growth")
+    // `supp` is a factor in R, levels OJ and VC
+    factorize_column(load(BYTES, "tooth_growth"), "supp")
 }
 
 /// Old Faithful geyser eruption data — 272 obs, 2 vars.
@@ -119,8 +120,10 @@ mod dataset_integrity {
         }
     }
 
-    /// Iris column sums, computed via:
-    ///   sapply(iris[1:4], sum)   →   876.5  458.1  563.7  179.9
+    /// Iris column sums, from R 4.5.3:
+    ///   sapply(iris[1:4], sum)   →   876.5  458.6  563.7  179.9
+    /// (458.1 was the sum of a variant with two rows differing from R's,
+    /// which this file held until 2026-11-11.)
     #[test]
     fn iris_column_sums_match_canonical_R() {
         let df = iris();
@@ -131,7 +134,7 @@ mod dataset_integrity {
         let pw = col_sum(&df, "Petal.Width");
         let tol = 1e-9;
         assert!((sl - 876.5).abs() < tol, "iris$Sepal.Length sum {} != 876.5 (canonical R)", sl);
-        assert!((sw - 458.1).abs() < tol, "iris$Sepal.Width sum {} != 458.1 (canonical R)", sw);
+        assert!((sw - 458.6).abs() < tol, "iris$Sepal.Width sum {} != 458.6 (canonical R)", sw);
         assert!((pl - 563.7).abs() < tol, "iris$Petal.Length sum {} != 563.7 (canonical R)", pl);
         assert!((pw - 179.9).abs() < tol, "iris$Petal.Width sum {} != 179.9 (canonical R)", pw);
     }

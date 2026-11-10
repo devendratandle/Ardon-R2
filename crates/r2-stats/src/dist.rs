@@ -356,13 +356,25 @@ pub fn bi_density(a: &[EvalArg]) -> Result<RVal, R2Err> {
         return Err(R2Err { msg: "density: need a non-empty numeric vector".into(), kind: ErrKind::Runtime });
     }
     let n = x.len() as f64;
-    let (_, _, sxx) = crate::moments::centred1_dense(&x);
-    let sd = (sxx / (n - 1.0).max(1.0)).sqrt();
-    let h = (0.9 * sd * n.powf(-0.2)).max(1e-6); // Silverman's rule of thumb
+    let named = |k: &str| a.iter().find(|e| e.name.as_deref() == Some(k)).map(|e| e.value.clone());
+    // R's default bandwidth, bw.nrd0: 0.9 min(sd, IQR/1.34) n^-1/5
+    let h = match named("bw").and_then(|v| v.scalar_f64().ok().flatten()) {
+        Some(b) if b > 0.0 => b,
+        _ => {
+            let (_, _, sxx) = crate::moments::centred1_dense(&x);
+            let sd = (sxx / (n - 1.0).max(1.0)).sqrt();
+            let mut s = x.clone();
+            s.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            let q = |p: f64| { let h = (s.len() - 1) as f64 * p; let (i, f) = (h.floor() as usize, h - h.floor()); s[i] + f * (s[(i + 1).min(s.len() - 1)] - s[i]) };
+            let mut lo = sd.min((q(0.75) - q(0.25)) / 1.34);
+            if !(lo > 0.0) { lo = if sd > 0.0 { sd } else if s[0] != 0.0 { s[0].abs() } else { 1.0 }; }
+            0.9 * lo * n.powf(-0.2)
+        }
+    };
     let xmin = x.iter().cloned().fold(f64::INFINITY, f64::min);
     let xmax = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let (lo, hi) = (xmin - 3.0 * h, xmax + 3.0 * h);
-    let ng = 512usize;
+    let ng = named("n").and_then(|v| v.scalar_f64().ok().flatten()).map(|k| k.max(2.0) as usize).unwrap_or(512);
     let norm = 1.0 / (n * h * (2.0 * std::f64::consts::PI).sqrt());
     let mut gx = Vec::with_capacity(ng);
     let mut gy = Vec::with_capacity(ng);
@@ -372,10 +384,24 @@ pub fn bi_density(a: &[EvalArg]) -> Result<RVal, R2Err> {
         gx.push(Some(xi));
         gy.push(Some(dens));
     }
-    Ok(RVal::list(vec![
+    // R's fields and class; the data's name comes from the call (eval.rs)
+    let data_name = named(".data.name").and_then(|v| match v {
+        RVal::Character(s, _) => s.first().cloned().flatten(),
+        _ => None,
+    }).unwrap_or_else(|| Arc::from("x"));
+    let text = |s: &str| RVal::Character(vec![Some(Arc::from(s))], Attrs::default());
+    let mut at = Attrs::default();
+    at.class = Some(Arc::from("density"));
+    Ok(RVal::List(vec![
         (Some(Arc::from("x")), RVal::Numeric(gx.into(), Attrs::default())),
         (Some(Arc::from("y")), RVal::Numeric(gy.into(), Attrs::default())),
-    ]))
+        (Some(Arc::from("bw")), RVal::Numeric(vec![Some(h)].into(), Attrs::default())),
+        (Some(Arc::from("n")), RVal::Integer(vec![Some(x.len() as i32)].into(), Attrs::default())),
+        (Some(Arc::from("old.coords")), RVal::Logical(vec![Some(false)].into(), Attrs::default())),
+        (Some(Arc::from("call")), text(&format!("density.default(x = {})", data_name))),
+        (Some(Arc::from("data.name")), text(&data_name)),
+        (Some(Arc::from("has.na")), RVal::Logical(vec![Some(false)].into(), Attrs::default())),
+    ], at))
 }
 
 #[cfg(test)]

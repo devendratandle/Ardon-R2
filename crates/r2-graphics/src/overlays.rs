@@ -39,6 +39,8 @@ fn overlay_col(a: &[EvalArg]) -> String {
 /// `lines(x, y, col=, lwd=, lty=)` — connect (x,y) as a polyline in the
 /// base plot's data coordinates.
 pub fn bi_lines(a: &[EvalArg]) -> Result<RVal, R2Err> {
+    // lines(density(x)): a list's x and y
+    if let Some(args) = crate::plots::xy_args(a) { return bi_lines(&args); }
     let x: Vec<f64> = gv(a, 0).as_reals()?.into_iter().filter_map(|x| x).collect();
     let y: Vec<f64> = gv(a, 1).as_reals()?.into_iter().filter_map(|x| x).collect();
     let col = overlay_col(a);

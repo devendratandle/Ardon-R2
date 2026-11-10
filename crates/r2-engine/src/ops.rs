@@ -269,7 +269,8 @@ impl Engine {
         // shorter (c(1,2,3,4) + c(10,20) is legal); only a fractional
         // recycle is worth flagging.
         if ll != rl && ll != 1 && rl != 1 && ll.max(rl) % ll.min(rl).max(1) != 0 { if self.mode == ErrorMode::Strict { return err!(Runtime, "vectors length {} vs {} mismatch", ll, rl); } else { self.warnings.push(format!("Warning: recycling {} and {}", ll, rl)); } }
-        let len = ll.max(rl);
+        // a zero-length operand gives a zero-length result, as in R
+        let len = if ll == 0 || rl == 0 { 0 } else { ll.max(rl) };
         match op {
             BinOp::Eq|BinOp::Ne|BinOp::Lt|BinOp::Gt|BinOp::Le|BinOp::Ge => {
                 let r: Vec<Logical> = (0..len).map(|i| { let (a,b) = (l[i%ll], r[i%rl]); match (a,b) { (Some(a),Some(b)) => Some(match op { BinOp::Eq => (a-b).abs()<f64::EPSILON, BinOp::Ne => (a-b).abs()>=f64::EPSILON, BinOp::Lt => a<b, BinOp::Gt => a>b, BinOp::Le => a<=b, BinOp::Ge => a>=b, _ => false }), _ => None } }).collect();

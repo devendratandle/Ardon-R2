@@ -196,7 +196,8 @@ impl Parser {
                 }
                 self.expect(&Token::RBrack)?; obj = Expr::Index { object: Box::new(obj), indices }; }
             Token::LDblBrack => { self.advance(); self.skip_nl(); let idx = self.parse_expr()?; self.skip_nl(); self.expect(&Token::RDblBrack)?; obj = Expr::DblIndex { object: Box::new(obj), index: Box::new(idx) }; }
-            Token::Dollar => { self.advance(); if let Token::Ident(name) = self.peek().clone() { self.advance(); obj = Expr::Dollar { object: Box::new(obj), field: Arc::from(name.as_str()) }; } else { let (l,c) = self.loc(); return Err(ParseErr { msg: "expected name after $".into(), line: l, col: c }); } }
+            // R has no reserved words after `$`: `fit$method`, `x$type`, `x$"a b"`
+            Token::Dollar => { self.advance(); let field = match self.peek().clone() { Token::Ident(s) | Token::Str(s) => Some(s), other => soft_keyword_name(&other).map(|s| s.to_string()) }; if let Some(name) = field { self.advance(); obj = Expr::Dollar { object: Box::new(obj), field: Arc::from(name.as_str()) }; } else { let (l,c) = self.loc(); return Err(ParseErr { msg: "expected name after $".into(), line: l, col: c }); } }
             Token::DblColon => { self.advance(); if let (Expr::Symbol(pkg), Token::Ident(name)) = (&obj, self.peek().clone()) { let pkg = pkg.clone(); self.advance(); obj = Expr::Namespace { pkg, name: Arc::from(name.as_str()) }; } else { let (l,c) = self.loc(); return Err(ParseErr { msg: "expected pkg::name".into(), line: l, col: c }); } }
             _ => break,
         }}

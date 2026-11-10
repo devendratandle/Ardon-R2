@@ -1,6 +1,6 @@
-# Ardon-R2 Function Reference — 538 Built-in Functions and Operators
+# Ardon-R2 Function Reference — 543 Built-in Functions and Operators
 
-## Core (95)
+## Core (97)
 ```
 seq(from,to,by=)   Regular sequence; also seq(along=x), seq_len(n)
 rep(x,times=,each=)   Repeat a vector
@@ -12,6 +12,7 @@ which.max(x) / which.min(x)   Index of the first maximum / minimum
 all(x) / any(x)    TRUE if all / any elements are TRUE (na.rm= honoured)
 isTRUE(x) / isFALSE(x)   TRUE only for a length-1, non-NA logical of that value
 nrow(x) / ncol(x)  Row / column count of a matrix or data frame
+dimnames(x)        Row and column names of a matrix, data frame or anova table, as a list
 row(x)              Matrix of row indices, the shape of x
 col(x)              Matrix of column indices, the shape of x
 rowSums(x) / colSums(x)     Row / column totals of a matrix
@@ -19,6 +20,7 @@ rowMeans(x) / colMeans(x)   Row / column means
 t(x)               Matrix transpose
 exists(name)       TRUE if a variable of that name is defined
 get(name)          The value of that name: a variable, a builtin or an operator (get("+"))
+I(x)               x as it is; in a model formula, I(wt^2) is arithmetic
 ls()               Names of objects in the current environment
 rm(x)              Remove objects from the environment
 stop(msg)          Raise an error (caught by tryCatch)
@@ -428,7 +430,7 @@ Filter(f,x)         Keep elements where f(x) is TRUE
 Map(f,...)          Apply f element-wise across vectors → list
 ```
 
-## I/O (14)
+## I/O (16)
 ```
 read.csv(file, header=TRUE, sep=",", check.names=TRUE)   Read a CSV; header names go through make.names (a b -> a.b, 1x -> X1x, duplicates .1/.2) unless check.names=FALSE
 make.names(x, unique=FALSE)   R's valid-name rule: X prefix for a bad start, invalid characters to ".", reserved words get "."; unique=TRUE appends .1, .2 to duplicates
@@ -441,9 +443,11 @@ read.table(file)    Read delimited file
 write.table(x,file) Write delimited file
 read.delim(file)    Read tab-delimited
 source(file)        Run R2 script
-save(file)          Save session
-load(file)          Load session
+save(..., list=, file=) Save objects under their names (save(file) alone: the session)
+load(file)          Restore saved objects under their names, where load is called
 file.exists(path)   Check if file exists
+tempfile(pattern, fileext=) A file name in the session's temporary folder
+tempdir()           The session's temporary folder
 list.files(path, pattern, full.names, recursive, ignore.case)   Files in a folder (pattern: regex on the name)
 dir(path, ...)      Same as list.files
 file.path(...)      Join path parts with "/"
@@ -512,7 +516,7 @@ Supported `par()` parameters: `mfrow`, `mfcol`, `mar`, `oma`, `cex`,
 `cex.axis`, `cex.lab`, `cex.main`, `col`, `bg`, `fg`, `lty`, `lwd`,
 `pch`, `las`, `new`. Defaults match CRAN R 4.5.x.
 
-## Model Functions (11)
+## Model Functions (12)
 ```
 lmer(y ~ x + (1|g), data=)   Random-intercept mixed model by profiled REML
 plssem(model, data=, seed=) / csem(model, data=)   PLS path model (PLS-SEM, cSEM defaults) with bootstrap
@@ -521,6 +525,7 @@ predict(model,newdata)  Predict from model
 residuals(model)        Residuals
 fitted(model)           Fitted values
 coef(model)             Coefficients
+nobs(model)             Number of observations the model was fitted to
 deviance(model)         Residual deviance (lm/glm)
 summary(model)          Model summary (auto-dispatch)
 plot(model)             Model diagnostic plot (auto-dispatch)

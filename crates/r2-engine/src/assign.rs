@@ -135,7 +135,6 @@ impl Engine {
     /// empty subscript (`None`) selects the whole axis. Values recycle
     /// column-major over the selected submatrix (R semantics).
     pub(crate) fn assign_matrix_index(&mut self, obj: &mut RVal, row: Option<&RVal>, col: Option<&RVal>, val: &RVal) -> Result<(), R2Err> {
-        let new_vals = self.as_reals(val)?;
         let sel = |axis: Option<&RVal>, n: usize, this: &Self| -> Result<Vec<usize>, R2Err> {
             match axis {
                 None => Ok((0..n).collect()),
@@ -145,6 +144,7 @@ impl Engine {
             }
         };
         if let RVal::Matrix(m) = obj {
+            let new_vals = self.as_reals(val)?;
             let keep_rows = sel(row, m.nrow, self)?;
             let keep_cols = sel(col, m.ncol, self)?;
             if new_vals.is_empty() { return err!(Runtime, "replacement has length zero"); }
@@ -175,8 +175,11 @@ impl Engine {
             if vlen == 0 { return err!(Runtime, "replacement has length zero"); }
             for (k, &p) in cols.iter().enumerate() {
                 let share: Vec<usize> = (0..rows.len()).map(|r| (k * rows.len() + r) % vlen).collect();
+                // a data frame or a list gives each column its own element,
+                // as `d[1, ] <- list(5, "b", "z")` does
                 let chunk = match val {
                     RVal::DataFrame(src) => src.columns[k % src.columns.len().max(1)].1.clone(),
+                    RVal::List(items, _) => items[k % items.len()].1.clone(),
                     other => take(other, &share),
                 };
                 let slot = if p < df.columns.len() { p } else {

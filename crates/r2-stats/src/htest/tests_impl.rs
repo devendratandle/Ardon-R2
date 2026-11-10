@@ -597,6 +597,11 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
+/// The first string of a character argument.
+fn text_of(v: &RVal) -> String {
+    match v { RVal::Character(s, _) => s.first().cloned().flatten().map(|x| x.to_string()).unwrap_or_default(), _ => String::new() }
+}
+
 pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let x = first(a).as_reals()?;
     let y = nth(a, 1).as_reals()?;
@@ -616,21 +621,54 @@ pub fn bi_cor_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     let t_stat = if (1.0 - r * r).abs() > 1e-15 { r * (df / (1.0 - r * r)).sqrt() } else { f64::INFINITY };
     // R: pt(-|t|, df)*2 — the t distribution, not the normal. The normal
     // shortcut understates p at small n (n=10: 0.0128 vs R's 0.0264).
-    let p_value = 2.0 * t_cdf(-t_stat.abs(), df);   // the tail itself: 1 - cdf cancels small p to 0
+    let alternative = arg_named(a, "alternative").map(|v| text_of(&v)).unwrap_or_else(|| "two.sided".into());
+    let conf_level = arg_named(a, "conf.level").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(0.95);
+    // the tail itself: 1 - cdf cancels small p to 0
+    let p_value = match alternative.as_str() {
+        "less" => t_cdf(t_stat, df),
+        "greater" => t_cdf(-t_stat, df),
+        _ => 2.0 * t_cdf(-t_stat.abs(), df),
+    };
+    // Fisher's z interval, as R's cor.test gives it (n > 3)
+    let conf_int = (n > 3).then(|| {
+        let (z, se) = (r.atanh(), 1.0 / ((n - 3) as f64).sqrt());
+        match alternative.as_str() {
+            "less" => (-1.0, (z + qnorm_approx(conf_level) * se).tanh()),
+            "greater" => ((z - qnorm_approx(conf_level) * se).tanh(), 1.0),
+            _ => { let q = qnorm_approx((1.0 + conf_level) / 2.0); ((z - q * se).tanh(), (z + q * se).tanh()) }
+        }
+    });
+    let sided = match alternative.as_str() { "less" => "less than", "greater" => "greater than", _ => "not equal to" };
 
     soutln!("\n  Pearson's product-moment correlation\n");
     soutln!("t = {}, df = {}, p-value = {}", fmt_n(t_stat), n - 2, fmt_pval(p_value));
-    soutln!("alternative hypothesis: true correlation is not equal to 0");
-    soutln!("sample estimate:");
+    soutln!("alternative hypothesis: true correlation is {} 0", sided);
+    if let Some((lo, hi)) = conf_int {
+        soutln!("{} percent confidence interval:", fmt_n(conf_level * 100.0));
+        soutln!(" {} {}", fmt_n(lo), fmt_n(hi));
+    }
+    soutln!("sample estimates:");
     soutln!("      cor");
     soutln!("{:>9}", fmt_n(r));
 
     let mut fields = HashMap::new();
-    fields.insert(Arc::from("estimate"), named(&[r], &["cor"]));
-    fields.insert(Arc::from("statistic"), rnum(t_stat));
+    fields.insert(Arc::from("statistic"), named(&[t_stat], &["t"]));
+    fields.insert(Arc::from("parameter"), named(&[df], &["df"]));
     fields.insert(Arc::from("p.value"), rnum(p_value));
-    fields.insert(Arc::from("df"), rnum(df));
-    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("cor.test"), fields }))
+    fields.insert(Arc::from("estimate"), named(&[r], &["cor"]));
+    fields.insert(Arc::from("null.value"), named(&[0.0], &["correlation"]));
+    fields.insert(Arc::from("alternative"), rstr(&alternative));
+    fields.insert(Arc::from("method"), rstr("Pearson's product-moment correlation"));
+    fields.insert(Arc::from("data.name"), rstr("x and y"));
+    // R's order for cor.test, which puts conf.int last
+    let order = ["statistic", "parameter", "p.value", "estimate", "null.value", "alternative", "method", "data.name", "conf.int"];
+    fields.insert(Arc::from(".order"), RVal::Character(order.iter().map(|s| Some(Arc::from(*s))).collect(), Attrs::default()));
+    if let Some((lo, hi)) = conf_int {
+        let mut at = Attrs::default();
+        at.custom.insert(Arc::from("conf.level"), rnum(conf_level));
+        fields.insert(Arc::from("conf.int"), RVal::Numeric(vec![Some(lo), Some(hi)].into(), at));
+    }
+    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("htest"), fields }))
 }
 
 pub fn bi_shapiro_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
@@ -669,73 +707,6 @@ pub fn bi_shapiro_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     fields.insert(Arc::from("statistic"), rnum(w));
     fields.insert(Arc::from("p.value"), rnum(p_value));
     Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("shapiro.test"), fields }))
-}
-
-pub fn bi_wilcox_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let x: Vec<f64> = first(a).as_reals()?.into_iter().filter_map(|v| v).collect();
-    let y_raw = arg_named(a, "y").or(Some(nth(a, 1)));
-    let mu = arg_named(a, "mu").and_then(|v| v.scalar_f64().ok().flatten()).unwrap_or(0.0);
-
-    let n = x.len();
-    if n < 2 { return Err(runtime_err("wilcox.test needs at least 2 observations".into())); }
-
-    if let Some(y_val) = &y_raw {
-        if let Ok(y_reals) = y_val.as_reals() {
-            let y: Vec<f64> = y_reals.into_iter().filter_map(|v| v).collect();
-            if !y.is_empty() {
-                let m = y.len();
-                let mut combined: Vec<(f64, bool)> = Vec::new();
-                for v in &x { combined.push((*v, true)); }
-                for v in &y { combined.push((*v, false)); }
-                combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-                let _total = combined.len();
-                let rank_sum_x: f64 = combined.iter().enumerate()
-                    .filter(|(_, (_, is_x))| *is_x)
-                    .map(|(i, _)| (i + 1) as f64)
-                    .sum();
-
-                let u = rank_sum_x - (n * (n + 1)) as f64 / 2.0;
-                let mean_u = (n * m) as f64 / 2.0;
-                let sd_u = ((n * m * (n + m + 1)) as f64 / 12.0).sqrt();
-                let z = if sd_u > 0.0 { (u - mean_u) / sd_u } else { 0.0 };
-                let p_value = 2.0 * phi_upper(z.abs());
-
-                soutln!("\n  Wilcoxon rank sum test\n");
-                soutln!("W = {}, p-value = {}", fmt_n(u), fmt_pval(p_value));
-                soutln!("alternative hypothesis: true location shift is not equal to 0");
-
-                let mut fields = HashMap::new();
-                fields.insert(Arc::from("statistic"), rnum(u));
-                fields.insert(Arc::from("p.value"), rnum(p_value));
-                return Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("wilcox.test"), fields }));
-            }
-        }
-    }
-
-    let diffs: Vec<f64> = x.iter().map(|v| v - mu).filter(|d| d.abs() > 1e-15).collect();
-    let nd = diffs.len();
-    if nd < 2 { return Err(runtime_err("wilcox.test: not enough non-zero differences".into())); }
-
-    let mut abs_diffs: Vec<(f64, f64)> = diffs.iter().map(|d| (d.abs(), d.signum())).collect();
-    abs_diffs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let w_plus: f64 = abs_diffs.iter().enumerate()
-        .filter(|(_, (_, sign))| *sign > 0.0)
-        .map(|(i, _)| (i + 1) as f64).sum();
-
-    let mean_w = (nd * (nd + 1)) as f64 / 4.0;
-    let sd_w = ((nd * (nd + 1) * (2 * nd + 1)) as f64 / 24.0).sqrt();
-    let z = if sd_w > 0.0 { (w_plus - mean_w) / sd_w } else { 0.0 };
-    let p_value = 2.0 * phi_upper(z.abs());
-
-    soutln!("\n  Wilcoxon signed rank test\n");
-    soutln!("V = {}, p-value = {}", fmt_n(w_plus), fmt_pval(p_value));
-    soutln!("alternative hypothesis: true location is not equal to {}", mu);
-
-    let mut fields = HashMap::new();
-    fields.insert(Arc::from("statistic"), rnum(w_plus));
-    fields.insert(Arc::from("p.value"), rnum(p_value));
-    Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("wilcox.test"), fields }))
 }
 
 /// log C(n, k) via log-gamma. Returns -∞ when k > n or k < 0.

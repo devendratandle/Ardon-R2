@@ -53,6 +53,7 @@ pub mod moments;
 pub mod summary;
 pub mod htest;
 pub mod models;
+pub mod anova_lm;
 pub mod rng;
 pub mod multivariate;
 pub mod mixed;

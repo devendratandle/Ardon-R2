@@ -799,7 +799,17 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
     };
     let header = gn(a,"header").and_then(|v| e.as_logicals(&v).ok()).map(|v| v[0] == Some(true)).unwrap_or(true);
     let sep = gn(a,"sep").and_then(|v| match v { RVal::Character(s,_) => s[0].as_ref().map(|s| s.to_string()), _ => None }).unwrap_or(",".into());
-    let na_strings = vec!["NA", "na", "N/A", "n/a", "", ".", "NULL", "null", "None", "none"];
+    // `na.strings` replaces R2's broader default list, as R's replaces "NA"
+    let na_strings: Vec<String> = match gn(a, "na.strings") {
+        Some(RVal::Character(s, _)) => s.iter().flatten().map(|x| x.to_string()).collect(),
+        _ => ["NA", "na", "N/A", "n/a", "", ".", "NULL", "null", "None", "none"].iter().map(|s| s.to_string()).collect(),
+    };
+    let na_strings: Vec<&str> = na_strings.iter().map(|s| s.as_str()).collect();
+    // `dec = ","`: the decimal mark of the numbers
+    let dec = match gn(a, "dec") { Some(RVal::Character(s, _)) => s.first().cloned().flatten().and_then(|d| d.chars().next()), _ => None };
+    let number = |s: &str| -> Option<f64> {
+        match dec { Some(d) if d != '.' => s.trim().replace(d, ".").parse().ok(), _ => s.trim().parse().ok() }
+    };
 
     let content = r2_io::read_text_file(&path, r2_io::encoding_arg(a).as_deref())?;
     let mut lines = content.lines();
@@ -831,8 +841,8 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
 
         // Type inference: try integer → numeric → character
         let all_int = col_vals.iter().all(|s| na_strings.contains(&s.as_str()) || s.parse::<i32>().is_ok());
-        let all_num = col_vals.iter().all(|s| na_strings.contains(&s.as_str()) || s.parse::<f64>().is_ok());
-        let has_num = col_vals.iter().any(|s| s.parse::<f64>().is_ok());
+        let all_num = col_vals.iter().all(|s| na_strings.contains(&s.as_str()) || number(s).is_some());
+        let has_num = col_vals.iter().any(|s| number(s).is_some());
 
         if all_int && has_num {
             let vals: Vec<Integer> = col_vals.iter().map(|s| {
@@ -841,7 +851,7 @@ pub(crate) fn bi_read_csv_v2(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Resul
             columns.push((name, RVal::Integer(vals.into(), Attrs::default())));
         } else if all_num && has_num {
             let vals: Vec<Real> = col_vals.iter().map(|s| {
-                if na_strings.contains(&s.as_str()) { None } else { s.parse().ok() }
+                if na_strings.contains(&s.as_str()) { None } else { number(s) }
             }).collect();
             columns.push((name, RVal::Numeric(vals.into(), Attrs::default())));
         } else {

@@ -144,7 +144,7 @@ pub(crate) fn stats_table() -> Vec<(&'static str, BuiltinFn)> {
         ("predict",bi_predict),("residuals",bi_residuals),("fitted",bi_fitted),("coef",bi_coef),("deviance",bi_deviance),
         ("glm",bi_glm),("confint",bi_confint),("binomial",bi_binomial),("gaussian",bi_gaussian),("poisson",bi_poisson),("subset",bi_subset),("transform",bi_transform),
         // ML functions
-        ("get",bi_get),("conditionMessage",bi_condition_message),("as.difftime",bi_as_difftime),("weekdays",bi_weekdays),("months",bi_months),("class<-",bi_class_set),("oldClass",bi_old_class),("unclass",bi_unclass),("attr<-",bi_attr_set),("is.integer",bi_is_integer),("row",bi_row),("col",bi_col),
+        ("dimnames",bi_dimnames),("nobs",bi_nobs),("I",bi_asis),("get",bi_get),("conditionMessage",bi_condition_message),("as.difftime",bi_as_difftime),("weekdays",bi_weekdays),("months",bi_months),("class<-",bi_class_set),("oldClass",bi_old_class),("unclass",bi_unclass),("attr<-",bi_attr_set),("is.integer",bi_is_integer),("row",bi_row),("col",bi_col),
         ("qr",bi_qr),("is.qr",bi_is_qr),("qr.Q",bi_qr_q),("qr.R",bi_qr_r),("qr.X",bi_qr_x),("qr.coef",bi_qr_coef),("qr.qy",bi_qr_qy),("qr.qty",bi_qr_qty),("qr.resid",bi_qr_resid),("qr.fitted",bi_qr_fitted),("qr.solve",bi_qr_solve),
         ("svd",bi_svd),("chol",bi_chol),("eigen",bi_eigen),("prcomp",bi_prcomp),("solve",bi_solve),("det",bi_det),("backsolve",bi_backsolve),("forwardsolve",bi_forwardsolve),("rcond",bi_rcond),("kappa",bi_kappa),("mmap.write",bi_mmap_write),("mmap.col",bi_mmap_col),("mmap.map",bi_mmap_map),("mmap.csv",bi_mmap_csv),("mmap.lm",bi_mmap_lm),("read.parquet",bi_read_parquet),("mem.budget",bi_mem_budget),("mem.status",bi_mem_status),("mem.spill",bi_mem_spill),("mem.restore",bi_mem_restore),("gpu.enable",bi_gpu_enable),("gpu.status",bi_gpu_status),("gpu.map",bi_gpu_map),
         ("llm.new",bi_llm_new),("llm.train",bi_llm_train),("llm.generate",bi_llm_generate),("llm.save",bi_llm_save),("llm.load",bi_llm_load),("llm.resume",bi_llm_resume),("llm.finetune",bi_llm_finetune),("llm.freeze",bi_llm_freeze),("llm.lora",bi_llm_lora),("llm.save.adapter",bi_llm_save_adapter),("llm.load.adapter",bi_llm_load_adapter),("llm.info",bi_llm_info),("llm.inspect",bi_llm_inspect),("llm.free",bi_llm_free),
@@ -183,7 +183,7 @@ pub(crate) fn utils_table() -> Vec<(&'static str, BuiltinFn)> {
         ("source",bi_source),("system.time",bi_system_time),
         ("read.table",bi_read_table),("write.table",bi_write_table),("read.delim",bi_read_delim),
         ("help",bi_help),("getwd",bi_getwd),("setwd",bi_setwd),
-        ("file.exists",bi_file_exists),("list.files",bi_list_files),("dir",bi_list_files),("file.path",bi_file_path),("basename",bi_basename),("dirname",bi_dirname),("Sys.getenv",bi_sys_getenv),("save",bi_save),("load",bi_load),("version",bi_version),(".Internal",bi_internal),
+        ("tempfile",bi_tempfile),("tempdir",bi_tempdir),("file.exists",bi_file_exists),("list.files",bi_list_files),("dir",bi_list_files),("file.path",bi_file_path),("basename",bi_basename),("dirname",bi_dirname),("Sys.getenv",bi_sys_getenv),("save",bi_save),("load",bi_load),("version",bi_version),(".Internal",bi_internal),
     ]
 }
 

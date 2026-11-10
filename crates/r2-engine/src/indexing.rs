@@ -45,7 +45,16 @@ impl Engine {
             _ => return None,
         };
         let &[nrow, ncol] = at.dim.as_deref()? else { return None };
-        let positions = Matrix::new((0..nrow * ncol).map(|k| k as f64).collect(), nrow, ncol);
+        let mut positions = Matrix::new((0..nrow * ncol).map(|k| k as f64).collect(), nrow, ncol);
+        // dimnames let a table be read by label: t["6", "4"]
+        if let Some(RVal::List(dn, _)) = at.custom.get("dimnames") {
+            let side = |k: usize, len: usize| match dn.get(k).map(|x| &x.1) {
+                Some(RVal::Character(s, _)) if s.len() == len => Some(s.iter().map(|x| x.clone().unwrap_or_else(|| Arc::from("NA"))).collect()),
+                _ => None,
+            };
+            positions.row_names = side(0, nrow);
+            positions.col_names = side(1, ncol);
+        }
         let picked = match self.index_matrix(&positions, row, col) { Ok(v) => v, Err(e) => return Some(Err(e)) };
         let (keep, dim) = match &picked {
             RVal::Matrix(m) => (m.data.iter().map(|k| Some(*k as usize)).collect::<Vec<_>>(), Some(vec![m.nrow, m.ncol])),
@@ -112,6 +121,19 @@ impl Engine {
                 df.columns.get(i.wrapping_sub(1)).map(|(_, v)| v.clone())
                     .ok_or_else(|| R2Err { msg: "subscript out of bounds".into(), kind: ErrKind::Runtime })
             }
+            // a result read as the list it is in R: `a[["F value"]]`, `fit[[1]]`
+            RVal::TypeInstance(inst) => {
+                let names = crate::builtins::attrs::field_names(inst);
+                let name = match idx {
+                    RVal::Character(cv, _) => cv.first().cloned().flatten(),
+                    _ => {
+                        let i = self.as_reals(idx)?.first().copied().flatten().unwrap_or(0.0) as usize;
+                        names.get(i.wrapping_sub(1)).cloned()
+                    }
+                };
+                name.and_then(|n| inst.fields.get(&n).cloned())
+                    .ok_or_else(|| R2Err { msg: "subscript out of bounds".into(), kind: ErrKind::Runtime })
+            }
             _ => {
                 // `v[["name"]]` on a named atomic vector: resolve the name
                 // against the names attribute (R drops names on `[[`).
@@ -154,6 +176,26 @@ impl Engine {
 
     fn index_matrix(&self, m: &Matrix, row: &Option<RVal>, col: &Option<RVal>) -> Result<RVal, R2Err> {
         // Resolve rows
+        // a label reads the row or column of that name: m["r1", "c2"]
+        let by_name = |idx: &RVal, names: &Option<Vec<Arc<str>>>, side: &str| -> Option<Result<Vec<usize>, R2Err>> {
+            let RVal::Character(keys, _) = idx else { return None };
+            Some(keys.iter().map(|k| {
+                let k = k.as_deref().unwrap_or("NA");
+                names.as_ref().and_then(|ns| ns.iter().position(|n| n.as_ref() == k))
+                    .ok_or_else(|| R2Err { msg: format!("subscript out of bounds: no {} named '{}'", side, k), kind: ErrKind::Index })
+            }).collect())
+        };
+        if let Some(r) = row.as_ref().and_then(|i| by_name(i, &m.row_names, "row")) {
+            let rows = r?;
+            let cols = match col { Some(c) => match by_name(c, &m.col_names, "column") { Some(c) => c?, None => self.resolve_subscript(c, m.ncol)? }, None => (0..m.ncol).collect() };
+            let pos = |v: &[usize]| RVal::Numeric(v.iter().map(|i| Some(*i as f64 + 1.0)).collect(), Attrs::default());
+            return self.index_matrix(m, &Some(pos(&rows)), &Some(pos(&cols)));
+        }
+        if let Some(c) = col.as_ref().and_then(|i| by_name(i, &m.col_names, "column")) {
+            let cols = c?;
+            let pos = RVal::Numeric(cols.iter().map(|i| Some(*i as f64 + 1.0)).collect(), Attrs::default());
+            return self.index_matrix(m, row, &Some(pos));
+        }
         let keep_rows: Vec<usize> = match row {
             None => (0..m.nrow).collect(),
             Some(RVal::Logical(mask, _)) => mask.iter().enumerate().filter_map(|(i, b)| if *b == Some(true) { Some(i) } else { None }).collect(),
@@ -170,14 +212,19 @@ impl Engine {
             let v = m.data[keep_cols[0] * m.nrow + keep_rows[0]];
             return Ok(RVal::Numeric(vec![if v.is_nan() { None } else { Some(v) }].into(), Attrs::default()));
         }
-        // Single column or single row → drop to vector (R's default `drop=TRUE`)
+        // Single column or single row → drop to vector (R's default `drop=TRUE`),
+        // named by the other dimension's names, as R names it
+        let named = |names: &Option<Vec<Arc<str>>>, keep: &[usize]| Attrs {
+            names: names.as_ref().map(|ns| keep.iter().map(|&k| ns[k].clone()).collect()),
+            ..Default::default()
+        };
         if keep_cols.len() == 1 {
             let j = keep_cols[0];
             let out: Vec<Real> = keep_rows.iter().map(|&i| {
                 let v = m.data[j * m.nrow + i];
                 if v.is_nan() { None } else { Some(v) }
             }).collect();
-            return Ok(RVal::Numeric(out.into(), Attrs::default()));
+            return Ok(RVal::Numeric(out.into(), named(&m.row_names, &keep_rows)));
         }
         if keep_rows.len() == 1 {
             let i = keep_rows[0];
@@ -185,7 +232,7 @@ impl Engine {
                 let v = m.data[j * m.nrow + i];
                 if v.is_nan() { None } else { Some(v) }
             }).collect();
-            return Ok(RVal::Numeric(out.into(), Attrs::default()));
+            return Ok(RVal::Numeric(out.into(), named(&m.col_names, &keep_cols)));
         }
         // General submatrix → Matrix (column-major)
         let mut data = Vec::with_capacity(keep_rows.len() * keep_cols.len());
@@ -299,7 +346,14 @@ impl Engine {
             (name.clone(), new_col)
         }).collect();
 
-        Ok(RVal::DataFrame(DataFrame { columns: new_cols, row_names: None }))
+        // the rows keep their names, "153" for the 153rd, as in R
+        let row_names = match (&df.row_names, row.is_some()) {
+            (Some(rn), _) => Some(keep_rows.iter().map(|&i| rn[i].clone()).collect()),
+            (None, true) if keep_rows.iter().enumerate().any(|(k, &i)| k != i) =>
+                Some(keep_rows.iter().map(|&i| Arc::from((i + 1).to_string().as_str())).collect()),
+            _ => None,
+        };
+        Ok(RVal::DataFrame(DataFrame { columns: new_cols, row_names }))
     }
 
     fn subset_col_by_rows(&self, col: &RVal, rows: &[usize]) -> RVal {

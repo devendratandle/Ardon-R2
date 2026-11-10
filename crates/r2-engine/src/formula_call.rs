@@ -36,6 +36,9 @@ impl Engine {
                 return Ok(Some(v));
             }
         }
+        if fname == "wilcox.test" {
+            return self.two_groups_call(func, lhs, rhs, df, args, env).map(Some);
+        }
         // A dot (.) on the RHS means "all other columns".
         let v = if matches!(rhs.as_ref(), Expr::Symbol(s) if s.as_ref() == ".") {
             self.dot_formula_call(fname, func, lhs, df, args, env)?
@@ -43,6 +46,31 @@ impl Engine {
             self.named_formula_call(func, lhs, rhs, df, args, env)?
         };
         Ok(Some(v))
+    }
+
+    /// `test(y ~ g, data = df)` for a two-sample test: the values of `y` in
+    /// the first level of `g` become `x`, those in the second `y`, as R's
+    /// formula methods split them. The other arguments pass through.
+    fn two_groups_call(&mut self, func: &Expr, lhs: &Expr, rhs: &Expr, df: &DataFrame, args: &[CallArg],
+                       env: &EnvRef) -> Result<RVal, R2Err> {
+        let first = |v: RVal| match v { RVal::List(items, _) if !items.is_empty() => items[0].1.clone(), other => other };
+        let y = first(self.resolve_formula_term(lhs, df, env)?);
+        let g = first(self.resolve_formula_term(rhs, df, env)?);
+        let Some(f) = Factor::from_values(&g) else {
+            return Err(R2Err { msg: "the grouping term must be a factor, text or numbers".into(), kind: ErrKind::Runtime });
+        };
+        if f.levels.len() != 2 {
+            return Err(R2Err { msg: "grouping factor must have exactly 2 levels".into(), kind: ErrKind::Runtime });
+        }
+        let values = self.as_reals(&y)?;
+        let group = |k: u32| RVal::Numeric(values.iter().zip(&f.codes).filter(|(_, c)| **c == Some(k)).map(|(v, _)| *v).collect(), Attrs::default());
+        let mut ea = vec![EvalArg { name: None, value: group(0) }, EvalArg { name: Some(Arc::from("y")), value: group(1) }];
+        for a in args.iter().skip(1) {
+            if a.name.as_deref() == Some("data") || a.name.is_none() { continue; }
+            ea.push(EvalArg { name: a.name.clone(), value: self.eval_in(&a.value, env)? });
+        }
+        let f = self.eval_in(func, env)?;
+        self.call_fn(&f, &ea, env)
     }
 
     /// aggregate(cbind(y1, y2) ~ g1 + g2, data = df, FUN = ...) — any
@@ -211,10 +239,13 @@ impl Engine {
         let (rhs_no_err, error_stratum_expr) = split_error_term(rhs);
         let (rhs_fixed, random_grouping_exprs) = split_random_effects(&rhs_no_err);
         let lhs_val = self.resolve_formula_term(lhs, df, env)?;
-        let rhs_val = if matches!(rhs_fixed, Expr::NullLit) {
-            RVal::Null
-        } else {
-            self.resolve_formula_term(&rhs_fixed, df, env)?
+        let rhs_val = match self.resolve_formula_term(&rhs_fixed, df, env)? {
+            // a single expression term (`y ~ factor(cyl)`) is named as written
+            v @ (RVal::Numeric(..) | RVal::Integer(..) | RVal::Factor(..) | RVal::Character(..) | RVal::Logical(..))
+                if !matches!(rhs_fixed, Expr::NullLit) =>
+                RVal::list(vec![(Some(Arc::from(crate::formula::fmt_expr(&rhs_fixed).as_str())), v)]),
+            _ if matches!(rhs_fixed, Expr::NullLit) => RVal::Null,
+            other => other,
         };
         let mut formula_items = vec![
             (Some(Arc::from("~lhs")), lhs_val),
