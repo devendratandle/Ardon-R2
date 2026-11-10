@@ -748,6 +748,8 @@ impl Blas {
             GemmForm::F32 => (R_32F, COMPUTE_32F, GEMM_DEFAULT),
             // the compute type alone asks for tensor cores; algorithm 160 was refused (run 33)
             GemmForm::F16 => (R_16F, COMPUTE_16F, GEMM_DEFAULT),
+            // f16 operands and output, f32 sums: PyTorch's f16 matmul (run 36: f16 sums cost 7x the error)
+            GemmForm::F16Sum32 => (R_16F, COMPUTE_32F, GEMM_DEFAULT),
             GemmForm::F32Fast16 => (R_32F, COMPUTE_32F_FAST_16F, GEMM_DEFAULT),
         };
         // a buffer holds f32 slots, and two f16 fit in each
@@ -813,6 +815,8 @@ pub enum GemmForm {
     F32,
     /// f16 storage and tensor-core arithmetic.
     F16,
+    /// f16 storage, f32 sums on the tensor cores: PyTorch's f16 product.
+    F16Sum32,
     /// f32 storage, with cuBLAS free to do the arithmetic in f16.
     F32Fast16,
 }

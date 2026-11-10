@@ -94,6 +94,10 @@ fn gemm_ex_accuracy() {
         Ok(()) => report("f16", &unpack_f16(&hc.download(), m * n)),
         Err(e) => println!("f16 refused: {e}"),
     }
+    match blas.gemm_ex(GemmForm::F16Sum32, m, n, k, &ha, &hb, &hc) {
+        Ok(()) => report("f16_sum32", &unpack_f16(&hc.download(), m * n)),
+        Err(e) => println!("f16_sum32 refused: {e}"),
+    }
 }
 
 /// What a launch costs, without the kernel's work: a nearly empty block, queued
@@ -119,7 +123,7 @@ fn sustain(kind: &str) {
     let (t, k, m) = (4096usize, 768usize, 3072usize);
     // Constant operands toggle few bits, so they cost less energy than real ones.
     // `cublas_bits_N` keeps N significant bits of each random operand.
-    let form = match kind { "gemm_ex_f32" => Some(GemmForm::F32), "gemm_ex_fast16" => Some(GemmForm::F32Fast16), "gemm_ex_f16" => Some(GemmForm::F16), _ => None };
+    let form = match kind { "gemm_ex_f32" => Some(GemmForm::F32), "gemm_ex_fast16" => Some(GemmForm::F32Fast16), "gemm_ex_f16" => Some(GemmForm::F16), "gemm_ex_f16_sum32" => Some(GemmForm::F16Sum32), _ => None };
     let bits = if kind == "cublas_random" || form.is_some() { Some(24) } else { kind.strip_prefix("cublas_bits_").and_then(|b| b.parse::<u32>().ok()) };
     let operand = |n: usize, seed: u32| -> Vec<f32> {
         let Some(bits) = bits else { return vec![0.5; n] };
@@ -130,7 +134,7 @@ fn sustain(kind: &str) {
             f32::from_bits(((x >> 8) as f32 / (1u32 << 24) as f32 - 0.5).to_bits() & mask)
         }).collect()
     };
-    let stored = |x: Vec<f32>| if form == Some(GemmForm::F16) { pack_f16(&x) } else { x };
+    let stored = |x: Vec<f32>| if matches!(form, Some(GemmForm::F16 | GemmForm::F16Sum32)) { pack_f16(&x) } else { x };
     let (ga, gb, gc) = (Tensor::upload(&stored(operand(t * k, 1))).unwrap(), Tensor::upload(&stored(operand(k * m, 2))).unwrap(), Tensor::zeros(t * m).unwrap());
     let start = Instant::now();
     let mut units = 0.0f64;

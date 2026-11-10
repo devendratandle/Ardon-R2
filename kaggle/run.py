@@ -232,7 +232,7 @@ if "fp16" in STAGES:
     sh(f"CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -E '^CEILING|refused|rror|panicked'")
     sh(f"CUBLAS_LOGINFO_DBG=1 CUBLAS_LOGDEST_DBG=stdout CUDA_VISIBLE_DEVICES=0 /tmp/ceiling accuracy 2>&1 | grep -E 'refused|Atype|computeType' | tail -12")
     for round_ in range(2):
-        for kind in ("gemm_ex_f32", "torch_f32", "gemm_ex_fast16", "gemm_ex_f16", "torch_f16"):
+        for kind in ("gemm_ex_f32", "torch_f32", "gemm_ex_fast16", "gemm_ex_f16_sum32", "torch_f16", "gemm_ex_f16"):
             print(f"\n=== sustain {kind} card 0 round {round_ + 1}", flush=True)
             sh("sleep 45")
             if kind.startswith("torch"):
