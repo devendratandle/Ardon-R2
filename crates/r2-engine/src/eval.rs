@@ -309,6 +309,11 @@ impl Engine {
                 }
             }
         }
+        // `density(x)` records its data's expression, as R's data.name does
+        if matches!(func, Expr::Symbol(n) if n.as_ref() == "density") && !args.is_empty() {
+            ea.push(EvalArg { name: Some(Arc::from(".data.name")),
+                              value: rstr(&crate::formula::fmt_expr(&args[0].value)) });
+        }
         // `View(df)` titles its viewer with the expression, as R's does
         // (deparse(substitute(x))) — builtins only see values otherwise.
         if matches!(func, Expr::Symbol(n) if n.as_ref() == "View")
@@ -450,7 +455,7 @@ pub(crate) fn is_invisible_builtin(name: &str) -> bool {
         "install.packages" | "uninstall" | "q" | "quit" |
         "clear" | "cls" | "clr" | "View" |
         "plot" | "hist" | "boxplot" | "barplot" | "lines" | "points" | "abline" | "legend" | "text" |
-        "save.plot" | "dev.view" | "dev.off" |
+        "save.plot" | "dev.view" | "dev.off" | "pdf" | "png" | "svg" |
         "str")
 }
 

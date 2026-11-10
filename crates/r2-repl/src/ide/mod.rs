@@ -24,6 +24,7 @@ pub mod json;
 use std::cell::RefCell;
 use std::io::{BufRead, Write};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use r2_engine::Engine;
 use r2_parser::Parser;
@@ -41,6 +42,18 @@ const PAGE: usize = 200;
 #[derive(Clone, Copy)]
 enum Sink { Stream(u64), Discard }
 
+/// Requests read so far, counted by the reading thread.
+static RECEIVED: AtomicU64 = AtomicU64::new(0);
+/// The count when the last `interrupt` came: it stops that request, even one
+/// still waiting its turn, and not a later one.
+static INTERRUPT_AFTER: AtomicU64 = AtomicU64::new(0);
+
+/// Before request `n` runs: an interrupt sent after it stays set and stops it
+/// at once; an older one, left over from a request already done, is dropped.
+fn take_stale_interrupt(n: u64) {
+    if INTERRUPT_AFTER.load(Ordering::SeqCst) != n { r2_types::clear_interrupt(); }
+}
+
 pub fn ide_main() -> i32 {
     // stdin on its own thread, so `interrupt` arrives while code runs
     let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -48,9 +61,11 @@ pub fn ide_main() -> i32 {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if json_str(&line, "op").as_deref() == Some("interrupt") {
+                INTERRUPT_AFTER.store(RECEIVED.load(Ordering::SeqCst), Ordering::SeqCst);
                 r2_types::request_interrupt();
-            } else if tx.send(line).is_err() {
-                break;
+            } else {
+                RECEIVED.fetch_add(1, Ordering::SeqCst);
+                if tx.send(line).is_err() { break; }
             }
         }
     });
@@ -68,8 +83,11 @@ pub fn ide_main() -> i32 {
         })));
     }
     let mut engine = Engine::new();
-    let mut last_plot = r2_graphics::device::screen_svg();
+    let mut last_plot = r2_graphics::device::current_svg();
+    let mut handled = 0u64;
     for line in rx {
+        handled += 1;
+        take_stale_interrupt(handled);
         if line.trim().is_empty() { continue; }
         let id = json_num(&line, "id").unwrap_or(0.0) as u64;
         let op = json_str(&line, "op").unwrap_or_default();
@@ -124,7 +142,6 @@ fn eval(engine: &mut Engine, id: u64, code: &str, last_plot: &mut Option<String>
         Err(e) if crate::incomplete(code) || e.to_string().contains("Eof") => return "\"ok\":true,\"incomplete\":true".into(),
         Err(e) => { stream(id, true, &format!("Error: {e}\n")); return "\"ok\":true,\"error\":true".into(); }
     };
-    r2_types::clear_interrupt();
     let (mut failed, mut interrupted) = (false, false);
     for stmt in &stmts {
         match engine.eval(stmt) {
@@ -140,7 +157,8 @@ fn eval(engine: &mut Engine, id: u64, code: &str, last_plot: &mut Option<String>
     }
     for w in engine.drain_warnings() { stream(id, true, &format!("{w}\n")); }
     let mut body = format!("\"ok\":true,\"error\":{failed},\"interrupted\":{interrupted}");
-    let plot = r2_graphics::device::screen_svg();
+    // the whole picture, overlays included, not only what the last plot() drew
+    let plot = r2_graphics::device::current_svg();
     if plot != *last_plot {
         if let Some(svg) = &plot { body.push_str(&format!(",\"plot\":{}", string(svg))); }
         *last_plot = plot;
@@ -151,8 +169,6 @@ fn eval(engine: &mut Engine, id: u64, code: &str, last_plot: &mut Option<String>
 /// Evaluate without printing anything; the last statement's value.
 fn quiet(engine: &mut Engine, code: &str) -> Result<RVal, String> {
     let stmts = Parser::parse(code).map_err(|e| format!("parse error: {e}"))?;
-    // an interrupt that arrived after the last eval finished is stale
-    r2_types::clear_interrupt();
     let mut last = RVal::Null;
     for stmt in &stmts {
         last = engine.eval(stmt).map_err(|e| e.msg.clone())?;

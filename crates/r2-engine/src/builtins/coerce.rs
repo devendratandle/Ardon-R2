@@ -790,26 +790,29 @@ pub(crate) fn bi_str(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
             // R pads the names to the longest one and separates with a tab
             soutln!("'data.frame':\t{} obs. of  {} variable{}:", df.nrow(), df.ncol(), if df.ncol() == 1 { "" } else { "s" });
             let width = df.columns.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+            // as many values as R's str shows, then "..." when there are more
+            let more = |len: usize, shown: usize| if len > shown { " ..." } else { "" };
             for (n, c) in &df.columns {
                 let preview = match c {
                     RVal::Numeric(v, _) => {
-                        let vals: Vec<String> = v.iter().take(6).map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect();
-                        format!(" num  {}", vals.join(" "))
+                        let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => fmt_num(*n), None => "NA".into() }).collect();
+                        format!(" num  {}{}", vals.join(" "), more(v.len(), 10))
                     }
                     RVal::Integer(v, _) => {
-                        let vals: Vec<String> = v.iter().take(6).map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).collect();
-                        format!(" int  {}", vals.join(" "))
+                        let vals: Vec<String> = v.iter().take(10).map(|x| match x { Some(n) => format!("{}", n), None => "NA".into() }).collect();
+                        format!(" int  {}{}", vals.join(" "), more(v.len(), 10))
                     }
                     RVal::Character(v, _) => {
                         let vals: Vec<String> = v.iter().take(4).map(|x| match x { Some(s) => format!("\"{}\"", s), None => "NA".into() }).collect();
-                        format!(" chr  {}", vals.join(" "))
+                        format!(" chr  {}{}", vals.join(" "), more(v.len(), 4))
                     }
                     RVal::Logical(v, _) => {
                         let vals: Vec<String> = v.iter().take(6).map(|x| match x { Some(true) => "TRUE".into(), Some(false) => "FALSE".into(), None => "NA".into() }).collect();
-                        format!(" logi {}", vals.join(" "))
+                        format!(" logi {}{}", vals.join(" "), more(v.len(), 6))
                     }
                     RVal::Factor(f) => {
-                        let vals: Vec<String> = f.codes.iter().take(6).map(|x| match x { Some(c) => format!("{}", c + 1), None => "NA".into() }).collect();
+                        let vals: Vec<String> = f.codes.iter().take(10).map(|x| match x { Some(c) => format!("{}", c + 1), None => "NA".into() }).collect();
+                        let vals = if f.codes.len() > 10 { let mut v = vals; v.push("...".into()); v } else { vals };
                         let levels: Vec<String> = f.levels.iter().take(4).map(|s| format!("\"{}\"", s)).collect();
                         let more = if f.levels.len() > 4 { ",.." } else { "" };
                         let kind = if f.ordered { "Ord.factor" } else { "Factor" };

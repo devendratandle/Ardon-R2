@@ -11,6 +11,39 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### Plots an editor can read: whole pictures, marked parts, R's geometry — 2026-11-11
+
+- **`r2 --ide` replies carry the whole plot.** After `plot()` then `lines()`,
+  `points()`, `abline()`, `text()` or `title()`, the reply's `plot` is the complete
+  picture; it held only the first drawing, so overlays (and `title(sub =)` and
+  `text()`, which are overlays) seemed to be ignored.
+- **The SVG's parts are marked**: `class="main"`, `"sub"`, `"xlab"`, `"ylab"` on the
+  titles and axis names, and `class="plot-region"` with `data-usr="x1 x2 y1 y2"` (R's
+  `par("usr")`) on the plotting area, so an editor can pick and edit them.
+- **`xlim` and `ylim`** set the axes of `plot()` and `hist()`, padded 4 % as R pads
+  them; both were ignored.
+- **`barplot` draws as R does**: bars of width 1 at 0.7, 1.9, ..., returned as R
+  returns them; `horiz = TRUE` (it drew vertical bars); names from the vector; no
+  "Barplot" title R does not draw; negative bars. **`hist`, `boxplot` and
+  `barplot` record their coordinates**, so `lines(density(x))` over a histogram lands
+  where it should. `boxplot` uses Tukey's hinges and whiskers and draws outliers.
+- **`density()`** has R's bandwidth (`bw.nrd0`: the smaller of the sd and IQR/1.34; it
+  used the sd alone), takes `bw` and `n`, and returns `bw`, `n`, `call`, `data.name`
+  and `has.na` with class "density". `plot(density(x))` draws R's line, title and
+  "N = 5   Bandwidth = 0.9736" label; `lines(density(x))` adds the curve.
+- **The datasets are R's.** `iris` was a variant with two rows differing from R's,
+  and `faithful` was not R's data; both are now R's, and `ToothGrowth$supp` is a factor.
+- **Also:** `round()` is R 4's (`round(3.5965625, 6)` is 3.596562; it gave 3.596563);
+  `sapply()` names its result after a data frame's columns or a list's names;
+  `pdf(NULL)` draws without writing; `pdf()`, `png()` and `svg()` are invisible; `str()`
+  shows ten values and "...".
+- **`interrupt` in `r2 --ide` is no longer lost.** One sent while its request was still
+  waiting to run (R2 starting, or busy) was cleared when the request began, so a
+  runaway loop could not be stopped. An interrupt now stops the request it followed,
+  even one that has not started yet, and only that one.
+- Checked in the `--ide` reply itself (`crates/r2-repl/tests/ide_protocol.rs`), and the
+  values compared with R in `tests/differential/output/studio_graphics.R`.
+
 ### Two-way tables, `wilcox.test` and `airquality` as in R — 2026-11-11
 
 - **`table(a, b)` counts both variables.** It ignored `b` and gave a one-way table.
