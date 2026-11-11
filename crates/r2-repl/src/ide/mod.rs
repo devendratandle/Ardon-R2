@@ -93,7 +93,7 @@ pub fn ide_main() -> i32 {
         let op = json_str(&line, "op").unwrap_or_default();
         let code = json_str(&line, "code").unwrap_or_default();
         let reply = match op.as_str() {
-            "hello" => format!("\"ok\":true,\"r2\":{},\"protocol\":{PROTOCOL}", string(env!("CARGO_PKG_VERSION"))),
+            "hello" => hello(),
             "eval" => {
                 *sink.borrow_mut() = Sink::Stream(id);
                 let r = eval(&mut engine, id, &code, &mut last_plot);
@@ -121,6 +121,22 @@ pub fn ide_main() -> i32 {
     0
 }
 
+/// What `hello` adds to protocol 1; an IDE uses one only when it is listed,
+/// so R2 and the IDE can each be updated without the other.
+const FEATURES: &[&str] = &["banner", "prompts"];
+
+/// `hello`: the versions, then the console as r2-console defines it (the
+/// banner every frontend shows unchanged, and the prompts), so an IDE's
+/// console is R2's own and not a copy of it.
+fn hello() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let list = |items: &[String]| items.iter().map(|s| string(s)).collect::<Vec<_>>().join(",");
+    let features: Vec<String> = FEATURES.iter().map(|f| f.to_string()).collect();
+    format!("\"ok\":true,\"r2\":{},\"protocol\":{PROTOCOL},\"banner\":[{}],\"prompts\":{{\"main\":{},\"continue\":{}}},\"features\":[{}]",
+            string(version), list(&r2_console::banner_lines(version)),
+            string(r2_console::PROMPT), string(r2_console::PROMPT_MORE), list(&features))
+}
+
 /// One reply line: `{"id":N,` + body + `}`.
 fn send(id: u64, body: &str) {
     let mut o = std::io::stdout().lock();
@@ -139,7 +155,8 @@ fn stream(id: u64, is_err: bool, text: &str) {
 fn eval(engine: &mut Engine, id: u64, code: &str, last_plot: &mut Option<String>) -> String {
     let stmts = match Parser::parse(code) {
         Ok(s) => s,
-        Err(e) if crate::incomplete(code) || e.to_string().contains("Eof") => return "\"ok\":true,\"incomplete\":true".into(),
+        // an open string is unfinished too, as in R: the next line continues it
+        Err(e) if crate::incomplete(code) || e.to_string().contains("Eof") || e.to_string().contains("unterminated string") => return "\"ok\":true,\"incomplete\":true".into(),
         Err(e) => { stream(id, true, &format!("Error: {e}\n")); return "\"ok\":true,\"error\":true".into(); }
     };
     let (mut failed, mut interrupted) = (false, false);

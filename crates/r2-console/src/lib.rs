@@ -52,6 +52,12 @@ pub fn banner_lines(version: &str) -> Vec<String> {
     ]
 }
 
+/// The prompts, shared by every frontend like the banner: fresh input,
+/// and the continuation of an unfinished statement. `r2 --ide` reports
+/// them in `hello`, so an IDE shows R2's own.
+pub const PROMPT: &str = "R2>";
+pub const PROMPT_MORE: &str = "+";
+
 // ─── Transcript lines ─────────────────────────────────────────────────
 
 /// Semantic role of a transcript line. The renderer maps this to a
@@ -141,7 +147,7 @@ impl ConsoleBuffer {
     /// Prompt the renderer should display NOW.
     /// `R2>` for fresh input, `+` mid-continuation.
     pub fn current_prompt(&self) -> &'static str {
-        if self.continuation.is_empty() { "R2>" } else { "+" }
+        if self.continuation.is_empty() { PROMPT } else { PROMPT_MORE }
     }
 
     pub fn in_continuation(&self) -> bool {
