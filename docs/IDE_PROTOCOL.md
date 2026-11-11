@@ -26,8 +26,13 @@ Requests run one at a time, in order. While an `eval` runs, R2 also writes
 ## 2. Operations
 
 ### 2.1 `hello`
-`{"id":1,"op":"hello"}` → `{"id":1,"ok":true,"r2":"0.4.1","protocol":1}`.
+`{"id":1,"op":"hello"}` →
+`{"id":1,"ok":true,"r2":"0.4.1","protocol":1,"banner":["Ardon-R2 0.4.1 — …","…"],"prompts":{"main":"R2>","continue":"+"},"features":["banner","prompts"]}`.
 The IDE should send it first and check `protocol` (and `r2` against its minimum).
+
+- `banner` is R2's startup banner (`r2_console::banner_lines`), one string per line. An IDE shows it unchanged and may add one hint line of its own after it, as every frontend may.
+- `prompts` are R2's console prompts: `main` for fresh input, `continue` after an `"incomplete":true` reply.
+- `features` names what this R2 has beyond the first protocol 1. An IDE uses a feature only when it is listed, and otherwise keeps its older behaviour. New abilities are added here; `protocol` rises only when an existing message changes meaning. That way R2 and the IDE can each be updated without the other.
 
 ### 2.2 `eval` — console input
 `{"id":2,"op":"eval","code":"mean(x); hist(x)"}`

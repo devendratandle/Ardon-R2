@@ -43,6 +43,10 @@ fn console_values_environment_and_viewer() {
         Some(r#"{"id":10,"op":"quit"}"#),
     ]);
     assert!(reply(&out, 1).contains(&format!("\"r2\":\"{}\",\"protocol\":1", env!("CARGO_PKG_VERSION"))));
+    // the console is R2's: its banner, unchanged, and its prompts
+    let banner: Vec<String> = r2_console::banner_lines(env!("CARGO_PKG_VERSION"));
+    assert!(reply(&out, 1).contains(&format!("\"banner\":[\"{}\",", banner[0])), "{}", reply(&out, 1));
+    assert!(reply(&out, 1).contains("\"prompts\":{\"main\":\"R2>\",\"continue\":\"+\"},\"features\":[\"banner\",\"prompts\"]"));
     // visible values print on the out stream; invisible() does not
     let streams: Vec<&String> = out.iter().filter(|l| l.starts_with("{\"id\":3,\"stream\"")).collect();
     assert_eq!(streams.len(), 1, "{streams:?}");

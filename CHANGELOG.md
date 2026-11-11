@@ -11,6 +11,12 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### An IDE's console is R2's own: banner and prompts in `hello` — 2026-11-11
+
+- `r2 --ide`'s `hello` now carries R2's banner (`r2_console::banner_lines`, unchanged), its prompts (`R2>` and `+`, now the constants `r2_console::PROMPT` and `PROMPT_MORE`) and a `features` list. An IDE shows R2's banner and prompts instead of its own copies, and uses a new ability only when `features` names it, so R2 and the IDE update independently. `protocol` stays 1: nothing existing changed.
+- An open string (`s <- "abc`) is unfinished input in `--ide`, as in R: the reply is `"incomplete":true`, not a parse error.
+- docs/IDE_PROTOCOL.md describes the new fields.
+
 ### Plots an editor can read: whole pictures, marked parts, R's geometry — 2026-11-11
 
 - **`r2 --ide` replies carry the whole plot.** After `plot()` then `lines()`,
