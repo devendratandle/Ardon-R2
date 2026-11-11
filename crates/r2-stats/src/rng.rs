@@ -64,6 +64,23 @@ thread_local! {
 /// Install (or clear) the current thread's per-worker RNG stream (Phase P).
 pub fn set_worker_seed(s: Option<u64>) { WORKER_SEED.with(|c| c.set(s)); }
 
+/// For tests: a seeded stream private to this thread, cleared when the
+/// guard drops. Tests run in parallel threads, so a test that seeds the
+/// GLOBAL stream (`set_seed`) still gets whatever draws the other tests
+/// leave it — its samples, and so its verdict, change run to run.
+#[cfg(test)]
+pub(crate) struct SeededStream;
+
+#[cfg(test)]
+impl SeededStream {
+    pub(crate) fn new(seed: u64) -> Self { set_worker_seed(Some(seed)); SeededStream }
+}
+
+#[cfg(test)]
+impl Drop for SeededStream {
+    fn drop(&mut self) { set_worker_seed(None); }
+}
+
 /// f64 in `[0, 1)`. Thread-safe. Uses the per-worker stream if one is set
 /// (parallel apply), else the shared atomic (serial).
 pub fn next_random() -> f64 {
@@ -146,7 +163,7 @@ mod tests {
 
     #[test]
     fn runif_in_range() {
-        set_seed(42);
+        let _s = SeededStream::new(42);
         let r = bi_runif(&[evarg(n(1000.0))]).unwrap();
         match r {
             RVal::Numeric(v, _) => {
@@ -161,7 +178,7 @@ mod tests {
 
     #[test]
     fn rnorm_mean_and_sd_approx() {
-        set_seed(7);
+        let _s = SeededStream::new(7);
         let r = bi_rnorm(&[evarg(n(10_000.0))]).unwrap();
         match r {
             RVal::Numeric(v, _) => {
@@ -179,7 +196,7 @@ mod tests {
 
     #[test]
     fn rbinom_within_bounds() {
-        set_seed(11);
+        let _s = SeededStream::new(11);
         let r = bi_rbinom(&[
             evarg(n(100.0)),
             EvalArg { name: Some(std::sync::Arc::from("size")), value: n(10.0) },

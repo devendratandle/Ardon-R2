@@ -378,6 +378,7 @@ mod tests {
 
     #[test]
     fn continuous_generators_draw_from_their_distributions() {
+        let _s = crate::rng::SeededStream::new(1);
         let v = reals(&bi_rgamma(&args(&[N, 2.5, 2.0])).unwrap());
         assert!(ks(v, |x| pgamma_log_tails(2.5, x * 2.0).0.exp()) < limit(), "rgamma");
         let v = reals(&bi_rgamma(&args(&[N, 0.1, 2.0])).unwrap());
@@ -419,6 +420,7 @@ mod tests {
 
     #[test]
     fn discrete_generators_have_the_right_moments() {
+        let _s = crate::rng::SeededStream::new(1);
         let v = reals(&bi_rgeom(&args(&[N, 0.2])).unwrap());
         moments(&v, 4.0, 20.0, "rgeom");
         let v = reals(&bi_rnbinom(&args(&[N, 3.0, 0.4])).unwrap());
@@ -430,6 +432,7 @@ mod tests {
     /// Knuth's method underflows past mean ~700 and stops near there.
     #[test]
     fn large_poisson_means_are_not_capped() {
+        let _s = crate::rng::SeededStream::new(1);
         for m in [29.0, 31.0, 1000.0, 1e6] {
             let v: Vec<f64> = (0..50_000).map(|_| rpois1(m)).collect();
             moments(&v, m, m, "rpois1");
@@ -438,6 +441,7 @@ mod tests {
 
     #[test]
     fn large_binomials_have_the_right_moments() {
+        let _s = crate::rng::SeededStream::new(1);
         for (size, p) in [(10.0, 0.3), (1001.0, 0.5), (1e6, 0.1), (1e8, 0.99)] {
             let v = reals(&bi_rbinom(&args(&[20_000.0, size, p])).unwrap());
             moments(&v, size * p, size * p * (1.0 - p), "rbinom");
