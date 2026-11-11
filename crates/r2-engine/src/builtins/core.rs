@@ -217,19 +217,32 @@ pub(crate) fn bi_rep(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
     // `times`. Filter on `name.is_none()` before falling back, otherwise
     // `rep(c("A","B","C"), each=3)` reads `times=3` AND `each=3`, giving
     // 27 entries instead of 9.
-    let times = gn(a, "times")
+    // `times` may be a vector, one count per element (after `each`):
+    // `rep(c("a","b"), times = c(2, 3))` → a a b b b.
+    let times: Vec<usize> = gn(a, "times")
         .or_else(|| a.get(1).filter(|p| p.name.is_none()).map(|p| p.value.clone()))
-        .and_then(|v| e.scalar_f64(&v).ok().flatten())
-        .unwrap_or(1.0) as usize;
+        .and_then(|v| v.as_reals().ok())
+        .map(|t| t.into_iter().map(|x| x.unwrap_or(-1.0)).collect::<Vec<f64>>())
+        .map(|t| if t.iter().any(|x| *x < 0.0) { Err(()) } else { Ok(t.into_iter().map(|x| x as usize).collect()) })
+        .transpose()
+        .or_else(|_| err!(Runtime, "invalid 'times' argument"))?
+        .unwrap_or_else(|| vec![1]);
     let each = gn(a, "each").and_then(|v| e.scalar_f64(&v).ok().flatten())
         .unwrap_or(1.0) as usize;
     // `length.out =` recycles/truncates the result to exactly that length
     // (R: when given, it wins over `times`).
     let lengthout = gn(a, "length.out").or_else(|| gn(a, "length_out"))
         .and_then(|v| e.scalar_f64(&v).ok().flatten()).map(|n| n as usize);
-    fn expand<T: Clone>(v: &[T], each: usize, times: usize, lengthout: Option<usize>) -> Vec<T> {
+    let per_pass_len = rval_length(&v) * each;
+    if lengthout.is_none() && times.len() != 1 && times.len() != per_pass_len {
+        return err!(Runtime, "invalid 'times' argument");
+    }
+    fn expand<T: Clone>(v: &[T], each: usize, times: &[usize], lengthout: Option<usize>) -> Vec<T> {
         let per_pass: Vec<T> = v.iter().flat_map(|x| std::iter::repeat(x.clone()).take(each)).collect();
-        let full: Vec<T> = per_pass.iter().cycle().take(per_pass.len() * times).cloned().collect();
+        let full: Vec<T> = match times {
+            [t] => per_pass.iter().cycle().take(per_pass.len() * t).cloned().collect(),
+            ts => per_pass.iter().zip(ts).flat_map(|(x, &t)| std::iter::repeat(x.clone()).take(t)).collect(),
+        };
         match lengthout {
             Some(n) if !full.is_empty() => full.iter().cycle().take(n).cloned().collect(),
             Some(_) => Vec::new(),
@@ -237,10 +250,10 @@ pub(crate) fn bi_rep(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, 
         }
     }
     match &v {
-        RVal::Numeric(vs, _)   => Ok(RVal::Numeric(expand(vs, each, times, lengthout).into(), Attrs::default())),
-        RVal::Integer(vs, _)   => Ok(RVal::Integer(expand(vs, each, times, lengthout).into(), Attrs::default())).into(),
-        RVal::Character(vs, _) => Ok(RVal::Character(expand(vs, each, times, lengthout), Attrs::default())).into(),
-        RVal::Logical(vs, _)   => Ok(RVal::Logical(expand(vs, each, times, lengthout).into(), Attrs::default())).into(),
+        RVal::Numeric(vs, _)   => Ok(RVal::Numeric(expand(vs, each, &times, lengthout).into(), Attrs::default())),
+        RVal::Integer(vs, _)   => Ok(RVal::Integer(expand(vs, each, &times, lengthout).into(), Attrs::default())).into(),
+        RVal::Character(vs, _) => Ok(RVal::Character(expand(vs, each, &times, lengthout), Attrs::default())).into(),
+        RVal::Logical(vs, _)   => Ok(RVal::Logical(expand(vs, each, &times, lengthout).into(), Attrs::default())).into(),
         _ => err!(Runtime, "rep() not supported for {}", v.type_name()).into(),
     }
 }

@@ -525,22 +525,67 @@ pub fn bi_t_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
     one_sample_t_test(&x, "x", mu, conf_level)
 }
 
+/// A two-way table as column-major counts: a numeric matrix, or a vector
+/// with a two-element `dim` (what `table(a, b)` returns). Like R, a table
+/// with one row or one column is left to the goodness-of-fit path.
+fn two_way_counts(v: &RVal) -> Option<(Vec<f64>, usize, usize)> {
+    let (data, nr, nc) = match v {
+        RVal::Matrix(m) => (m.data.clone(), m.nrow, m.ncol),
+        RVal::Numeric(_, at) | RVal::Integer(_, at) | RVal::Logical(_, at) => match at.dim.as_deref() {
+            Some(&[r, c]) => (v.as_reals().ok()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect(), r, c),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (nr > 1 && nc > 1 && data.len() == nr * nc).then_some((data, nr, nc))
+}
+
+/// `chisq.test(x, y)`: R's `table(factor(x[ok]), factor(y[ok]))` — pairs
+/// with an NA dropped, then levels nobody uses.
+fn cross_counts(x: &RVal, y: &RVal) -> Result<(Vec<f64>, usize, usize), R2Err> {
+    let (Some(fx), Some(fy)) = (Factor::from_values(x), Factor::from_values(y)) else {
+        return Err(runtime_err("chisq.test: 'x' and 'y' must be vectors or factors".into()));
+    };
+    if fx.codes.len() != fy.codes.len() {
+        return Err(runtime_err("'x' and 'y' must have the same length".into()));
+    }
+    let (lr, lc) = (fx.levels.len(), fy.levels.len());
+    let mut t = vec![0.0; lr * lc];
+    for (r, c) in fx.codes.iter().zip(&fy.codes) {
+        if let (Some(r), Some(c)) = (r, c) { t[*c as usize * lr + *r as usize] += 1.0; }
+    }
+    let rows: Vec<usize> = (0..lr).filter(|&r| (0..lc).any(|c| t[c * lr + r] > 0.0)).collect();
+    let cols: Vec<usize> = (0..lc).filter(|&c| (0..lr).any(|r| t[c * lr + r] > 0.0)).collect();
+    if rows.len() < 2 || cols.len() < 2 {
+        return Err(runtime_err("'x' and 'y' must have at least 2 levels".into()));
+    }
+    let kept = cols.iter().flat_map(|&c| rows.iter().map(|&r| t[c * lr + r]).collect::<Vec<_>>()).collect();
+    Ok((kept, rows.len(), cols.len()))
+}
+
 pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    match &first(a) {
-        RVal::Matrix(mat) => {
-            let (nr, nc) = (mat.nrow, mat.ncol);
-            let n: f64 = mat.data.iter().sum();
+    let x = first(a);
+    let y = a.iter().skip(1).find(|e| e.name.is_none() || e.name.as_deref() == Some("y")).map(|e| &e.value);
+    let table = match (two_way_counts(&x), y) {
+        (Some(t), _) => Some(t),
+        (None, Some(y)) if !matches!(y, RVal::Null) => Some(cross_counts(&x, y)?),
+        _ => None,
+    };
+    match table {
+        Some((data, nr, nc)) => {
+            let get = |r: usize, c: usize| data[c * nr + r];
+            let n: f64 = data.iter().sum();
             // R: `if (correct && nrow(x) == 2L && ncol(x) == 2L)` — Yates
             // applies to 2x2 tables only, whatever `correct` says.
             let correct = arg_named(a, "correct").and_then(|v| v.as_logicals().ok())
                 .map(|v| v.first().copied().flatten() == Some(true))
                 .unwrap_or(true) && nr == 2 && nc == 2;
-            let row_totals: Vec<f64> = (0..nr).map(|r| (0..nc).map(|c| mat.get(r, c)).sum()).collect();
-            let col_totals: Vec<f64> = (0..nc).map(|c| (0..nr).map(|r| mat.get(r, c)).sum()).collect();
+            let row_totals: Vec<f64> = (0..nr).map(|r| (0..nc).map(|c| get(r, c)).sum()).collect();
+            let col_totals: Vec<f64> = (0..nc).map(|c| (0..nr).map(|r| get(r, c)).sum()).collect();
             let mut chi_sq = 0.0;
             for r in 0..nr {
                 for c in 0..nc {
-                    let observed = mat.get(r, c);
+                    let observed = get(r, c);
                     let expected = row_totals[r] * col_totals[c] / n;
                     if expected > 0.0 {
                         // Uncorrected, a cell below its expectation counts
@@ -568,8 +613,8 @@ pub fn bi_chisq_test(a: &[EvalArg]) -> Result<RVal, R2Err> {
             fields.insert(Arc::from("method"), rstr(method));
             Ok(RVal::TypeInstance(TypeInstance { type_name: Arc::from("htest"), fields }))
         }
-        v => {
-            let obs: Vec<f64> = v.as_reals()?.into_iter().filter_map(|x| x).collect();
+        None => {
+            let obs: Vec<f64> = x.as_reals()?.into_iter().filter_map(|x| x).collect();
             let k = obs.len();
             let total: f64 = obs.iter().sum();
             let probs: Vec<f64> = arg_named(a, "p").and_then(|v| v.as_reals().ok())

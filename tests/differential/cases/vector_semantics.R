@@ -78,3 +78,8 @@ kv("ordered", is.ordered(factor(c("s", "m"), levels = c("s", "m"), ordered = TRU
 d <- data.frame(g = c("b", "a"), y = 1:2, stringsAsFactors = TRUE)
 kv("saf", paste(class(d$g), j(levels(d$g))))
 kv("ttest.names", j(names(t.test(c(1, 2, 3, 4), c(2, 4, 6, 9))$estimate)))
+
+# rep: a vector `times` gives one count per element (after `each`)
+kv("rep.times.vec", j(rep(c("a", "b", "c"), times = c(2, 0, 3))))
+kv("rep.times.pos", j(rep(1:2, c(3, 1))))
+kv("rep.each.times", j(rep(1:2, each = 2, times = c(1, 2, 3, 1))))

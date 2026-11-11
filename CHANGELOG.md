@@ -6,6 +6,22 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 
 ---
 
+## Unreleased
+
+### `chisq.test` on a two-way table, `rep` with a count per element — 2026-11-11
+
+- **`chisq.test(table(a, b))` tests independence**, as R does: df = (rows − 1)(cols − 1),
+  with Yates' correction on a 2×2 table. It treated the table as one row of counts and
+  ran the "given probabilities" test (df = 5 instead of 2). Any table or array with
+  two dimensions now counts, not only a numeric matrix; one with a single row or column
+  is still a goodness-of-fit test, as in R.
+- **`chisq.test(x, y)` cross-tabulates two vectors or factors**, as R does: pairs with
+  an NA are dropped, then unused levels. It ignored `y`.
+- **`rep(x, times = c(...))` repeats each element its own number of times**:
+  `rep(c("a", "b"), times = c(2, 3))` is `a a b b b`. Only the first count was used;
+  a `times` of the wrong length is R's "invalid 'times' argument".
+- Compared with R in `tests/differential/cases/htests.R` and `vector_semantics.R`.
+
 ## v0.4.1 (November 2026)
 
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
