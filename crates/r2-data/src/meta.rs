@@ -128,51 +128,71 @@ pub fn bi_as_data_frame(a: &[EvalArg]) -> Result<RVal, R2Err> {
     }
 }
 
-pub fn bi_head(a: &[EvalArg]) -> Result<RVal, R2Err> {
+pub fn bi_head(a: &[EvalArg]) -> Result<RVal, R2Err> { head_tail(a, false) }
+
+pub fn bi_tail(a: &[EvalArg]) -> Result<RVal, R2Err> { head_tail(a, true) }
+
+/// R's `head(x, n)` / `tail(x, n)`: the first / last `n` elements of a
+/// vector or factor, or rows of a data frame or matrix. Every column is
+/// cut (factor columns included), row names and dimnames are kept — `tail`
+/// labels unnamed rows with their original numbers, as R does — and a
+/// negative `n` means all but `|n|`.
+fn head_tail(a: &[EvalArg], tail: bool) -> Result<RVal, R2Err> {
     let o = first_arg(a);
     let n = arg_named(a, "n").or(Some(nth_arg(a, 1)))
         .and_then(|v| v.scalar_f64().ok().flatten())
-        .unwrap_or(6.0) as usize;
-    match &o {
-        RVal::Numeric(v, at) => Ok(RVal::Numeric(v.iter().take(n).cloned().collect(), at.clone())),
-        RVal::Integer(v, at) => Ok(RVal::Integer(v.iter().take(n).cloned().collect(), at.clone())),
-        RVal::Character(v, at) => Ok(RVal::Character(v.iter().take(n).cloned().collect(), at.clone())),
-        RVal::Logical(v, at) => Ok(RVal::Logical(v.iter().take(n).cloned().collect(), at.clone())),
+        .unwrap_or(6.0) as i64;
+    let pick = |len: usize| -> Vec<usize> {
+        let k = if n >= 0 { (n as usize).min(len) } else { len.saturating_sub(n.unsigned_abs() as usize) };
+        if tail { (len - k..len).collect() } else { (0..k).collect() }
+    };
+    Ok(match &o {
         RVal::DataFrame(df) => {
-            let nr = n.min(df.nrow());
-            let cols: Vec<(Arc<str>, RVal)> = df.columns.iter().map(|(name, col)| {
-                let sub = match col {
-                    RVal::Numeric(v, _) => RVal::Numeric(v.iter().take(nr).cloned().collect(), Attrs::default()),
-                    RVal::Integer(v, _) => RVal::Integer(v.iter().take(nr).cloned().collect(), Attrs::default()),
-                    RVal::Character(v, _) => RVal::Character(v.iter().take(nr).cloned().collect(), Attrs::default()),
-                    RVal::Logical(v, _) => RVal::Logical(v.iter().take(nr).cloned().collect(), Attrs::default()),
-                    _ => col.clone(),
-                };
-                (name.clone(), sub)
-            }).collect();
-            Ok(RVal::DataFrame(DataFrame { columns: cols, row_names: None }))
+            let idx = pick(df.nrow());
+            let row_names = match &df.row_names {
+                Some(rn) => Some(idx.iter().map(|&i| rn[i].clone()).collect()),
+                None if tail => Some(idx.iter().map(|&i| Arc::from((i + 1).to_string().as_str())).collect()),
+                None => None,
+            };
+            let columns = df.columns.iter().map(|(name, col)| (name.clone(), cut(col, &idx))).collect();
+            RVal::DataFrame(DataFrame { columns, row_names })
         }
         RVal::Matrix(m) => {
-            let nr = n.min(m.nrow);
-            let mut data = Vec::with_capacity(nr * m.ncol);
-            for c in 0..m.ncol {
-                for r in 0..nr { data.push(m.get(r, c)); }
-            }
-            Ok(RVal::Matrix(Matrix::new(data, nr, m.ncol)))
+            let idx = pick(m.nrow);
+            let mut data = Vec::with_capacity(idx.len() * m.ncol);
+            for c in 0..m.ncol { for &r in &idx { data.push(m.get(r, c)); } }
+            let mut out = Matrix::new(data, idx.len(), m.ncol);
+            out.col_names = m.col_names.clone();
+            out.row_names = m.row_names.as_ref().map(|rn| idx.iter().map(|&i| rn[i].clone()).collect());
+            RVal::Matrix(out)
         }
-        _ => Ok(o),
-    }
+        other => cut(other, &pick(r2_types::rval_length(other))),
+    })
 }
 
-pub fn bi_tail(a: &[EvalArg]) -> Result<RVal, R2Err> {
-    let o = first_arg(a);
-    let n = nth_arg(a, 1).scalar_f64()?.unwrap_or(6.0) as usize;
-    match &o {
-        RVal::Numeric(v, _) => {
-            let skip = v.len().saturating_sub(n);
-            Ok(RVal::Numeric(v.iter().skip(skip).cloned().collect(), Attrs::default()))
+/// `x[idx]` for a column or vector, keeping its class (a `Date` stays a
+/// `Date`) and names. A time series stays one, its `tsp` moved to the
+/// window kept.
+fn cut(v: &RVal, idx: &[usize]) -> RVal {
+    let keep = |at: &Attrs| {
+        let mut out = Attrs::default();
+        out.names = at.names.as_ref().map(|ns| idx.iter().map(|&i| ns[i].clone()).collect());
+        out.set_classes(at.classes());
+        if let (Some(RVal::Numeric(t, _)), Some(&first), Some(&last)) = (at.custom.get("tsp"), idx.first(), idx.last()) {
+            if let (Some(start), Some(freq)) = (t.get(0).copied().flatten(), t.get(2).copied().flatten()) {
+                let tsp = vec![Some(start + first as f64 / freq), Some(start + last as f64 / freq), Some(freq)];
+                out.custom.insert(Arc::from("tsp"), RVal::Numeric(tsp.into(), Attrs::default()));
+            }
         }
-        _ => Ok(o),
+        out
+    };
+    match v {
+        RVal::Numeric(x, at) => RVal::Numeric(idx.iter().map(|&i| x[i]).collect::<Vec<Real>>().into(), keep(at)),
+        RVal::Integer(x, at) => RVal::Integer(idx.iter().map(|&i| x[i]).collect::<Vec<Option<i32>>>().into(), keep(at)),
+        RVal::Logical(x, at) => RVal::Logical(idx.iter().map(|&i| x[i]).collect::<Vec<Option<bool>>>().into(), keep(at)),
+        RVal::Character(x, at) => RVal::Character(idx.iter().map(|&i| x[i].clone()).collect(), keep(at)),
+        RVal::Factor(_) => r2_types::take(v, idx),
+        other => other.clone(),
     }
 }
 

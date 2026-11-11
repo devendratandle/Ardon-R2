@@ -67,9 +67,13 @@ impl Engine {
     /// package name as a string, not evaluated.
     fn nse_package_call(&mut self, func: &Expr, args: &[CallArg], env: &EnvRef) -> Result<RVal, R2Err> {
         let f = self.eval_in(func, env)?;
+        // `data(iris, CO2)`: every bare symbol is a dataset NAME, as in R —
+        // looking it up would hand data() the dataset itself.
+        let is_data = matches!(func, Expr::Symbol(s) if s.as_ref() == "data");
         let mut ea = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let value = match &a.value {
+                Expr::Symbol(sym) if is_data && a.name.is_none() => rstr(sym),
                 // A variable holding the name wins over the bare symbol.
                 Expr::Symbol(sym) if i == 0 => env.lookup(sym).unwrap_or_else(|| rstr(sym)),
                 e => self.eval_in(e, env)?,

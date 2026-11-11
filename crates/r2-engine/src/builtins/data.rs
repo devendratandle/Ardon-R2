@@ -3,6 +3,7 @@
 //! `bi_do_call`, thread them through unchanged); the factor, `data()` and
 //! predicate builtins at the end are implemented here.
 
+use std::sync::Arc;
 use r2_types::*;
 use crate::{gv, err};
 
@@ -104,25 +105,29 @@ pub(crate) fn bi_as_logical(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result
     Ok(RVal::Logical(v.into(), Attrs::default()))
 }
 
+/// `data()` lists R's datasets with their titles; `data(iris, CO2)` or
+/// `data(list = c("iris", "CO2"))` binds a fresh copy of each in the
+/// workspace and returns their names (invisibly), as R does. Every dataset
+/// is reachable without `data()` too — they live in the base environment.
 pub(crate) fn bi_data(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
-    let val = gv(a, 0);
-    match &val {
-        RVal::Character(v, _) => {
-            let name = v[0].as_ref().map(|s| s.to_string()).unwrap_or_default();
-            if e.global_env.lookup(&name).is_some() {
-                soutln!("Dataset '{}' is already loaded", name);
-            } else {
-                soutln!("Dataset '{}' not found", name);
-            }
+    let mut names: Vec<Arc<str>> = Vec::new();
+    for arg in a.iter().filter(|x| x.name.is_none() || x.name.as_deref() == Some("list")) {
+        if let RVal::Character(v, _) = &arg.value { names.extend(v.iter().flatten().cloned()); }
+    }
+    if names.is_empty() {
+        soutln!("Data sets in package 'datasets':\n");
+        for d in r2_base::datasets::index() {
+            soutln!("{:<24}{}", d.name, d.title);
         }
-        RVal::DataFrame(_) => {
-            soutln!("Dataset is already loaded in the environment");
-        }
-        _ => {
-            soutln!("Available datasets: iris, mtcars, airquality");
+        return Ok(RVal::Null);
+    }
+    for n in &names {
+        match r2_base::datasets::get(n) {
+            Some(v) => e.global_env.set(n.clone(), v),
+            None => r2_types::out::rerr(&format!("Warning message:\ndata set '{}' not found", n)),
         }
     }
-    Ok(RVal::Null)
+    Ok(RVal::Character(names.into_iter().map(Some).collect(), Attrs::default()))
 }
 
 

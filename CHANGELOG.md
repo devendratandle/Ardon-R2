@@ -11,6 +11,32 @@ choices and refactors live in the code and `docs/ARCHITECTURE.md`.
 Everything since v0.4.0. (The code carried the number 0.4.2 for a while during
 development; that number was never released.)
 
+### All of R's datasets, built in — 2026-11-11
+
+- **The whole `datasets` package: 108 objects**, up from 5 — `CO2`,
+  `PlantGrowth`, `ChickWeight`, `cars`, `Titanic`, `AirPassengers`,
+  `volcano`, `state.x77`, `penguins` and the rest. They are inside the
+  executable, so a bare `r2` binary has them as well as an installed one.
+- **The values are R's own.** R writes them out
+  (`crates/r2-base/datasets/export_datasets.R`), nothing is copied by hand,
+  and a comparison case checks every dataset against R: sizes, the sum and
+  NA count of every numeric column and vector, factor levels.
+- **Two built-in datasets were wrong and are fixed:** `airquality` had only
+  its first 30 of 153 rows, and `ToothGrowth$supp` was character, not a
+  factor.
+- **`data()` works as in R.** `data()` lists every dataset with its title,
+  `data(CO2)` puts a fresh copy in the workspace, and an unknown name warns.
+  `help("CO2")` gives the title and shape.
+- **`letters`, `LETTERS`, `month.name` and `month.abb`** exist.
+- **`head()` and `tail()` fixed.** `head()` of a data frame did not cut
+  factor columns: `head(iris, 3)$Species` was still 150 long, and
+  `head(CO2)` crashed. It also dropped row names (`head(mtcars)` lost the
+  car names). `tail()` handled only numeric vectors. Both now cut every
+  column, keep row names, dimnames, a `Date` column's class and a time
+  series' `tsp`, and take a negative `n`, as R does.
+- **`is.numeric()`** is now TRUE for a numeric matrix and FALSE for a
+  `Date`, as in R.
+
 ### Plots an editor can read: whole pictures, marked parts, R's geometry — 2026-11-11
 
 - **`r2 --ide` replies carry the whole plot.** After `plot()` then `lines()`,

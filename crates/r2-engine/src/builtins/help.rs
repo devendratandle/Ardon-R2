@@ -224,6 +224,21 @@ fn help_fallback(topic: &str) -> Result<RVal, R2Err> {
         soutln!("");
         return Ok(RVal::Null);
     }
+    // A dataset: R's title for it, and its shape.
+    if let Some(d) = r2_base::datasets::index().iter().find(|d| d.name == topic) {
+        let shape = match r2_base::datasets::get(topic) {
+            Some(RVal::DataFrame(df)) => format!("a data frame with {} rows and {} columns", df.nrow(), df.columns.len()),
+            Some(RVal::Matrix(m)) => format!("a {} x {} matrix", m.nrow, m.ncol),
+            Some(v) => format!("{} of length {}", v.type_name(), r2_types::rval_length(&v)),
+            None => String::new(),
+        };
+        soutln!("");
+        soutln!("{}    package:datasets", topic);
+        soutln!("  {}", d.title);
+        soutln!("  {}", shape);
+        soutln!("");
+        return Ok(RVal::Null);
+    }
     if topic.is_empty() {
         soutln!("");
         soutln!("{}", HELP_OVERVIEW);

@@ -385,6 +385,14 @@ impl Engine {
         base.set(Arc::from("NA_real_"), RVal::Numeric(vec![None].into(), Attrs::default()));
         base.set(Arc::from("NA_integer_"), RVal::Integer(vec![None].into(), Attrs::default()));
         base.set(Arc::from("NA_character_"), RVal::Character(vec![None], Attrs::default()));
+        // R's character constants.
+        let chars = |v: Vec<String>| RVal::Character(v.into_iter().map(|s| Some(Arc::from(s.as_str()))).collect(), Attrs::default());
+        base.set(Arc::from("letters"), chars(('a'..='z').map(String::from).collect()));
+        base.set(Arc::from("LETTERS"), chars(('A'..='Z').map(String::from).collect()));
+        const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July",
+                                    "August", "September", "October", "November", "December"];
+        base.set(Arc::from("month.name"), chars(MONTHS.iter().map(|m| m.to_string()).collect()));
+        base.set(Arc::from("month.abb"), chars(MONTHS.iter().map(|m| m[..3].to_string()).collect()));
         e
     }
 

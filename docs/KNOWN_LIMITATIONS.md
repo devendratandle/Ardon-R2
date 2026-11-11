@@ -48,6 +48,21 @@ to be worse than documented and was fixed here rather than scheduled.
 
 ---
 
+## Datasets
+
+All 108 of R's datasets are built in with R's values, but some print or
+answer `class()` more simply than in R:
+
+- **Time series** (`AirPassengers`, `Nile`, …) and **3- and 4-way tables**
+  (`Titanic`, `UCBAdmissions`, `HairEyeColor`) print as plain vectors. Their
+  `tsp`, `dim` and `dimnames` are kept (`attr(AirPassengers, "tsp")` is R's),
+  but R2 has no `print.ts` / `print.table` layout yet.
+- **Multivariate time series** (`EuStockMarkets`, `Seatbelts`) and integer
+  matrices load as R2's numeric matrix, which has no NA and no `tsp`.
+- `class(CO2)` is `"data.frame"`: the `groupedData` classes and their
+  formula attributes from `nlme` are not kept (`Orange`, `ChickWeight`,
+  `Loblolly`, …).
+
 ## Language / evaluation
 
 - **Deliberate difference (Windows only):** a string literal that starts

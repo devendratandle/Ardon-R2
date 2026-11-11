@@ -442,7 +442,17 @@ pub(crate) fn bi_format(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVa
         Attrs { names, ..Default::default() }))
 }
 
-pub(crate) fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Numeric(..)|RVal::Integer(..)))) }
+/// R's `is.numeric`: a double or integer vector or a numeric matrix — but
+/// not a `Date`, `POSIXct` or `difftime`, whose `is.numeric` methods say
+/// FALSE although they are doubles underneath.
+pub(crate) fn bi_is_num(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {
+    Ok(rbool(match gv(a,0) {
+        RVal::Numeric(_, at) | RVal::Integer(_, at) =>
+            !at.classes().iter().any(|c| matches!(c.as_ref(), "Date" | "POSIXct" | "difftime")),
+        RVal::Matrix(_) => true,
+        _ => false,
+    }))
+}
 pub(crate) fn bi_is_chr(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Character(..)))) }
 pub(crate) fn bi_is_lgl(_: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> { Ok(rbool(matches!(gv(a,0), RVal::Logical(..)))) }
 pub(crate) fn bi_as_num(e: &mut Engine, a: &[EvalArg], _: &EnvRef) -> Result<RVal, R2Err> {

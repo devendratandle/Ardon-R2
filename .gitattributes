@@ -28,3 +28,6 @@ installer/**            linguist-vendored
 # driver at run time. Not part of the Rust program, and PTX must keep LF.
 crates/r2-gpu/src/cuda/kernels/** linguist-vendored
 *.ptx text eol=lf
+
+# Binary data files embedded in the executable — never line-converted.
+*.r2o binary
